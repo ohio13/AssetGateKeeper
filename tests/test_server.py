@@ -621,7 +621,79 @@ expect("the rules endpoint is not public", status == 401, str(status))
 plan_server.shutdown()
 plan_server.server_close()
 
-print("12. CLI wiring")
+print("12. alert throttling")
+thr_db = fresh_db("throttle.db")
+now = 1_000_000.0
+expect("the first alert in a window is sent",
+       ahs.claim_alert_slot(thr_db, "project:1", 300, now=now) is True)
+expect("a second alert inside the cooldown is dropped",
+       ahs.claim_alert_slot(thr_db, "project:1", 300, now=now + 10) is False)
+expect("the cooldown expires on its own",
+       ahs.claim_alert_slot(thr_db, "project:1", 300, now=now + 301) is True)
+expect("another project keeps its own window",
+       ahs.claim_alert_slot(thr_db, "project:2", 300, now=now + 302) is True)
+expect("legacy scope has its own window too",
+       ahs.claim_alert_slot(thr_db, "shared", 300, now=now + 303) is True)
+expect("a cooldown of 0 disables throttling",
+       all(ahs.claim_alert_slot(thr_db, "project:1", 0, now=now + 400) for _ in range(3)))
+expect("scopes are named per project", ahs.alert_scope(7) == "project:7")
+expect("legacy scope is explicit", ahs.alert_scope(None) == "shared")
+
+# Through the real ingest route: a batch sweep must produce one message.
+thr_pid, thr_tok = ahs.create_project(thr_db, "Batch Night")
+ahs.save_budget(thr_db, thr_pid, {"max_triangles": 50_000})
+batch_notifier = ahs.Notifier("https://hooks.example/T0/B0/x", "slack")
+batch_server = ahs.build_server("127.0.0.1", 0, thr_db, quiet=True,
+                                notifier=batch_notifier, alert_cooldown=300)
+bport = batch_server.server_address[1]
+threading.Thread(target=batch_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+BATCH_AUTH = {"Authorization": f"Bearer {thr_tok}"}
+
+with patch("urllib.request.urlopen", side_effect=fake_post):
+    posted.clear()
+    for index in range(3):
+        request(bport, "/api/telemetry", method="POST", headers=BATCH_AUTH,
+                body=dict(heavy, name=f"batch_{index}.gltf"))
+    batch_notifier.flush()
+expect("a three-asset batch sends exactly one alert", len(posted) == 1, str(len(posted)))
+expect("the suppressed count is tracked", batch_server.alerts_suppressed == 2,
+       str(batch_server.alerts_suppressed))
+
+status, body, _ = request(bport, f"/api/summary?project_id={thr_pid}&token={thr_tok}")
+summary = json.loads(body)
+expect("/api/summary exposes the alert state",
+       summary["alerts"]["enabled"] is True and summary["alerts"]["cooldown"] == 300
+       and summary["alerts"]["suppressed"] == 2, str(summary.get("alerts")))
+
+# Rewind the window, as if five minutes had passed.
+with ahs.open_db(thr_db) as connection:
+    connection.execute("UPDATE alerts_state SET last_alert_at = 0 WHERE scope_key = ?",
+                       (ahs.alert_scope(thr_pid),))
+with patch("urllib.request.urlopen", side_effect=fake_post):
+    posted.clear()
+    request(bport, "/api/telemetry", method="POST", headers=BATCH_AUTH,
+            body=dict(heavy, name="after_cooldown.gltf"))
+    batch_notifier.flush()
+expect("the next window alerts again", len(posted) == 1, str(len(posted)))
+expect("the alert names the new asset", "after_cooldown.gltf" in posted[0][1]["text"])
+
+# A different project is not muted by the first one's cooldown.
+other_pid, other_tok = ahs.create_project(thr_db, "Other Vendor")
+ahs.save_budget(thr_db, other_pid, {"max_triangles": 50_000})
+with patch("urllib.request.urlopen", side_effect=fake_post):
+    posted.clear()
+    request(bport, "/api/telemetry", method="POST",
+            headers={"Authorization": f"Bearer {other_tok}"},
+            body=dict(heavy, name="vendor_fail.gltf"))
+    batch_notifier.flush()
+expect("a second tenant still gets its own alert", len(posted) == 1, str(len(posted)))
+expect("the second alert belongs to the second tenant",
+       "vendor_fail.gltf" in posted[0][1]["text"])
+batch_server.shutdown()
+batch_server.server_close()
+
+print("13. CLI wiring")
 parser = ahs.build_parser()
 options = parser.parse_args(["--port", "9999", "--db", "x.db", "--token", "t", "--no-seed"])
 expect("CLI accepts host/port/db/token/no-seed",

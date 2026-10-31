@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-355%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-370%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -449,6 +449,22 @@ The envelope adapts to the provider (`text` for Slack, `content` for Discord, a
 telemetry sender: a queue, one daemon thread, a 2 s timeout, drop-and-count —
 **a dead webhook can never fail an ingest**.
 
+**Throttled per project.** A nightly sweep that fails 300 assets is one incident,
+not 300 notifications: the server sends at most one message per project per
+cooldown window (default 300 s, `--alert-cooldown` or `[webhooks] cooldown`; `0`
+disables it). The claim is a single atomic upsert, so two workers failing the same
+batch at the same instant cannot both alert:
+
+```sql
+INSERT INTO alerts_state (scope_key, last_alert_at) VALUES (?, ?)
+ON CONFLICT(scope_key) DO UPDATE SET last_alert_at = excluded.last_alert_at
+WHERE alerts_state.last_alert_at <= ?          -- out of the cooldown window only
+```
+
+Suppressed alerts are counted and reported in `/api/summary`, so a lead can tell
+"the pipeline is quiet" from "someone muted the channel". Nothing is lost: every
+verdict is still stored, and the dashboard remains the complete record.
+
 ### Budget planner
 
 ![Budget planner](server/budget_planner.png)
@@ -467,8 +483,9 @@ the client still only adopts a repair that verifies.
 > typed URL, so the dashboard and planner accept `?token=` — that token lands in
 > access logs and browser history, so front the server with a reverse proxy that
 > injects the header and strips the query. Tokens are per project, not per user, so
-> an offboarded artist's token must be rotated manually. Alerts have no cooldown: a
-> nightly sweep that fails 300 assets will send 300 messages.
+> an offboarded artist's token must be rotated manually. The alert cooldown is per
+> project and wall-clock only: a genuinely new incident inside the window is folded
+> into the same message window, which is the tradeoff that keeps channels readable.
 
 ### Auth
 
@@ -692,7 +709,7 @@ Three layers, because unit tests, networks and DCC reality fail in different way
 python tests/gen_test_assets.py
 python tests/test_gatekeeper.py
 
-# 2. the server — 146 assertions over real sockets, ephemeral ports
+# 2. the server — 161 assertions over real sockets, ephemeral ports
 python tests/test_server.py
 
 # 3. real exporter -> real file -> real verdict (headless Blender / Unreal)
@@ -703,14 +720,15 @@ python tests/run_headless_integration.py
 asset_gatekeeper.py              the tool (single file)
 healer.py                        opt-in repair engine (only loaded with --auto-heal)
 asset_gatekeeper.example.toml    rules.toml template
+ASSET_DIFF_ENGINE_SPEC.md        design for the next subsystem (not implemented)
 README.md  LICENSE  .gitignore  .gitattributes
 .github/workflows/
-  ci.yml                         every push/PR: lint + 355 assertions + integration
+  ci.yml                         every push/PR: lint + 370 assertions + integration
   dcc-nightly.yml                nightly Blender export through the real watcher
 tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
   test_gatekeeper.py             209 assertions: rules, config, healing, hooks
-  test_server.py                 146 assertions: tenancy, ingest, alerts, planner
+  test_server.py                 161 assertions: tenancy, ingest, alerts, throttle
   run_headless_integration.py    drives headless DCC exports through the gate
 server/
   asset_health_server.py         dashboard + planner + ingest, stdlib only
@@ -744,6 +762,14 @@ status codes, keep-alive, bodies. It covers the payload contract and aliases,
 and missing filenames, `413` for an oversized body, `404`/`405` routing, HTML
 escaping of hostile filenames, the `ON DELETE CASCADE` on `problems`, and that
 seeding happens exactly once.
+
+The enterprise half is covered end-to-end as well: token hashing and resolution,
+a project token getting `403` on another project's dashboard, a `project_id` in
+the body failing to redirect a token's write, per-project totals that do not
+leak, admin vs project vs open modes, the overshoot arithmetic at 1.2× and 1.6×,
+provider envelopes, a dead webhook staying silent, one alert for a three-asset
+batch with a rewind to prove the cooldown expires, and that the gate's own
+`Budget.from_mapping` accepts what `/api/rules` serves.
 
 ### Headless DCC integration
 
@@ -815,6 +841,23 @@ nightly and on demand; Unreal, Maya and Houdini stay manual because their licenc
 can't live in a runner.
 
 > **Known gaps, stated plainly:** the harness itself is verified in `--synthetic` mode and against a mocked DCC binary (which exercises the Blender argv contract, exit codes and verdict assertions); the Blender and Unreal command lines have not yet been executed against real installs in this repository. If you run them, a PR with the output — or with the UE version you tested — is very welcome.
+
+---
+
+## Roadmap: the Asset Diff Engine
+
+[`ASSET_DIFF_ENGINE_SPEC.md`](ASSET_DIFF_ENGINE_SPEC.md) is the memory bank for the
+next subsystem: tracking what actually changed in a binary asset across commits, and
+whether it changed the way the asset *looks*. It is a design document — no code in
+this repository implements it — written down now so the data model (`asset_snapshots`,
+`asset_signatures`, `asset_diffs`) can grow out of the tenancy schema instead of
+retrofitting it later.
+
+The short version: byte hashes answer "is this the same file", content signatures
+answer "is this the same asset" (a re-export that reorders vertices is not a change),
+and geometry diffs run only when someone asks. The verdict ladder is
+`IDENTICAL → REPACKED → COSMETIC/STRUCTURAL → VISUAL`, and the engine is explicitly
+not allowed to guess: an unparseable file is `UNKNOWN` with the error attached.
 
 ---
 

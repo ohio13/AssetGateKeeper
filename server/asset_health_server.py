@@ -137,6 +137,14 @@ CREATE TABLE IF NOT EXISTS budgets (
     updated_at         TEXT    NOT NULL,
     updated_by         TEXT    NOT NULL DEFAULT ''
 );
+
+-- Alert throttling. One row per scope ("project:3", or "shared" in legacy
+-- mode) holding the epoch of the last message we actually sent. Kept out of
+-- `projects` so single-tenant installs get the throttle too.
+CREATE TABLE IF NOT EXISTS alerts_state (
+    scope_key     TEXT PRIMARY KEY,
+    last_alert_at REAL NOT NULL
+);
 """
 
 # One writer at a time keeps WAL happy without a storm of busy retries.
@@ -581,6 +589,10 @@ def bottlenecks(db_path: str | Path, limit: int = BOTTLENECK_LIMIT,
 # Alert when a budget is exceeded by more than this factor (50% over).
 ALERT_FACTOR = 1.5
 
+# One webhook message per scope per cooldown window. A nightly sweep that fails
+# 300 assets is one incident, not 300 notifications.
+DEFAULT_ALERT_COOLDOWN = 300.0
+
 _TRIANGLE_RE = re.compile(r"([\d,]+) triangles exceeds the ([\d,]+) budget")
 _SLOTS_RE = re.compile(r"(\d+) material slots exceeds the (\d+) slot budget")
 _EDGE_RE = re.compile(r"(\d+)x(\d+) exceeds the (\d+)x\d+ maximum")
@@ -656,6 +668,34 @@ def webhook_body(provider: str, text: str) -> bytes:
     return json.dumps(body).encode("utf-8")
 
 
+def alert_scope(project_id: int | None) -> str:
+    """Throttle key. Tenants do not share a cooldown, and legacy mode still gets one."""
+    return f"project:{project_id}" if project_id is not None else "shared"
+
+
+def claim_alert_slot(db_path: str | Path, scope: str, cooldown: float,
+                     now: float | None = None) -> bool:
+    """Atomically take the alert slot for `scope`. True means "send it".
+
+    The upsert's WHERE clause is the whole mechanism: only one thread can move
+    ``last_alert_at`` forward out of the cooldown window, so two workers that
+    fail the same batch at the same instant cannot both alert.
+
+    A cooldown of 0 disables throttling and always returns True.
+    """
+    if cooldown <= 0:
+        return True
+    moment = time.time() if now is None else now
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        cursor = connection.execute(
+            "INSERT INTO alerts_state (scope_key, last_alert_at) VALUES (?, ?)"
+            " ON CONFLICT(scope_key) DO UPDATE SET last_alert_at = excluded.last_alert_at"
+            " WHERE alerts_state.last_alert_at <= ?",
+            (scope, moment, moment - cooldown),
+        )
+        return cursor.rowcount == 1
+
+
 class Notifier:
     """Fire-and-forget webhook POSTs. Same three rules as the gate's telemetry.
 
@@ -711,7 +751,25 @@ class Notifier:
             print(f"asset_health: webhook POST failed ({type(exc).__name__}): {exc}",
                   file=sys.stderr)
 
+    def flush(self, timeout: float = 5.0) -> bool:
+        """Wait for the queue to drain without shutting the worker down.
+
+        Used at shutdown and by tests that assert on what was delivered. Never
+        called on the ingest path — that path must not wait for a network.
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self._thread is None:
+                return True
+            if self._queue.empty():
+                time.sleep(0.02)      # let an in-flight POST finish
+                if self._queue.empty():
+                    return True
+            time.sleep(0.02)
+        return False
+
     def close(self, timeout: float | None = None) -> None:
+        self.flush(self.timeout if timeout is None else timeout)
         self._closed = True
         if self._thread is None:
             return
@@ -1249,11 +1307,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json(error, {"error": "bad project scope"})
             return
         db_path = self.server.db_path  # type: ignore[attr-defined]
+        server = self.server  # type: ignore[attr-defined]
         self._json(200, {
             "project_id": project_id,
             "totals": totals(db_path, project_id),
             "bottlenecks": [{"rule": label, "count": count}
                             for label, count in bottlenecks(db_path, project_id=project_id)],
+            # Operational visibility: how many alerts this run suppressed, and
+            # the window that did it, so a lead can tell "quiet" from "muted".
+            "alerts": {"enabled": server.notifier is not None,
+                       "cooldown": server.alert_cooldown,
+                       "suppressed": server.alerts_suppressed},
         })
 
     def _rules(self, identity: dict) -> None:
@@ -1341,15 +1405,28 @@ class Handler(BaseHTTPRequestHandler):
         self._json(201, {"stored": True, "id": verdict_id, "project_id": project_id})
 
     def _maybe_alert(self, payload: dict, project_id: int | None) -> None:
-        """Push a webhook when a failure blows a budget by more than 50%."""
+        """Push a webhook when a failure blows a budget by more than 50%.
+
+        Throttled per scope so a nightly sweep failing 300 assets sends one
+        message, not 300. The asset still lands in the database either way — the
+        dashboard is the complete record, the webhook is the poke.
+        """
         notifier = getattr(self.server, "notifier", None)
         if notifier is None:
             return
         if payload.get("passed") is not False:
             return   # healed assets pass; they are not pipeline emergencies
-        budget = budget_for_project(self.server.db_path, project_id)  # type: ignore[attr-defined]
+        server = self.server  # type: ignore[attr-defined]
+        budget = budget_for_project(server.db_path, project_id)
         overshoot = overshoots(payload, budget)
         if not overshoot:
+            return
+        scope = alert_scope(project_id)
+        if not claim_alert_slot(server.db_path, scope, server.alert_cooldown):
+            server.alerts_suppressed += 1
+            if not getattr(server, "quiet", False):
+                print(f"asset_health: alert for {scope} suppressed by the "
+                      f"{server.alert_cooldown:g}s cooldown", file=sys.stderr)
             return
         notifier.submit(alert_text(payload, budget, overshoot))
 
@@ -1409,18 +1486,22 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
     request_queue_size = 64        # a studio's worth of retries in the backlog
 
     def __init__(self, address: tuple[str, int], db_path: str | Path, token: str = "",
-                 quiet: bool = False, notifier: "Notifier | None" = None):
+                 quiet: bool = False, notifier: "Notifier | None" = None,
+                 alert_cooldown: float = DEFAULT_ALERT_COOLDOWN):
         self.db_path = str(db_path)
         self.auth_token = token          # the studio-wide admin token, optional
         self.quiet = quiet
         self.notifier = notifier
+        self.alert_cooldown = float(alert_cooldown)
+        self.alerts_suppressed = 0       # visible in /api/summary for tuning
         super().__init__(address, Handler)
 
 
 def build_server(host: str, port: int, db_path: str | Path,
                  token: str = "", quiet: bool = False,
-                 notifier: "Notifier | None" = None) -> AssetHealthServer:
-    return AssetHealthServer((host, port), db_path, token, quiet, notifier)
+                 notifier: "Notifier | None" = None,
+                 alert_cooldown: float = DEFAULT_ALERT_COOLDOWN) -> AssetHealthServer:
+    return AssetHealthServer((host, port), db_path, token, quiet, notifier, alert_cooldown)
 
 
 # --------------------------------------------------------------------------- #
@@ -1536,6 +1617,9 @@ def build_parser() -> argparse.ArgumentParser:
                         default="", help="envelope format (default: inferred from the URL)")
     alerts.add_argument("--webhooks-config", metavar="PATH",
                         help="TOML/JSON file with a [webhooks] table")
+    alerts.add_argument("--alert-cooldown", type=float, default=None, metavar="SECONDS",
+                        help="minimum gap between alerts per project (default "
+                             f"{DEFAULT_ALERT_COOLDOWN:g}s; 0 disables throttling)")
     return parser
 
 
@@ -1544,10 +1628,15 @@ WEBHOOK_ENV = (("SLACK_WEBHOOK_URL", "slack"),
                ("TEAMS_WEBHOOK_URL", "teams"))
 
 
-def resolve_webhook(args: argparse.Namespace) -> tuple[str, str]:
-    """Return (url, provider) from CLI, env or a config file — in that order."""
+def resolve_webhook(args: argparse.Namespace) -> tuple[str, str, float]:
+    """Return (url, provider, cooldown) from CLI, env or a config file.
+
+    Precedence per value: CLI flag > environment > config file > default.
+    """
     url = (args.webhook_url or "").strip()
     provider = (args.webhook_provider or "").strip()
+    cooldown = args.alert_cooldown
+    file_cooldown = None
 
     if not url:
         for variable, name in WEBHOOK_ENV:
@@ -1566,8 +1655,10 @@ def resolve_webhook(args: argparse.Namespace) -> tuple[str, str]:
 
                 document = tomllib.loads(text)
             table = document.get("webhooks", {}) if isinstance(document, dict) else {}
-            url = str(table.get("url", "") or "")
+            url = url or str(table.get("url", "") or "")
             provider = provider or str(table.get("provider", "") or "")
+            if table.get("cooldown") is not None:
+                file_cooldown = float(table["cooldown"])
         except (OSError, ValueError) as exc:
             print(f"warning: webhooks config unreadable ({exc})", file=sys.stderr)
 
@@ -1576,7 +1667,9 @@ def resolve_webhook(args: argparse.Namespace) -> tuple[str, str]:
         provider = ("discord" if "discord" in lowered
                     else "teams" if "office.com" in lowered or "teams" in lowered
                     else "slack")
-    return url, provider or "slack"
+    if cooldown is None:
+        cooldown = file_cooldown if file_cooldown is not None else DEFAULT_ALERT_COOLDOWN
+    return url, provider or "slack", float(cooldown)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1619,11 +1712,12 @@ def main(argv: list[str] | None = None) -> int:
         except sqlite3.Error as exc:
             print(f"warning: seeding skipped ({exc})", file=sys.stderr)
 
-    webhook_url, webhook_provider = resolve_webhook(args)
+    webhook_url, webhook_provider, alert_cooldown = resolve_webhook(args)
     notifier = Notifier(webhook_url, webhook_provider) if webhook_url else None
 
     try:
-        httpd = build_server(args.host, args.port, db_path, args.token, args.quiet, notifier)
+        httpd = build_server(args.host, args.port, db_path, args.token, args.quiet,
+                             notifier, alert_cooldown)
     except OSError as exc:
         print(f"error: cannot bind {args.host}:{args.port}: {exc}", file=sys.stderr)
         return 2
@@ -1647,6 +1741,8 @@ def main(argv: list[str] | None = None) -> int:
         print("  auth       DISABLED - fine on loopback, not on a shared network")
     if notifier is not None:
         print(f"  alerts     {webhook_provider} -> {webhook_url}")
+        print(f"             cooldown {alert_cooldown:g}s per project"
+              f"{' (disabled)' if alert_cooldown <= 0 else ''}")
     if seeded:
         print(f"  seeded     {len(_SEED)} demo verdicts (first launch)")
 
