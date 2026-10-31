@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-551%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-597%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -323,6 +323,52 @@ FAILED: geometry is centred 10.012m from its own origin (50% of its size); the p
 other would silently skip the pivot checks that make it useful.
 
 ---
+
+## Per-asset budgets: tags and presets
+
+One folder can hold a 1,500-triangle prop and a 120,000-triangle boss. Flat limits
+force the whole project to the loosest one, so budgets can be **tagged**:
+
+```toml
+[mesh]
+max_triangles = 50000
+
+[tags.Monsters_Boss]
+max_triangles = 1000        # bosses get a bigger budget... or a stricter one
+
+[tags.Props]
+max_triangles = 5000
+texture = { pbr_floor = 0.05 }   # a tag may tighten a threshold too
+
+[tagging]
+mode = "suggest"            # auto | suggest | strict
+min_similarity = 0.75
+```
+
+The tag comes from the **folder** (`Exports/Monsters_Boss/…`) or the **filename
+prefix** (`Props_01.gltf`), case and separators ignored. Shipped **presets**
+(`--preset retro|mobile|pc`) are the same mechanism with the values living in code,
+so a project file cannot quietly degrade them.
+
+**Near misses are not dropped.** `Monsters_Bos/` is fuzzy-matched to
+`Monsters_Boss` (difflib, threshold configurable) and *never* silently falls back
+to the global budget — that fallback is the exact failure this feature exists to
+prevent. Modes:
+
+| `tagging.mode` | Behaviour |
+| :--- | :--- |
+| `auto` | accept the closest tag, log it |
+| `suggest` (default) | accept it **and** print `note: tag 'Monsters_Bos' … closest match is 'Monsters_Boss'` |
+| `strict` | refuse the guess: fail with "rename the folder to match" |
+
+## Native desktop toasts
+
+On by default **while watching** a folder, off for `--once`, single-file mode and
+CI — a build agent has nobody to interrupt. `--notify` / `--no-notify` force it
+either way. Windows uses a WinRT toast with a tray-balloon fallback, Linux uses
+`notify-send` (or `zenity`), macOS `osascript`. Rate-limited to 6/min, queued on a
+daemon thread, and text travels through environment variables rather than being
+interpolated into a PowerShell string — asset names are artist-controlled input.
 
 ## Auto-healing: opt-in, and verified before it touches your file
 
@@ -863,9 +909,9 @@ README.md  LICENSE  .gitignore  .gitattributes
   dcc-nightly.yml                nightly Blender export through the real watcher
 tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
-  test_gatekeeper.py             283 assertions: rules, config, healing, hooks, audits, packaging
+  test_gatekeeper.py             318 assertions: rules, tags, healing, hooks, audits, packaging
   test_server.py                 172 assertions: tenancy, ingest, alerts, throttle, SSE
-  test_workstation.py            96 assertions: storage, LODs, collision, notes, refs, SSE, report
+  test_workstation.py            107 assertions: storage, LODs, collision export, notes, refs, SSE, report
   run_headless_integration.py    drives headless DCC exports through the gate
 server/
   asset_health_server.py         dashboard + planner + ingest, stdlib only
@@ -1024,6 +1070,8 @@ or with the button.
 | **Asset library** | Every upload with tri/vertex/material counts, LOD and note counts. Oversized assets are flagged with `!` |
 | **Viewport** | Orbit/zoom/pinch. Textured vs Geometry (normal material), wireframe overlay, exposure slider, `source` and each LOD as a button with its live triangle count |
 | **Collision inspector** | The stored proxy drawn in amber over the mesh; rebuild as bounding box, sphere or convex hull straight from the loaded geometry |
+| **Collision export** | The proxy as a standalone `.obj` — exact box, 24×16 sphere, and a real convex hull (supporting-plane test, capped at 64 points, `413` beyond that rather than an AABB pretending to be a hull) |
+| **Material instruments** | Every material listed with **exposure** (a reversible multiplier on the load-time colour) and **roughness** sliders |
 | **Review notes** | Categorised (Geometry / Texture / LOD / Collision / Shading / Other), markdown-ish (`**bold**`, `` `code` ``, `- lists`), newest first, deletable |
 
 `/viewer?asset=12&lod=LOD2` is a shareable link straight to one asset at one LOD —

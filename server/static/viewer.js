@@ -182,6 +182,8 @@ async function loadModel(assetId, level) {
   frameObject(object);
   applyMaterialMode();
   applyWireframe();
+  buildMaterialControls();
+  refreshCollisionExport();
   updateReadout();
   await refreshCollisionOverlay();
 }
@@ -427,6 +429,72 @@ function inline(text) {
   return text
     .replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>")
     .replace(/`([^`]+)`/g, "<code>$1</code>");
+}
+
+/* ------------------------------------------------ per-material instruments */
+
+function buildMaterialControls() {
+  const host = $("materials");
+  host.innerHTML = "";
+  const entries = [];
+  if (state.sceneObjects.model) {
+    state.sceneObjects.model.traverse((child) => {
+      if (!child.isMesh || !child.material) return;
+      const list = Array.isArray(child.material) ? child.material : [child.material];
+      for (const material of list) {
+        if (!material || entries.some((entry) => entry.material === material)) continue;
+        entries.push({ material, name: material.name || `material ${entries.length}` });
+      }
+    });
+  }
+  if (!entries.length) {
+    host.innerHTML = '<div class="empty">No materials on this asset.</div>';
+    return;
+  }
+
+  for (const entry of entries) {
+    const base = state.originals.get(entry.material) || {};
+    const roughness = Number(base.roughness ?? entry.material.roughness ?? 0.5);
+    const row = document.createElement("div");
+    row.className = "mat";
+    row.innerHTML =
+      `<div class="mat-name" title="${escapeHtml(entry.name)}">${escapeHtml(entry.name)}</div>
+       <label class="mat-row">exposure
+         <input type="range" min="0.1" max="3" step="0.05" value="1" data-kind="exposure">
+         <span class="val">1.00</span></label>
+       <label class="mat-row">roughness
+         <input type="range" min="0" max="1" step="0.01" value="${roughness.toFixed(2)}" data-kind="roughness">
+         <span class="val">${roughness.toFixed(2)}</span></label>`;
+
+    for (const input of row.querySelectorAll("input")) {
+      input.addEventListener("input", () => {
+        const value = Number(input.value);
+        input.parentElement.querySelector(".val").textContent = value.toFixed(2);
+        if (input.dataset.kind === "exposure") {
+          // Exposure here is a per-material colour multiplier against the
+          // pristine colour captured at load, so the slider is always reversible.
+          if (base.color && entry.material.color) {
+            entry.material.color.copy(base.color).multiplyScalar(value);
+          }
+        } else {
+          entry.material.roughness = value;
+        }
+        entry.material.needsUpdate = true;
+      });
+    }
+    host.appendChild(row);
+  }
+}
+
+function refreshCollisionExport() {
+  const link = $("collision-export");
+  if (!state.asset) {
+    link.style.display = "none";
+    return;
+  }
+  link.style.display = "";
+  link.href = `/api/assets/${state.asset.id}/collision.obj`
+    + (state.token ? `?token=${encodeURIComponent(state.token)}` : "");
 }
 
 function renderNotes() {

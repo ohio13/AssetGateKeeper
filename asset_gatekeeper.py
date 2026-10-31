@@ -70,6 +70,7 @@ __version__ = "1.0.0"
 import argparse
 import array
 import base64
+import difflib
 import getpass
 import json
 import logging
@@ -216,7 +217,8 @@ class Budget:
         if not isinstance(document, dict):
             raise ConfigError("the rules file must contain a table of settings")
         _reject_unknown(document, ("mesh", "texture", "server", "healer",
-                                   "platforms", "platform"), "the rules file")
+                                   "platforms", "platform", "tags", "tagging",
+                                   "preset", "notify"), "the rules file")
 
         mesh = document.get("mesh", {})
         texture = document.get("texture", {})
@@ -313,6 +315,9 @@ class Verdict:
     stats: tuple[tuple[str, int], ...] = ()
     # Non-empty only when the asset was actively repaired and re-verified.
     heal_notes: tuple[str, ...] = ()
+    # Non-fatal advisories: a fuzzy tag match, a guess a human should confirm.
+    # Warnings never change `passed`.
+    warnings: tuple[str, ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -446,9 +451,131 @@ def apply_platform(document: dict, platform: str) -> dict:
     profile = platforms[platform]
     if not isinstance(profile, dict):
         raise ConfigError(f"[platforms.{platform}] must be a table")
-    _reject_unknown(profile, (*PLATFORM_KEYS, *PLATFORM_SECTION_KEYS), f"[platforms.{platform}]")
+    return _overlay_profile(document, profile, f"[platforms.{platform}]")
 
-    merged = {key: value for key, value in document.items() if key not in ("platforms", "platform")}
+
+# --------------------------------------------------------------------------- #
+# Shipped presets and tag-based profiles
+# --------------------------------------------------------------------------- #
+
+# A preset is a known-good starting point that lives in code, so a project file
+# cannot quietly degrade it: `--preset retro` beats anything in rules.toml.
+PRESETS: dict[str, dict[str, object]] = {
+    "retro": {
+        # No max_bone_influences here: the budget validator refuses 0, and "this
+        # platform does not skin" is a rules-file policy, not a preset value.
+        "max_triangles": 1_500, "max_material_slots": 1, "max_texture_edge": 256,
+        "max_uv_channels": 1,
+    },
+    "mobile": {
+        "max_triangles": 15_000, "max_material_slots": 2, "max_texture_edge": 1_024,
+        "max_bone_influences": 4, "max_uv_channels": 2,
+    },
+    "pc": {
+        "max_triangles": 120_000, "max_material_slots": 6, "max_texture_edge": 4_096,
+        "max_bone_influences": 8, "max_uv_channels": 4,
+    },
+}
+
+TAG_MODES = ("auto", "suggest", "strict")
+DEFAULT_TAG_SIMILARITY = 0.75
+
+
+def apply_preset(document: dict, name: Optional[str]) -> dict:
+    key = (name or "").strip().lower()
+    if not key:
+        return document
+    profile = PRESETS.get(key)
+    if profile is None:
+        raise ConfigError(f"unknown preset '{name}' (known: {', '.join(sorted(PRESETS))})")
+    return _overlay_profile(document, dict(profile), f"preset '{key}'")
+
+
+def normalise_tag(value: object) -> str:
+    """Tags are folder names written by humans: `Monsters_Boss` == `monsters boss`."""
+    return re.sub(r"[\s_\-]+", " ", str(value or "").strip().lower()).strip()
+
+
+def build_tag_budgets(document: dict) -> dict[str, Budget]:
+    """Compile `[tags.<name>]` into ready-to-use budgets, keyed by normalised tag."""
+    tags = document.get("tags") or {}
+    if not isinstance(tags, dict):
+        raise ConfigError("[tags] must be a table of tables")
+    budgets: dict[str, Budget] = {}
+    for name, table in tags.items():
+        if not isinstance(table, dict):
+            raise ConfigError(f"[tags.{name}] must be a table")
+        budgets[normalise_tag(name)] = Budget.from_mapping(
+            _overlay_profile(document, table, f"[tags.{name}]"))
+    return budgets
+
+
+def tag_candidates(path: Path, root: Optional[Path] = None) -> list[str]:
+    """Names an asset could be tagged with, most specific first.
+
+    The filename prefix (`Monsters_Boss_01.gltf` -> `Monsters`) catches the
+    per-asset convention; the folder chain catches the drop-folder convention.
+    """
+    candidates: list[str] = []
+    parts = [part for part in re.split(r"[ _\-]+", path.stem) if part]
+    if parts:
+        candidates.append(parts[0])
+        candidates.append(path.stem)
+    parent = path.parent
+    for _ in range(4):
+        if parent is None or (root is not None and parent == root):
+            break
+        candidates.append(parent.name)
+        parent = parent.parent
+    return [candidate for candidate in candidates if candidate]
+
+
+def resolve_tag(path: Path, budgets: dict[str, Budget], root: Optional[Path] = None,
+                similarity: float = DEFAULT_TAG_SIMILARITY) -> tuple[Optional[str], Optional[str]]:
+    """Resolve an asset to a tag key. Returns (tag, warning).
+
+    Exact matches win outright, including case and separator differences. A near
+    miss is deliberately *not* dropped: falling back to the global budget on a
+    typo is the failure this feature exists to prevent, so it resolves to the
+    closest tag and says so.
+    """
+    if not budgets:
+        return None, None
+    normalised = {key: normalise_tag(key) for key in budgets}
+    candidates = tag_candidates(path, root)
+
+    for candidate in candidates:
+        norm = normalise_tag(candidate)
+        if norm in normalised.values():
+            for key, value in normalised.items():
+                if value == norm:
+                    return key, None
+
+    for candidate in candidates:
+        norm = normalise_tag(candidate)
+        if not norm:
+            continue
+        close = difflib.get_close_matches(norm, list(normalised.values()), n=1,
+                                          cutoff=similarity)
+        if close:
+            for key, value in normalised.items():
+                if value == close[0]:
+                    return key, (f"tag '{candidate}' is not a known tag; "
+                                 f"closest match is '{key}'")
+    return None, None
+
+
+def _overlay_profile(document: dict, profile: dict, where: str) -> dict:
+    """Merge one budget profile into a rules document, or refuse it loudly.
+
+    Used by `[platforms.*]`, `[tags.*]` and the shipped presets — one merge
+    implementation means one set of rules about what a profile may say, so a tag
+    cannot do something a platform could not.
+    """
+    _reject_unknown(profile, (*PLATFORM_KEYS, *PLATFORM_SECTION_KEYS), where)
+
+    merged = {key: value for key, value in document.items()
+              if key not in ("platforms", "platform", "tags", "tagging", "preset")}
     merged["mesh"] = dict(document.get("mesh", {}) or {})
     merged["texture"] = dict(document.get("texture", {}) or {})
     for key, value in profile.items():
@@ -459,9 +586,9 @@ def apply_platform(document: dict, platform: str) -> dict:
             allowed = PLATFORM_SECTION_KEYS.get(key)
             if allowed is None:
                 raise ConfigError(
-                    f"[platforms.{platform}.{key}] is not a known section "
+                    f"{where}.{key} is not a known section "
                     f"(known: {', '.join(sorted(PLATFORM_SECTION_KEYS))})")
-            _reject_unknown(value, allowed, f"[platforms.{platform}.{key}]")
+            _reject_unknown(value, allowed, f"{where}.{key}")
             merged[key].update(value)
         elif key == "max_texture_edge":
             merged["texture"]["max_edge"] = value
@@ -531,10 +658,15 @@ def resolve_budget(root: Path, args: argparse.Namespace,
     """
     requested_platform = (getattr(args, "platform", None) or "").strip()
 
+    requested_preset = (getattr(args, "preset", None) or "").strip()
+
     if remote_document is not None:
         platform = requested_platform or str(remote_document.get("platform", "") or "")
         try:
-            budget, source = Budget.from_mapping(apply_platform(remote_document, platform)), None
+            document = apply_preset(
+                apply_platform(remote_document, platform),
+                requested_preset or str(remote_document.get("preset", "") or ""))
+            budget, source = Budget.from_mapping(document), None
         except ConfigError as exc:
             raise ConfigError(f"remote rules: {exc}") from exc
     else:
@@ -546,7 +678,9 @@ def resolve_budget(root: Path, args: argparse.Namespace,
         else:
             platform = requested_platform or str(document.get("platform", "") or "")
             try:
-                budget, source = Budget.from_mapping(apply_platform(document, platform)), rules_path
+                document = apply_preset(apply_platform(document, platform),
+                                        requested_preset or str(document.get("preset", "") or ""))
+                budget, source = Budget.from_mapping(document), rules_path
             except ConfigError as exc:
                 raise ConfigError(f"{rules_path}: {exc}") from exc
 
@@ -1022,6 +1156,40 @@ def load_healer(budget: Budget, settings: HealSettings):
                              texture_mode=settings.texture_mode)
     except module.HealError as exc:
         raise ConfigError(f"healer cannot start: {exc}") from exc
+
+
+def resolve_tagging(root: Path, args: argparse.Namespace,
+                    remote_document: Optional[dict] = None
+                    ) -> tuple[dict[str, Budget], str, float]:
+    """Compile the per-tag budgets and the matching policy for this run.
+
+    Reads the same document the budget came from, so `[tags.*]` inherits the
+    project's platform/preset baseline instead of being resolved in a vacuum.
+    """
+    if remote_document is not None:
+        document = remote_document
+    else:
+        rules_path = Path(args.rules).expanduser() if getattr(args, "rules", None) else root / RULES_FILENAME
+        document = parse_rules(rules_path) if rules_path.is_file() else {}
+
+    try:
+        platform = ((getattr(args, "platform", None) or "").strip()
+                    or str(document.get("platform", "") or ""))
+        preset = ((getattr(args, "preset", None) or "").strip()
+                  or str(document.get("preset", "") or ""))
+        document = apply_preset(apply_platform(document, platform), preset)
+
+        tagging = document.get("tagging") or {}
+        _reject_unknown(tagging, ("mode", "min_similarity"), "[tagging]")
+        mode = ((getattr(args, "tag_mode", None) or "").strip()
+                or _read_str(tagging, "mode", "[tagging]") or "suggest")
+        if mode not in TAG_MODES:
+            raise ConfigError(f"[tagging].mode must be one of {', '.join(TAG_MODES)}, got {mode!r}")
+        similarity = _read_float(tagging, "min_similarity", "[tagging]")
+        budgets = build_tag_budgets(document)
+    except ConfigError as exc:
+        raise ConfigError(str(exc)) from exc
+    return budgets, mode, DEFAULT_TAG_SIMILARITY if similarity is None else similarity
 
 
 def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:
@@ -1753,16 +1921,62 @@ class Gatekeeper:
     passing. With ``healer=None`` (the default) this class never writes a byte.
     """
 
-    def __init__(self, budget: Budget, healer: Optional[object] = None) -> None:
+    def __init__(self, budget: Budget, healer: Optional[object] = None,
+                 tag_budgets: Optional[dict[str, Budget]] = None,
+                 tag_mode: str = "suggest",
+                 tag_similarity: float = DEFAULT_TAG_SIMILARITY,
+                 tag_root: Optional[Path] = None) -> None:
         self.budget = budget
         self.healer = healer
+        self.tag_budgets = tag_budgets or {}
+        self.tag_mode = tag_mode if tag_mode in TAG_MODES else "suggest"
+        self.tag_similarity = tag_similarity
+        self.tag_root = tag_root
         self._naming = build_naming_pattern(budget.texture_suffixes) if budget.enforce_texture_naming else None
 
     def check(self, path: Path) -> Verdict:
-        verdict = self._inspect(path)
-        if verdict.problems and self.healer is not None:
-            return self._heal(path, verdict)
+        budget, tag, warning = self._budget_for(path)
+        previous = self.budget
+        if budget is not previous:
+            # One asset is inspected at a time (single worker thread), so a
+            # scoped swap is safe and avoids threading a budget through every
+            # analyzer signature.
+            self.budget = budget
+            self._naming = (build_naming_pattern(budget.texture_suffixes)
+                            if budget.enforce_texture_naming else None)
+        try:
+            verdict = self._inspect(path)
+            if verdict.problems and self.healer is not None:
+                verdict = self._heal(path, verdict)
+        finally:
+            self.budget = previous
+            self._naming = (build_naming_pattern(previous.texture_suffixes)
+                            if previous.enforce_texture_naming else None)
+
+        notes = list(verdict.warnings)
+        if warning:
+            if self.tag_mode == "strict":
+                # Strict mode turns a near miss into a failure, with the fix in
+                # the message: that is the whole point of not guessing politely.
+                problems = (warning + " (strict tag mode: rename the folder to match)",) + verdict.problems
+                return Verdict(verdict.path, problems, verdict.metric, verdict.stats,
+                               verdict.heal_notes, tuple(notes))
+            notes.append(warning)
+        if notes:
+            return Verdict(verdict.path, verdict.problems, verdict.metric, verdict.stats,
+                           verdict.heal_notes, tuple(notes))
         return verdict
+
+    def _budget_for(self, path: Path) -> tuple[Budget, Optional[str], Optional[str]]:
+        if not self.tag_budgets:
+            return self.budget, None, None
+        tag, warning = resolve_tag(path, self.tag_budgets, self.tag_root, self.tag_similarity)
+        if tag is None:
+            return self.budget, None, None
+        if self.tag_mode == "strict" and warning:
+            # Do not apply a guess in strict mode; let the caller fail it.
+            return self.budget, tag, warning
+        return self.tag_budgets[tag], tag, warning
 
     def _heal(self, path: Path, verdict: Verdict) -> Verdict:
         """Attempt a repair, then re-inspect with the same budget.
@@ -1969,6 +2183,7 @@ def build_telemetry_payload(verdict: Verdict, root: Optional[Path] = None) -> di
         "stats": dict(verdict.stats),
         "problems": list(verdict.problems),
         "modifications": list(verdict.heal_notes),
+        "warnings": list(verdict.warnings),
     }
 
 
@@ -2080,11 +2295,13 @@ class Reporter:
     RESET = "\033[0m"
 
     def __init__(self, color: bool = True, root: Optional[Path] = None,
-                 json_mode: bool = False, telemetry: Optional[Telemetry] = None) -> None:
+                 json_mode: bool = False, telemetry: Optional[Telemetry] = None,
+                 notifier: Optional[object] = None) -> None:
         self.color = color and self._ansi_supported()
         self.root = root
         self.json_mode = json_mode
         self.telemetry = telemetry
+        self.notifier = notifier
         self.passed = 0
         self.failed = 0
         self._lock = threading.Lock()
@@ -2118,6 +2335,9 @@ class Reporter:
         # Telemetry mirrors the local verdict; it never influences it.
         if self.telemetry is not None:
             self.telemetry.submit(verdict)
+        # Same contract for desktop toasts: queued, rate-limited, non-blocking.
+        if self.notifier is not None:
+            self.notifier.notify_verdict(verdict)
         if self.json_mode:
             # Machine-readable contract for the DCC plugins: one object per file.
             with self._lock:
@@ -2131,6 +2351,7 @@ class Reporter:
                     "metric": verdict.metric,
                     "problems": list(verdict.problems),
                     "modifications": list(verdict.heal_notes),
+                    "warnings": list(verdict.warnings),
                 }), flush=True)
             return
 
@@ -2146,6 +2367,11 @@ class Reporter:
             detail = f" {self._paint(verdict.metric, self.DIM)}" if verdict.metric else ""
             LOG.info("%s  %s%s", tag, self.display_path(verdict.path), detail)
 
+            # Advisories sit under the verdict, dimmed: they inform, they never
+            # change the exit code, and they must not look like failures.
+            for warning in verdict.warnings:
+                LOG.info("       %s", self._paint(f"note: {warning}", self.DIM))
+
     def summary(self) -> None:
         total = self.passed + self.failed
         if self.json_mode:
@@ -2155,9 +2381,11 @@ class Reporter:
         LOG.info("%d asset(s): %d passed, %d failed", total, self.passed, self.failed)
 
     def close(self, timeout: Optional[float] = None) -> None:
-        """Flush pending telemetry. Bounded, and a no-op when it is switched off."""
+        """Flush pending telemetry and toasts. Bounded, and a no-op when off."""
         if self.telemetry is not None:
             self.telemetry.close(timeout)
+        if self.notifier is not None:
+            self.notifier.close(timeout)
 
 
 # --------------------------------------------------------------------------- #
@@ -2373,6 +2601,18 @@ def build_parser() -> argparse.ArgumentParser:
                         help="accept texture names without a standard suffix")
     parser.add_argument("--rules", metavar="PATH",
                         help=f"rules file to use instead of <folder>/{RULES_FILENAME}")
+    parser.add_argument("--preset", metavar="NAME", default=None,
+                        help=f"apply a shipped preset ({', '.join(sorted(PRESETS))}); "
+                             "beats rules.toml but not an explicit numeric flag")
+    parser.add_argument("--tag-mode", choices=TAG_MODES, default=None, dest="tag_mode",
+                        help="how a near-miss asset tag is handled: auto (accept), "
+                             "suggest (accept + note, default), strict (fail with the fix)")
+    parser.add_argument("--notify", action="store_true", dest="notify", default=None,
+                        help="native desktop toasts on failure/heal (default: on while watching)")
+    parser.add_argument("--no-notify", action="store_false", dest="notify", default=None,
+                        help="never raise desktop toasts")
+    parser.add_argument("--notify-max", type=int, default=None, metavar="N",
+                        help="maximum toasts per minute (default 6)")
     parser.add_argument("--platform", metavar="NAME", default=None,
                         help="apply the [platforms.<NAME>] compression profile from rules.toml "
                              "(e.g. mobile, console, pc)")
@@ -2509,9 +2749,38 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         telemetry = Telemetry(server.telemetry_url, root=watch_dir, token=server.token)
         LOG.info("report  %s", server.telemetry_url)
 
-    gatekeeper = Gatekeeper(budget, healer=healer)
+    try:
+        tag_budgets, tag_mode, tag_similarity = resolve_tagging(watch_dir, args, remote_document)
+    except ConfigError as exc:
+        LOG.error("invalid tag configuration: %s", exc)
+        return 2
+    if tag_budgets:
+        LOG.info("tags    %s  (%s matching, %.2f similarity)",
+                 ", ".join(sorted(tag_budgets)), tag_mode, tag_similarity)
+
+    # Toasts default on for a human watching a folder, off for CI and hooks:
+    # a build agent has nobody to interrupt.
+    notify_wanted = (args.notify if args.notify is not None
+                     else (not args.once and root.is_dir()))
+    notifier = None
+    if notify_wanted:
+        try:
+            import notifier as notifier_module
+            notifier = notifier_module.Notifier(max_per_minute=args.notify_max or 6)
+            if not notifier.available:
+                LOG.debug("no desktop notification backend on this machine")
+                notifier = None
+        except Exception as exc:      # missing module, no backend, locked session
+            LOG.debug("desktop notifications unavailable: %s", exc)
+            notifier = None
+    if notifier is not None:
+        LOG.info("toasts  on (%d/min)", notifier.max_per_minute)
+
+    gatekeeper = Gatekeeper(budget, healer=healer, tag_budgets=tag_budgets,
+                            tag_mode=tag_mode, tag_similarity=tag_similarity,
+                            tag_root=watch_dir)
     reporter = Reporter(color=not args.no_color and not args.json, root=watch_dir,
-                        json_mode=args.json, telemetry=telemetry)
+                        json_mode=args.json, telemetry=telemetry, notifier=notifier)
 
     if root.is_file():
         if not is_candidate(root):

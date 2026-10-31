@@ -39,6 +39,16 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
 .inspector { grid-area: inspector; }
 .notes     { grid-area: notes; display: flex; flex-direction: column; }
 .panel { background: var(--panel); padding: 14px; overflow: auto; min-height: 0; }
+/* Per-material override rows: name, then two sliders, then the live value. */
+.materials { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; }
+.mat { background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px;
+       padding: 9px 10px; }
+.mat-name { font-size: 12px; color: var(--text); font-weight: 600; margin-bottom: 6px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mat-row { display: grid; grid-template-columns: 62px 1fr 34px; align-items: center;
+           gap: 8px; font-size: 11px; color: var(--muted); margin-top: 4px; }
+.mat-row input[type="range"] { width: 100%; accent-color: var(--accent); }
+.mat-row .val { font-variant-numeric: tabular-nums; text-align: right; color: var(--text); }
 /* The form stays put; the list is the part that scrolls. */
 .notes .list { overflow-y: auto; flex: 1 1 auto; padding-right: 4px; }
 .notes .note-form { flex: 0 0 auto; }

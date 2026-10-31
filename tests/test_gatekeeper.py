@@ -1298,6 +1298,153 @@ for label, body, expected in (
     except agk.ConfigError as exc:
         expect(label, expected in str(exc), str(exc)[:70])
 
+print("18. tags, presets and native notifications")
+
+import subprocess as _subprocess  # noqa: E402
+
+# ---- presets ---------------------------------------------------------------
+retro = agk.Budget.from_mapping(agk.apply_preset({}, "retro"))
+expect("a shipped preset applies without a rules file",
+       retro.max_triangles == 1500 and retro.max_texture_edge == 256,
+       f"{retro.max_triangles}/{retro.max_texture_edge}")
+expect("a preset does not require textures to be named",
+       agk.Budget.from_mapping(agk.apply_preset({}, "pc")).max_triangles == 120000)
+try:
+    agk.apply_preset({}, "nintendo-64")
+    expect("an unknown preset is rejected", False)
+except agk.ConfigError as exc:
+    expect("an unknown preset is rejected", "nintendo-64" in str(exc), str(exc))
+expect("no preset name changes nothing", agk.apply_preset({"mesh": {}}, "") == {"mesh": {}})
+
+preset_cfg = scratch / "tags"
+preset_cfg.mkdir(parents=True, exist_ok=True)
+(preset_cfg / "rules.toml").write_text(
+    "[mesh]\nmax_triangles = 90000\n[texture]\nmax_edge = 4096\n", encoding="utf-8")
+def preset_args(*extra):
+    return agk.build_parser().parse_args([str(preset_cfg), *extra])
+
+preset_budget = agk.resolve_budget(preset_cfg, preset_args("--preset", "mobile"))[0]
+expect("--preset beats the project file", preset_budget.max_triangles == 15000,
+       str(preset_budget.max_triangles))
+preset_budget = agk.resolve_budget(preset_cfg, preset_args("--preset", "mobile",
+                                                         "--triangles", "4200"))[0]
+expect("an explicit flag still beats the preset", preset_budget.max_triangles == 4200)
+
+# ---- hierarchical tags -----------------------------------------------------
+tag_doc = {
+    "mesh": {"max_triangles": 50000},
+    "tags": {"Monsters_Boss": {"max_triangles": 1000},
+             "Props": {"max_triangles": 5000, "texture": {"pbr_floor": 0.05}}},
+}
+tag_budgets = agk.build_tag_budgets(tag_doc)
+expect("each tag compiles to its own budget",
+       sorted(tag_budgets) == ["monsters boss", "props"] and
+       tag_budgets["monsters boss"].max_triangles == 1000)
+expect("a tag inherits the base budget it does not override",
+       tag_budgets["monsters boss"].max_texture_edge == 2048)
+expect("a tag can tighten a strictness threshold",
+       tag_budgets["props"].pbr_floor == 0.05)
+
+exact_path = Path("Exports/Monsters_Boss/boss.gltf")
+expect("an exact folder match resolves",
+       agk.resolve_tag(exact_path, tag_budgets) == ("monsters boss", None))
+expect("case and separators do not matter",
+       agk.resolve_tag(Path("Exports/monsters-boss/boss.gltf"), tag_budgets)[0] == "monsters boss")
+typo_tag, typo_warning = agk.resolve_tag(Path("Exports/Monsters_Bos/boss.gltf"), tag_budgets)
+expect("a near-miss folder is recovered, not ignored", typo_tag == "monsters boss", str(typo_tag))
+expect("the recovery is announced", typo_warning is not None and "closest match" in typo_warning,
+       str(typo_warning))
+expect("an unrelated folder matches nothing",
+       agk.resolve_tag(Path("Exports/Vehicles/truck.gltf"), tag_budgets) == (None, None))
+expect("a filename prefix is a valid tag source",
+       agk.resolve_tag(Path("Exports/Props_01.obj"), tag_budgets)[0] == "props")
+
+heal_cfg = tag_budgets
+boss = scratch / "tags" / "Monsters_Boss"
+boss.mkdir(parents=True, exist_ok=True)
+shutil.copy(DROP / "boss_statue.gltf", boss / "boss.gltf")
+typo_dir = scratch / "tags" / "Monsters_Bos"
+typo_dir.mkdir(parents=True, exist_ok=True)
+shutil.copy(DROP / "boss_statue.gltf", typo_dir / "typo.gltf")
+
+tag_gate = agk.Gatekeeper(agk.Budget(), tag_budgets=tag_budgets, tag_mode="suggest")
+tag_verdict = tag_gate.check(boss / "boss.gltf")
+expect("the tag budget is what fails the asset",
+       any("1,000 budget" in problem for problem in tag_verdict.problems),
+       str(tag_verdict.problems))
+expect("an exact match produces no advisory", tag_verdict.warnings == ())
+typo_verdict = agk.Gatekeeper(agk.Budget(), tag_budgets=tag_budgets).check(typo_dir / "typo.gltf")
+expect("a fuzzy match applies the tag budget too",
+       any("1,000 budget" in problem for problem in typo_verdict.problems))
+expect("and says so as a warning", len(typo_verdict.warnings) == 1, str(typo_verdict.warnings))
+expect("a warning never flips the verdict",
+       typo_verdict.passed == (not typo_verdict.problems))
+strict_verdict = agk.Gatekeeper(agk.Budget(), tag_budgets=tag_budgets,
+                               tag_mode="strict").check(typo_dir / "typo.gltf")
+expect("strict mode fails a near-miss with the fix",
+       any("rename the folder" in problem for problem in strict_verdict.problems),
+       str(strict_verdict.problems))
+expect("strict mode does not silently apply the guess",
+       any("50,000 budget" in problem for problem in strict_verdict.problems))
+
+tagging_cfg = scratch / "tagging"
+tagging_cfg.mkdir(parents=True, exist_ok=True)
+(tagging_cfg / "rules.toml").write_text(
+    "[tagging]\nmode = \"strict\"\nmin_similarity = 0.9\n", encoding="utf-8")
+budgets, mode, similarity = agk.resolve_tagging(
+    tagging_cfg, agk.build_parser().parse_args([str(tagging_cfg)]))
+expect("the tagging policy loads from the file", mode == "strict" and similarity == 0.9,
+       f"{mode} {similarity}")
+budgets, mode, _ = agk.resolve_tagging(
+    tagging_cfg, agk.build_parser().parse_args([str(tagging_cfg), "--tag-mode", "auto"]))
+expect("the CLI beats the tagging policy", mode == "auto")
+(tagging_cfg / "rules.toml").write_text("[tagging]\nmode = \"lenient\"\n", encoding="utf-8")
+try:
+    agk.resolve_tagging(tagging_cfg, agk.build_parser().parse_args([str(tagging_cfg)]))
+    expect("an unknown tagging mode is rejected", False)
+except agk.ConfigError as exc:
+    expect("an unknown tagging mode is rejected", "lenient" in str(exc), str(exc))
+
+# ---- native notifications --------------------------------------------------
+import notifier as _notifier  # noqa: E402
+
+argv, env = _notifier._command("notify-send", "Title", "Body")
+expect("linux pushes text through argv", argv[-2:] == ["Title", "Body"], str(argv))
+argv, env = _notifier._command("windows-toast", "Title; rm -rf /", "Body $(evil)")
+expect("windows never interpolates text into the script",
+       not any("rm -rf" in part for part in argv), str(argv))
+expect("windows passes text through the environment",
+       env["AGK_TOAST_TITLE"] == "Title; rm -rf /" and env["AGK_TOAST_BODY"] == "Body $(evil)")
+
+sent_calls = []
+def fake_run(argv, **kwargs):
+    sent_calls.append(argv)
+    return _subprocess.CompletedProcess(argv, 0, "", "")
+
+with patch("notifier.subprocess.run", side_effect=fake_run):
+    toast = _notifier.Notifier(max_per_minute=2, backend="notify-send")
+    for index in range(3):
+        toast.notify("T", f"body {index}")
+    toast.close(timeout=5.0)
+expect("the rate limit holds", toast.sent == 2 and toast.suppressed == 1,
+       f"sent={toast.sent} suppressed={toast.suppressed}")
+
+sent_calls.clear()          # the rate-limit block above already sent two
+with patch("notifier.subprocess.run", side_effect=fake_run):
+    toast = _notifier.Notifier(backend="notify-send")
+    failed_verdict = agk.Verdict(Path("heavy.glb"), ("too many triangles", "too many slots"),
+                                 "1 tris")
+    healed_verdict = agk.Verdict(Path("fixed.png"), (), "8x8", (), ("padded",))
+    passed_verdict = agk.Verdict(Path("fine.obj"), (), "1 tris")
+    expect("a failure raises a toast", toast.notify_verdict(failed_verdict) is True)
+    expect("a heal raises a toast", toast.notify_verdict(healed_verdict) is True)
+    expect("a pass is silent", toast.notify_verdict(passed_verdict) is False)
+    toast.close(timeout=5.0)
+expect("toasts carry the asset name", any("heavy.glb" in str(call) for call in sent_calls))
+expect("only failing/ healed assets were announced", len(sent_calls) == 2, str(len(sent_calls)))
+expect("a disabled notifier never spawns anything",
+       _notifier.Notifier(enabled=False).notify("T", "B") is False)
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

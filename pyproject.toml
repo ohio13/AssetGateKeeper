@@ -46,7 +46,7 @@ Issues = "https://github.com/ohio13/asset-gatekeeper/issues"
 [tool.setuptools]
 # Both modules ship: the gate loads healer.py by path from its own directory, so
 # they must stay side by side in site-packages too.
-py-modules = ["asset_gatekeeper", "healer"]
+py-modules = ["asset_gatekeeper", "healer", "notifier"]
 
 [tool.setuptools.dynamic]
 version = { attr = "asset_gatekeeper.__version__" }

@@ -453,7 +453,52 @@ expect("an unknown asset has no report", status == 404, str(status))
 report_server.shutdown()
 report_server.server_close()
 
-print("9. CLI wiring")
+print("9. collision proxy export")
+
+exp_db, exp_data = fresh("export")
+exp_asset = aws.create_asset(exp_db, exp_data, "crate.obj", OBJ.encode())
+
+box_text = aws.collision_obj(exp_asset, aws.get_collision(exp_db, exp_asset["id"]))
+expect("the derived box exports as 8 vertices", box_text.count("\nv ") == 8,
+       str(box_text.count("\nv ")))
+expect("the derived box exports as 6 quads", box_text.count("\nf ") == 6)
+expect("the export names the asset", exp_asset["filename"] in box_text)
+expect("the export is a valid obj header", box_text.startswith("# AssetGatekeeper"))
+
+aws.set_collision(exp_db, exp_asset["id"], "sphere",
+                  {"center": [0, 0, 0], "radius": 2.0})
+sphere_text = aws.collision_obj(exp_asset, aws.get_collision(exp_db, exp_asset["id"]))
+expect("a sphere exports as a closed quad grid", sphere_text.count("\nf ") == 24 * 16,
+       str(sphere_text.count("\nf ")))
+
+aws.set_collision(exp_db, exp_asset["id"], "hull",
+                  {"points": [[0, 0, 0], [1, 0, 0], [0, 1, 0], [0, 0, 1], [1, 1, 1]]})
+hull_text = aws.collision_obj(exp_asset, aws.get_collision(exp_db, exp_asset["id"]))
+expect("a hull exports as triangles", hull_text.count("\nf ") >= 4,
+       str(hull_text.count("\nf ")))
+expect("every hull face is a triangle",
+       all(len(line.split()) == 4 for line in hull_text.splitlines() if line.startswith("f ")))
+
+try:
+    aws.convex_hull_triangles([[i, 0, 0] for i in range(70)])
+    expect("a huge hull point cloud is refused", False)
+except aws.WorkstationError as exc:
+    expect("a huge hull point cloud is refused", exc.status == 413, str(exc.status))
+
+export_server = aws.build_server("127.0.0.1", 0, exp_db, exp_data, quiet=True)
+export_port = export_server.server_address[1]
+threading.Thread(target=export_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+status, body, headers = Client(export_port).call(f"/api/assets/{exp_asset['id']}/collision.obj")
+expect("the export is downloadable", status == 200, str(status))
+expect("it downloads as a file",
+       "attachment" in (headers.get("Content-Disposition") or ""),
+       str(headers.get("Content-Disposition")))
+expect("the body is the obj text", body.decode().startswith("# AssetGatekeeper"))
+export_server.shutdown()
+export_server.server_close()
+
+print("10. CLI wiring")
 options = aws.build_parser().parse_args(["--port", "9999", "--db", "x.db",
                                          "--data", "y", "--token", "t"])
 expect("CLI accepts the storage and auth flags",

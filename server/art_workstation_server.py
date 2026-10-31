@@ -43,6 +43,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import math
 import os
 import queue
 import re
@@ -371,6 +372,112 @@ def list_notes(db_path: str | Path, asset_id: int) -> list[dict]:
             "SELECT * FROM reviews_and_notes WHERE asset_id = ?"
             " ORDER BY created_at DESC, id DESC", (asset_id,)).fetchall()
     return [dict(row) for row in rows]
+
+
+HULL_POINT_LIMIT = 64
+
+
+def _cross(a, b):
+    return (a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0])
+
+
+def _dot(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def convex_hull_triangles(points: list[list[float]]) -> list[tuple[int, int, int]]:
+    """Exact convex hull by supporting-plane test (stdlib, brute force).
+
+    Every vertex triple defines a plane; the triple is a hull facet when no point
+    sits strictly on both sides of it. Cubic in the point count, so it is capped —
+    a collision proxy is a handful of points, not a mesh.
+    """
+    unique: list[tuple[float, float, float]] = []
+    seen = set()
+    for point in points:
+        key = (round(float(point[0]), 6), round(float(point[1]), 6), round(float(point[2]), 6))
+        if key not in seen:
+            seen.add(key)
+            unique.append(key)
+    if len(unique) > HULL_POINT_LIMIT:
+        raise WorkstationError(
+            f"exact hull export supports {HULL_POINT_LIMIT} points, got {len(unique)}; "
+            f"decimate the proxy in the DCC first", 413)
+
+    faces: set[tuple[int, int, int]] = set()
+    count = len(unique)
+    for i in range(count):
+        for j in range(i + 1, count):
+            for k in range(j + 1, count):
+                a, b, c = unique[i], unique[j], unique[k]
+                normal = _cross((b[0] - a[0], b[1] - a[1], b[2] - a[2]),
+                                (c[0] - a[0], c[1] - a[1], c[2] - a[2]))
+                if _dot(normal, normal) <= 1e-18:
+                    continue                      # collinear triple
+                offset = _dot(normal, a)
+                above = below = False
+                for m in range(count):
+                    side = _dot(normal, unique[m]) - offset
+                    if side > 1e-9:
+                        above = True
+                    elif side < -1e-9:
+                        below = True
+                    if above and below:
+                        break
+                if not (above and below):
+                    faces.add((i, j, k))
+    return sorted(faces), unique  # type: ignore[return-value]
+
+
+def collision_obj(asset: dict, collision: dict) -> str:
+    """Serialise a collision proxy as a standalone Wavefront .obj."""
+    kind = collision["kind"]
+    data = collision["data"]
+    lines = ["# AssetGatekeeper collision proxy",
+             f"# asset: {asset['filename']}",
+             f"# kind:  {kind}",
+             f"# generated: {utc_now()}",
+             f"o collision_{kind}"]
+
+    vertices: list[tuple[float, float, float]] = []
+    faces: list[tuple[int, ...]] = []
+
+    if kind == "box":
+        low, high = data["min"], data["max"]
+        vertices = [(low[0], low[1], low[2]), (high[0], low[1], low[2]),
+                    (high[0], high[1], low[2]), (low[0], high[1], low[2]),
+                    (low[0], low[1], high[2]), (high[0], low[1], high[2]),
+                    (high[0], high[1], high[2]), (low[0], high[1], high[2])]
+        faces = [(1, 2, 3, 4), (5, 8, 7, 6), (1, 5, 6, 2),
+                 (2, 6, 7, 3), (3, 7, 8, 4), (4, 8, 5, 1)]
+    elif kind == "sphere":
+        center = data["center"]
+        radius = float(data["radius"])
+        segments, rings = 24, 16
+        for ring in range(rings + 1):
+            phi = math.pi * ring / rings
+            for segment in range(segments):
+                theta = 2 * math.pi * segment / segments
+                vertices.append((
+                    center[0] + radius * math.sin(phi) * math.cos(theta),
+                    center[1] + radius * math.cos(phi),
+                    center[2] + radius * math.sin(phi) * math.sin(theta)))
+        def index(ring: int, segment: int) -> int:
+            return ring * segments + (segment % segments) + 1
+        for ring in range(rings):
+            for segment in range(segments):
+                faces.append((index(ring, segment), index(ring, segment + 1),
+                              index(ring + 1, segment + 1), index(ring + 1, segment)))
+    else:
+        faces, vertices = convex_hull_triangles(data["points"])
+
+    for x, y, z in vertices:
+        lines.append(f"v {x:.6g} {y:.6g} {z:.6g}")
+    for face in faces:
+        lines.append("f " + " ".join(str(i + 1) for i in face))
+    return "\n".join(lines) + "\n"
 
 
 def asset_references(db_path: str | Path, data_dir: Path, asset_id: int) -> dict:
@@ -795,6 +902,7 @@ ASSET_NOTES_RE = re.compile(r"^/api/assets/(\d+)/notes$")
 ASSET_COLLISION_RE = re.compile(r"^/api/assets/(\d+)/collision$")
 ASSET_REFERENCES_RE = re.compile(r"^/api/assets/(\d+)/references$")
 ASSET_REPORT_RE = re.compile(r"^/api/assets/(\d+)/report$")
+COLLISION_OBJ_RE = re.compile(r"^/api/assets/(\d+)/collision\.obj$")
 NOTE_RE = re.compile(r"^/api/notes/(\d+)$")
 
 
@@ -944,6 +1052,21 @@ class Handler(BaseHTTPRequestHandler):
 
         if path == "/api/events":
             self._stream()
+            return
+
+        match = COLLISION_OBJ_RE.match(path)
+        if match:
+            asset_id = int(match.group(1))
+            server = self.server  # type: ignore[attr-defined]
+            asset = get_asset(server.db_path, asset_id)
+            collision = get_collision(server.db_path, asset_id)
+            if collision is None:
+                raise WorkstationError("no collision proxy for this asset", 404)
+            body = collision_obj(asset, collision).encode("utf-8")
+            stem = safe_filename(asset["filename"]).rsplit(".", 1)[0]
+            self._send(200, body, "text/plain; charset=utf-8",
+                       {"Content-Disposition":
+                        f'attachment; filename="{stem}_collision.obj"'})
             return
 
         match = ASSET_REPORT_RE.match(path)

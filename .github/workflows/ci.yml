@@ -36,7 +36,7 @@ jobs:
       # ("syntax error in forward annotation"), so the engine and tests are
       # linted here and the plugins are syntax-checked below instead.
       - name: Lint engine, server + tests
-        run: python -m pyflakes asset_gatekeeper.py healer.py engine/lod_manager.py server/asset_health_server.py server/art_workstation_server.py vcs_hooks/p4_pre_submit.py vcs_hooks/git_pre_commit.py tests/test_gatekeeper.py tests/test_server.py tests/test_workstation.py tests/gen_test_assets.py tests/run_headless_integration.py
+        run: python -m pyflakes asset_gatekeeper.py healer.py notifier.py engine/lod_manager.py tools/houdini_export_hook.py server/asset_health_server.py server/art_workstation_server.py vcs_hooks/p4_pre_submit.py vcs_hooks/git_pre_commit.py tests/test_gatekeeper.py tests/test_server.py tests/test_workstation.py tests/gen_test_assets.py tests/run_headless_integration.py
 
       - name: Syntax-check DCC plugins
         run: python -m compileall -q plugins
@@ -52,10 +52,10 @@ jobs:
       - name: Generate fixtures
         run: python tests/gen_test_assets.py
 
-      - name: Unit suite (283 assertions)
+      - name: Unit suite (318 assertions)
         run: python tests/test_gatekeeper.py
 
-      - name: Workstation suite (77 assertions)
+      - name: Workstation suite (107 assertions)
         run: python tests/test_workstation.py
 
       # Spins the real dashboard server on an ephemeral port and drives it over
