@@ -57,3 +57,23 @@ suffixes = ["_Albedo", "_Normal", "_Roughness"]
 
 # NOTE: all three keys are commented out on purpose. An empty [server] table is
 # valid (it means "no platform"), but a stray "url = " with no value is not.
+
+# --------------------------------------------------------------------------- #
+# Optional: auto-healing. OFF unless enabled = true here or --auto-heal is
+# passed. The gate fails and locks by default; a repaired file is adopted only if
+# it then verifies as passing under the same budget.
+# --------------------------------------------------------------------------- #
+
+[healer]
+enabled = false        # the only safe default
+
+# Non-power-of-two textures and missing "_Albedo"/"_Normal"/"_Roughness" suffixes.
+textures = true
+
+# Zero-area faces in .obj files. .gltf/.glb geometry is never rewritten blind.
+meshes = true
+
+# "pad" grows the canvas and replicates edge pixels, preserving every original
+# pixel. "resize" resamples with LANCZOS. Pad by default: it is the only one of
+# the two that cannot change what the texture looks like.
+texture_mode = "pad"

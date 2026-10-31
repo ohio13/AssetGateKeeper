@@ -158,10 +158,13 @@ for text, bucket in cases:
 
 print("4. dashboard queries + seeding")
 seed_db = fresh_db("seed.db")
+SEED_ROWS = len(ahs._SEED) + 1   # + the demo 'healed' row
 expect("first launch seeds demo rows", ahs.seed_if_first_launch(seed_db) is True)
-expect("first launch seeds in one call", ahs.totals(seed_db)["total"] == len(ahs._SEED))
+expect("first launch seeds in one call", ahs.totals(seed_db)["total"] == SEED_ROWS)
 expect("a second launch does not re-seed", ahs.seed_if_first_launch(seed_db) is False)
-expect("still the same row count", ahs.totals(seed_db)["total"] == len(ahs._SEED))
+expect("still the same row count", ahs.totals(seed_db)["total"] == SEED_ROWS)
+expect("the demo set includes a healed asset", ahs.totals(seed_db)["healed"] == 1,
+       str(ahs.totals(seed_db)))
 
 stats = ahs.totals(seed_db)
 expect("totals add up", stats["passed"] + stats["failed"] == stats["total"], str(stats))
@@ -205,7 +208,7 @@ status, body, _ = request(port, "/api/telemetry", method="POST", body=VERDICT)
 expect("POST /api/telemetry stores a verdict", status == 201, str(status))
 stored_id = json.loads(body)["id"]
 expect("the response names the row", isinstance(stored_id, int) and stored_id > 0)
-expect("the new verdict is counted", ahs.totals(seed_db)["total"] == len(ahs._SEED) + 1)
+expect("the new verdict is counted", ahs.totals(seed_db)["total"] == SEED_ROWS + 1)
 
 status, _, _ = request(port, "/api/telemetry", method="POST", body=b"{not json")
 expect("invalid JSON is a 400", status == 400, str(status))
@@ -274,7 +277,60 @@ with ahs.open_db(escape_db) as connection:
 expect("deleting a verdict removes its problems (foreign key)", before == 1 and after == 0,
        f"{before} -> {after}")
 
-print("8. CLI wiring")
+print("8. healing status + modifications")
+heal_db = fresh_db("heal.db")
+HEALED = {
+    "name": "stone_wall_Albedo.png", "path": "env/stone_wall_Albedo.png",
+    "hostname": "WS-ART-014", "username": "jdoe", "platform": "Windows-11",
+    "size_bytes": 734003, "passed": True, "status": "HEALED", "metric": "1024x1024",
+    "problems": [], "modifications": ["padded 1000x1000 -> 1024x1024"],
+}
+healed_id = ahs.store_verdict(heal_db, HEALED)
+with ahs.open_db(heal_db) as connection:
+    healed_row = connection.execute("SELECT * FROM verdicts WHERE id = ?", (healed_id,)).fetchone()
+    mods = [r["action"] for r in connection.execute(
+        "SELECT action FROM modifications WHERE verdict_id = ?", (healed_id,)).fetchall()]
+expect("a healed verdict stores status HEALED", healed_row["status"] == "HEALED",
+       str(healed_row["status"]))
+expect("a healed verdict still counts as passed", healed_row["passed"] == 1)
+expect("the modifications are stored", mods == ["padded 1000x1000 -> 1024x1024"], str(mods))
+expect("healed assets are counted separately", ahs.totals(heal_db)["healed"] == 1)
+
+expect("status is derived when the client omits it",
+       ahs._normalise({"name": "a.png", "passed": True,
+                       "modifications": ["padded"]})["status"] == "HEALED")
+expect("a plain pass derives PASSED", ahs._normalise({"name": "a.png", "passed": True})["status"]
+       == "PASSED")
+expect("a failure derives FAILED", ahs._normalise({"name": "a.png", "passed": False})["status"]
+       == "FAILED")
+expect("an unknown status is re-derived rather than trusted",
+       ahs._normalise({"name": "a.png", "passed": False, "status": "SORT_OF"})["status"] == "FAILED")
+try:
+    ahs._normalise({"name": "a.png", "passed": True, "modifications": [1]})
+    expect("modifications must be strings", False, "no error raised")
+except ValueError as exc:
+    expect("modifications must be strings", "modifications" in str(exc), str(exc)[:48])
+
+# A database created before healing shipped must gain the column, not the boot error.
+legacy = WORK / "legacy.db"
+for suffix in ("", "-wal", "-shm"):
+    if Path(str(legacy) + suffix).exists():
+        Path(str(legacy) + suffix).unlink()
+with ahs.open_db(legacy) as connection:
+    connection.execute(
+        "CREATE TABLE verdicts (id INTEGER PRIMARY KEY AUTOINCREMENT, timestamp TEXT NOT NULL,"
+        " received_at TEXT NOT NULL, hostname TEXT, username TEXT, os TEXT, filename TEXT,"
+        " filepath TEXT, filesize INTEGER, passed INTEGER NOT NULL, metric TEXT)")
+    connection.execute("INSERT INTO verdicts (timestamp, received_at, passed) "
+                       "VALUES ('2026-01-01T00:00:00+00:00', '2026-01-01T00:00:00+00:00', 1)")
+ahs.init_db(legacy)
+with ahs.open_db(legacy) as connection:
+    migrated = {row[1] for row in connection.execute("PRAGMA table_info(verdicts)").fetchall()}
+    kept = connection.execute("SELECT COUNT(*) FROM verdicts").fetchone()[0]
+expect("an old database is migrated, not dropped", "status" in migrated and kept == 1,
+       f"columns={sorted(migrated)} rows={kept}")
+
+print("9. CLI wiring")
 parser = ahs.build_parser()
 options = parser.parse_args(["--port", "9999", "--db", "x.db", "--token", "t", "--no-seed"])
 expect("CLI accepts host/port/db/token/no-seed",

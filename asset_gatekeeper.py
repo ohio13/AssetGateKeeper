@@ -79,6 +79,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import importlib.util
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import lru_cache
@@ -147,7 +148,9 @@ IGNORED_SUFFIXES = (
     ".tmp", ".temp", ".part", ".partial", ".crdownload", ".download",
     ".swp", ".lock", ".cache", ".blend1",
 )
-IGNORED_PREFIXES = ("~$", ".~", ".git")
+# ".agk-heal-" is the healer's staging folder: it lives inside the watch dir so the
+# atomic rename is same-filesystem, and it must never be inspected as an asset.
+IGNORED_PREFIXES = ("~$", ".~", ".git", ".agk-heal-")
 
 GLB_MAGIC = b"glTF"
 GLB_JSON_CHUNK = 0x4E4F534A  # 'JSON'
@@ -182,7 +185,7 @@ class Budget:
         """
         if not isinstance(document, dict):
             raise ConfigError("the rules file must contain a table of settings")
-        _reject_unknown(document, ("mesh", "texture", "server"), "the rules file")
+        _reject_unknown(document, ("mesh", "texture", "server", "healer"), "the rules file")
 
         mesh = document.get("mesh", {})
         texture = document.get("texture", {})
@@ -240,10 +243,23 @@ class Verdict:
     # Structured equivalent of `metric` for machines: ("triangles", 4000), ...
     # Kept as a tuple so a Verdict stays immutable and hashable.
     stats: tuple[tuple[str, int], ...] = ()
+    # Non-empty only when the asset was actively repaired and re-verified.
+    heal_notes: tuple[str, ...] = ()
 
     @property
     def passed(self) -> bool:
         return not self.problems
+
+    @property
+    def healed(self) -> bool:
+        return bool(self.heal_notes)
+
+    @property
+    def status(self) -> str:
+        """PASSED / HEALED / FAILED - the word a dashboard and a hook can branch on."""
+        if not self.passed:
+            return "FAILED"
+        return "HEALED" if self.healed else "PASSED"
 
     @property
     def reason(self) -> str:
@@ -251,7 +267,9 @@ class Verdict:
 
     @property
     def tag(self) -> str:
-        return "PASSED" if self.passed else f"FAILED: {self.reason}"
+        if self.passed:
+            return f"PASSED WITH HEALING: {'; '.join(self.heal_notes)}" if self.healed else "PASSED"
+        return f"FAILED: {self.reason}"
 
 
 class AssetError(Exception):
@@ -534,6 +552,85 @@ def fetch_remote_rules(url: str, cache_path: Path, timeout: float = HTTP_TIMEOUT
             return cached
         LOG.warning("Central server offline and no cached rules profile; using local settings")
         return None
+
+
+@dataclass(frozen=True)
+class HealSettings:
+    """Opt-in healing policy.
+
+    ``enabled`` is False unless a human says otherwise — via ``--auto-heal`` or
+    ``[healer] enabled = true``. Nothing in this tool ever repairs an asset as a
+    side effect of failing it; automated mesh decimation and resampling destroy
+    artistic intent, so the default answer is "no".
+    """
+
+    enabled: bool = False
+    textures: bool = True       # NPOT + missing-suffix renames
+    meshes: bool = True         # zero-area faces, .obj only
+    texture_mode: str = "pad"   # pad preserves pixels; resize resamples
+
+    @classmethod
+    def from_mapping(cls, table: dict, where: str = "[healer]") -> "HealSettings":
+        if not isinstance(table, dict):
+            raise ConfigError(f"{where} must be a table")
+        _reject_unknown(table, ("enabled", "textures", "meshes", "texture_mode"), where)
+        mode = _read_str(table, "texture_mode", where)
+        if mode is not None and mode not in ("pad", "resize"):
+            raise ConfigError(f"{where}.texture_mode must be 'pad' or 'resize', got {mode!r}")
+        enabled = _read_bool(table, "enabled", where)
+        textures = _read_bool(table, "textures", where)
+        meshes = _read_bool(table, "meshes", where)
+        defaults = cls()
+        return cls(
+            enabled=defaults.enabled if enabled is None else enabled,
+            textures=defaults.textures if textures is None else textures,
+            meshes=defaults.meshes if meshes is None else meshes,
+            texture_mode=defaults.texture_mode if mode is None else mode,
+        )
+
+
+def resolve_healer(root: Path, args: argparse.Namespace) -> HealSettings:
+    """Merge healing policy: explicit CLI flag > ``[healer]`` table > off.
+
+    ``--no-auto-heal`` exists so CI can pin healing off even when a project file
+    turns it on: a build agent must never rewrite an artist's asset.
+    """
+    from_file = HealSettings()
+    rules_path = Path(args.rules).expanduser() if getattr(args, "rules", None) else root / RULES_FILENAME
+    if rules_path.is_file():
+        try:
+            from_file = HealSettings.from_mapping(parse_rules(rules_path).get("healer", {}))
+        except (ConfigError, ValueError, OSError) as exc:
+            raise ConfigError(f"{rules_path}: {exc}") from exc
+    forced = getattr(args, "auto_heal", None)
+    if forced is None:
+        return from_file
+    return replace(from_file, enabled=bool(forced))
+
+
+def load_healer(budget: Budget, settings: HealSettings):
+    """Import the companion ``healer.py`` next to this file — only when asked.
+
+    Loaded by path rather than by import name so the tool still works when it is
+    copied alone into a studio's tools folder next to its healer.
+    """
+    module_path = Path(__file__).with_name("healer.py")
+    if not module_path.is_file():
+        raise ConfigError(f"healing is enabled but {module_path.name} is missing "
+                          f"(expected next to asset_gatekeeper.py)")
+    spec = importlib.util.spec_from_file_location("agk_healer", module_path)
+    if spec is None or spec.loader is None:  # pragma: no cover - defensive
+        raise ConfigError(f"cannot load {module_path}")
+    module = importlib.util.module_from_spec(spec)
+    # Register before executing: @dataclass resolves its own module through
+    # sys.modules, and an unregistered module makes it raise AttributeError.
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    try:
+        return module.Healer(budget, textures=settings.textures, meshes=settings.meshes,
+                             texture_mode=settings.texture_mode)
+    except module.HealError as exc:
+        raise ConfigError(f"healer cannot start: {exc}") from exc
 
 
 def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:
@@ -954,13 +1051,45 @@ def build_naming_pattern(suffixes: Sequence[str]) -> Optional[re.Pattern[str]]:
 # --------------------------------------------------------------------------- #
 
 class Gatekeeper:
-    """Applies the budget rules and returns a Verdict. No I/O side effects."""
+    """Applies the budget rules and returns a Verdict. No I/O side effects.
 
-    def __init__(self, budget: Budget) -> None:
+    The single exception is healing, and it is opt-in: pass a ``Healer`` and a
+    failing asset is repaired *only if* the repaired copy then verifies as
+    passing. With ``healer=None`` (the default) this class never writes a byte.
+    """
+
+    def __init__(self, budget: Budget, healer: Optional[object] = None) -> None:
         self.budget = budget
+        self.healer = healer
         self._naming = build_naming_pattern(budget.texture_suffixes) if budget.enforce_texture_naming else None
 
     def check(self, path: Path) -> Verdict:
+        verdict = self._inspect(path)
+        if verdict.problems and self.healer is not None:
+            return self._heal(path, verdict)
+        return verdict
+
+    def _heal(self, path: Path, verdict: Verdict) -> Verdict:
+        """Attempt a repair, then re-inspect with the same budget.
+
+        ``_inspect`` (not ``check``) is the checker on purpose: the healer's
+        output must be judged by the rules, never by the healer itself.
+        """
+        try:
+            result = self.healer.heal(path, self._inspect)  # type: ignore[attr-defined]
+        except Exception as exc:  # healing must never turn a FAILED into a crash
+            LOG.warning("healing %s failed: %s", path.name, exc)
+            return verdict
+        if result is None:
+            return verdict          # nothing safe to do; the original is untouched
+        healed = self._inspect(result.path)
+        if healed.problems:         # belt and braces: never report a lie
+            LOG.warning("healing %s did not satisfy the budget: %s",
+                        result.path.name, healed.reason)
+            return verdict
+        return Verdict(result.path, (), healed.metric, healed.stats, result.modifications)
+
+    def _inspect(self, path: Path) -> Verdict:
         suffix = path.suffix.lower()
         if suffix in MESH_SUFFIXES:
             return self._check_mesh(path)
@@ -1109,9 +1238,13 @@ def build_telemetry_payload(verdict: Verdict, root: Optional[Path] = None) -> di
         "path": relative,
         "size_bytes": size_bytes,
         "passed": verdict.passed,
+        # PASSED / HEALED / FAILED: a healed asset passed, but the studio still
+        # wants to know it was rewritten, and what was done to it.
+        "status": verdict.status,
         "metric": verdict.metric,
         "stats": dict(verdict.stats),
         "problems": list(verdict.problems),
+        "modifications": list(verdict.heal_notes),
     }
 
 
@@ -1270,15 +1403,18 @@ class Reporter:
                     "file": str(verdict.path),
                     "name": verdict.path.name,
                     "passed": verdict.passed,
+                    "status": verdict.status,
                     "metric": verdict.metric,
                     "problems": list(verdict.problems),
+                    "modifications": list(verdict.heal_notes),
                 }), flush=True)
             return
 
         with self._lock:
             if verdict.passed:
                 self.passed += 1
-                tag = self._paint("PASSED", self.GREEN)
+                # A healed asset passed, but the artist must be told it was rewritten.
+                tag = self._paint(verdict.tag if verdict.healed else "PASSED", self.GREEN)
             else:
                 self.failed += 1
                 tag = self._paint(verdict.tag, self.RED)
@@ -1508,6 +1644,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="accept texture names without a standard suffix")
     parser.add_argument("--rules", metavar="PATH",
                         help=f"rules file to use instead of <folder>/{RULES_FILENAME}")
+    parser.add_argument("--auto-heal", action="store_true", dest="auto_heal", default=None,
+                        help="repair failing assets in place (NPOT textures, missing texture "
+                             "suffixes, zero-area .obj faces) - off unless this or "
+                             "[healer] enabled = true is set")
+    parser.add_argument("--no-auto-heal", action="store_false", dest="auto_heal",
+                        help="force healing off, even if rules.toml enables it (use in CI)")
     parser.add_argument("--remote-rules", metavar="URL", default=None,
                         help="fetch the budget from a central endpoint; cached locally for "
                              f"offline use (or set {REMOTE_RULES_ENV})")
@@ -1579,12 +1721,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOG.info("cli     overriding %s", ", ".join(overrides))
     LOG.info("budget  %s", describe_budget(budget))
 
+    try:
+        heal_settings = resolve_healer(watch_dir, args)
+    except ConfigError as exc:
+        LOG.error("invalid healer settings: %s", exc)
+        return 2
+
+    healer = None
+    if heal_settings.enabled:
+        try:
+            healer = load_healer(budget, heal_settings)
+        except ConfigError as exc:
+            LOG.error("%s", exc)
+            return 2
+        LOG.info("healing enabled  textures=%s meshes=%s mode=%s (opt-in)",
+                 "on" if heal_settings.textures else "off",
+                 "on" if heal_settings.meshes else "off",
+                 heal_settings.texture_mode)
+
     telemetry = None
     if server.telemetry_enabled:
         telemetry = Telemetry(server.telemetry_url, root=watch_dir, token=server.token)
         LOG.info("report  %s", server.telemetry_url)
 
-    gatekeeper = Gatekeeper(budget)
+    gatekeeper = Gatekeeper(budget, healer=healer)
     reporter = Reporter(color=not args.no_color and not args.json, root=watch_dir,
                         json_mode=args.json, telemetry=telemetry)
 

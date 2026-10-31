@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-197%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-282%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -192,6 +192,91 @@ Load a shared file explicitly with `--rules path/to/rules.toml`. On Python < 3.1
 ```
 
 Files saved by Notepad or PowerShell carry a UTF-8 BOM; those load fine.
+
+---
+
+## Auto-healing: opt-in, and verified before it touches your file
+
+The gate **fails and locks by default.** It never modifies an artist's asset on its
+own — automated resampling changes detail, mesh decimation destroys intent, and a
+tool that silently rewrites files during a submit is indistinguishable from
+corruption. Healing is a deliberate act:
+
+```bash
+python asset_gatekeeper.py D:\Exports --auto-heal      # or [healer] enabled = true
+```
+
+What it will repair, and what it refuses to:
+
+| Problem | Healed? | How |
+| :--- | :--- | :--- |
+| `.png` not a power of two | yes | pad to the next POT (edge replication) or LANCZOS resize — `[healer] texture_mode` |
+| `.png` missing a naming suffix | yes | rename with the inferred suffix (`_Albedo`/`_Normal`/`_Roughness`) |
+| `.obj` zero-area faces | yes | delete the degenerate faces, rewrite the file |
+| Triangle budget exceeded | **no** | decimation is not a safe transformation |
+| Texture resolution exceeded | **no** | that would throw away detail the artist chose |
+| Material slots, UV channels, bone weights | **no** | needs an artist decision, not a script |
+| `.gltf` / `.glb` geometry | **no** | rewriting accessors and buffers blind corrupts files |
+
+**Nothing is adopted unless it verifies.** The healer copies the asset into a
+staging folder inside the same directory, repairs the copy, runs the *same* budget
+over it, and only then swaps it in atomically. If the healed copy still fails —
+say a 4096×1000 texture that pads to 4096×1024 and still blows the edge limit —
+the staged copy is deleted and the original is left byte-for-byte intact. It also
+refuses to rename onto a file that already exists, and it never recurses on its
+own staging folder.
+
+```
+15:41:07 PASSED WITH HEALING: padded 1000x1000 -> 1024x1024  stone_Albedo.png 1024x1024
+15:41:07 PASSED WITH HEALING: Stripped 1 degenerate face     broken_glass.obj 12 tris / 1 mat
+15:41:07 FAILED: 4096x1024 exceeds the 2048x2048 maximum resolution  huge_Albedo.png   (unhealable: bytes untouched)
+```
+
+```toml
+[healer]
+enabled = false        # the only safe default
+textures = true        # NPOT + suffix renames
+meshes = true          # zero-area .obj faces
+texture_mode = "pad"   # "pad" preserves every pixel; "resize" resamples
+```
+
+`--no-auto-heal` exists so CI and the VCS hooks can pin healing **off** even when a
+project file turns it on. A heal is reported to AssetHealth as `status: "HEALED"`
+with the list of modifications, so a studio can still see every file that was
+rewritten on the way in.
+
+---
+
+## Version control hooks: reject at the door
+
+`vcs_hooks/` holds the gateway code for build engineers who want the failure to
+happen *before* a bad asset enters the depot. All three hooks pass
+`--no-auto-heal`: a hook that rewrites an artist's file mid-submit is not a gate.
+
+| Hook | Installed as | Mechanism |
+| :--- | :--- | :--- |
+| `p4_pre_submit.py` | a `change-submit` trigger | `p4 describe` → `p4 print` each rev to a temp tree → gate → reject |
+| `git_pre_commit.py` | `.git/hooks/pre-commit` (`--install`) | `git diff --cached` → gate the staged assets |
+| `git_pre_push.sh` | `.git/hooks/pre-push` | upstream-or-empty-tree diff → gate → block the push |
+
+```python
+# Perforce server trigger (p4 triggers), tabs between fields:
+AssetGatekeeper change-submit //depot/.../..."python C:\p4\hooks\p4_pre_submit.py %changelist% %user%"
+```
+
+```
+$ git commit
+Commit blocked by AssetGatekeeper:
+  - crate_4mtl.obj [LFS]
+    15:41:07 FAILED: 4 material slots exceeds the 3 slot budget (draw calls)  crate_4mtl.obj 4,000 tris / 4 mat
+
+Nothing was healed or modified. Commit the fix, or `git commit --no-verify` if a
+technical lead agrees.
+```
+
+Both git hooks refuse to run on an interpreter older than 3.9 rather than dying on
+a syntax error, fail closed if `p4 describe` cannot be read, and honour
+`AGK_GATEKEEPER` / `AGK_PYTHON` for non-standard installs.
 
 ---
 
@@ -484,6 +569,8 @@ python asset_gatekeeper.py [folder] [options]
 | `--max-materials N` | Override the material-slot budget |
 | `--max-influences N` | Override the per-vertex bone-weight budget |
 | `--max-uvs N` | Override the UV-channel budget |
+| `--auto-heal` | Repair failing assets in place (opt-in; see above) |
+| `--no-auto-heal` | Force healing off, even if `rules.toml` enables it |
 | `--allow-degenerate` | Permit zero-area triangles |
 | `--json` | One JSON object per file on stdout (the contract the DCC plugins use) |
 | `--allow-npot` | Accept non-power-of-two textures |
@@ -520,11 +607,11 @@ No changes are needed in the watcher, the reporter, or the queue. Rules are data
 Three layers, because unit tests, networks and DCC reality fail in different ways.
 
 ```bash
-# 1. rules, parsers, config precedence — 127 assertions, no network, no GPU
+# 1. rules, config, healing, VCS hooks — 201 assertions, no network, no GPU
 python tests/gen_test_assets.py
 python tests/test_gatekeeper.py
 
-# 2. the dashboard server — 70 assertions over real sockets, ephemeral port
+# 2. the dashboard server — 81 assertions over real sockets, ephemeral port
 python tests/test_server.py
 
 # 3. real exporter -> real file -> real verdict (headless Blender / Unreal)
@@ -533,19 +620,24 @@ python tests/run_headless_integration.py
 
 ```
 asset_gatekeeper.py              the tool (single file)
+healer.py                        opt-in repair engine (only loaded with --auto-heal)
 asset_gatekeeper.example.toml    rules.toml template
 README.md  LICENSE  .gitignore  .gitattributes
 .github/workflows/
-  ci.yml                         every push/PR: lint + 127 assertions + integration
+  ci.yml                         every push/PR: lint + 201 assertions + integration
   dcc-nightly.yml                nightly Blender export through the real watcher
 tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
-  test_gatekeeper.py             127 assertions over rules, parsers, config
-  test_server.py                 70 assertions: ingest, auth, HTML, cascade delete
+  test_gatekeeper.py             201 assertions: rules, config, healing, hooks
+  test_server.py                 81 assertions: ingest, auth, HTML, cascade delete
   run_headless_integration.py    drives headless DCC exports through the gate
 server/
   asset_health_server.py         dashboard: HTTP + SQLite, stdlib only
-  dashboard.png                  what /dashboard looks like (README) 
+  dashboard.png                  what /dashboard looks like (README)
+vcs_hooks/
+  p4_pre_submit.py               Perforce change-submit trigger
+  git_pre_commit.py              Git pre-commit hook (+ --install)
+  git_pre_push.sh                Git pre-push hook
 plugins/
   blender/addon.py               sidebar panel + selection check
   maya/gatekeeper_maya.py        in-scene checks via maya.cmds / OpenMaya
@@ -631,7 +723,7 @@ Both DCC snippets are written to `<workdir>/dcc_snippets/` every run, ready to p
 `.github/workflows/ci.yml` runs on every push and pull request: `pyflakes` over the
 engine and tests, a syntax check of all four plugins (`compileall`, because
 `bpy.props` annotations make pyflakes emit bogus F722 forward-annotation errors),
-the 127-assertion suite, and the integration harness in `--synthetic` mode, on
+the 201-assertion suite, and the integration harness in `--synthetic` mode, on
 Ubuntu and Windows × Python 3.11 and 3.12.
 
 `.github/workflows/dcc-nightly.yml` downloads a pinned Blender (cached between

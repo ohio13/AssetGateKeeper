@@ -1,0 +1,197 @@
+#!/usr/bin/env python3
+r"""Perforce server-side submit trigger for AssetGatekeeper.
+
+Installed on the P4 server as a ``change-submit`` trigger, this runs *before* the
+submit is committed. If any asset in the changelist blows a budget, the trigger
+exits non-zero and P4V shows the reason straight to the artist — the file never
+enters the depot.
+
+Server trigger line (``p4 triggers``), one line, tabs between fields::
+
+    AssetGatekeeper change-submit //depot/.../..."python C:\p4\hooks\p4_pre_submit.py %changelist% %user%"
+
+Behaviour
+    * only inspects ``add``/``edit``/``branch``/``move/add``/``integrate`` revs of
+      .obj/.gltf/.glb/.png — deleted files have nothing to inspect;
+    * materialises each rev with ``p4 print -o`` into a temp folder and gates that
+      copy, so the check reflects the *submitted* content, not the shelf;
+    * **never heals.** A trigger that rewrites files behind an artist's back is not
+      a gate, it is a liability. ``--no-auto-heal`` is passed explicitly so a
+      project rules.toml cannot switch it on either;
+    * fails closed: any unexpected error rejects the submit rather than waving it
+      through.
+
+Exit codes: 0 pass, 1 rejected (budget or hook error), 2 configuration problem.
+"""
+
+from __future__ import annotations
+
+import argparse
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+from pathlib import Path
+
+ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".png"}
+# Actions that put bytes into the depot. "delete" and "move/delete" carry none.
+CONTENT_ACTIONS = {"add", "edit", "branch", "move/add", "integrate", "merge"}
+
+MAX_MESSAGE = 4000   # P4V truncates anyway; keep the rejection readable
+
+
+def log(message: str) -> None:
+    print(message, flush=True)
+
+
+def p4(*args: str, timeout: float = 120.0) -> str:
+    """Run a p4 command and return stdout, raising on a non-zero exit."""
+    completed = subprocess.run(args, capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=timeout)
+    if completed.returncode != 0:
+        raise RuntimeError(
+            f"{' '.join(args[:3])} failed ({completed.returncode}): "
+            f"{(completed.stderr or completed.stdout).strip()[:400]}"
+        )
+    return completed.stdout
+
+
+def changelist_files(changelist: str) -> list[tuple[str, str]]:
+    """Return [(depot_path, action)] for the content-bearing files in a CL.
+
+    ``p4 describe -s`` is the portable formulation; the text is parsed rather
+    than version-pinned so this keeps working across server versions.
+    """
+    output = p4("p4", "describe", "-s", changelist)
+    files: list[tuple[str, str]] = []
+    in_files = False
+    for line in output.splitlines():
+        if line.startswith("Affected files ..."):
+            in_files = True
+            continue
+        if in_files:
+            stripped = line.strip()
+            if stripped.startswith("Differences ..."):
+                break
+            # Real `p4 describe` output puts a blank line between the header and
+            # the first entry; a blank line is not the end of the list.
+            if not stripped:
+                continue
+            # "... //depot/path/file.png#3 add"
+            if stripped.startswith("..."):
+                body = stripped[3:].strip()
+                if not body:
+                    continue
+                revisioned, _, action = body.rpartition(" ")
+                path = revisioned.split("#")[0]
+                if action and path:
+                    files.append((path, action))
+    return files
+
+
+def fetch_revision(changelist: str, depot_path: str, destination: Path) -> None:
+    """Stream a changelist rev out of the depot into ``destination``."""
+    p4("p4", "print", "-q", "-o", str(destination), f"{depot_path}@{changelist}")
+
+
+def gatekeeper_command() -> list[str]:
+    """Resolve how to invoke the gate. Overridable for non-standard installs."""
+    python = os.environ.get("AGK_PYTHON") or sys.executable
+    script = os.environ.get("AGK_GATEKEEPER") or str(
+        Path(__file__).resolve().parent.parent / "asset_gatekeeper.py")
+    if not Path(script).is_file():
+        raise RuntimeError(
+            f"asset_gatekeeper.py not found at {script}; set AGK_GATEKEEPER to its path"
+        )
+    return [python, script]
+
+
+def gate(path: Path, extra: list[str]) -> subprocess.CompletedProcess:
+    """Gate one file. Single-file mode gives one verdict and one exit code."""
+    command = [*gatekeeper_command(), str(path), *extra]
+    return subprocess.run(command, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=600.0)
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(
+        prog="p4_pre_submit.py",
+        description="Reject Perforce submits whose assets exceed the studio budget.")
+    parser.add_argument("changelist", help="changelist number (%%changelist%%)")
+    parser.add_argument("user", nargs="?", default="", help="submitting user (%%user%%)")
+    parser.add_argument("--rules", help="rules file to use instead of <asset folder>/rules.toml")
+    parser.add_argument("--verbose", action="store_true")
+    options = parser.parse_args(argv)
+
+    # Built here, not inside gate(), so what a trigger passes to the gate is
+    # visible in one place — and provably includes the no-heal lockdown.
+    extra: list[str] = ["--no-color", "--no-auto-heal"]
+    if options.rules:
+        extra += ["--rules", options.rules]
+
+    try:
+        files = changelist_files(options.changelist)
+    except (RuntimeError, OSError) as exc:
+        # Fail closed: an unreadable changelist must not become an implicit pass.
+        log(f"AssetGatekeeper: cannot read changelist {options.changelist}: {exc}")
+        return 1
+
+    candidates = [(path, action) for path, action in files
+                  if action in CONTENT_ACTIONS and Path(path).suffix.lower() in ASSET_SUFFIXES]
+    if not candidates:
+        if options.verbose:
+            log(f"AssetGatekeeper: no tracked assets in changelist {options.changelist}")
+        return 0
+
+    temp_root = Path(tempfile.mkdtemp(prefix="agk-p4-"))
+    failures: list[str] = []
+    try:
+        # Keep the depot's folder shape so relative texture/buffer references in a
+        # .gltf still resolve when the copy is inspected.
+        common = os.path.commonprefix([path for path, _ in candidates])
+        common_root = common.rsplit("/", 1)[0] if "/" in common else ""
+
+        for depot_path, action in candidates:
+            relative = depot_path[len(common_root):].lstrip("/") if common_root else depot_path.lstrip("/")
+            destination = temp_root / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                fetch_revision(options.changelist, depot_path, destination)
+            except (RuntimeError, OSError) as exc:
+                failures.append(f"{depot_path}: could not fetch from depot ({exc})")
+                continue
+
+            completed = gate(destination, extra)
+            if completed.returncode == 0:
+                if options.verbose:
+                    log(f"AssetGatekeeper: PASSED {depot_path}")
+                continue
+            if completed.returncode == 2:
+                failures.append(f"{depot_path}: gate setup error\n{completed.stderr.strip()[:400]}")
+                continue
+            # Exit code 1: a real budget failure. Surface the tool's own verdict line.
+            verdict = ""
+            for line in (completed.stdout + completed.stderr).splitlines():
+                if "FAILED" in line or "PASSED" in line:
+                    verdict = line.strip()
+            detail = verdict or (completed.stdout + completed.stderr).strip()[:400]
+            failures.append(f"{depot_path} ({action})\n    {detail}")
+    finally:
+        shutil.rmtree(temp_root, ignore_errors=True)
+
+    if not failures:
+        return 0
+
+    header = (f"Submit rejected by AssetGatekeeper: {len(failures)} of {len(candidates)} "
+              f"asset(s) exceed the studio budget.")
+    body = "\n".join(f"  - {item}" for item in failures)
+    hint = ("\nNothing was healed or modified. Fix the assets and resubmit, or ask a "
+            "technical lead to change rules.toml.")
+    log((header + "\n" + body + hint)[:MAX_MESSAGE])
+    log(f"\n(submitted by {options.user or 'unknown'}, changelist {options.changelist})")
+    return 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

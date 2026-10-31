@@ -72,7 +72,10 @@ CREATE TABLE IF NOT EXISTS verdicts (
     filepath    TEXT    NOT NULL DEFAULT '',
     filesize    INTEGER NOT NULL DEFAULT -1,
     passed      INTEGER NOT NULL,              -- 0/1, SQLite has no bool
-    metric      TEXT    NOT NULL DEFAULT ''
+    metric      TEXT    NOT NULL DEFAULT '',
+    -- PASSED / HEALED / FAILED. A healed asset passed, but the studio still
+    -- wants a record that the file was rewritten on its way in.
+    status      TEXT    NOT NULL DEFAULT 'PASSED'
 );
 
 CREATE TABLE IF NOT EXISTS problems (
@@ -81,10 +84,18 @@ CREATE TABLE IF NOT EXISTS problems (
     message    TEXT    NOT NULL
 );
 
+-- What the (opt-in) healer changed. Empty for everything else.
+CREATE TABLE IF NOT EXISTS modifications (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    verdict_id INTEGER NOT NULL REFERENCES verdicts(id) ON DELETE CASCADE,
+    action     TEXT    NOT NULL
+);
+
 -- The dashboard's three queries, and nothing else.
 CREATE INDEX IF NOT EXISTS idx_verdicts_passed    ON verdicts(passed);
 CREATE INDEX IF NOT EXISTS idx_verdicts_timestamp ON verdicts(timestamp DESC);
 CREATE INDEX IF NOT EXISTS idx_problems_verdict   ON problems(verdict_id);
+CREATE INDEX IF NOT EXISTS idx_mods_verdict       ON modifications(verdict_id);
 
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
@@ -116,10 +127,21 @@ def open_db(db_path: str | Path):
 
 
 def init_db(db_path: str | Path) -> None:
-    """Create the schema on first run. Safe to call on every boot."""
+    """Create the schema on first run, and migrate a pre-existing database.
+
+    ``CREATE TABLE IF NOT EXISTS`` silently does nothing to a table that already
+    exists, so a database written before healing shipped would never gain the
+    ``status`` column. ALTER it explicitly instead of asking people to delete
+    their metrics.
+    """
     with open_db(db_path) as connection:
         connection.execute("PRAGMA journal_mode = WAL")  # concurrent readers
         connection.executescript(SCHEMA)
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(verdicts)").fetchall()}
+        if "status" not in columns:
+            connection.execute(
+                "ALTER TABLE verdicts ADD COLUMN status TEXT NOT NULL DEFAULT 'PASSED'")
+            print("asset_health: migrated verdicts, added the status column")
 
 
 def _utc_now() -> str:
@@ -158,6 +180,18 @@ def _normalise(payload: dict) -> dict:
     if isinstance(filesize, bool) or not isinstance(filesize, int):
         filesize = -1
 
+    modifications = pick("modifications", default=[])
+    if modifications is None:
+        modifications = []
+    if not isinstance(modifications, list) or not all(isinstance(m, str) for m in modifications):
+        raise ValueError("'modifications' must be a list of strings")
+
+    # Trust an explicit status when it is one we know; otherwise derive it, so a
+    # hand-written curl still produces a coherent row.
+    status = pick("status", default=None)
+    if status not in ("PASSED", "HEALED", "FAILED"):
+        status = "HEALED" if (passed and modifications) else ("PASSED" if passed else "FAILED")
+
     return {
         "timestamp": str(pick("timestamp", default=_utc_now())),
         "received_at": _utc_now(),
@@ -169,7 +203,9 @@ def _normalise(payload: dict) -> dict:
         "filesize": filesize,
         "passed": 1 if passed else 0,
         "metric": str(pick("metric", default="")),
+        "status": status,
         "problems": problems,
+        "modifications": modifications,
     }
 
 
@@ -179,16 +215,20 @@ def store_verdict(db_path: str | Path, payload: dict) -> int:
     with _WRITE_LOCK, open_db(db_path) as connection:
         cursor = connection.execute(
             "INSERT INTO verdicts (timestamp, received_at, hostname, username, os,"
-            " filename, filepath, filesize, passed, metric)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " filename, filepath, filesize, passed, metric, status)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (row["timestamp"], row["received_at"], row["hostname"], row["username"],
              row["os"], row["filename"], row["filepath"], row["filesize"],
-             row["passed"], row["metric"]),
+             row["passed"], row["metric"], row["status"]),
         )
         verdict_id = int(cursor.lastrowid or 0)
         connection.executemany(
             "INSERT INTO problems (verdict_id, message) VALUES (?, ?)",
             [(verdict_id, message) for message in row["problems"]],
+        )
+        connection.executemany(
+            "INSERT INTO modifications (verdict_id, action) VALUES (?, ?)",
+            [(verdict_id, action) for action in row["modifications"]],
         )
     return verdict_id
 
@@ -202,7 +242,8 @@ def totals(db_path: str | Path) -> dict:
     with open_db(db_path) as connection:
         row = connection.execute(
             "SELECT COUNT(*) AS total,"
-            "       COALESCE(SUM(passed), 0) AS passed"
+            "       COALESCE(SUM(passed), 0) AS passed,"
+            "       COALESCE(SUM(CASE WHEN status = 'HEALED' THEN 1 ELSE 0 END), 0) AS healed"
             " FROM verdicts"
         ).fetchone()
         hosts = connection.execute(
@@ -215,6 +256,7 @@ def totals(db_path: str | Path) -> dict:
         "total": total,
         "passed": passed,
         "failed": failed,
+        "healed": int(row["healed"]),
         "pass_rate": round(passed * 100.0 / total, 1) if total else 0.0,
         "hosts": int(hosts or 0),
     }
@@ -309,7 +351,7 @@ h1 { font-size: 22px; margin: 0; letter-spacing: -0.01em; }
 .sub { color: var(--muted); font-size: 13px; }
 h2 { font-size: 13px; text-transform: uppercase; letter-spacing: 0.08em;
      color: var(--muted); margin: 32px 0 10px; font-weight: 600; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
          gap: 12px; margin-top: 22px; }
 .card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
 .card .k { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.07em; }
@@ -411,6 +453,7 @@ def render_dashboard(db_path: str | Path) -> str:
     <div class="card"><div class="k">Passed</div><div class="v good">{stats['passed']:,}</div></div>
     <div class="card"><div class="k">Failed</div><div class="v bad">{stats['failed']:,}</div></div>
     <div class="card"><div class="k">Pass rate</div><div class="v {rate_class}">{rate}%</div></div>
+    <div class="card"><div class="k">Healed (opt-in)</div><div class="v">{stats['healed']:,}</div></div>
     <div class="card"><div class="k">Workstations</div><div class="v">{stats['hosts']:,}</div></div>
   </div>
 
@@ -654,6 +697,14 @@ def seed_if_first_launch(db_path: str | Path) -> bool:
             "name": filename, "path": path, "size_bytes": size, "passed": bool(passed),
             "metric": metric, "problems": problems,
         })
+    # One demo "healed" row, so the dashboard's healing card is not always zero.
+    store_verdict(db_path, {
+        "timestamp": datetime.fromtimestamp(time.time() - 600, timezone.utc).isoformat(timespec="seconds"),
+        "hostname": "WS-ART-014", "username": "jdoe", "platform": "Windows-11",
+        "name": "stone_wall_Albedo.png", "path": "env/stone_wall_Albedo.png",
+        "size_bytes": 734_003, "passed": True, "status": "HEALED", "metric": "1024x1024",
+        "problems": [], "modifications": ["padded 1000x1000 -> 1024x1024"],
+    })
     with _WRITE_LOCK, open_db(db_path) as connection:
         connection.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded', '1')")
     return True
