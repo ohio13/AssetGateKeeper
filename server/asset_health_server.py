@@ -874,8 +874,12 @@ button.secondary { background: transparent; color: var(--text); border: 1px soli
 """
 
 
+MAX_REFRESH_SECONDS = 3600
+
+
 def render_dashboard(db_path: str | Path, project_id: int | None = None,
-                     project_name: str | None = None, warn: str = "") -> str:
+                     project_name: str | None = None, warn: str = "",
+                     refresh: int = 0) -> str:
     stats = totals(db_path, project_id)
     shame = wall_of_shame(db_path, project_id=project_id)
     tops = bottlenecks(db_path, project_id=project_id)
@@ -922,11 +926,19 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
     else:
         tops_html = "<div class=\"panel\"><div class=\"empty\">No violations recorded.</div></div>"
 
+    # Opt-in only: ?refresh=5 turns the dashboard into a wallboard. Off by default
+    # so a stale page never looks like a broken pipeline.
+    auto_refresh = (f'<meta http-equiv="refresh" content="{refresh}">'
+                    if refresh > 0 else "")
+    live_note = (f' <span class="chips">&middot; live, every {refresh}s</span>'
+                 if refresh > 0 else "")
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
+{auto_refresh}
 <title>AssetHealth — studio pipeline dashboard</title>
 <style>{CSS}</style>
 </head>
@@ -934,7 +946,7 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
 <div class="wrap">
   <header>
     <h1>AssetHealth</h1>
-    <span class="sub">studio pipeline dashboard &middot; {scope}</span>
+    <span class="sub">studio pipeline dashboard &middot; {scope}{live_note}</span>
   </header>
   <div class="sub">Every number below comes from live verdicts posted by AssetGatekeeper.</div>
   {f'<div class="notice err" style="display:block">{_e(warn)}</div>' if warn else ''}
@@ -1269,7 +1281,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._forbid(404, "No such project", f"project_id={project_id} is not registered")
                 return
             name = match[0]["name"]
-        body = render_dashboard(db_path, project_id, name).encode("utf-8")
+        refresh = 0
+        raw_refresh = self._query().get("refresh", ["0"])[0]
+        try:
+            refresh = max(0, min(int(raw_refresh), MAX_REFRESH_SECONDS))
+        except (TypeError, ValueError):
+            refresh = 0
+        body = render_dashboard(db_path, project_id, name, refresh=refresh).encode("utf-8")
         self._send(200, body, "text/html; charset=utf-8")
 
     def _planner(self, identity: dict) -> None:

@@ -729,9 +729,14 @@ tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
   test_gatekeeper.py             209 assertions: rules, config, healing, hooks
   test_server.py                 161 assertions: tenancy, ingest, alerts, throttle
+  test_workstation.py            66 assertions: storage, LODs, collision, notes, auth
   run_headless_integration.py    drives headless DCC exports through the gate
 server/
   asset_health_server.py         dashboard + planner + ingest, stdlib only
+  art_workstation_server.py     3D viewer, LODs, collision, notes
+  static/                       viewer.html, viewer.js, app.css (Three.js from CDN)
+engine/
+  lod_manager.py                vertex-cluster decimator (stdlib only)
   dashboard.png                  what /dashboard looks like (README)
   budget_planner.png             what /budget-planner looks like (README)
 vcs_hooks/
@@ -841,6 +846,76 @@ nightly and on demand; Unreal, Maya and Houdini stay manual because their licenc
 can't live in a runner.
 
 > **Known gaps, stated plainly:** the harness itself is verified in `--synthetic` mode and against a mocked DCC binary (which exercises the Blender argv contract, exit codes and verdict assertions); the Blender and Unreal command lines have not yet been executed against real installs in this repository. If you run them, a PR with the output — or with the UE version you tested — is very welcome.
+
+---
+
+## Art Workstation: the technical-art review screen
+
+![Art Workstation](server/static/workstation.png)
+
+The gate answers "is it within budget". AssetHealth answers "what is the studio
+trend". This answers the question a technical artist actually asks across a desk:
+**"let me look at it."** One page: the asset in 3D, its LOD ladder, its collision
+proxy, and the review notes — with the numbers the gate measured, not a re-count.
+
+```bash
+python server/art_workstation_server.py --port 8100
+#   Art Workstation  http://127.0.0.1:8100/viewer
+```
+
+Backend is `http.server` + `sqlite3` + `json` and nothing else; only Three.js
+comes from a CDN. Upload by dragging a `.obj` / `.gltf` / `.glb` onto the viewport
+or with the button.
+
+| Panel | What it does |
+| :--- | :--- |
+| **Asset library** | Every upload with tri/vertex/material counts, LOD and note counts. Oversized assets are flagged with `!` |
+| **Viewport** | Orbit/zoom/pinch. Textured vs Geometry (normal material), wireframe overlay, exposure slider, `source` and each LOD as a button with its live triangle count |
+| **Collision inspector** | The stored proxy drawn in amber over the mesh; rebuild as bounding box, sphere or convex hull straight from the loaded geometry |
+| **Review notes** | Categorised (Geometry / Texture / LOD / Collision / Shading / Other), markdown-ish (`**bold**`, `` `code` ``, `- lists`), newest first, deletable |
+
+`/viewer?asset=12&lod=LOD2` is a shareable link straight to one asset at one LOD —
+paste it into a review thread instead of "open the workstation and find it".
+
+### LOD generation (zero dependencies)
+
+`engine/lod_manager.py` decimates by **vertex clustering**: snap vertices to a grid
+cell, merge what shares a cell, drop collapsed faces, dedupe. Not a quadric-error
+decimator — but deterministic, dependency-free, and honest about its trade-offs:
+
+```bash
+python engine/lod_manager.py big_statue.glb --ratios 0.5,0.25,0.125 --max-tris 20000,5000,1200
+# big_statue.glb: 38,080 tris, 19,042 verts
+#   LOD1    21,154 tris ( 55.6% of source, target 0.50) -> LOD1_big_statue.glb
+#   LOD2    10,716 tris ( 28.1% of source, target 0.25) -> LOD2_big_statue.glb
+#   LOD3     4,316 tris ( 11.3% of source, target 0.13) -> LOD3_big_statue.glb
+```
+
+Two things that make it work on real exports:
+
+1. **Weld before decimating.** DCC exporters split vertices per face corner, so a
+   38k-triangle sphere arrives with 19k+ vertices duplicated across seams. Without
+   a weld pass, a grid cell big enough to merge anything also swallows whole
+   triangles, and the level collapses in one step instead of grading down.
+2. **Sample cell sizes, don't bisect.** Clustering is *mostly* monotonic but the
+   crossings are cliffs; a bisection walks into one and returns the same mesh for
+   two different targets. A 26-point geometric sweep plus a refinement pass lands
+   within a few percent.
+
+A ratio is the director's intent, `max_tris` is the platform ceiling, and the
+tighter one wins. LODs drop UVs and materials by design — they exist to be *looked
+at*, and anything that ships still gets a DCC decimation pass.
+
+### Solo or studio
+
+| Mode | Behaviour |
+| :--- | :--- |
+| no `AUTH_TOKEN` | single-developer tool: everything open, on loopback |
+| `AUTH_TOKEN` set | every `/api` call needs `Authorization: Bearer` (or `?token=`); pages stay open so the UI can ask |
+
+The viewer prompts once for the token and keeps it in `localStorage`. Notes are
+stored verbatim and rendered as escaped text with a tiny markdown subset — a note
+containing `<script>` is text, never markup.
 
 ---
 

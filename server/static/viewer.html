@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Art Workstation</title>
+<link rel="stylesheet" href="/static/app.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot"></span>
+    <strong>Art Workstation</strong>
+    <span class="sub" id="status">loading…</span>
+  </div>
+  <div class="actions">
+    <label class="file-btn">
+      Upload asset
+      <input type="file" id="upload" accept=".obj,.gltf,.glb" hidden>
+    </label>
+    <span class="sub" id="stats"></span>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ---------------------------------------------------------------- library -->
+  <aside class="panel library">
+    <h2>Asset library</h2>
+    <div id="asset-list" class="list">
+      <div class="empty">Nothing uploaded yet.<br>Drop a .obj / .gltf / .glb anywhere.</div>
+    </div>
+  </aside>
+
+  <!-- --------------------------------------------------------------- viewport -->
+  <section class="viewport-wrap">
+    <div class="toolbar">
+      <div class="group">
+        <button id="mode-textured" class="chip active" title="Textured view">Textured</button>
+        <button id="mode-geometry" class="chip" title="Flat normal material">Geometry</button>
+        <button id="wireframe" class="chip" title="Show triangle edges">Wireframe</button>
+        <button id="collision" class="chip active" title="Show collision proxy">Collision</button>
+      </div>
+      <div class="group grow">
+        <span class="label">Exposure</span>
+        <input type="range" id="brightness" min="0.2" max="3" step="0.05" value="1">
+        <output id="brightness-out">1.00</output>
+      </div>
+      <div class="group">
+        <span class="label">LOD</span>
+        <span id="lod-buttons" class="lod-buttons">
+          <button class="chip active" data-level="source">Source</button>
+        </span>
+      </div>
+    </div>
+
+    <div class="canvas-host" id="canvas-host">
+      <div class="hint" id="viewport-hint">
+        <strong>No asset loaded</strong>
+        <span>Pick one from the library, or drop a file here to upload it.</span>
+      </div>
+      <div class="dropzone" id="dropzone">Drop to upload</div>
+    </div>
+
+    <div class="readout" id="readout"></div>
+  </section>
+
+  <!-- ------------------------------------------------------------- collision -->
+  <section class="panel inspector">
+    <h2>Collision inspector</h2>
+    <div id="collision-info" class="kv">
+      <div class="empty">No asset selected.</div>
+    </div>
+    <div class="field">
+      <label for="collision-kind">Proxy type</label>
+      <select id="collision-kind">
+        <option value="box">Bounding box</option>
+        <option value="sphere">Sphere</option>
+        <option value="hull">Convex hull</option>
+      </select>
+      <button id="collision-derive" class="chip">Rebuild from mesh</button>
+    </div>
+  </section>
+
+  <!-- ----------------------------------------------------------------- notes -->
+  <aside class="panel notes">
+    <h2>Review notes</h2>
+    <form id="note-form" class="note-form">
+      <div class="row">
+        <select id="note-category">
+          <option>Geometry</option>
+          <option>Texture</option>
+          <option>LOD</option>
+          <option>Collision</option>
+          <option>Shading</option>
+          <option>Other</option>
+        </select>
+        <input id="note-author" placeholder="your name" autocomplete="off">
+      </div>
+      <textarea id="note-text" rows="4"
+        placeholder="Markdown-ish: **bold**, `code`, - list items"></textarea>
+      <button type="submit" id="note-submit" disabled>Add note</button>
+    </form>
+    <div id="note-list" class="list"></div>
+  </aside>
+</main>
+
+<script type="module" src="/static/viewer.js"></script>
+</body>
+</html>
