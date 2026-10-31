@@ -71,6 +71,7 @@ import argparse
 import array
 import base64
 import difflib
+import fnmatch
 import getpass
 import json
 import logging
@@ -181,6 +182,11 @@ class Budget:
     allow_degenerate: bool = False        # zero-area triangles: poison for Nanite / RT
     degenerate_epsilon: float = 1e-8      # area below which a triangle counts as degenerate
 
+    # -- filters ------------------------------------------------------------ #
+    # Globs that look like assets but are not: review renders, 4x paint sources,
+    # hashed build caches. From [filters] exclude. Empty by default.
+    exclude: tuple[str, ...] = ()
+
     # -- reference & hierarchy auditing ------------------------------------ #
     # On by default: a .gltf pointing at a texture nobody shipped is broken in
     # every engine, on every platform, with no ambiguity to argue about.
@@ -218,7 +224,12 @@ class Budget:
             raise ConfigError("the rules file must contain a table of settings")
         _reject_unknown(document, ("mesh", "texture", "server", "healer",
                                    "platforms", "platform", "tags", "tagging",
-                                   "preset", "notify"), "the rules file")
+                                   "preset", "notify", "filters"), "the rules file")
+        filters = document.get("filters") or {}
+        if not isinstance(filters, dict):
+            raise ConfigError("[filters] must be a table")
+        _reject_unknown(filters, ("exclude",), "[filters]")
+        exclude = _read_strings(filters, "exclude", "[filters]") if filters else None
 
         mesh = document.get("mesh", {})
         texture = document.get("texture", {})
@@ -284,6 +295,7 @@ class Budget:
             check_references=(
                 defaults.check_references if check_references is None else check_references
             ),
+            exclude=defaults.exclude if exclude is None else exclude,
             pbr_check=defaults.pbr_check if pbr_check is None else pbr_check,
             pbr_floor=defaults.pbr_floor if pbr_floor is None else pbr_floor,
             pbr_ceiling=defaults.pbr_ceiling if pbr_ceiling is None else pbr_ceiling,
@@ -714,6 +726,8 @@ def resolve_budget(root: Path, args: argparse.Namespace,
         value = getattr(args, attribute, None)
         if value is not None:
             overrides[field] = value
+    if getattr(args, "exclude", None):
+        overrides["exclude"] = tuple(args.exclude)
     if getattr(args, "require_indexed", None):
         # Asking for an index audit without the transform audit would silently
         # skip the pivot checks that make the audit useful.
@@ -2392,14 +2406,29 @@ class Reporter:
 # Watching
 # --------------------------------------------------------------------------- #
 
-def is_candidate(path: Path) -> bool:
-    """Cheap pre-filter: right extension, not a hidden/scratch file."""
+def is_candidate(path: Path, exclude: Sequence[str] = ()) -> bool:
+    """Cheap pre-filter: right extension, not a hidden/scratch/excluded file.
+
+    `exclude` holds glob patterns from `[filters] exclude` / `--exclude`. Real
+    asset folders keep review renders, 4x paint sources and hashed build caches
+    next to shipped textures; without this the gate reports them as budget
+    violations and the real findings get lost in the noise.
+    """
     name = path.name
     if name.startswith(IGNORED_PREFIXES):
         return False
     if name.lower().endswith(IGNORED_SUFFIXES):
         return False
-    return path.suffix.lower() in TRACKED_SUFFIXES
+    if path.suffix.lower() not in TRACKED_SUFFIXES:
+        return False
+    if exclude:
+        for pattern in exclude:
+            # fnmatchcase, not fnmatch: fnmatch normalises case on Windows, which
+            # would make identical rules behave differently on an artist's box and
+            # on the Linux CI runner.
+            if fnmatch.fnmatchcase(name, pattern) or fnmatch.fnmatchcase(str(path), pattern):
+                return False
+    return True
 
 
 def wait_until_stable(path: Path, quiet: float = 0.35, timeout: float = 30.0) -> bool:
@@ -2449,7 +2478,7 @@ class AssetEventHandler(FileSystemEventHandler):  # type: ignore[misc]
 
     def _submit(self, raw_path: str) -> None:
         path = Path(raw_path)
-        if is_candidate(path):
+        if is_candidate(path, getattr(self, "exclude", ())):
             self._queue.put(path)
 
     def on_created(self, event: FileSystemEvent) -> None:
@@ -2493,7 +2522,7 @@ class WatchWorker(threading.Thread):
                 self._queue.task_done()
 
     def _process(self, path: Path) -> None:
-        if not is_candidate(path) or not path.exists():
+        if not is_candidate(path, getattr(self, "exclude", ())) or not path.exists():
             return
         if not wait_until_stable(path):
             LOG.debug("skipping %s (vanished or never settled)", path.name)
@@ -2530,9 +2559,11 @@ def describe_budget(budget: Budget) -> str:
     )
 
 
-def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter, recursive: bool) -> int:
+def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
+             recursive: bool, exclude: Sequence[str] = ()) -> int:
     pattern = "**/*" if recursive else "*"
-    candidates = sorted(p for p in root.glob(pattern) if p.is_file() and is_candidate(p))
+    candidates = sorted(p for p in root.glob(pattern)
+                        if p.is_file() and is_candidate(p, exclude))
     if not candidates:
         LOG.info("no tracked assets found in %s", root)
         return 0
@@ -2547,17 +2578,21 @@ def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter, recursive: 
     return 1 if reporter.failed else 0
 
 
-def run_watch(root: Path, gatekeeper: Gatekeeper, reporter: Reporter, recursive: bool) -> int:
+def run_watch(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
+              recursive: bool, exclude: Sequence[str] = ()) -> int:
     if Observer is None:
         LOG.error("watchdog is not installed: python -m pip install watchdog")
         return 2
 
     work_queue: "queue.Queue[Optional[Path]]" = queue.Queue()
     worker = WatchWorker(work_queue, gatekeeper, reporter)
+    worker.exclude = tuple(exclude)
     worker.start()
 
+    handler = AssetEventHandler(work_queue)
+    handler.exclude = tuple(exclude)
     observer = Observer()
-    observer.schedule(AssetEventHandler(work_queue), str(root), recursive=recursive)
+    observer.schedule(handler, str(root), recursive=recursive)
     observer.start()
 
     LOG.info("watching %s - Ctrl+C to stop", root)
@@ -2613,6 +2648,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="never raise desktop toasts")
     parser.add_argument("--notify-max", type=int, default=None, metavar="N",
                         help="maximum toasts per minute (default 6)")
+    parser.add_argument("--exclude", action="append", metavar="GLOB", default=None,
+                        help="ignore files matching this glob, e.g. 'preview_*' "
+                             "(repeatable; same as [filters] exclude)")
     parser.add_argument("--platform", metavar="NAME", default=None,
                         help="apply the [platforms.<NAME>] compression profile from rules.toml "
                              "(e.g. mobile, console, pc)")
@@ -2792,9 +2830,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0 if verdict.passed else 1
 
     if args.once:
-        status = run_once(watch_dir, gatekeeper, reporter, args.recursive)
+        status = run_once(watch_dir, gatekeeper, reporter, args.recursive, budget.exclude)
     else:
-        status = run_watch(watch_dir, gatekeeper, reporter, args.recursive)
+        status = run_watch(watch_dir, gatekeeper, reporter, args.recursive, budget.exclude)
     reporter.close()
     return status
 

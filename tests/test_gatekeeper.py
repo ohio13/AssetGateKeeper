@@ -1445,6 +1445,56 @@ expect("only failing/ healed assets were announced", len(sent_calls) == 2, str(l
 expect("a disabled notifier never spawns anything",
        _notifier.Notifier(enabled=False).notify("T", "B") is False)
 
+print("19. exclude filters and folder tags")
+
+# Real asset trees keep review renders and paint sources next to shipped art.
+expect("a plain file is a candidate", agk.is_candidate(Path("crate.obj")))
+expect("an excluded glob is skipped",
+       agk.is_candidate(Path("preview_crate.png"), ["preview_*"]) is False)
+expect("other files still pass the filter",
+       agk.is_candidate(Path("crate_Albedo.png"), ["preview_*"]) is True)
+expect("filters are matched case-sensitively like a shell",
+       agk.is_candidate(Path("Preview_crate.png"), ["preview_*"]) is True)
+
+filter_cfg = scratch / "filters"
+filter_cfg.mkdir(parents=True, exist_ok=True)
+(filter_cfg / "rules.toml").write_text(
+    '[texture]\nmax_edge = 64\n[filters]\nexclude = ["preview_*", "*_src4x.png"]\n',
+    encoding="utf-8")
+filter_budget = agk.resolve_budget(filter_cfg, agk.build_parser().parse_args([str(filter_cfg)]))[0]
+expect("filters load from the rules file",
+       filter_budget.exclude == ("preview_*", "*_src4x.png"), str(filter_budget.exclude))
+cli_budget = agk.resolve_budget(
+    filter_cfg, agk.build_parser().parse_args([str(filter_cfg), "--exclude", "*.tmp.png"]))[0]
+expect("the CLI replaces the file's filters", cli_budget.exclude == ("*.tmp.png",))
+(filter_cfg / "rules.toml").write_text('[filters]\nignore = ["x"]\n', encoding="utf-8")
+try:
+    agk.resolve_budget(filter_cfg, agk.build_parser().parse_args([str(filter_cfg)]))
+    expect("an unknown filters key is rejected", False)
+except agk.ConfigError as exc:
+    expect("an unknown filters key is rejected", "ignore" in str(exc), str(exc))
+
+# A tag must resolve from the folder an asset was dropped into.
+folder_root = scratch / "folder_tags"
+(folder_root / "rooms").mkdir(parents=True, exist_ok=True)
+(folder_root / "props").mkdir(parents=True, exist_ok=True)
+(folder_root / "rules.toml").write_text(
+    "[mesh]\nmax_triangles = 1000\n[tags.rooms]\nmax_triangles = 8000\n", encoding="utf-8")
+folder_args = agk.build_parser().parse_args([str(folder_root)])
+folder_budget, _, _ = agk.resolve_budget(folder_root, folder_args)
+folder_tags, folder_mode, _ = agk.resolve_tagging(folder_root, folder_args)
+shutil.copy(DROP / "boss_statue.gltf", folder_root / "rooms" / "huge.gltf")
+folder_gate = agk.Gatekeeper(folder_budget, tag_budgets=folder_tags, tag_mode=folder_mode,
+                             tag_root=folder_root)
+room_verdict = folder_gate.check(folder_root / "rooms" / "huge.gltf")
+# The fixture is deliberately bigger than even the room budget, so the proof that
+# the tag applied is the limit quoted in the message (8,000, not the 1,000 base).
+expect("the room tag raises the budget for a folder",
+       any("8,000 budget" in problem for problem in room_verdict.problems),
+       str(room_verdict.problems))
+expect("a room tag does not leak to a sibling folder",
+       agk.resolve_tag(folder_root / "props" / "huge.obj", folder_tags, folder_root)[0] is None)
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)
