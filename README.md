@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-370%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-490%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -192,6 +192,98 @@ Load a shared file explicitly with `--rules path/to/rules.toml`. On Python < 3.1
 ```
 
 Files saved by Notepad or PowerShell carry a UTF-8 BOM; those load fine.
+
+---
+
+## Auditing depth: references, platforms, PBR and pivots
+
+Four checks that catch what a triangle count cannot.
+
+### 1. Broken references and orphans
+
+A `.gltf` pointing at a texture nobody shipped is broken everywhere, so this is
+**on by default**. The gate follows `buffers[].uri` and `images[].uri` in glTF,
+and `mtllib` plus the `map_*` lines inside those `.mtl` files in OBJ. Data URIs and
+`http(s)` URLs are ignored — they are not files to resolve.
+
+```
+FAILED: missing reference 'wood_Albedo.png' (broken link: the engine cannot load it)   table.gltf
+```
+
+Orphans are the other half, and they are repository-level: a texture in the folder
+that no mesh points at. They are a report, not a per-asset verdict:
+
+```bash
+python asset_gatekeeper.py D:\Exports --audit
+# BROKEN  props/table.gltf
+#           -> wood_Albedo.png   (expected D:\Exports\props\wood_Albedo.png)
+# ORPHAN  props/old_wood_Albedo.png
+# 41 mesh file(s), 96 reference(s), 1 broken, 1 orphaned texture(s)     # exit 1
+```
+
+`--no-reference-check` turns the per-asset failure off; `--audit` is unaffected.
+
+### 2. Platform profiles
+
+```toml
+platform = "pc"          # optional default
+
+[platforms.mobile]
+max_triangles = 15000
+max_material_slots = 2
+max_texture_edge = 1024
+
+[platforms.console]
+max_triangles = 250000
+max_texture_edge = 4096
+```
+
+```bash
+python asset_gatekeeper.py D:\Exports --once --platform mobile
+# budget  tris<=15,000  texture<=1024px  ...  platform=mobile
+```
+
+Precedence is unchanged in shape: **CLI flag > `[platforms.<name>]` > flat
+`[mesh]`/`[texture]` values > defaults**. A profile may only override budget keys —
+`PLATFORM_KEYS` is a whitelist, so a profile cannot switch auditing off for one
+platform. An unknown profile name is a config error (exit 2), not a silent fallback.
+
+### 3. PBR value sanitisation
+
+Albedo is a *reflectance colour*, not a painting: real surfaces live in a narrow
+band, pure black absorbs everything, pure white blinds the lighting model.
+`_Albedo` and `_Diffuse` textures are sampled at 64×64 and measured by mean Rec. 709
+luminance (and by how much of the image is clipped to the extremes):
+
+```
+FAILED: albedo mean luminance 0.000 is below the PBR floor 0.02 (near-black absorbs all light)
+FAILED: albedo mean luminance 1.000 is above the PBR ceiling 0.94 (near-white blinds the lighting model)
+```
+
+Normal and roughness maps are never checked — a flat violet normal map is correct,
+and a pure-white roughness map is correct. Thresholds live in `[texture]`
+(`pbr_floor`, `pbr_ceiling`, `pbr_suffixes`) and `--no-pbr-check` disables it.
+
+### 4. Geometric boundary profiling
+
+Opt-in (`[mesh] audit_transforms`, `--audit-transforms`, `--require-indexed`) —
+an offset pivot is frequently authored on purpose, so this is a review prompt
+rather than a rule violation:
+
+| Finding | Test |
+| :--- | :--- |
+| **Unbaked translation** | node `translation` (or `matrix[12:15]`) further from the origin than `transform_epsilon` |
+| **Unbaked rotation** | node `rotation` quaternion with `|w| ≠ 1` beyond 1e-3 |
+| **Uncentred pivot** | geometry's own bbox centre further than `pivot_tolerance` × its diagonal from its origin |
+| **Unindexed geometry** | glTF primitive with no `indices`; for OBJ, more than 0.95 vertices per corner (triangle soup) |
+
+```
+FAILED: 'probe' has an unbaked translation (3.000, 0.000, 0.000); the pivot is floating, so engine placement will double the offset
+FAILED: geometry is centred 10.012m from its own origin (50% of its size); the pivot is uncentred
+```
+
+`--require-indexed` implies `--audit-transforms`: asking for one audit without the
+other would silently skip the pivot checks that make it useful.
 
 ---
 
@@ -667,6 +759,12 @@ python asset_gatekeeper.py [folder] [options]
 | `--max-materials N` | Override the material-slot budget |
 | `--max-influences N` | Override the per-vertex bone-weight budget |
 | `--max-uvs N` | Override the UV-channel budget |
+| `--platform NAME` | Apply the `[platforms.<NAME>]` compression profile |
+| `--audit` | Report broken references and orphaned textures for the whole folder, then exit |
+| `--no-reference-check` | Do not fail assets whose texture/buffer links are missing |
+| `--no-pbr-check` | Do not clamp albedo luminance |
+| `--audit-transforms` | Flag unbaked node transforms and uncentred pivots |
+| `--require-indexed` | Also fail triangle-soup geometry (implies the transform audit) |
 | `--auto-heal` | Repair failing assets in place (opt-in; see above) |
 | `--no-auto-heal` | Force healing off, even if `rules.toml` enables it |
 | `--allow-degenerate` | Permit zero-area triangles |
@@ -705,7 +803,7 @@ No changes are needed in the watcher, the reporter, or the queue. Rules are data
 Three layers, because unit tests, networks and DCC reality fail in different ways.
 
 ```bash
-# 1. rules, config, healing, VCS hooks — 209 assertions, no network, no GPU
+# 1. rules, config, healing, VCS hooks — 252 assertions, no network, no GPU
 python tests/gen_test_assets.py
 python tests/test_gatekeeper.py
 
@@ -727,9 +825,9 @@ README.md  LICENSE  .gitignore  .gitattributes
   dcc-nightly.yml                nightly Blender export through the real watcher
 tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
-  test_gatekeeper.py             209 assertions: rules, config, healing, hooks
+  test_gatekeeper.py             252 assertions: rules, config, healing, hooks, audits
   test_server.py                 161 assertions: tenancy, ingest, alerts, throttle
-  test_workstation.py            66 assertions: storage, LODs, collision, notes, auth
+  test_workstation.py            77 assertions: storage, LODs, collision, notes, refs, auth
   run_headless_integration.py    drives headless DCC exports through the gate
 server/
   asset_health_server.py         dashboard + planner + ingest, stdlib only
@@ -757,6 +855,16 @@ The suite generates its own fixtures — OBJ + MTL with 1 and 4 materials, an OB
 ```
 FAILURES: none
 ```
+
+### Audit coverage (group 16)
+
+The auditing features get their own block in `tests/test_gatekeeper.py`: a broken
+glTF image link, a satisfied one, data-URI immunity, `mtllib` resolution into a
+`.mtl`'s `map_Kd`, an orphan found across a folder, `--audit` exit codes, three
+platform profiles including CLI precedence and an unknown-profile error, black /
+white / grey albedo plus the `_Diffuse` and `_Normal` cases, configurable
+thresholds, and each transform finding — unbaked translation, unbaked rotation,
+uncentred pivot — with the audit both on and off.
 
 ### Server suite
 

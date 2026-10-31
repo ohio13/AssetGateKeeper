@@ -304,7 +304,80 @@ expect("a query token works for a browser tab", status == 200, str(status))
 secured.shutdown()
 secured.server_close()
 
-print("7. CLI wiring")
+print("7. reference auditing (broken links + orphans)")
+import base64  # noqa: E402
+import struct  # noqa: E402
+
+ref_db, ref_data = fresh("references")
+assets_dir = ref_data / "assets"
+assets_dir.mkdir(parents=True, exist_ok=True)
+
+# A real one-triangle glTF: positions (36 bytes) + indices (12 bytes), with an
+# *external* image so the reference audit has something to resolve.
+_positions = struct.pack("<9f", 0, 0, 0, 1, 0, 0, 0, 1, 0)
+_indices = struct.pack("<3I", 0, 1, 2)
+_blob = _positions + _indices
+GLTF_WITH_IMAGE = json.dumps({
+    "asset": {"version": "2.0"},
+    "scene": 0,
+    "scenes": [{"nodes": [0]}],
+    "nodes": [{"mesh": 0}],
+    "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1,
+                               "material": 0}]}],
+    "materials": [{"name": "wood", "pbrMetallicRoughness": {"baseColorTexture": {"index": 0}}}],
+    "textures": [{"source": 0}],
+    "images": [{"uri": "wood_Albedo.png"}],
+    "buffers": [{"byteLength": len(_blob),
+                 "uri": "data:application/octet-stream;base64,"
+                        + base64.b64encode(_blob).decode()}],
+    "bufferViews": [
+        {"buffer": 0, "byteOffset": 0, "byteLength": len(_positions)},
+        {"buffer": 0, "byteOffset": len(_positions), "byteLength": len(_indices)},
+    ],
+    "accessors": [
+        {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+         "min": [0, 0, 0], "max": [1, 1, 0]},
+        {"bufferView": 1, "componentType": 5125, "count": 3, "type": "SCALAR"},
+    ],
+}).encode()
+
+ref_asset = aws.create_asset(ref_db, ref_data, "table.gltf", GLTF_WITH_IMAGE)
+report = aws.asset_references(ref_db, ref_data, ref_asset["id"])
+expect("the reference is listed", [r["uri"] for r in report["references"]] == ["wood_Albedo.png"],
+       str(report["references"]))
+expect("a missing texture is reported", report["missing"] == ["wood_Albedo.png"])
+expect("the report is not ok", report["ok"] is False)
+
+# Ship the texture next to it: the same reference is now satisfied.
+from PIL import Image  # noqa: E402
+
+Image.new("RGB", (64, 64), (120, 100, 90)).save(assets_dir / "wood_Albedo.png")
+report = aws.asset_references(ref_db, ref_data, ref_asset["id"])
+expect("adding the texture clears the missing link", report["missing"] == [])
+expect("and the reference is marked present", report["references"][0]["exists"] is True)
+
+Image.new("RGB", (64, 64), (30, 30, 30)).save(assets_dir / "nobody_uses_me.png")
+report = aws.asset_references(ref_db, ref_data, ref_asset["id"])
+expect("an unreferenced texture is an orphan", "nobody_uses_me.png" in report["orphaned"],
+       str(report["orphaned"]))
+expect("the orphaned texture is not the referenced one",
+       "wood_Albedo.png" not in report["orphaned"])
+expect("orphans keep the report not-ok", report["ok"] is False)
+
+ref_server = aws.build_server("127.0.0.1", 0, ref_db, ref_data, quiet=True)
+rport = ref_server.server_address[1]
+threading.Thread(target=ref_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+status, body = Client(rport).json(f"/api/assets/{ref_asset['id']}/references")
+expect("the endpoint serves the audit", status == 200 and body["references"][0]["exists"] is True,
+       str(status))
+expect("the endpoint reports orphans", "nobody_uses_me.png" in body["orphaned"])
+status, _ = Client(rport).json("/api/assets/999/references")
+expect("an unknown asset is a 404", status == 404, str(status))
+ref_server.shutdown()
+ref_server.server_close()
+
+print("8. CLI wiring")
 options = aws.build_parser().parse_args(["--port", "9999", "--db", "x.db",
                                          "--data", "y", "--token", "t"])
 expect("CLI accepts the storage and auth flags",

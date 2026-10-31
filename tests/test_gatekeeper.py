@@ -869,6 +869,7 @@ else:
 
     run(["git", "reset", "-q", "crate_4mtl.obj"], git_dir)
     shutil.copy(DROP / "crate_1mtl.obj", git_dir / "crate_ok.obj")
+    shutil.copy(DROP / "crate_1mtl.mtl", git_dir / "crate_1mtl.mtl")   # the OBJ references it
     run(["git", "add", "crate_ok.obj"], git_dir)
     allowed = run([sys.executable, str(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py")],
                   git_dir, {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
@@ -930,6 +931,247 @@ else:
                f"err={push_blocked.stderr[-200:]}")
         expect("pre-push reports the offending asset",
                "crate_4mtl.obj" in push_blocked.stderr, push_blocked.stderr[-160:])
+
+print("16. references, platforms, PBR and transforms")
+
+import base64 as _b64  # noqa: E402 - only this group needs it
+import struct as _struct  # noqa: E402
+
+audit_root = scratch / "audit"
+if audit_root.exists():
+    force_rmtree(audit_root)
+audit_root.mkdir(parents=True)
+
+
+def write_probe_gltf(path, images=(), translation=None, indexed=True,
+                     bmin=(-0.5, -0.5, 0.0), bmax=(0.5, 0.5, 0.0), extra_buffer=None):
+    """A minimal but valid glTF: one *centred* triangle, optional extras.
+
+    Centred matters: an off-origin probe would fail the pivot audit for a reason
+    the test did not intend, and hiding that behind a flag would make the audit
+    look like it works when it is only being skipped.
+    """
+    positions = [(-0.5, -0.5, 0.0), (0.5, -0.5, 0.0), (-0.5, 0.5, 0.0)]
+    position_bytes = _struct.pack("<9f", *[c for p in positions for c in p])
+    index_bytes = _struct.pack("<3I", 0, 1, 2)
+    blob = position_bytes + index_bytes
+    document = {
+        "asset": {"version": "2.0", "generator": "test"},
+        "scene": 0,
+        "scenes": [{"nodes": [0]}],
+        "nodes": [{"mesh": 0, "name": "probe"}],
+        "meshes": [{"name": "probe", "primitives": [{"attributes": {"POSITION": 0}}]}],
+        "buffers": [{"byteLength": len(blob),
+                     "uri": "data:application/octet-stream;base64,"
+                            + _b64.b64encode(blob).decode()}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": len(position_bytes)},
+            {"buffer": 0, "byteOffset": len(position_bytes), "byteLength": len(index_bytes)},
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+             "min": list(bmin), "max": list(bmax)},
+            {"bufferView": 1, "componentType": 5125, "count": 3, "type": "SCALAR"},
+        ],
+    }
+    if indexed:
+        document["meshes"][0]["primitives"][0]["indices"] = 1
+    if images:
+        document["images"] = [{"uri": uri} for uri in images]
+    if translation is not None:
+        document["nodes"][0]["translation"] = list(translation)
+    if extra_buffer:
+        document["buffers"].append({"byteLength": 12, "uri": extra_buffer})
+    path.write_text(json.dumps(document), encoding="utf-8")
+    return path
+
+
+def check(path, budget=None, **kwargs):
+    return agk.Gatekeeper(budget or agk.Budget()).check(Path(path))
+
+
+# -- STEP 1: references -------------------------------------------------------
+ref_dir = audit_root / "references"
+ref_dir.mkdir()
+broken = write_probe_gltf(ref_dir / "broken.gltf", images=["missing_Albedo.png"])
+ok = write_probe_gltf(ref_dir / "ok.gltf", images=["present_Albedo.png"])
+make_png(ref_dir / "present_Albedo.png", (64, 64), (120, 120, 120))
+
+expect("a missing image reference fails the asset",
+       not check(broken).passed and "missing reference" in check(broken).reason,
+       check(broken).reason[:80])
+expect("the broken filename is named in the verdict",
+       "missing_Albedo.png" in check(broken).reason)
+expect("a satisfied reference passes", check(ok).passed, check(ok).reason[:80])
+expect("broken references are counted in stats",
+       dict(check(broken).stats).get("broken_references") == 1, str(check(broken).stats))
+expect("--no-reference-check suppresses the failure",
+       check(broken, agk.Budget(check_references=False)).passed)
+expect("data URIs are never treated as references",
+       agk.collect_references(ok) == ["present_Albedo.png"], str(agk.collect_references(ok)))
+
+# OBJ: mtllib, then the maps inside the .mtl.
+obj_dir = audit_root / "obj_refs"
+obj_dir.mkdir()
+(obj_dir / "prop.obj").write_text(
+    "mtllib prop.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+expect("a missing .mtl is a broken reference",
+       "prop.mtl" in check(obj_dir / "prop.obj").reason,
+       check(obj_dir / "prop.obj").reason[:80])
+(obj_dir / "prop.mtl").write_text("newmtl wood\nmap_Kd wood_Albedo.png\n", encoding="utf-8")
+obj_verdict = check(obj_dir / "prop.obj")
+expect("a map inside the .mtl is followed", "wood_Albedo.png" in obj_verdict.reason,
+       obj_verdict.reason[:100])
+make_png(obj_dir / "wood_Albedo.png", (64, 64), (100, 90, 80))
+expect("with both files present the OBJ passes", check(obj_dir / "prop.obj").passed,
+       check(obj_dir / "prop.obj").reason[:80])
+
+# Orphans: a texture nobody points at.
+make_png(obj_dir / "unused_Albedo.png", (64, 64), (90, 90, 90))
+orphans = [p.name for p in agk.orphaned_files(obj_dir)]
+expect("an unreferenced texture is reported as an orphan", orphans == ["unused_Albedo.png"],
+       str(orphans))
+make_png(ref_dir / "lonely_Albedo.png", (64, 64), (90, 90, 90))
+expect("orphans are found across the repository",
+       "lonely_Albedo.png" in [p.name for p in agk.orphaned_files(audit_root)])
+
+expect("the audit report exits 1 on a dirty repository",
+       agk.run_audit(audit_root) == 1)
+clean = audit_root / "clean"
+clean.mkdir()
+write_probe_gltf(clean / "solo.gltf")
+expect("a clean repository audits to 0", agk.run_audit(clean) == 0)
+
+# -- STEP 2: platform profiles ------------------------------------------------
+plat_dir = audit_root / "platforms"
+plat_dir.mkdir()
+(plat_dir / "rules.toml").write_text(
+    "[mesh]\nmax_triangles = 60000\nmax_material_slots = 4\n"
+    "[texture]\nmax_edge = 4096\npower_of_two = true\n"
+    "[platforms.mobile]\nmax_triangles = 15000\nmax_texture_edge = 1024\nmax_material_slots = 2\n"
+    "[platforms.console]\nmax_triangles = 120000\nmax_texture_edge = 4096\n",
+    encoding="utf-8")
+
+
+def platform_args(*extra):
+    return agk.build_parser().parse_args([str(plat_dir), *extra])
+
+
+base_budget, _src, _ = agk.resolve_budget(plat_dir, platform_args())
+expect("without a profile the base budget applies", base_budget.max_triangles == 60_000)
+mobile, _src, _ = agk.resolve_budget(plat_dir, platform_args("--platform", "mobile"))
+expect("--platform applies the profile", mobile.max_triangles == 15_000, str(mobile.max_triangles))
+expect("the profile can lower texture resolution", mobile.max_texture_edge == 1024)
+expect("the profile can lower material slots", mobile.max_material_slots == 2)
+expect("the selected platform is recorded", mobile.platform == "mobile")
+expect("untouched keys fall back to the base budget", mobile.require_power_of_two is True)
+console, _src, _ = agk.resolve_budget(plat_dir, platform_args("--platform", "console"))
+expect("a second profile is independent", console.max_triangles == 120_000)
+over, _src, names = agk.resolve_budget(plat_dir, platform_args("--platform", "mobile",
+                                                             "--triangles", "9000"))
+expect("an explicit CLI flag still beats the profile",
+       over.max_triangles == 9000 and "max_triangles" in names, str(names))
+
+(plat_dir / "default.toml").write_text(
+    'platform = "mobile"\n[mesh]\nmax_triangles = 60000\n'
+    "[platforms.mobile]\nmax_triangles = 7000\n", encoding="utf-8")
+defaulted, _src, _ = agk.resolve_budget(
+    plat_dir, agk.build_parser().parse_args([str(plat_dir), "--rules",
+                                             str(plat_dir / "default.toml")]))
+expect("rules.toml can pick a default platform", defaulted.max_triangles == 7000,
+       str(defaulted.max_triangles))
+expect("the platform is reported for the log line", defaulted.platform == "mobile")
+
+try:
+    agk.resolve_budget(plat_dir, platform_args("--platform", "switch"))
+    expect("an unknown platform is a config error", False, "no error raised")
+except agk.ConfigError as exc:
+    expect("an unknown platform is a config error", "unknown platform" in str(exc), str(exc)[:60])
+(plat_dir / "bad.toml").write_text("[platforms.mobile]\nmax_pixels = 10\n", encoding="utf-8")
+try:
+    agk.resolve_budget(plat_dir, agk.build_parser().parse_args(
+        [str(plat_dir), "--rules", str(plat_dir / "bad.toml"), "--platform", "mobile"]))
+    expect("an unknown profile key is rejected", False, "no error raised")
+except agk.ConfigError as exc:
+    expect("an unknown profile key is rejected", "max_pixels" in str(exc), str(exc)[:60])
+
+# -- STEP 3: PBR sanitisation -------------------------------------------------
+pbr_dir = audit_root / "pbr"
+pbr_dir.mkdir()
+make_png(pbr_dir / "black_Albedo.png", (64, 64), (0, 0, 0))
+make_png(pbr_dir / "white_Albedo.png", (64, 64), (255, 255, 255))
+make_png(pbr_dir / "grey_Albedo.png", (64, 64), (128, 128, 128))
+make_png(pbr_dir / "black_Normal.png", (64, 64), (0, 0, 0))
+make_png(pbr_dir / "black_Diffuse.png", (64, 64), (0, 0, 0))
+
+expect("a pure-black albedo is a PBR violation",
+       "below the PBR floor" in check(pbr_dir / "black_Albedo.png").reason,
+       check(pbr_dir / "black_Albedo.png").reason[:80])
+expect("a pure-white albedo is a PBR violation",
+       "above the PBR ceiling" in check(pbr_dir / "white_Albedo.png").reason,
+       check(pbr_dir / "white_Albedo.png").reason[:80])
+expect("a mid-grey albedo passes", check(pbr_dir / "grey_Albedo.png").passed,
+       check(pbr_dir / "grey_Albedo.png").reason[:80])
+expect("_Diffuse is checked the same way",
+       "below the PBR floor" in check(pbr_dir / "black_Diffuse.png").reason)
+expect("a normal map is not an albedo", check(pbr_dir / "black_Normal.png").passed,
+       check(pbr_dir / "black_Normal.png").reason[:80])
+expect("the violation names the measured luminance",
+       "0.000" in check(pbr_dir / "black_Albedo.png").reason)
+expect("pbr can be switched off",
+       check(pbr_dir / "black_Albedo.png", agk.Budget(pbr_check=False)).passed)
+
+# Configurable thresholds, validated like everything else.
+(pbr_dir / "floor.toml").write_text("[texture]\npbr_floor = 0.6\n", encoding="utf-8")
+strict = agk.Budget.from_mapping(agk.parse_rules(pbr_dir / "floor.toml"))
+expect("a stricter floor catches mid-grey too",
+       "below the PBR floor" in check(pbr_dir / "grey_Albedo.png", strict).reason)
+(pbr_dir / "bad.toml").write_text("[texture]\npbr_floor = \"dark\"\n", encoding="utf-8")
+try:
+    agk.Budget.from_mapping(agk.parse_rules(pbr_dir / "bad.toml"))
+    expect("a non-numeric threshold is rejected", False, "no error raised")
+except agk.ConfigError:
+    expect("a non-numeric threshold is rejected", True)
+
+# -- STEP 4: geometric boundary profiling -------------------------------------
+geo_dir = audit_root / "geometry"
+geo_dir.mkdir()
+floating = write_probe_gltf(geo_dir / "floating.gltf", translation=(3.0, 0.0, 0.0))
+centred = write_probe_gltf(geo_dir / "centred.gltf")
+unindexed = write_probe_gltf(geo_dir / "unindexed.gltf", indexed=False)
+offset_geo = write_probe_gltf(geo_dir / "offset.gltf", bmin=(10.0, 10.0, 10.0),
+                              bmax=(11.0, 11.0, 11.0))
+
+audit_budget = agk.Budget(audit_transforms=True)
+expect("an unbaked node translation is flagged",
+       "unbaked translation" in check(floating, audit_budget).reason,
+       check(floating, audit_budget).reason[:90])
+expect("the flagged offset is printed in metres",
+       "3.000" in check(floating, audit_budget).reason)
+expect("a baked node passes the audit", check(centred, audit_budget).passed,
+       check(centred, audit_budget).reason[:90])
+expect("the audit is off by default", check(floating).passed,
+       check(floating).reason[:90])
+expect("off-centre geometry is an uncentred pivot",
+       "uncentred" in check(offset_geo, audit_budget).reason,
+       check(offset_geo, audit_budget).reason[:90])
+expect("an unindexed primitive is only flagged when asked",
+       check(unindexed, audit_budget).passed)
+indexed_budget = agk.Budget(audit_transforms=True, require_indexed=True)
+expect("require_indexed flags the missing index buffer",
+       "unindexed geometry" in check(unindexed, indexed_budget).reason,
+       check(unindexed, indexed_budget).reason[:90])
+expect("--require-indexed implies the transform audit",
+       agk.resolve_budget(geo_dir, agk.build_parser().parse_args(
+           [str(geo_dir), "--require-indexed"]))[0].audit_transforms is True)
+
+soup = geo_dir / "soup.obj"
+soup.write_text("".join(
+    f"v {i} 0 0\nv {i} 1 0\nv {i + 1} 1 0\nf {i * 3 + 1} {i * 3 + 2} {i * 3 + 3}\n"
+    for i in range(20)), encoding="utf-8")
+expect("triangle soup is flagged as unindexed",
+       "unindexed geometry" in check(soup, indexed_budget).reason,
+       check(soup, indexed_budget).reason[:90])
 
 print()
 print("FAILURES:", failures if failures else "none")

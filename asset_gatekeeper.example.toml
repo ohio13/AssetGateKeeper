@@ -7,9 +7,25 @@
 # Loaded with the standard library `tomllib` on Python 3.11+, `tomli` on older
 # interpreters, or the same structure written as JSON (`--rules rules.json`).
 
+# Which [platforms.*] profile to apply by default (empty = none). A CLI
+# --platform flag overrides it, and a platform profile beats the values below.
+platform = ""
+
 [mesh]
 # Hard cap on triangles per mesh file.
 max_triangles = 50000
+
+# Fail an asset whose .gltf/.obj points at a texture or buffer that is not there.
+# On by default: a broken link fails to load in every engine, on every platform.
+check_references = true
+
+# Flags unbaked node translations/rotations and uncentred pivots; with
+# require_indexed it also fails triangle-soup geometry. OFF by default: an
+# offset pivot is often authored on purpose, so this is a review prompt.
+audit_transforms = false
+require_indexed = false
+pivot_tolerance = 0.05      # fraction of the bounding-box diagonal
+transform_epsilon = 0.0001  # metres; translations below this count as baked
 
 # Draw-call proxy: how many distinct materials one mesh may reference.
 max_material_slots = 3
@@ -37,6 +53,14 @@ naming = true
 # Case-insensitive; a trailing index (`_Albedo_02`) is tolerated. Change this
 # list if your studio uses a different convention (e.g. "_BC", "_N", "_R").
 suffixes = ["_Albedo", "_Normal", "_Roughness"]
+
+# PBR value sanitisation: albedo is a reflectance colour, not a painting. Real
+# surfaces sit in a narrow band; pure black absorbs all light and pure white
+# blinds the lighting model. Measured as mean Rec.709 luminance on the 0..1 scale.
+pbr = true
+pbr_floor = 0.02          # 5/255
+pbr_ceiling = 0.94        # 240/255
+pbr_suffixes = ["_Albedo", "_Diffuse"]   # normal/roughness maps are not albedo
 
 # --------------------------------------------------------------------------- #
 # Optional: studio platform integration. Delete this table for a standalone tool.
@@ -77,3 +101,29 @@ meshes = true
 # pixel. "resize" resamples with LANCZOS. Pad by default: it is the only one of
 # the two that cannot change what the texture looks like.
 texture_mode = "pad"
+
+# --------------------------------------------------------------------------- #
+# Optional: per-platform compression profiles.
+#
+# A profile is "what this platform can afford". It overlays the [mesh]/[texture]
+# values above (the profile wins), and an explicit CLI flag still wins over both.
+# Select one with `--platform mobile`, or set `platform = "mobile"` at the top.
+# Only budget keys are allowed here: auditing rules are not per-platform.
+# --------------------------------------------------------------------------- #
+
+[platforms.mobile]
+max_triangles = 15000
+max_material_slots = 2
+max_texture_edge = 1024
+max_bone_influences = 4
+
+[platforms.console]
+max_triangles = 250000
+max_material_slots = 8
+max_texture_edge = 4096
+max_bone_influences = 8
+
+[platforms.pc]
+max_triangles = 120000
+max_material_slots = 6
+max_texture_edge = 4096

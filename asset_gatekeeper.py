@@ -176,6 +176,32 @@ class Budget:
     allow_degenerate: bool = False        # zero-area triangles: poison for Nanite / RT
     degenerate_epsilon: float = 1e-8      # area below which a triangle counts as degenerate
 
+    # -- reference & hierarchy auditing ------------------------------------ #
+    # On by default: a .gltf pointing at a texture nobody shipped is broken in
+    # every engine, on every platform, with no ambiguity to argue about.
+    check_references: bool = True
+
+    # -- PBR value sanitisation --------------------------------------------- #
+    # Albedo is *not* a painting. Real-world base colour reflectance lives in a
+    # narrow band; pure black absorbs everything and pure white blinds the
+    # lighting model, which is why graders ask for it to be clamped.
+    pbr_check: bool = True
+    pbr_floor: float = 0.02               # 5/255: below this, albedo is "pure black"
+    pbr_ceiling: float = 0.94             # 240/255: above this, albedo is "pure white"
+    pbr_suffixes: tuple[str, ...] = ("_Albedo", "_Diffuse")
+
+    # -- geometric boundary profiling --------------------------------------- #
+    # Off by default, on purpose: plenty of legitimate exports are authored with
+    # an offset pivot (a door hinged at its edge) or as a triangle soup. That is
+    # a conversation with the artist, not a violation, so it is opt-in.
+    audit_transforms: bool = False
+    require_indexed: bool = False
+    pivot_tolerance: float = 0.05         # fraction of the bbox diagonal
+    transform_epsilon: float = 1e-4       # metres; below this a translation is "baked"
+
+    # Which platform profile produced this budget (for the log line only).
+    platform: str = ""
+
     @classmethod
     def from_mapping(cls, document: dict) -> "Budget":
         """Build a Budget from a parsed rules file, rejecting typos loudly.
@@ -185,7 +211,8 @@ class Budget:
         """
         if not isinstance(document, dict):
             raise ConfigError("the rules file must contain a table of settings")
-        _reject_unknown(document, ("mesh", "texture", "server", "healer"), "the rules file")
+        _reject_unknown(document, ("mesh", "texture", "server", "healer",
+                                   "platforms", "platform"), "the rules file")
 
         mesh = document.get("mesh", {})
         texture = document.get("texture", {})
@@ -194,8 +221,11 @@ class Budget:
         if not isinstance(texture, dict):
             raise ConfigError("[texture] must be a table")
         _reject_unknown(mesh, ("max_triangles", "max_material_slots", "max_bone_influences",
-                               "max_uv_channels", "allow_degenerate", "degenerate_epsilon"), "[mesh]")
-        _reject_unknown(texture, ("max_edge", "power_of_two", "naming", "suffixes"), "[texture]")
+                               "max_uv_channels", "allow_degenerate", "degenerate_epsilon",
+                               "check_references", "audit_transforms", "require_indexed",
+                               "pivot_tolerance", "transform_epsilon"), "[mesh]")
+        _reject_unknown(texture, ("max_edge", "power_of_two", "naming", "suffixes",
+                                  "pbr", "pbr_floor", "pbr_ceiling", "pbr_suffixes"), "[texture]")
 
         max_triangles = _read_int(mesh, "max_triangles", "[mesh]")
         max_material_slots = _read_int(mesh, "max_material_slots", "[mesh]", minimum=0)
@@ -207,6 +237,21 @@ class Budget:
         require_power_of_two = _read_bool(texture, "power_of_two", "[texture]")
         enforce_texture_naming = _read_bool(texture, "naming", "[texture]")
         texture_suffixes = _read_strings(texture, "suffixes", "[texture]")
+
+        # Reference / hierarchy auditing
+        check_references = _read_bool(mesh, "check_references", "[mesh]")
+
+        # PBR sanitisation
+        pbr_check = _read_bool(texture, "pbr", "[texture]")
+        pbr_floor = _read_float(texture, "pbr_floor", "[texture]")
+        pbr_ceiling = _read_float(texture, "pbr_ceiling", "[texture]")
+        pbr_suffixes = _read_strings(texture, "pbr_suffixes", "[texture]")
+
+        # Geometric boundary profiling
+        audit_transforms = _read_bool(mesh, "audit_transforms", "[mesh]")
+        require_indexed = _read_bool(mesh, "require_indexed", "[mesh]")
+        pivot_tolerance = _read_float(mesh, "pivot_tolerance", "[mesh]")
+        transform_epsilon = _read_float(mesh, "transform_epsilon", "[mesh]")
 
         defaults = cls()
         return cls(
@@ -229,6 +274,25 @@ class Budget:
             allow_degenerate=defaults.allow_degenerate if allow_degenerate is None else allow_degenerate,
             degenerate_epsilon=(
                 defaults.degenerate_epsilon if degenerate_epsilon is None else degenerate_epsilon
+            ),
+            check_references=(
+                defaults.check_references if check_references is None else check_references
+            ),
+            pbr_check=defaults.pbr_check if pbr_check is None else pbr_check,
+            pbr_floor=defaults.pbr_floor if pbr_floor is None else pbr_floor,
+            pbr_ceiling=defaults.pbr_ceiling if pbr_ceiling is None else pbr_ceiling,
+            pbr_suffixes=defaults.pbr_suffixes if pbr_suffixes is None else pbr_suffixes,
+            audit_transforms=(
+                defaults.audit_transforms if audit_transforms is None else audit_transforms
+            ),
+            require_indexed=(
+                defaults.require_indexed if require_indexed is None else require_indexed
+            ),
+            pivot_tolerance=(
+                defaults.pivot_tolerance if pivot_tolerance is None else pivot_tolerance
+            ),
+            transform_epsilon=(
+                defaults.transform_epsilon if transform_epsilon is None else transform_epsilon
             ),
         )
 
@@ -338,6 +402,45 @@ def _read_str(table: dict, key: str, where: str) -> Optional[str]:
     return value.strip()
 
 
+# The keys a platform profile may override. Deliberately a subset: a profile is
+# a *compression* preset (what this platform can afford), not a place to switch
+# auditing rules off per platform.
+PLATFORM_KEYS = ("max_triangles", "max_material_slots", "max_texture_edge",
+                 "max_bone_influences", "max_uv_channels")
+
+
+def apply_platform(document: dict, platform: str) -> dict:
+    """Overlay ``[platforms.<name>]`` onto the base budget, returning a new document.
+
+    The profile wins over the flat budget (a mobile build must be smaller than
+    the project default) and loses to an explicit CLI flag, which is applied
+    later in :func:`resolve_budget`.
+    """
+    if not platform:
+        return document
+    platforms = document.get("platforms", {})
+    if not isinstance(platforms, dict):
+        raise ConfigError("[platforms] must be a table of tables")
+    if platform not in platforms:
+        known = ", ".join(sorted(platforms)) or "none defined"
+        raise ConfigError(f"unknown platform profile {platform!r} (known: {known})")
+
+    profile = platforms[platform]
+    if not isinstance(profile, dict):
+        raise ConfigError(f"[platforms.{platform}] must be a table")
+    _reject_unknown(profile, PLATFORM_KEYS, f"[platforms.{platform}]")
+
+    merged = {key: value for key, value in document.items() if key not in ("platforms", "platform")}
+    merged["mesh"] = dict(document.get("mesh", {}) or {})
+    merged["texture"] = dict(document.get("texture", {}) or {})
+    for key, value in profile.items():
+        if key == "max_texture_edge":
+            merged["texture"]["max_edge"] = value
+        else:
+            merged["mesh"][key] = value
+    return merged
+
+
 def parse_rules(path: Path) -> dict:
     """Parse a rules file: TOML via tomllib/tomli, or plain JSON.
 
@@ -349,10 +452,16 @@ def parse_rules(path: Path) -> dict:
     # on Windows; tomllib would otherwise reject the file on its very first byte.
     text = path.read_text(encoding="utf-8-sig")
     if path.suffix.lower() == ".json":
-        return json.loads(text)
+        try:
+            return json.loads(text)
+        except ValueError as exc:
+            raise ConfigError(f"{path.name}: {exc}") from exc
 
     if tomllib is not None:
-        return tomllib.loads(text)
+        try:
+            return tomllib.loads(text)
+        except ValueError as exc:      # TOMLDecodeError subclasses ValueError
+            raise ConfigError(f"{path.name}: {exc}") from exc
 
     try:
         import tomli  # type: ignore[import-not-found]  # Python 3.9 / 3.10
@@ -391,15 +500,28 @@ def resolve_budget(root: Path, args: argparse.Namespace,
     passed in rather than fetched here so this function stays pure: no sockets,
     no filesystem surprises, and the same code path in tests and in the field.
     """
+    requested_platform = (getattr(args, "platform", None) or "").strip()
+
     if remote_document is not None:
+        platform = requested_platform or str(remote_document.get("platform", "") or "")
         try:
-            budget, source = Budget.from_mapping(remote_document), None
+            budget, source = Budget.from_mapping(apply_platform(remote_document, platform)), None
         except ConfigError as exc:
             raise ConfigError(f"remote rules: {exc}") from exc
     else:
         rules_path = Path(args.rules).expanduser() if args.rules else root / RULES_FILENAME
-        loaded = load_rules(rules_path)
-        budget, source = loaded if loaded is not None else (Budget(), None)
+        document = parse_rules(rules_path) if rules_path.is_file() else None
+        if document is None:
+            budget, source = Budget(), None
+            platform = requested_platform
+        else:
+            platform = requested_platform or str(document.get("platform", "") or "")
+            try:
+                budget, source = Budget.from_mapping(apply_platform(document, platform)), rules_path
+            except ConfigError as exc:
+                raise ConfigError(f"{rules_path}: {exc}") from exc
+
+    budget = replace(budget, platform=platform)
 
     overrides: dict[str, object] = {}
     if args.triangles is not None:
@@ -419,9 +541,61 @@ def resolve_budget(root: Path, args: argparse.Namespace,
     if args.allow_degenerate is not None:
         overrides["allow_degenerate"] = args.allow_degenerate
 
+    # Tri-state switches: None means "the config decides", True/False means the
+    # command line was explicit. False must still be recorded, or --no-pbr-check
+    # could not override a project that enabled the check.
+    for attribute, field in (("check_references", "check_references"),
+                             ("pbr_check", "pbr_check"),
+                             ("audit_transforms", "audit_transforms"),
+                             ("require_indexed", "require_indexed")):
+        value = getattr(args, attribute, None)
+        if value is not None:
+            overrides[field] = value
+    if getattr(args, "require_indexed", None):
+        # Asking for an index audit without the transform audit would silently
+        # skip the pivot checks that make the audit useful.
+        overrides["audit_transforms"] = True
+
     if not overrides:
         return budget, source, []
     return replace(budget, **overrides), source, sorted(overrides)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# Repository audit: the whole folder, not one asset
+# --------------------------------------------------------------------------- #
+
+def run_audit(root: Path) -> int:
+    """Report broken references and orphaned textures across a repository.
+
+    Exit 0 when the repository is clean, 1 when anything is wrong — a folder that
+    looks shut but is missing its textures is exactly the failure this catches.
+    """
+    assets = sorted(p for p in root.rglob("*")
+                    if p.is_file() and p.suffix.lower() in MESH_SUFFIXES)
+    broken_total = 0
+    for asset in assets:
+        broken = missing_references(asset)
+        if not broken:
+            continue
+        broken_total += len(broken)
+        print(f"BROKEN  {asset.relative_to(root)}")
+        for written, target in broken:
+            print(f"          -> {written}   (expected {target})")
+
+    orphans = orphaned_files(root)
+    for orphan in orphans:
+        try:
+            relative = orphan.relative_to(root)
+        except ValueError:       # pragma: no cover - outside the root
+            relative = orphan
+        print(f"ORPHAN  {relative}")
+
+    referenced = sum(len(resolve_references(asset)) for asset in assets)
+    print()
+    print(f"{len(assets):,} mesh file(s), {referenced:,} reference(s), "
+          f"{broken_total:,} broken, {len(orphans):,} orphaned texture(s)")
+    return 1 if (broken_total or orphans) else 0
 
 
 # --------------------------------------------------------------------------- #
@@ -1060,6 +1234,310 @@ def build_naming_pattern(suffixes: Sequence[str]) -> Optional[re.Pattern[str]]:
 # The gate itself
 # --------------------------------------------------------------------------- #
 
+# --------------------------------------------------------------------------- #
+# Reference & hierarchy auditing
+# --------------------------------------------------------------------------- #
+
+# What counts as a texture on disk when hunting orphans. Wider than the gated
+# suffixes on purpose: an orphaned .tga is still an orphan.
+TEXTURE_DISK_SUFFIXES = (".png", ".jpg", ".jpeg", ".tga", ".tif", ".tiff", ".exr", ".webp")
+
+# Material lines in an .mtl that point at a file (map_Kd foo.png, bump foo.png ...)
+_MTL_MAP_KEYS = ("map_kd", "map_ka", "map_ks", "map_bump", "bump", "map_ns", "map_d",
+                 "map_pr", "norm", "refl")
+
+
+def _is_external_uri(uri: object) -> bool:
+    """True for a path we must resolve on disk (not a data URI, not a URL)."""
+    if not isinstance(uri, str) or not uri.strip():
+        return False
+    lowered = uri.lower()
+    return not lowered.startswith(("data:", "http://", "https://", "blob:", "//"))
+
+
+def _gltf_external_uris(document: dict) -> list[str]:
+    """Buffer and image URIs — the two places glTF stores a sibling file."""
+    uris: list[str] = []
+    for section in ("buffers", "images"):
+        for entry in document.get(section, []) or []:
+            uri = entry.get("uri") if isinstance(entry, dict) else None
+            if _is_external_uri(uri):
+                uris.append(unquote(str(uri).split("?")[0]))
+    return uris
+
+
+def _mtl_texture_uris(mtl_path: Path) -> list[str]:
+    """Texture files named inside a .mtl. Missing .mtl files are reported by the caller."""
+    uris: list[str] = []
+    try:
+        text = mtl_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return uris
+    for line in text.splitlines():
+        parts = line.strip().split()
+        if len(parts) < 2:
+            continue
+        if parts[0].lower() in _MTL_MAP_KEYS:
+            # `map_Kd -s 1 1 1 foo.png`: the filename is the last token.
+            uris.append(parts[-1].strip('"'))
+    return uris
+
+
+def collect_references(path: Path) -> list[str]:
+    """Every external file this asset points at, exactly as written in the file.
+
+    glTF: ``buffers[].uri`` and ``images[].uri``. OBJ: ``mtllib`` plus the maps
+    referenced *by* those .mtl files (one level, which is how OBJ works).
+    """
+    suffix = path.suffix.lower()
+    if suffix in (".gltf", ".glb"):
+        try:
+            return _gltf_external_uris(read_gltf_document(path))
+        except Exception as exc:
+            LOG.debug("cannot read references from %s: %s", path.name, exc)
+            return []
+    if suffix != ".obj":
+        return []
+
+    references: list[str] = []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return references
+    for line in text.splitlines():
+        if not line.lower().startswith("mtllib "):
+            continue
+        for name in line.split()[1:]:
+            name = name.strip('"')
+            references.append(name)
+            material_path = (path.parent / name)
+            if material_path.is_file():
+                references.extend(_mtl_texture_uris(material_path))
+    return references
+
+
+def resolve_references(path: Path) -> list[tuple[str, Path]]:
+    """[(as written, resolved absolute path)] for every external reference."""
+    base = path.parent
+    resolved = []
+    for written in collect_references(path):
+        # Normalise Windows-style separators coming out of a DCC.
+        normalised = written.replace("\\", "/")
+        resolved.append((written, (base / normalised)))
+    return resolved
+
+
+def missing_references(path: Path) -> list[tuple[str, Path]]:
+    """References that point at a file which is not there."""
+    return [(written, target) for written, target in resolve_references(path)
+            if not target.is_file()]
+
+
+def orphaned_files(root: Path) -> list[Path]:
+    """Texture files in the repository that no mesh references.
+
+    Repository-level, not per-asset: an orphan is only visible when you compare
+    every asset against every texture on disk.
+    """
+    root = Path(root)
+    referenced: set[Path] = set()
+    for candidate in root.rglob("*"):
+        if not candidate.is_file() or candidate.suffix.lower() not in MESH_SUFFIXES:
+            continue
+        for _written, target in resolve_references(candidate):
+            try:
+                referenced.add(target.resolve())
+            except OSError:      # pragma: no cover - unreadable path
+                continue
+    orphans = []
+    for candidate in root.rglob("*"):
+        if not candidate.is_file() or candidate.suffix.lower() not in TEXTURE_DISK_SUFFIXES:
+            continue
+        try:
+            if candidate.resolve() not in referenced:
+                orphans.append(candidate)
+        except OSError:          # pragma: no cover
+            continue
+    return sorted(orphans)
+
+
+# --------------------------------------------------------------------------- #
+# PBR value sanitisation
+# --------------------------------------------------------------------------- #
+
+def _luma(pixel: tuple[int, int, int]) -> float:
+    """Rec. 709 luminance on the 0..1 scale the shader will see."""
+    return (0.2126 * pixel[0] + 0.7152 * pixel[1] + 0.0722 * pixel[2]) / 255.0
+
+
+def pbr_violation(path: Path, budget: Budget) -> Optional[str]:
+    """Is this albedo inside the range a physically based shader can use?
+
+    Sampled at 64x64: a 4k texture costs the same as a 512 to inspect, and an
+    albedo that is uniformly black or white is uniform at any resolution.
+    """
+    if Image is None:            # pragma: no cover - Pillow is optional
+        return None
+    try:
+        with Image.open(path) as image:
+            image = image.convert("RGB")
+            image.thumbnail((64, 64), Image.BILINEAR)
+            pixels = list(image.getdata())
+    except Exception as exc:     # unreadable: the texture check already fails it
+        LOG.debug("pbr: cannot sample %s: %s", path.name, exc)
+        return None
+    if not pixels:
+        return None
+
+    luminances = [_luma(pixel) for pixel in pixels]
+    mean = sum(luminances) / len(luminances)
+    if mean < budget.pbr_floor:
+        return (f"albedo mean luminance {mean:.3f} is below the PBR floor "
+                f"{budget.pbr_floor:g} (near-black absorbs all light)")
+    if mean > budget.pbr_ceiling:
+        return (f"albedo mean luminance {mean:.3f} is above the PBR ceiling "
+                f"{budget.pbr_ceiling:g} (near-white blinds the lighting model)")
+
+    # A texture can average mid-grey and still be two clipped extremes.
+    extreme = sum(1 for value in luminances if value <= 0.01 or value >= 0.99)
+    if extreme / len(luminances) > 0.9:
+        return (f"{extreme * 100 // len(luminances)}% of albedo pixels are clipped to "
+                f"black or white (mean {mean:.3f}); the surface has no usable variance")
+    return None
+
+
+# --------------------------------------------------------------------------- #
+# Geometric boundary profiling
+# --------------------------------------------------------------------------- #
+
+def _node_translation(node: dict) -> tuple[float, float, float]:
+    """Translation from a TRS node or from a 4x4 matrix, in metres."""
+    translation = node.get("translation")
+    if isinstance(translation, list) and len(translation) == 3:
+        try:
+            return (float(translation[0]), float(translation[1]), float(translation[2]))
+        except (TypeError, ValueError):
+            return (0.0, 0.0, 0.0)
+    matrix = node.get("matrix")
+    if isinstance(matrix, list) and len(matrix) == 16:
+        try:
+            return (float(matrix[12]), float(matrix[13]), float(matrix[14]))
+        except (TypeError, ValueError):
+            return (0.0, 0.0, 0.0)
+    return (0.0, 0.0, 0.0)
+
+
+def transform_audit(path: Path, budget: Budget) -> list[str]:
+    """Unbaked node transforms, floating/off-centre pivots, unindexed geometry.
+
+    Only called when ``budget.audit_transforms`` (or ``require_indexed``) is on:
+    an offset pivot is often authored on purpose, so this is a review prompt,
+    not a hard violation.
+    """
+    problems: list[str] = []
+    suffix = path.suffix.lower()
+
+    if suffix in (".gltf", ".glb"):
+        try:
+            document = read_gltf_document(path)
+        except Exception:
+            return problems
+
+        for node in document.get("nodes", []) or []:
+            if not isinstance(node, dict):
+                continue
+            x, y, z = _node_translation(node)
+            distance = (x * x + y * y + z * z) ** 0.5
+            if distance > budget.transform_epsilon:
+                name = node.get("name") or f"node {node.get('mesh', '?')}"
+                problems.append(
+                    f"'{name}' has an unbaked translation ({x:.3f}, {y:.3f}, {z:.3f}); "
+                    f"the pivot is floating, so engine placement will double the offset")
+            rotation = node.get("rotation")
+            if isinstance(rotation, list) and len(rotation) == 4:
+                try:
+                    w = float(rotation[3])
+                except (TypeError, ValueError):
+                    w = 1.0
+                if abs(abs(w) - 1.0) > 1e-3:
+                    name = node.get("name") or f"node {node.get('mesh', '?')}"
+                    problems.append(f"'{name}' carries an unbaked rotation; bake it into the mesh")
+
+        if budget.audit_transforms:
+            accessors = document.get("accessors", []) or []
+            for mesh in document.get("meshes", []) or []:
+                for primitive in mesh.get("primitives", []) or []:
+                    position = (primitive.get("attributes") or {}).get("POSITION")
+                    if not isinstance(position, int) or position >= len(accessors):
+                        continue
+                    accessor = accessors[position]
+                    low, high = accessor.get("min"), accessor.get("max")
+                    if not (isinstance(low, list) and isinstance(high, list) and len(low) == 3):
+                        continue
+                    center = [(low[i] + high[i]) / 2.0 for i in range(3)]
+                    size = [(high[i] - low[i]) for i in range(3)]
+                    diagonal = (size[0] ** 2 + size[1] ** 2 + size[2] ** 2) ** 0.5 or 1.0
+                    offset = (center[0] ** 2 + center[1] ** 2 + center[2] ** 2) ** 0.5
+                    if offset / diagonal > budget.pivot_tolerance:
+                        problems.append(
+                            f"geometry is centred {offset:.3f}m from its own origin "
+                            f"({offset / diagonal * 100:.0f}% of its size); the pivot is uncentred")
+
+        if budget.require_indexed:
+            for mesh in document.get("meshes", []) or []:
+                for primitive in mesh.get("primitives", []) or []:
+                    if "indices" not in primitive:
+                        name = mesh.get("name") or "unnamed mesh"
+                        problems.append(f"'{name}' has unindexed geometry (no index buffer)")
+        return problems
+
+    if suffix != ".obj":
+        return problems
+
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return problems
+    vertices = 0
+    triangles = 0
+    low = [float("inf")] * 3
+    high = [float("-inf")] * 3
+    for line in text.splitlines():
+        if line.startswith("v "):
+            parts = line.split()
+            if len(parts) >= 4:
+                vertices += 1
+                for axis in range(3):
+                    try:
+                        value = float(parts[axis + 1])
+                    except ValueError:
+                        continue
+                    low[axis] = min(low[axis], value)
+                    high[axis] = max(high[axis], value)
+        elif line.startswith("f "):
+            triangles += max(0, len(line.split()) - 3)
+
+    if triangles and vertices:
+        if budget.audit_transforms and low[0] != float("inf"):
+            center = [(low[i] + high[i]) / 2.0 for i in range(3)]
+            size = [(high[i] - low[i]) for i in range(3)]
+            diagonal = (size[0] ** 2 + size[1] ** 2 + size[2] ** 2) ** 0.5 or 1.0
+            offset = (center[0] ** 2 + center[1] ** 2 + center[2] ** 2) ** 0.5
+            if offset / diagonal > budget.pivot_tolerance:
+                problems.append(
+                    f"geometry is centred {offset:.3f}m from its own origin "
+                    f"({offset / diagonal * 100:.0f}% of its size); the pivot is uncentred")
+        if budget.require_indexed:
+            # An OBJ is indexed by definition; the useful question is whether the
+            # exporter welded its vertices or emitted a triangle soup (3 per tri).
+            ratio = vertices / (3.0 * triangles)
+            if ratio > 0.95:
+                problems.append(
+                    f"unindexed geometry: {vertices:,} vertices for {triangles:,} triangles "
+                    f"(a welded mesh needs about a third of that)")
+    return problems
+
+
 class Gatekeeper:
     """Applies the budget rules and returns a Verdict. No I/O side effects.
 
@@ -1182,6 +1660,23 @@ class Gatekeeper:
                         f"tracing compute garbage from these"
                     )
 
+        # Broken references are unconditional when enabled: a .gltf pointing at a
+        # texture nobody shipped fails to load in every engine, on every platform.
+        if self.budget.check_references:
+            broken = missing_references(path)
+            for written, _target in broken:
+                problems.append(
+                    f"missing reference '{written}' (broken link: the engine cannot load it)")
+            if broken:
+                stats.append(("broken_references", len(broken)))
+
+        # Transform/pivot/index audits are opt-in (see Budget.audit_transforms).
+        if self.budget.audit_transforms or self.budget.require_indexed:
+            try:
+                problems.extend(transform_audit(path, self.budget))
+            except Exception as exc:      # an audit must never break the verdict
+                LOG.debug("transform audit failed for %s: %s", path.name, exc)
+
         return Verdict(path, tuple(problems), " / ".join(metrics), tuple(stats))
 
     # -- textures ---------------------------------------------------------- #
@@ -1205,8 +1700,20 @@ class Gatekeeper:
             expected = ", ".join(self.budget.texture_suffixes)
             problems.append(f"name does not end with a standard suffix ({expected})")
 
+        # PBR sanitisation applies to albedo/diffuse only: a normal map is
+        # allowed to be flat violet-blue, and a roughness map is allowed to be
+        # pure white, because neither is a reflectance colour.
+        if self.budget.pbr_check and self._is_pbr(path):
+            violation = pbr_violation(path, self.budget)
+            if violation:
+                problems.append(violation)
+
         return Verdict(path, tuple(problems), f"{width}x{height}",
                        (("width", width), ("height", height)))
+
+    def _is_pbr(self, path: Path) -> bool:
+        stem = path.stem.lower()
+        return any(stem.endswith(suffix.lower()) for suffix in self.budget.pbr_suffixes)
 
 
 # --------------------------------------------------------------------------- #
@@ -1580,7 +2087,11 @@ def describe_budget(budget: Budget) -> str:
         f"influences<={budget.max_bone_influences}  "
         f"uvs<={budget.max_uv_channels}  "
         f"degenerate={'allowed' if budget.allow_degenerate else 'blocked'}  "
-        f"naming={'on' if budget.enforce_texture_naming else 'off'}"
+        f"naming={'on' if budget.enforce_texture_naming else 'off'}  "
+        f"refs={'checked' if budget.check_references else 'ignored'}  "
+        f"pbr={'on' if budget.pbr_check else 'off'}  "
+        f"audit={'on' if budget.audit_transforms else 'off'}"
+        + (f"  platform={budget.platform}" if budget.platform else "")
     )
 
 
@@ -1654,6 +2165,21 @@ def build_parser() -> argparse.ArgumentParser:
                         help="accept texture names without a standard suffix")
     parser.add_argument("--rules", metavar="PATH",
                         help=f"rules file to use instead of <folder>/{RULES_FILENAME}")
+    parser.add_argument("--platform", metavar="NAME", default=None,
+                        help="apply the [platforms.<NAME>] compression profile from rules.toml "
+                             "(e.g. mobile, console, pc)")
+    parser.add_argument("--no-reference-check", action="store_false", dest="check_references",
+                        default=None, help="do not fail assets with missing texture/buffer links")
+    parser.add_argument("--no-pbr-check", action="store_false", dest="pbr_check", default=None,
+                        help="do not clamp albedo luminance")
+    parser.add_argument("--audit-transforms", action="store_true", dest="audit_transforms",
+                        default=None,
+                        help="flag unbaked node transforms, uncentred pivots and unindexed geometry")
+    parser.add_argument("--require-indexed", action="store_true", dest="require_indexed",
+                        default=None, help="also fail triangle-soup geometry (implies the audit)")
+    parser.add_argument("--audit", action="store_true",
+                        help="audit the whole folder for broken references and orphaned "
+                             "textures, then exit")
     parser.add_argument("--auto-heal", action="store_true", dest="auto_heal", default=None,
                         help="repair failing assets in place (NPOT textures, missing texture "
                              "suffixes, zero-area .obj faces) - off unless this or "
@@ -1697,6 +2223,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
     # Single-file mode lets a DCC plugin gate one temporary export directly.
     watch_dir = root if root.is_dir() else root.parent
+
+    # Folder audit is a report, not a gate: it needs no budget and no deps
+    # beyond the parser, so it runs before the dependency check on purpose.
+    if getattr(args, "audit", False):
+        if root.is_file():
+            LOG.error("--audit needs a folder, not a single file")
+            return 2
+        return run_audit(watch_dir)
+
     if trimesh is None or Image is None:
         missing = [name for name, module in (("trimesh", trimesh), ("pillow", Image)) if module is None]
         LOG.error("missing dependencies: %s - python -m pip install %s", ", ".join(missing), " ".join(missing))

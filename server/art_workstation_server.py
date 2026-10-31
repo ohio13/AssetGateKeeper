@@ -329,6 +329,42 @@ def list_notes(db_path: str | Path, asset_id: int) -> list[dict]:
     return [dict(row) for row in rows]
 
 
+def asset_references(db_path: str | Path, data_dir: Path, asset_id: int) -> dict:
+    """Broken links and orphaned textures for one asset (Step 1, on demand).
+
+    Recomputed per request rather than stored: the answer depends on what is on
+    disk *now*, and a cached "references are fine" is exactly the lie this check
+    exists to prevent.
+    """
+    asset = get_asset(db_path, asset_id)
+    stored = resolve_inside(data_dir, asset["file_path"])
+    if stored is None or not stored.is_file():
+        raise WorkstationError("the stored file is missing", 410)
+
+    references = []
+    for written, target in agk.resolve_references(stored):
+        references.append({
+            "uri": written,
+            "resolved": str(target),
+            "exists": target.is_file(),
+        })
+    missing = [item["uri"] for item in references if not item["exists"]]
+
+    # Orphans are repository-level, but scoped to the asset store: a texture in
+    # the store that no stored mesh points at is dead weight nobody will delete.
+    assets_dir, _ = asset_paths(data_dir)
+    orphaned = [path.name for path in agk.orphaned_files(assets_dir)]
+
+    return {
+        "asset_id": asset_id,
+        "filename": asset["filename"],
+        "references": references,
+        "missing": missing,
+        "orphaned": orphaned,
+        "ok": not missing and not orphaned,
+    }
+
+
 def get_collision(db_path: str | Path, asset_id: int) -> dict | None:
     with open_db(db_path) as connection:
         row = connection.execute(
@@ -565,6 +601,7 @@ ASSET_LODS_RE = re.compile(r"^/api/assets/(\d+)/lods$")
 ASSET_LOD_FILE_RE = re.compile(r"^/api/assets/(\d+)/lods/(LOD[1-4])/file$")
 ASSET_NOTES_RE = re.compile(r"^/api/assets/(\d+)/notes$")
 ASSET_COLLISION_RE = re.compile(r"^/api/assets/(\d+)/collision$")
+ASSET_REFERENCES_RE = re.compile(r"^/api/assets/(\d+)/references$")
 NOTE_RE = re.compile(r"^/api/notes/(\d+)$")
 
 
@@ -710,6 +747,12 @@ class Handler(BaseHTTPRequestHandler):
         match = ASSET_NOTES_RE.match(path)
         if match:
             self._json(200, {"notes": list_notes(server.db_path, int(match.group(1)))})
+            return
+
+        match = ASSET_REFERENCES_RE.match(path)
+        if match:
+            self._json(200, asset_references(server.db_path, Path(server.data_dir),
+                                             int(match.group(1))))
             return
 
         match = ASSET_COLLISION_RE.match(path)

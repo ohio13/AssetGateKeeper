@@ -23,3 +23,9 @@ asset_health.db-shm
 Thumbs.db
 .idea/
 .vscode/
+
+# Art Workstation runtime state
+art_workstation.db
+art_workstation.db-wal
+art_workstation.db-shm
+workstation_data/
