@@ -44,12 +44,12 @@ jobs:
       - name: Generate fixtures
         run: python tests/gen_test_assets.py
 
-      - name: Unit suite (201 assertions)
+      - name: Unit suite (209 assertions)
         run: python tests/test_gatekeeper.py
 
       # Spins the real dashboard server on an ephemeral port and drives it over
       # real sockets: ingest, bearer auth, 400/404/405/413, HTML, cascade delete.
-      - name: Server suite (81 assertions)
+      - name: Server suite (146 assertions)
         run: python tests/test_server.py
 
       - name: Headless integration (synthetic exporter)

@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-282%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-355%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -385,9 +385,90 @@ python asset_gatekeeper.py "D:\Exports" --once --telemetry-url http://studio:808
 | Route | Method | Returns |
 | :--- | :--- | :--- |
 | `/api/telemetry` | `POST` | Stores one verdict + its problems, `201 {"stored": true, "id": 41}` |
-| `/dashboard` | `GET` | The HTML page above |
+| `/dashboard` | `GET` | The HTML page above (`?project_id=N` to scope) |
+| `/budget-planner` | `GET` | Visual budget editor for producers (`?project_id=N`) |
+| `/api/save-budget` | `POST` | Publishes a project's budget |
+| `/api/rules` | `GET` | The published budget as a `rules.toml`-shaped document, for `--remote-rules` |
 | `/api/summary` | `GET` | The same totals and ranking as JSON, for a wallboard or a test |
 | `/` | `GET` | `302` → `/dashboard` |
+
+### Multi-project isolation
+
+One server, many projects — first-party teams and outsource vendors — with no
+shared rows. Create a project on the server:
+
+```bash
+python server/asset_health_server.py --db studio.db --add-project "Nova Survival"
+# created project 1: Nova Survival
+#   token      GuQwhkXMSlRBI7dG_-nkJNRJLw09IMQW   (shown once; only its hash is stored)
+#   dashboard  /dashboard?project_id=1&token=<token>
+#   rules URL  /api/rules?project_id=1  (for --remote-rules)
+```
+
+The token becomes the artist's `ASSET_GATEKEEPER_TOKEN`, so the same variable
+authenticates both telemetry and the remote-rules fetch:
+
+```bash
+export ASSET_GATEKEEPER_TOKEN=<token>
+python asset_gatekeeper.py D:\Exports --once \
+    --remote-rules https://studio/api/rules?project_id=1 \
+    --telemetry-url  https://studio/api/telemetry
+```
+
+| Credential | Can do |
+| :--- | :--- |
+| **Project token** | POST verdicts into its own project; read *only* its own dashboard, summary and rules |
+| **Admin token** (`AUTH_TOKEN` / `--token`) | See every project, pick one with `?project_id=`, publish budgets for any project |
+| **No token, no projects** | Legacy single-tenant mode — unchanged behaviour for existing installs |
+
+Guarantees, all covered by tests: a project token asking for another project is a
+**403**, not a silent fallback; a `project_id` in the POST body cannot redirect a
+token's write (**tested**); tokens are stored as `sha256:<hex>` and compared with
+`hmac.compare_digest`; the refusal page never lists the other tenants.
+
+### Webhook alerts
+
+```bash
+export SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...
+python server/asset_health_server.py --port 8080     # or --webhook-url / --webhooks-config
+```
+
+A failure alerts only when it is **more than 50% over** a budget — 80,000 triangles
+on a 50,000 budget alerts, 60,000 does not. Healed assets and plain passes never
+alert; the point is to page someone about a real regression, not every red line.
+
+```
+🔴 CRITICAL PIPELINE ALERT: User alice on WS-ART-014 failed validation for
+boss_statue.gltf. Reasons: 72,500 triangles exceeds the 50,000 budget (+22,500).
+Over budget: triangles 72,500 vs 50,000 (1.8x)
+```
+
+The envelope adapts to the provider (`text` for Slack, `content` for Discord, a
+`MessageCard` for Teams), and the URL's provider is inferred when
+`--webhook-provider` is not given. Delivery uses the same three rules as the
+telemetry sender: a queue, one daemon thread, a 2 s timeout, drop-and-count —
+**a dead webhook can never fail an ingest**.
+
+### Budget planner
+
+![Budget planner](server/budget_planner.png)
+
+A producer opens the planner, drags two sliders, picks a texture edge, ticks three
+boxes, and clicks **Publish budgets**. That writes the `budgets` table; `/api/rules`
+serves it in `rules.toml` shape, so every artist's next `--remote-rules` run picks
+it up — no TOML, no commit, no build step.
+
+Ticking **Enable auto-heal** is the interesting one: it reaches clients as
+`[healer] enabled = true` in the remote document, so healing can be switched on for
+a project centrally. It is still opt-in per run (`--no-auto-heal` beats it), and
+the client still only adopts a repair that verifies.
+
+> **Limits worth knowing:** the browser cannot send an `Authorization` header on a
+> typed URL, so the dashboard and planner accept `?token=` — that token lands in
+> access logs and browser history, so front the server with a reverse proxy that
+> injects the header and strips the query. Tokens are per project, not per user, so
+> an offboarded artist's token must be rotated manually. Alerts have no cooldown: a
+> nightly sweep that fails 300 assets will send 300 messages.
 
 ### Auth
 
@@ -607,11 +688,11 @@ No changes are needed in the watcher, the reporter, or the queue. Rules are data
 Three layers, because unit tests, networks and DCC reality fail in different ways.
 
 ```bash
-# 1. rules, config, healing, VCS hooks — 201 assertions, no network, no GPU
+# 1. rules, config, healing, VCS hooks — 209 assertions, no network, no GPU
 python tests/gen_test_assets.py
 python tests/test_gatekeeper.py
 
-# 2. the dashboard server — 81 assertions over real sockets, ephemeral port
+# 2. the server — 146 assertions over real sockets, ephemeral ports
 python tests/test_server.py
 
 # 3. real exporter -> real file -> real verdict (headless Blender / Unreal)
@@ -624,16 +705,17 @@ healer.py                        opt-in repair engine (only loaded with --auto-h
 asset_gatekeeper.example.toml    rules.toml template
 README.md  LICENSE  .gitignore  .gitattributes
 .github/workflows/
-  ci.yml                         every push/PR: lint + 201 assertions + integration
+  ci.yml                         every push/PR: lint + 355 assertions + integration
   dcc-nightly.yml                nightly Blender export through the real watcher
 tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
-  test_gatekeeper.py             201 assertions: rules, config, healing, hooks
-  test_server.py                 81 assertions: ingest, auth, HTML, cascade delete
+  test_gatekeeper.py             209 assertions: rules, config, healing, hooks
+  test_server.py                 146 assertions: tenancy, ingest, alerts, planner
   run_headless_integration.py    drives headless DCC exports through the gate
 server/
-  asset_health_server.py         dashboard: HTTP + SQLite, stdlib only
+  asset_health_server.py         dashboard + planner + ingest, stdlib only
   dashboard.png                  what /dashboard looks like (README)
+  budget_planner.png             what /budget-planner looks like (README)
 vcs_hooks/
   p4_pre_submit.py               Perforce change-submit trigger
   git_pre_commit.py              Git pre-commit hook (+ --install)
@@ -723,7 +805,7 @@ Both DCC snippets are written to `<workdir>/dcc_snippets/` every run, ready to p
 `.github/workflows/ci.yml` runs on every push and pull request: `pyflakes` over the
 engine and tests, a syntax check of all four plugins (`compileall`, because
 `bpy.props` annotations make pyflakes emit bogus F722 forward-annotation errors),
-the 201-assertion suite, and the integration harness in `--synthetic` mode, on
+the 209-assertion suite, and the integration harness in `--synthetic` mode, on
 Ubuntu and Windows × Python 3.11 and 3.12.
 
 `.github/workflows/dcc-nightly.yml` downloads a pinned Blender (cached between

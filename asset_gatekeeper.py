@@ -589,23 +589,33 @@ class HealSettings:
         )
 
 
-def resolve_healer(root: Path, args: argparse.Namespace) -> HealSettings:
-    """Merge healing policy: explicit CLI flag > ``[healer]`` table > off.
+def resolve_healer(root: Path, args: argparse.Namespace,
+                   remote_document: Optional[dict] = None) -> HealSettings:
+    """Merge healing policy: explicit CLI flag > remote rules > ``[healer]`` > off.
 
-    ``--no-auto-heal`` exists so CI can pin healing off even when a project file
-    turns it on: a build agent must never rewrite an artist's asset.
+    The remote document matters here as much as it does for the budget: a
+    producer who ticks "Enable auto-heal" in the budget planner expects the
+    artists' clients to pick it up, and the planner's output arrives as remote
+    rules. ``--no-auto-heal`` exists so CI can still pin healing off when a
+    project (or a producer) turns it on.
     """
-    from_file = HealSettings()
-    rules_path = Path(args.rules).expanduser() if getattr(args, "rules", None) else root / RULES_FILENAME
-    if rules_path.is_file():
+    from_source = HealSettings()
+    if remote_document is not None:
         try:
-            from_file = HealSettings.from_mapping(parse_rules(rules_path).get("healer", {}))
-        except (ConfigError, ValueError, OSError) as exc:
-            raise ConfigError(f"{rules_path}: {exc}") from exc
+            from_source = HealSettings.from_mapping(remote_document.get("healer", {}))
+        except ConfigError as exc:
+            raise ConfigError(f"remote rules: {exc}") from exc
+    else:
+        rules_path = Path(args.rules).expanduser() if getattr(args, "rules", None) else root / RULES_FILENAME
+        if rules_path.is_file():
+            try:
+                from_source = HealSettings.from_mapping(parse_rules(rules_path).get("healer", {}))
+            except (ConfigError, ValueError, OSError) as exc:
+                raise ConfigError(f"{rules_path}: {exc}") from exc
     forced = getattr(args, "auto_heal", None)
     if forced is None:
-        return from_file
-    return replace(from_file, enabled=bool(forced))
+        return from_source
+    return replace(from_source, enabled=bool(forced))
 
 
 def load_healer(budget: Budget, settings: HealSettings):
@@ -1722,7 +1732,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     LOG.info("budget  %s", describe_budget(budget))
 
     try:
-        heal_settings = resolve_healer(watch_dir, args)
+        heal_settings = resolve_healer(watch_dir, args, remote_document)
     except ConfigError as exc:
         LOG.error("invalid healer settings: %s", exc)
         return 2

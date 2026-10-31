@@ -5,12 +5,15 @@ the real server on an ephemeral port and talks to it over real sockets, because
 the interesting failures here are HTTP-level (status codes, keep-alive, bodies).
 """
 import json
+import socket
+import sqlite3
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
 from pathlib import Path
+from unittest.mock import patch
 
 for _stream in (sys.stdout, sys.stderr):
     if hasattr(_stream, "reconfigure"):
@@ -21,6 +24,7 @@ for _stream in (sys.stdout, sys.stderr):
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "server"))
+sys.path.insert(0, str(ROOT))
 
 import asset_health_server as ahs  # noqa: E402
 
@@ -43,6 +47,25 @@ def fresh_db(name):
             target.unlink()
     ahs.init_db(path)
     return path
+
+
+class FakeResponse:
+    """What urllib.request.urlopen hands back, without a socket in sight."""
+
+    status = 200
+
+    def __init__(self, body: bytes = b"{}", headers=None):
+        self._body = body
+        self.headers = headers or {}
+
+    def read(self):
+        return self._body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
 
 
 def request(port, path, method="GET", body=None, headers=None, timeout=10):
@@ -330,7 +353,275 @@ with ahs.open_db(legacy) as connection:
 expect("an old database is migrated, not dropped", "status" in migrated and kept == 1,
        f"columns={sorted(migrated)} rows={kept}")
 
-print("9. CLI wiring")
+print("9. multi-tenant isolation")
+ten_db = fresh_db("tenant.db")
+pid_a, tok_a = ahs.create_project(ten_db, "Game A")
+pid_b, tok_b = ahs.create_project(ten_db, "Game B")
+pid_c, tok_c = ahs.create_project(ten_db, "Legacy", token="plain-token")
+
+with ahs.open_db(ten_db) as connection:
+    stored_tokens = [row["api_token"] for row in connection.execute(
+        "SELECT api_token FROM projects").fetchall()]
+expect("project tokens are hashed at rest", all(t.startswith("sha256:") for t in stored_tokens),
+       str(stored_tokens[:1]))
+expect("the plain token is not readable from the database",
+       not any("plain-token" in t for t in stored_tokens))
+expect("a token resolves to its own project",
+       ahs.project_for_token(ten_db, tok_a)["id"] == pid_a)
+expect("another project's token resolves separately",
+       ahs.project_for_token(ten_db, tok_b)["id"] == pid_b)
+expect("an unknown token resolves to nothing", ahs.project_for_token(ten_db, "nope") is None)
+expect("a hand-written plain-text token still works",
+       ahs.project_for_token(ten_db, "plain-token")["id"] == pid_c)
+try:
+    ahs.create_project(ten_db, "Game A")
+    expect("duplicate project names are rejected", False, "no error raised")
+except sqlite3.IntegrityError:
+    expect("duplicate project names are rejected", True)
+expect("list_projects hides the tokens",
+       all(set(row) == {"id", "name", "created_at"} for row in ahs.list_projects(ten_db)))
+
+ten_server = ahs.build_server("127.0.0.1", 0, ten_db, quiet=True)
+tport = ten_server.server_address[1]
+threading.Thread(target=ten_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+
+A_VERDICT = dict(VERDICT, name="game_a_hero.gltf", path="a/hero.gltf", username="alice")
+B_VERDICT = dict(VERDICT, name="game_b_hero.gltf", path="b/hero.gltf", username="bob")
+AUTH_A = {"Authorization": f"Bearer {tok_a}"}
+AUTH_B = {"Authorization": f"Bearer {tok_b}"}
+
+status, _, _ = request(tport, "/api/telemetry", method="POST", body=A_VERDICT)
+expect("telemetry without a project token is refused in tenant mode", status == 401, str(status))
+status, body, _ = request(tport, "/api/telemetry", method="POST", body=A_VERDICT, headers=AUTH_A)
+expect("telemetry with a project token is accepted", status == 201, str(status))
+expect("the row is tagged with that project", json.loads(body)["project_id"] == pid_a)
+request(tport, "/api/telemetry", method="POST", body=B_VERDICT, headers=AUTH_B)
+
+with ahs.open_db(ten_db) as connection:
+    tagged = {(row["filename"], row["project_id"]) for row in connection.execute(
+        "SELECT filename, project_id FROM verdicts").fetchall()}
+expect("each verdict lands in its own project",
+       ("game_a_hero.gltf", pid_a) in tagged and ("game_b_hero.gltf", pid_b) in tagged,
+       str(sorted(tagged)))
+expect("project totals do not leak across tenants",
+       ahs.totals(ten_db, pid_a)["total"] == 1 and ahs.totals(ten_db, pid_b)["total"] == 1,
+       f"{ahs.totals(ten_db, pid_a)['total']} / {ahs.totals(ten_db, pid_b)['total']}")
+
+# A token in the body must never override the token's own scope.
+spoof = dict(A_VERDICT, name="spoofed.gltf", project_id=pid_b)
+request(tport, "/api/telemetry", method="POST", body=spoof, headers=AUTH_A)
+with ahs.open_db(ten_db) as connection:
+    spoof_row = connection.execute(
+        "SELECT project_id FROM verdicts WHERE filename = 'spoofed.gltf'").fetchone()
+expect("a body project_id cannot redirect a token's write", spoof_row["project_id"] == pid_a,
+       str(spoof_row["project_id"]))
+
+status, _, _ = request(tport, f"/dashboard?project_id={pid_a}")
+expect("the dashboard refuses an anonymous request in tenant mode", status == 401, str(status))
+status, _, _ = request(tport, f"/dashboard?project_id={pid_a}&token={tok_b}")
+expect("one project's token cannot open another's dashboard", status == 403, str(status))
+status, body, _ = request(tport, f"/dashboard?project_id={pid_a}&token={tok_a}")
+page_a = body.decode("utf-8")
+expect("a project token opens its own dashboard", status == 200, str(status))
+expect("the dashboard shows its own assets", "game_a_hero.gltf" in page_a)
+expect("the dashboard hides other tenants' assets", "game_b_hero.gltf" not in page_a)
+expect("the dashboard is labelled with the project", "Game A" in page_a)
+
+status, body, _ = request(tport, "/dashboard", headers=AUTH_A)
+page_pinned = body.decode("utf-8")
+expect("a project token without project_id stays in its own scope",
+       status == 200 and "game_a_hero.gltf" in page_pinned
+       and "game_b_hero.gltf" not in page_pinned)
+status, _, _ = request(tport, "/dashboard?project_id=999", headers=AUTH_A)
+expect("an unknown project is a 404 for an admin, 403 for a project token",
+       status in (403, 404), str(status))
+
+status, body, _ = request(tport, f"/api/summary?project_id={pid_a}&token={tok_a}")
+summary_a = json.loads(body)
+expect("/api/summary is scoped too", summary_a["totals"]["total"] == 2, str(summary_a["totals"]))
+ten_server.shutdown()
+ten_server.server_close()
+
+# Admin token: sees every project, may pick one.
+adm_server = ahs.build_server("127.0.0.1", 0, ten_db, token="studio-admin", quiet=True)
+aport = adm_server.server_address[1]
+threading.Thread(target=adm_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+ADMIN = {"Authorization": "Bearer studio-admin"}
+status, body, _ = request(aport, "/dashboard", headers=ADMIN)
+everything = body.decode("utf-8")
+expect("the admin token sees every project",
+       status == 200 and "game_a_hero.gltf" in everything and "game_b_hero.gltf" in everything)
+status, body, _ = request(aport, f"/dashboard?project_id={pid_b}", headers=ADMIN)
+expect("the admin token may scope to one project",
+       status == 200 and "game_b_hero.gltf" in body.decode("utf-8")
+       and "game_a_hero.gltf" not in body.decode("utf-8"))
+status, _, _ = request(aport, "/dashboard", headers={"Authorization": "Bearer wrong"})
+expect("a bad token is refused even when an admin token exists", status == 401, str(status))
+adm_server.shutdown()
+adm_server.server_close()
+
+print("10. webhook alerting")
+BUDGET = dict(ahs.DEFAULT_BUDGET_ROW)
+heavy = {"name": "huge.gltf", "username": "alice", "hostname": "WS-1", "passed": False,
+         "stats": {"triangles": 80_000},
+         "problems": ["80,000 triangles exceeds the 50,000 budget (+30,000)"]}
+mild = dict(heavy, stats={"triangles": 60_000},
+            problems=["60,000 triangles exceeds the 50,000 budget (+10,000)"])
+overs = ahs.overshoots(heavy, BUDGET)
+expect("a 1.6x overshoot is critical", len(overs) == 1 and overs[0][0] == "triangles", str(overs))
+expect("the ratio is reported", round(overs[0][3], 2) == 1.6, str(overs[0][3]))
+expect("a 1.2x overshoot is not critical", ahs.overshoots(mild, BUDGET) == [])
+expect("problem text alone can trigger an alert",
+       len(ahs.overshoots({"problems": heavy["problems"]}, BUDGET)) == 1)
+expect("an under-budget asset never alerts",
+       ahs.overshoots({"stats": {"triangles": 40_000}, "problems": []}, BUDGET) == [])
+expect("texture overshoot is measured too",
+       len(ahs.overshoots({"stats": {"width": 4096, "height": 1024}, "problems": []}, BUDGET)) == 1)
+
+text = ahs.alert_text(heavy, BUDGET, overs)
+expect("the alert starts with the documented prefix", text.startswith("🔴 CRITICAL PIPELINE ALERT:"), text[:40])
+expect("the alert names user, host and file",
+       all(piece in text for piece in ("alice", "WS-1", "huge.gltf")))
+expect("the alert carries the reasons", "80,000 triangles exceeds" in text)
+expect("the alert states the overshoot", "1.6x" in text)
+expect("slack uses a text envelope", json.loads(ahs.webhook_body("slack", text))["text"] == text)
+expect("discord uses a content envelope",
+       json.loads(ahs.webhook_body("discord", text))["content"] == text)
+expect("teams uses a MessageCard",
+       json.loads(ahs.webhook_body("teams", text))["@type"] == "MessageCard")
+
+posted = []
+_real_urlopen = urllib.request.urlopen
+
+
+def fake_post(request, *args, **kwargs):
+    """Intercept webhook traffic only — the test client's own calls must pass through.
+
+    Patching urllib.request.urlopen globally also swallowed the requests this
+    suite makes to the server under test, which looked like "three alerts fired".
+    """
+    url = getattr(request, "full_url", str(request))
+    if not url.startswith("https://hooks.example"):
+        return _real_urlopen(request, *args, **kwargs)
+    posted.append((url, json.loads(request.data)))
+    return FakeResponse(b"{}")
+
+
+webhook = ahs.Notifier("https://hooks.example/T00/B00/xyz", "slack")
+with patch("urllib.request.urlopen", side_effect=fake_post):
+    webhook.submit(text)
+    webhook.close(timeout=5.0)
+expect("the notifier posts once", len(posted) == 1 and webhook.sent == 1, str(webhook.sent))
+expect("the post is JSON with a text field", posted[0][1]["text"] == text)
+
+silent = ahs.Notifier("https://hooks.example/dead", "slack")
+with patch("urllib.request.urlopen", side_effect=socket.timeout("timed out")):
+    try:
+        silent.submit(text)
+        silent.close(timeout=5.0)
+        raised = False
+    except Exception:  # noqa: BLE001 - the point is that it does not raise
+        raised = True
+expect("a dead webhook never raises into the ingest", not raised)
+expect("the failure is counted", silent.failed == 1 and silent.sent == 0)
+
+# End-to-end through the ingest route: only the critical failure alerts.
+alert_db = fresh_db("alerts.db")
+alert_pid, alert_tok = ahs.create_project(alert_db, "Alerting")
+ahs.save_budget(alert_db, alert_pid, {"max_triangles": 50_000, "max_material_slots": 3})
+alert_notifier = ahs.Notifier("https://hooks.example/T00/B00/xyz", "slack")
+alert_server = ahs.build_server("127.0.0.1", 0, alert_db, quiet=True, notifier=alert_notifier)
+alert_port = alert_server.server_address[1]
+threading.Thread(target=alert_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+ALERT_AUTH = {"Authorization": f"Bearer {alert_tok}"}
+
+with patch("urllib.request.urlopen", side_effect=fake_post):
+    posted.clear()
+    request(alert_port, "/api/telemetry", method="POST", headers=ALERT_AUTH, body=heavy)
+    request(alert_port, "/api/telemetry", method="POST", headers=ALERT_AUTH, body=mild)
+    request(alert_port, "/api/telemetry", method="POST", headers=ALERT_AUTH,
+            body=dict(heavy, name="healed.gltf", passed=True, status="HEALED"))
+    alert_notifier.close(timeout=5.0)
+expect("one alert for three verdicts: only the critical failure", len(posted) == 1, str(len(posted)))
+expect("the alert names the critical asset", "huge.gltf" in posted[0][1]["text"])
+expect("healed and mild failures stay quiet",
+       "healed.gltf" not in posted[0][1]["text"] and "60,000" not in posted[0][1]["text"])
+alert_server.shutdown()
+alert_server.server_close()
+
+print("11. budget planner and remote-rules")
+plan_db = fresh_db("planner.db")
+plan_pid, plan_tok = ahs.create_project(plan_db, "Planner Game")
+plan_server = ahs.build_server("127.0.0.1", 0, plan_db, quiet=True)
+pport = plan_server.server_address[1]
+threading.Thread(target=plan_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+PLAN_AUTH = {"Authorization": f"Bearer {plan_tok}"}
+
+status, _, _ = request(pport, f"/budget-planner?project_id={plan_pid}")
+expect("the planner needs a token", status == 401, str(status))
+status, body, _ = request(pport, f"/budget-planner?project_id={plan_pid}&token={plan_tok}")
+planner = body.decode("utf-8")
+expect("the planner renders", status == 200 and "Budget planner" in planner, str(status))
+expect("it has the triangle slider",
+       'type="range"' in planner and 'id="max_triangles"' in planner and 'max="200000"' in planner)
+expect("it has the material slider", 'id="max_material_slots"' in planner and 'max="16"' in planner)
+expect("it has the edge dropdown", all(f'value="{edge}"' in planner for edge in (512, 1024, 2048, 4096)))
+expect("it has the three checkboxes",
+       all(f'id="{field}"' in planner for field in ("power_of_two", "naming", "auto_heal")))
+expect("it posts to the save route", "/api/save-budget" in planner)
+
+status, body, _ = request(
+    pport, "/api/save-budget", method="POST", headers=PLAN_AUTH,
+    body={"project_id": plan_pid, "max_triangles": 25_000, "max_material_slots": 2,
+          "max_texture_edge": 1024, "power_of_two": True, "naming": False, "auto_heal": True})
+saved = json.loads(body)["budget"]
+expect("a budget can be published", status == 200, str(status))
+expect("the published values stick",
+       (saved["max_triangles"], saved["max_material_slots"], saved["max_texture_edge"],
+        saved["naming"], saved["auto_heal"]) == (25_000, 2, 1024, False, True), str(saved))
+expect("a partial form keeps the previous values",
+       ahs.save_budget(plan_db, plan_pid, {"max_triangles": 30_000})["max_material_slots"] == 2)
+
+status, _, _ = request(pport, "/api/save-budget", method="POST", headers=PLAN_AUTH,
+                       body={"project_id": plan_pid, "max_triangles": -5})
+expect("an out-of-range budget is a 400", status == 400, str(status))
+status, _, _ = request(pport, "/api/save-budget", method="POST", headers=PLAN_AUTH,
+                       body={"project_id": plan_pid, "max_triangles": "lots"})
+expect("a non-numeric budget is a 400", status == 400, str(status))
+status, _, _ = request(pport, "/api/save-budget", method="POST",
+                       body={"project_id": plan_pid, "max_triangles": 1000})
+expect("publishing without a token is refused", status == 401, str(status))
+
+# The whole point: what the planner saves is what --remote-rules receives.
+status, body, _ = request(pport, f"/api/rules?project_id={plan_pid}&token={plan_tok}")
+document = json.loads(body)
+expect("the rules endpoint serves the published budget", status == 200, str(status))
+expect("it is shaped like rules.toml",
+       document["mesh"]["max_triangles"] == 30_000
+       and document["texture"]["max_edge"] == 1024
+       and document["texture"]["naming"] is False
+       and document["healer"]["enabled"] is True, str(document))
+
+import asset_gatekeeper as agk  # noqa: E402 - proves the contract, not just the JSON
+
+remote_budget = agk.Budget.from_mapping(document)
+expect("the gate's own parser accepts it", remote_budget.max_triangles == 30_000,
+       str(remote_budget.max_triangles))
+expect("the planner can enable healing for clients",
+       agk.HealSettings.from_mapping(document["healer"]).enabled is True)
+expect("the remote document parses through the real text path",
+       agk.parse_rules_text(json.dumps(document))["mesh"]["max_triangles"] == 30_000)
+
+status, _, _ = request(pport, f"/api/rules?project_id={plan_pid}")
+expect("the rules endpoint is not public", status == 401, str(status))
+plan_server.shutdown()
+plan_server.server_close()
+
+print("12. CLI wiring")
 parser = ahs.build_parser()
 options = parser.parse_args(["--port", "9999", "--db", "x.db", "--token", "t", "--no-seed"])
 expect("CLI accepts host/port/db/token/no-seed",

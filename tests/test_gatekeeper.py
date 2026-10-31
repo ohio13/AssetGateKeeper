@@ -493,6 +493,28 @@ expect("CLI flags beat remote rules",
 expect("remote rules are validated like any other budget",
        not _accepts_unknown_remote(agk, {"meshes": {"max_triangles": 1}}, local_cfg, cli))
 
+# Multi-tenant: the project token must travel with the remote-rules request, or a
+# multi-project server cannot tell which project is asking.
+auth_seen = []
+
+
+def capture_auth(request, timeout=None):
+    auth_seen.append(request)
+    return FakeResponse(json.dumps({"mesh": {"max_triangles": 4242}}).encode())
+
+
+with patch("urllib.request.urlopen", side_effect=capture_auth):
+    tenant_doc = agk.fetch_remote_rules("https://studio.example/api/rules?project_id=7",
+                                        cache_file, timeout=2.0, token="project-token-xyz")
+expect("the remote-rules request carries the project token",
+       auth_seen and auth_seen[0].get_header("Authorization") == "Bearer project-token-xyz",
+       str(auth_seen[0].get_header("Authorization") if auth_seen else None))
+expect("a project-scoped rules document still builds a budget",
+       agk.Budget.from_mapping(tenant_doc).max_triangles == 4242)
+expect("the Accept header asks for rules, not HTML",
+       "application/json" in (auth_seen[0].get_header("Accept") or ""),
+       str(auth_seen[0].get_header("Accept")))
+
 print("13. server settings resolution")
 server_cfg = scratch / "server_cfg"
 server_cfg.mkdir(exist_ok=True)
@@ -518,6 +540,23 @@ expect("--telemetry-url beats the environment", from_cli.telemetry_url == "https
 expect("a bare folder has no server settings",
        agk.resolve_server(empty_cfg, agk.build_parser().parse_args([str(empty_cfg)]))
        == agk.ServerSettings())
+
+# The budget planner publishes healer.enabled; that document arrives as remote
+# rules, so the healer must be able to come from there too.
+planner_doc = {"mesh": {"max_triangles": 1000}, "healer": {"enabled": True, "texture_mode": "resize"}}
+expect("a remote rules document can switch healing on",
+       agk.resolve_healer(empty_cfg, agk.build_parser().parse_args([str(empty_cfg)]),
+                          planner_doc).enabled is True)
+expect("remote healing settings are applied",
+       agk.resolve_healer(empty_cfg, agk.build_parser().parse_args([str(empty_cfg)]),
+                          planner_doc).texture_mode == "resize")
+expect("--no-auto-heal still beats the remote document",
+       agk.resolve_healer(empty_cfg, agk.build_parser().parse_args(
+           [str(empty_cfg), "--no-auto-heal"]), planner_doc).enabled is False)
+expect("without a remote document the local file is the only source",
+       agk.resolve_healer(empty_cfg, agk.build_parser().parse_args([str(empty_cfg)])).enabled is False)
+expect("the remote budget and healer tables coexist",
+       agk.Budget.from_mapping(planner_doc).max_triangles == 1000)
 
 print("14. opt-in auto-healing")
 
