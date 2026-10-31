@@ -46,6 +46,17 @@ from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
+HERE = Path(__file__).resolve().parent
+REPO_ROOT = HERE.parent
+for _path in (str(HERE), str(REPO_ROOT)):
+    if _path not in sys.path:
+        sys.path.insert(0, _path)
+
+# Only GET /api/rules needs the gate: it reuses the parser that *defines* a
+# budget, so the inspector can never drift from what is actually enforced.
+# Ingest and the dashboard stay pure stdlib - agk has no side effects on import.
+import asset_gatekeeper as agk  # noqa: E402
+
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
@@ -54,6 +65,7 @@ DEFAULT_HOST = "127.0.0.1"       # loopback by default: no accidental exposure
 DEFAULT_PORT = 8080
 DEFAULT_DB = "asset_health.db"
 DEFAULT_TOKEN_ENV = "AUTH_TOKEN"
+RULES_ENV = "ASSET_GATEKEEPER_RULES"    # same name the workstation uses
 
 MAX_BODY_BYTES = 64 * 1024       # one verdict is ~1 KB; 64 KB is already generous
 WALL_OF_SHAME_LIMIT = 20
@@ -1477,6 +1489,12 @@ class Handler(BaseHTTPRequestHandler):
 
         This is what `--remote-rules` points at, so a producer's click in the
         planner reaches every artist on their next run.
+
+        Called *without* ``project_id`` it answers a different question - "what
+        is this server's own rules.toml enforcing right now?" - and returns the
+        read-only inspector snapshot. That is additive: the project-scoped shape
+        below is unchanged, so an existing `--remote-rules` consumer sees
+        exactly what it saw before.
         """
         if identity["role"] == "denied":
             self._json(401, {"error": "unauthorised"})
@@ -1486,8 +1504,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(error, {"error": "bad project scope"})
             return
         if project_id is None:
-            self._json(400, {"error": "project_id is required",
-                             "detail": "use ?project_id=<id>"})
+            self._json(200, describe_rules(self.server))  # type: ignore[arg-type]
             return
         db_path = self.server.db_path  # type: ignore[attr-defined]
         self._json(200, budget_document(budget_for_project(db_path, project_id)))
@@ -1653,10 +1670,15 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
 
     def __init__(self, address: tuple[str, int], db_path: str | Path, token: str = "",
                  quiet: bool = False, notifier: "Notifier | None" = None,
-                 alert_cooldown: float = DEFAULT_ALERT_COOLDOWN):
+                 alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
+                 rules_path: str | Path = "", rules_root: str | Path = ""):
         self.db_path = str(db_path)
         self.auth_token = token          # the studio-wide admin token, optional
         self.quiet = quiet
+        # Read-only config the /api/rules inspector reports on. Empty rules_path
+        # means "discover rules.toml from rules_root", exactly like the gate does.
+        self.rules_path = str(rules_path or "")
+        self.rules_root = str(rules_root or Path.cwd())
         self.notifier = notifier
         self.alert_cooldown = float(alert_cooldown)
         self.alerts_suppressed = 0       # visible in /api/summary for tuning
@@ -1672,8 +1694,28 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
 def build_server(host: str, port: int, db_path: str | Path,
                  token: str = "", quiet: bool = False,
                  notifier: "Notifier | None" = None,
-                 alert_cooldown: float = DEFAULT_ALERT_COOLDOWN) -> AssetHealthServer:
-    return AssetHealthServer((host, port), db_path, token, quiet, notifier, alert_cooldown)
+                 alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
+                 rules_path: str | Path = "", rules_root: str | Path = "") -> AssetHealthServer:
+    return AssetHealthServer((host, port), db_path, token, quiet, notifier, alert_cooldown,
+                             rules_path, rules_root)
+
+
+def describe_rules(server: "AssetHealthServer") -> dict:
+    """The read-only rules snapshot, or an error object instead of a 500.
+
+    A broken rules.toml must not blank the inspector: the dashboard is where an
+    artist goes to find out *why* their asset failed, so a config error is
+    reported as data, with the message the gate would print.
+    """
+    try:
+        return agk.describe_rules(Path(server.rules_root),
+                                  server.rules_path or None)
+    except (agk.ConfigError, SystemExit) as exc:
+        return {"read_only": True,
+                "error": f"cannot read rules: {exc}",
+                "source": server.rules_path or "built-in defaults",
+                "global_budget": None,
+                "tag_budgets": []}
 
 
 # --------------------------------------------------------------------------- #
@@ -1774,6 +1816,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-seed", action="store_true",
                         help="do not insert the demo verdicts on a brand-new database")
     parser.add_argument("--quiet", action="store_true", help="only log errors")
+    parser.add_argument("--rules", metavar="PATH", default=os.environ.get(RULES_ENV, ""),
+                        help="rules.toml that GET /api/rules reports on, read-only "
+                             f"(default: ./{agk.RULES_FILENAME} in the working directory, "
+                             f"or ${RULES_ENV})")
 
     tenancy = parser.add_argument_group("projects (multi-tenant)")
     tenancy.add_argument("--add-project", metavar="NAME",
@@ -1889,7 +1935,8 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         httpd = build_server(args.host, args.port, db_path, args.token, args.quiet,
-                             notifier, alert_cooldown)
+                             notifier, alert_cooldown,
+                             rules_path=args.rules, rules_root=Path.cwd())
     except OSError as exc:
         print(f"error: cannot bind {args.host}:{args.port}: {exc}", file=sys.stderr)
         return 2
@@ -1900,6 +1947,7 @@ def main(argv: list[str] | None = None) -> int:
     print(f"AssetHealth listening on http://{shown}:{port}/dashboard")
     print(f"  database   {db_path.resolve()}")
     print("  ingest     POST /api/telemetry")
+    print(f"  rules      GET /api/rules  ({(Path(args.rules).resolve() if args.rules else Path.cwd() / agk.RULES_FILENAME)})")
     if projects:
         print(f"  projects   {len(projects)} registered - a project token is required")
         for row in projects:

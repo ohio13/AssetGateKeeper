@@ -497,7 +497,7 @@ _real_urlopen = urllib.request.urlopen
 
 
 def fake_post(request, *args, **kwargs):
-    """Intercept webhook traffic only — the test client's own calls must pass through.
+    """Intercept webhook traffic only â€” the test client's own calls must pass through.
 
     Patching urllib.request.urlopen globally also swallowed the requests this
     suite makes to the server under test, which looked like "three alerts fired".
@@ -763,6 +763,95 @@ expect("CLI accepts host/port/db/token/no-seed",
        (options.port, options.db, options.token, options.no_seed) == (9999, "x.db", "t", True))
 expect("defaults are loopback-only", (ahs.DEFAULT_HOST, ahs.DEFAULT_PORT) == ("127.0.0.1", 8080))
 expect("a bad database folder exits 2", ahs.main(["--db", str(WORK / "missing" / "x.db")]) == 2)
+
+print("15. rules inspector (read-only)")
+# The inspector exists so an artist can see the budget without opening a TOML
+# file. It must agree with the gate exactly, so it runs the gate's resolvers.
+ins_db = fresh_db("inspector.db")
+ins_rules = WORK / "inspector_rules.toml"
+ins_rules.write_text(
+    'platform = "n64"\n'
+    "\n[mesh]\n"
+    "max_triangles = 2000\n"
+    "max_material_slots = 4\n"
+    "\n[texture]\n"
+    "max_edge = 32\n"
+    "power_of_two = true\n"
+    "\n[tagging]\n"
+    'mode = "strict"\n'
+    "min_similarity = 0.8\n"
+    "\n[platforms.n64]\n"
+    "max_texture_edge = 64\n"
+    "\n[tags.boss]\n"
+    "max_triangles = 20000\n"
+    "max_material_slots = 8\n"
+    "\n[tags.environment_rock]\n"
+    "max_triangles = 300\n"
+    "max_texture_edge = 16\n",
+    encoding="utf-8")
+
+ins_server = ahs.build_server("127.0.0.1", 0, ins_db, rules_path=str(ins_rules), rules_root=str(WORK))
+threading.Thread(target=ins_server.serve_forever, daemon=True).start()
+ins_port = ins_server.server_address[1]
+
+status, body, _ = request(ins_port, "/api/rules")
+document = json.loads(body)
+expect("GET /api/rules answers without a project in open mode", status == 200, str(status))
+expect("the inspector declares itself read-only", document.get("read_only") is True, str(document.get("read_only")))
+expect("it reports the platform from rules.toml",
+       document.get("target_platform") == "n64", str(document.get("target_platform")))
+expect("it reports the tag matching mode", document.get("tag_mode") == "strict", str(document.get("tag_mode")))
+expect("it reports the tag similarity threshold", document.get("tag_similarity") == 0.8,
+       str(document.get("tag_similarity")))
+global_budget = document.get("global_budget") or {}
+expect("the global budget is the effective one (platform overlay applied)",
+       (global_budget.get("max_triangles"), global_budget.get("max_texture_edge"),
+        global_budget.get("max_material_slots")) == (2000, 64, 4), str(global_budget)[:120])
+expect("vertices are reported as unknown, not invented",
+       global_budget.get("max_vertices") is None and document.get("vertex_budget_enforced") is False,
+       str(global_budget.get("max_vertices")))
+expect("the source names the file that was read",
+       str(ins_rules) in str(document.get("source")), str(document.get("source")))
+tags = {tag["tag"]: tag for tag in document.get("tag_budgets") or []}
+expect("both tag budgets are listed", sorted(tags) == ["boss", "environment rock"], str(sorted(tags)))
+expect("a tag keeps its own triangle limit", tags.get("boss", {}).get("max_triangles") == 20000,
+       str(tags.get("boss")))
+expect("a tag keeps its own texture limit",
+       tags.get("environment rock", {}).get("max_texture_edge") == 16,
+       str(tags.get("environment rock")))
+expect("a tag inherits the effective platform limit it did not override",
+       tags.get("boss", {}).get("max_texture_edge") == 64, str(tags.get("boss")))
+expect("the project default leaves vertex caps empty",
+       all(tag.get("max_vertices") is None for tag in tags.values()), str(tags))
+
+# A broken file must explain itself, not 500: the inspector is where an artist
+# goes to find out why their asset failed.
+ins_bad = WORK / "inspector_broken.toml"
+ins_bad.write_text('[mesh]\nmax_triangles = "lots"\n', encoding="utf-8")
+ins_server.rules_path = str(ins_bad)
+status, body, _ = request(ins_port, "/api/rules")
+document = json.loads(body)
+expect("a broken rules file is 200 with an error, not a 500", status == 200, str(status))
+expect("the error is human readable", "cannot read rules" in str(document.get("error")),
+       str(document.get("error"))[:80])
+expect("a broken file yields no budget to render", document.get("global_budget") is None)
+ins_server.shutdown()
+ins_server.server_close()
+
+# In a token-protected studio the inspector is not a hole.
+locked = fresh_db("inspector_locked.db")
+locked_server = ahs.build_server("127.0.0.1", 0, locked, token="s3cret")
+threading.Thread(target=locked_server.serve_forever, daemon=True).start()
+status, _, _ = request(locked_server.server_address[1], "/api/rules")
+expect("/api/rules still needs a token when one is configured", status == 401, str(status))
+status, _, _ = request(locked_server.server_address[1], "/api/rules?token=s3cret")
+expect("the right token gets the inspector", status == 200, str(status))
+locked_server.shutdown()
+locked_server.server_close()
+
+inspector_options = ahs.build_parser().parse_args(["--rules", "custom.toml"])
+expect("the CLI can point the inspector at a rules file",
+       inspector_options.rules == "custom.toml", inspector_options.rules)
 
 print()
 print("FAILURES:", failures if failures else "none")

@@ -29,7 +29,7 @@ h2 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em;
 
 /* ---------------------------------------------------------------- layout */
 .layout { flex: 1 1 auto; display: grid; min-height: 0;
-  grid-template-columns: 250px minmax(0, 1fr) 250px;
+  grid-template-columns: var(--rail, 250px) minmax(0, 1fr) 250px;
   grid-template-rows: minmax(0, 1fr) 320px;
   grid-template-areas: "library viewport inspector" "library viewport notes";
   gap: 1px; background: var(--line); }
@@ -123,5 +123,52 @@ button:disabled { opacity: .45; cursor: not-allowed; }
 .note .body ul { margin: 4px 0 0 16px; padding: 0; }
 
 @media (max-width: 1100px) {
-  .layout { grid-template-columns: 200px minmax(0,1fr) 200px; }
+  .layout { grid-template-columns: var(--rail, 200px) minmax(0,1fr) 200px; }
 }
+
+/* ------------------------------------------------------- rules inspector */
+/* The left rail is a two-tab sidebar. Opening the rules tab widens the rail:
+ * a five-column budget table does not fit in 250px, and shrinking the numbers
+ * until they are illegible would defeat the point of a reference card. */
+body.rules-open { --rail: 430px; }
+.tabs { display: flex; gap: 4px; flex-wrap: wrap; margin: -2px 0 12px;
+  padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.tab { background: transparent; border: 1px solid transparent; color: var(--muted);
+  font: inherit; font-size: 12px; font-weight: 500; padding: 5px 9px;
+  border-radius: 7px; cursor: pointer; }
+.tab:hover { color: var(--text); background: var(--panel-2); }
+.tab.is-active { color: var(--text); background: var(--panel-2); border-color: var(--line); }
+.tab:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.tabpane.is-hidden { display: none; }
+
+.rules-head { display: flex; align-items: center; justify-content: space-between;
+  gap: 8px; }
+.chip.xs { padding: 3px 8px; font-size: 11px; line-height: 1.4; }
+.rules-meta { display: flex; flex-wrap: wrap; gap: 6px; margin: 0 0 12px; }
+.badge { background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px;
+  padding: 2px 9px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.badge strong { color: var(--text); font-weight: 600; }
+.badge.warn { color: var(--warn); border-color: #3d3423; }
+.badge.bad { color: var(--bad); border-color: #43262b; }
+
+.rules-table-host { overflow-x: auto; }
+.rules-table { width: 100%; border-collapse: collapse; font-size: 11.5px; }
+.rules-table th { position: sticky; top: 0; z-index: 1; background: var(--panel);
+  text-align: left; color: var(--muted); font-size: 10px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em; padding: 6px 6px;
+  border-bottom: 1px solid var(--line); white-space: nowrap; }
+.rules-table td { padding: 6px; border-bottom: 1px solid #1e2530;
+  font-variant-numeric: tabular-nums; white-space: nowrap; }
+.rules-table th.num, .rules-table td.num { text-align: right; }
+.rules-table tbody tr:last-child td { border-bottom: 0; }
+/* The project default is the baseline every tag is measured against. */
+.rules-table tr.is-default td { background: rgba(122,162,247,.07); }
+.rules-table td.cat { font-weight: 600; }
+.rules-table td.cat .kind { display: block; color: var(--muted); font-size: 10px;
+  font-weight: 500; letter-spacing: .04em; text-transform: uppercase; }
+.rules-table .na { color: var(--muted); }
+/* A tag that is looser than the project default is worth flagging, not hiding. */
+.rules-table .loose { color: var(--warn); }
+.rules-note { color: var(--muted); font-size: 11px; line-height: 1.55; margin-top: 12px; }
+.rules-source { color: var(--muted); font-size: 10.5px; word-break: break-all; margin-top: 10px; }
+

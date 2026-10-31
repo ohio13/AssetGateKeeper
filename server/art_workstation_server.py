@@ -72,6 +72,7 @@ DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 8100
 STATIC_DIR = HERE / "static"
 TOKEN_ENV = "AUTH_TOKEN"
+RULES_ENV = "ASSET_GATEKEEPER_RULES"    # same name the health server uses
 
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 MAX_JSON_BYTES = 1024 * 1024
@@ -1017,6 +1018,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/stats":
             self._json(200, repository_stats(server.db_path))
             return
+        if path == "/api/rules":
+            self._json(200, describe_rules(server))
+            return
         if path == "/api/assets":
             self._json(200, {"assets": list_assets(server.db_path)})
             return
@@ -1288,11 +1292,16 @@ class WorkstationServer(socketserver.ThreadingTCPServer):
     request_queue_size = 64
 
     def __init__(self, address: tuple[str, int], db_path: str | Path, data_dir: str | Path,
-                 token: str = "", quiet: bool = False):
+                 token: str = "", quiet: bool = False,
+                 rules_path: str | Path = "", rules_root: str | Path = ""):
         self.db_path = str(db_path)
         self.data_dir = str(data_dir)
         self.token = token
         self.quiet = quiet
+        # The /api/rules inspector reports this rules.toml read-only. It is never
+        # written and never gates an upload - it is a reference card for artists.
+        self.rules_path = str(rules_path or "")
+        self.rules_root = str(rules_root or Path.cwd())
         self.broadcaster = Broadcaster()   # /api/events
         self.stopping = False
         super().__init__(address, Handler)
@@ -1303,8 +1312,28 @@ class WorkstationServer(socketserver.ThreadingTCPServer):
 
 
 def build_server(host: str, port: int, db_path: str | Path, data_dir: str | Path,
-                 token: str = "", quiet: bool = False) -> WorkstationServer:
-    return WorkstationServer((host, port), db_path, data_dir, token, quiet)
+                 token: str = "", quiet: bool = False,
+                 rules_path: str | Path = "", rules_root: str | Path = "") -> WorkstationServer:
+    return WorkstationServer((host, port), db_path, data_dir, token, quiet,
+                             rules_path, rules_root)
+
+
+def describe_rules(server: "WorkstationServer") -> dict:
+    """The read-only rules snapshot for the in-page inspector panel.
+
+    Served by the workstation itself - not cross-origin from AssetHealth - so
+    the viewer needs no CORS and works with zero extra configuration. A broken
+    rules.toml is returned as data, so the panel can explain the problem instead
+    of showing an empty table.
+    """
+    try:
+        return agk.describe_rules(Path(server.rules_root), server.rules_path or None)
+    except (agk.ConfigError, SystemExit) as exc:
+        return {"read_only": True,
+                "error": f"cannot read rules: {exc}",
+                "source": server.rules_path or "built-in defaults",
+                "global_budget": None,
+                "tag_budgets": []}
 
 
 # --------------------------------------------------------------------------- #
@@ -1327,6 +1356,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--token", default=os.environ.get(TOKEN_ENV, ""),
                         help=f"require a bearer token (default ${TOKEN_ENV}; empty = solo mode)")
     parser.add_argument("--quiet", action="store_true", help="only log errors")
+    parser.add_argument("--rules", metavar="PATH", default=os.environ.get(RULES_ENV, ""),
+                        help="rules.toml the in-page Rules & Budgets panel reports on, "
+                             f"read-only (default: ./{agk.RULES_FILENAME} in the working "
+                             f"directory, or ${RULES_ENV})")
     return parser
 
 
@@ -1346,7 +1379,8 @@ def main(argv: list[str] | None = None) -> int:
               file=sys.stderr)
 
     try:
-        httpd = build_server(args.host, args.port, db_path, data_dir, args.token, args.quiet)
+        httpd = build_server(args.host, args.port, db_path, data_dir, args.token, args.quiet,
+                             rules_path=args.rules, rules_root=Path.cwd())
     except OSError as exc:
         print(f"error: cannot bind {args.host}:{args.port}: {exc}", file=sys.stderr)
         return 2
@@ -1356,6 +1390,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"Art Workstation  http://{shown}:{port}/viewer")
     print(f"  database   {db_path.resolve()}")
     print(f"  storage    {data_dir.resolve()}")
+    rules_shown = Path(args.rules).resolve() if args.rules else Path.cwd() / agk.RULES_FILENAME
+    print(f"  rules      {rules_shown}  (GET /api/rules, read-only)")
     print(f"  auth       {'bearer token required' if args.token else 'solo mode (no token)'}")
     try:
         httpd.serve_forever()

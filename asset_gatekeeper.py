@@ -463,7 +463,8 @@ def apply_platform(document: dict, platform: str) -> dict:
     profile = platforms[platform]
     if not isinstance(profile, dict):
         raise ConfigError(f"[platforms.{platform}] must be a table")
-    return _overlay_profile(document, profile, f"[platforms.{platform}]")
+    return _overlay_profile(document, profile, f"[platforms.{platform}]",
+                            keep_tag_tables=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -500,7 +501,8 @@ def apply_preset(document: dict, name: Optional[str]) -> dict:
     profile = PRESETS.get(key)
     if profile is None:
         raise ConfigError(f"unknown preset '{name}' (known: {', '.join(sorted(PRESETS))})")
-    return _overlay_profile(document, dict(profile), f"preset '{key}'")
+    return _overlay_profile(document, dict(profile), f"preset '{key}'",
+                            keep_tag_tables=True)
 
 
 def normalise_tag(value: object) -> str:
@@ -577,7 +579,8 @@ def resolve_tag(path: Path, budgets: dict[str, Budget], root: Optional[Path] = N
     return None, None
 
 
-def _overlay_profile(document: dict, profile: dict, where: str) -> dict:
+def _overlay_profile(document: dict, profile: dict, where: str,
+                     keep_tag_tables: bool = False) -> dict:
     """Merge one budget profile into a rules document, or refuse it loudly.
 
     Used by `[platforms.*]`, `[tags.*]` and the shipped presets — one merge
@@ -586,8 +589,15 @@ def _overlay_profile(document: dict, profile: dict, where: str) -> dict:
     """
     _reject_unknown(profile, (*PLATFORM_KEYS, *PLATFORM_SECTION_KEYS), where)
 
-    merged = {key: value for key, value in document.items()
-              if key not in ("platforms", "platform", "tags", "tagging", "preset")}
+    # A *tag* profile must not inherit sibling tag tables, so they are dropped by
+    # default. A platform or preset overlay is a different question - it refines
+    # the base budget, and dropping [tags] there silently disabled every tag
+    # budget in the project (found by tests/test_server.py: /api/rules showed an
+    # empty tag list whenever [platforms.<name>] was in play).
+    dropped = ["platforms", "platform", "preset"]
+    if not keep_tag_tables:
+        dropped += ["tags", "tagging"]
+    merged = {key: value for key, value in document.items() if key not in dropped}
     merged["mesh"] = dict(document.get("mesh", {}) or {})
     merged["texture"] = dict(document.get("texture", {}) or {})
     for key, value in profile.items():
@@ -1204,6 +1214,73 @@ def resolve_tagging(root: Path, args: argparse.Namespace,
     except ConfigError as exc:
         raise ConfigError(str(exc)) from exc
     return budgets, mode, DEFAULT_TAG_SIMILARITY if similarity is None else similarity
+
+
+def _budget_summary(budget: Budget) -> dict[str, object]:
+    """One budget, flattened into the handful of numbers a UI can show.
+
+    ``max_vertices`` is carried through as None: the gate enforces triangles,
+    not vertices, and inventing a number here would be a lie an artist acts on.
+    """
+    return {
+        "max_triangles": int(budget.max_triangles),
+        "max_vertices": int(getattr(budget, "max_vertices", 0) or 0) or None,
+        "max_texture_edge": int(budget.max_texture_edge),
+        "max_material_slots": int(budget.max_material_slots),
+        "max_bone_influences": int(budget.max_bone_influences),
+        "max_uv_channels": int(budget.max_uv_channels),
+        "power_of_two": bool(budget.require_power_of_two),
+        "texture_naming": bool(budget.enforce_texture_naming),
+        "allow_degenerate": bool(budget.allow_degenerate),
+        "check_references": bool(budget.check_references),
+    }
+
+
+def describe_rules(root: Path, rules_path: Optional[str | Path] = None,
+                   platform: str = "", preset: str = "",
+                   project_id: Optional[int] = None,
+                   project_name: Optional[str] = None) -> dict[str, object]:
+    """A read-only snapshot of the configuration the gate would enforce here.
+
+    The web inspectors show this, so it deliberately runs the *real* resolvers
+    instead of re-reading the TOML: one code path, one truth, no second parser
+    to drift. Nothing is written and no socket is opened, so it is safe to serve
+    to any artist who can open the dashboard.
+
+    The shape is stable and documented in the servers' ``/api/rules`` routes;
+    ``max_vertices`` is None because the gate has no vertex budget to report.
+    """
+    argv = [str(root)]
+    if rules_path:
+        argv += ["--rules", str(rules_path)]
+    if platform:
+        argv += ["--platform", platform]
+    if preset:
+        argv += ["--preset", preset]
+    args = build_parser().parse_args(argv)
+
+    budget, source, _overrides = resolve_budget(root, args)
+    tag_budgets, tag_mode, similarity = resolve_tagging(root, args)
+
+    return {
+        "read_only": True,
+        "generated_at": _utc_now(),
+        "root": str(root),
+        "source": str(source) if source else "built-in defaults",
+        "rules_file_found": bool(source),
+        "project_id": project_id,
+        "project_name": project_name,
+        "target_platform": budget.platform or "default",
+        "preset": str(getattr(budget, "preset", "") or "") or "none",
+        "tag_mode": tag_mode,
+        "tag_similarity": round(float(similarity), 3),
+        "vertex_budget_enforced": False,
+        "global_budget": _budget_summary(budget),
+        "tag_budgets": [
+            dict(tag=name, **_budget_summary(tag_budgets[name]))
+            for name in sorted(tag_budgets)
+        ],
+    }
 
 
 def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:

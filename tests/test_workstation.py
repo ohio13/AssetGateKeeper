@@ -508,6 +508,70 @@ expect("defaults are loopback and unauthenticated",
 expect("a bad data folder exits 2",
        aws.main(["--db", str(WORK / "missing" / "x.db"), "--data", str(WORK / "d")]) == 2)
 
+print("11. rules inspector endpoint")
+# The viewer is served by this server, so /api/rules must be same-origin here -
+# the panel can therefore work with no CORS and no second process running.
+insp_db, insp_data = fresh("inspector")
+insp_rules = WORK / "workstation_rules.toml"
+insp_rules.write_text(
+    'platform = "n64"\n'
+    "\n[mesh]\n"
+    "max_triangles = 1500\n"
+    "max_material_slots = 2\n"
+    "\n[texture]\n"
+    "max_edge = 64\n"
+    "\n[platforms.n64]\n"
+    "max_texture_edge = 32\n"
+    "\n[tags.rooms]\n"
+    "max_triangles = 8000\n"
+    "max_material_slots = 32\n",
+    encoding="utf-8")
+insp_server = aws.build_server("127.0.0.1", 0, insp_db, insp_data, quiet=True,
+                               rules_path=str(insp_rules), rules_root=str(WORK))
+threading.Thread(target=insp_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+insp_client = Client(insp_server.server_address[1])
+
+status, rules = insp_client.json("/api/rules")
+expect("GET /api/rules is served by the workstation itself", status == 200, str(status))
+expect("it is flagged read-only", rules.get("read_only") is True)
+expect("it carries the platform", rules.get("target_platform") == "n64",
+       str(rules.get("target_platform")))
+expect("it carries the effective global budget",
+       (rules["global_budget"]["max_triangles"], rules["global_budget"]["max_texture_edge"])
+       == (1500, 32), str(rules["global_budget"])[:100])
+tag_rows = rules.get("tag_budgets") or []
+expect("it carries the tag budgets the panel renders",
+       [row["tag"] for row in tag_rows] == ["rooms"], str(tag_rows)[:100])
+expect("a tag budget reports its own limits",
+       bool(tag_rows) and tag_rows[0]["max_triangles"] == 8000
+       and tag_rows[0]["max_material_slots"] == 32, str(tag_rows)[:100])
+expect("vertex caps are null rather than fabricated",
+       rules["global_budget"]["max_vertices"] is None
+       and rules.get("vertex_budget_enforced") is False)
+expect("the page links the panel to the same endpoint",
+       b"Rules &amp; Budgets" in insp_client.call("/viewer")[1]
+       and b"rules-table" in insp_client.call("/viewer")[1])
+insp_server.shutdown()
+insp_server.server_close()
+
+# Token mode must not turn the inspector into an open door.
+sec_db, sec_data = fresh("inspector_secure")
+sec_server = aws.build_server("127.0.0.1", 0, sec_db, sec_data, token="hunter2", quiet=True,
+                              rules_path=str(insp_rules), rules_root=str(WORK))
+threading.Thread(target=sec_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+expect("a token-protected workstation refuses /api/rules without one",
+       Client(sec_server.server_address[1]).json("/api/rules")[0] == 401)
+expect("the right token gets the inspector",
+       Client(sec_server.server_address[1], token="hunter2").json("/api/rules")[0] == 200)
+sec_server.shutdown()
+sec_server.server_close()
+
+rules_options = aws.build_parser().parse_args(["--rules", "studio.toml"])
+expect("the CLI can point the panel at a rules file",
+       rules_options.rules == "studio.toml", rules_options.rules)
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

@@ -716,7 +716,165 @@ animate();
     // ?live=0 turns the stream off: headless screenshots and kiosk displays never
     // finish loading while an EventSource holds the connection open.
     const params = new URLSearchParams(location.search);
-    if (params.get("live") !== "0") connectLive();
+/* ------------------------------------------------------- rules inspector */
+
+/* Read-only card: what the gate would enforce for this project. It renders the
+ * server's /api/rules payload and nothing else - no editing lives here, because
+ * a budget that can be changed from a review screen is a budget nobody owns. */
+
+const rules = { loaded: false, loading: false };
+
+function textureCell(edge, powerOfTwo) {
+  if (edge === null || edge === undefined) {
+    return '<span class="na" title="not enforced by the gate">—</span>';
+  }
+  const label = `${fmt(edge)} × ${fmt(edge)}`;
+  if (!powerOfTwo) return escapeHtml(label);
+  return `<span title="power-of-two required">${escapeHtml(label)}</span>`;
+}
+
+/* A number the gate does not enforce is not zero, it is unknown: showing "—"
+ * with an explanation beats inventing a limit an artist would optimise for. */
+function numberCell(value, options = {}) {
+  const { looser = false, title = "" } = options;
+  if (value === null || value === undefined || value === "") {
+    return '<span class="na" title="not enforced by the gate">—</span>';
+  }
+  const className = looser ? ' class="loose"' : "";
+  const hint = title ? ` title="${escapeHtml(title)}"` : "";
+  return `<span${className}${hint}>${fmt(value)}</span>`;
+}
+
+function renderRulesRow(label, kind, budget, baseline, isDefault) {
+  const looser = (value, base) => !isDefault && base !== null && base !== undefined
+                                && value !== null && value !== undefined && value > base;
+  const triangleIsLoose = looser(budget.max_triangles, baseline.max_triangles);
+  const cells = [
+    `<td class="cat">${escapeHtml(label)}${kind ? `<span class="kind">${escapeHtml(kind)}</span>` : ""}</td>`,
+    `<td class="num">${numberCell(budget.max_triangles, {
+      looser: triangleIsLoose,
+      title: triangleIsLoose ? "triangle budget is looser than the project default" : "",
+    })}</td>`,
+    `<td class="num">${numberCell(budget.max_vertices)}</td>`,
+    `<td class="num">${textureCell(budget.max_texture_edge, budget.power_of_two)}</td>`,
+    `<td class="num">${numberCell(budget.max_material_slots)}</td>`,
+  ];
+  return `<tr class="${isDefault ? "is-default" : ""}">${cells.join("")}</tr>`;
+}
+
+function renderRules(data) {
+  const meta = $("rules-meta");
+  const host = $("rules-table");
+  const budget = data.global_budget;
+
+  if (!budget) {
+    const message = data.error || "no budget available";
+    meta.innerHTML = `<span class="badge bad">rules unavailable</span>`
+      + `<span class="badge">${escapeHtml(data.source || "unknown source")}</span>`;
+    host.innerHTML = `<div class="rules-note">${escapeHtml(message)}</div>`;
+    return;
+  }
+
+  const tags = Array.isArray(data.tag_budgets) ? data.tag_budgets : [];
+  const platform = data.target_platform && data.target_platform !== "default"
+    ? `<span class="badge"><strong>platform</strong> ${escapeHtml(data.target_platform)}</span>`
+    : `<span class="badge" title="no [platforms.&lt;name&gt;] profile applied">`
+      + `<strong>platform</strong> default</span>`;
+  const tagMode = `<span class="badge${data.tag_mode === "strict" ? " warn" : ""}"`
+    + ` title="how a folder name is matched to a tag">`
+    + `<strong>tags</strong> ${escapeHtml(data.tag_mode || "suggest")}</span>`;
+  const pot = budget.power_of_two
+    ? `<span class="badge"><strong>textures</strong> power-of-two</span>`
+    : `<span class="badge warn"><strong>textures</strong> any size</span>`;
+  const degenerate = budget.allow_degenerate
+    ? `<span class="badge warn"><strong>degenerate</strong> allowed</span>`
+    : `<span class="badge"><strong>degenerate</strong> blocked</span>`;
+
+  meta.innerHTML = [platform, tagMode, pot, degenerate].join("");
+
+  host.innerHTML = `
+    <table class="rules-table">
+      <thead>
+        <tr>
+          <th>Category / tag</th>
+          <th class="num">Triangles</th>
+          <th class="num">Vertices</th>
+          <th class="num">Texture</th>
+          <th class="num">Slots</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${renderRulesRow("Project default", "global budget", budget, budget, true)}
+        ${tags.map((tag) => renderRulesRow(tag.tag, "tag", tag, budget, false)).join("")}
+      </tbody>
+    </table>
+    ${tags.length ? "" : `<div class="rules-note">No <code>[tags.*]</code> tables in this rules file -`
+      + ` every asset is measured against the project default.</div>`}
+    <div class="rules-note">
+      Read-only. Change these in <code>rules.toml</code> (or the AssetHealth budget planner),
+      then press ↻.
+      ${budget.max_vertices === null || budget.max_vertices === undefined
+        ? "Vertex caps are not enforced by the gate, so they show as —."
+        : ""}
+    </div>
+    <div class="rules-source">${escapeHtml(data.source || "")}</div>`;
+
+  $("status").textContent = tags.length
+    ? `${tags.length} tag budget${tags.length === 1 ? "" : "s"} loaded`
+    : "rules loaded";
+}
+
+async function loadRules(force = false) {
+  if (rules.loading || (rules.loaded && !force)) return;
+  rules.loading = true;
+  if (force || !rules.loaded) {
+    $("rules-meta").innerHTML = '<div class="empty">Loading rules…</div>';
+  }
+  try {
+    renderRules(await json("/api/rules"));
+    rules.loaded = true;
+  } catch (error) {
+    $("rules-meta").innerHTML =
+      `<span class="badge bad">cannot load rules</span>`;
+    $("rules-table").innerHTML =
+      `<div class="rules-note">${escapeHtml(error.message)}</div>`;
+  } finally {
+    rules.loading = false;
+  }
+}
+
+function setTab(name) {
+  for (const tab of document.querySelectorAll(".tab")) {
+    const active = tab.dataset.tab === name;
+    tab.classList.toggle("is-active", active);
+    tab.setAttribute("aria-selected", active ? "true" : "false");
+  }
+  $("pane-assets").classList.toggle("is-hidden", name !== "assets");
+  $("pane-rules").classList.toggle("is-hidden", name !== "rules");
+  document.body.classList.toggle("rules-open", name === "rules");
+  if (window.location.hash !== `#${name}`) {
+    window.history.replaceState(null, "", `#${name}`);
+  }
+  if (name === "rules") loadRules();
+}
+
+for (const tab of document.querySelectorAll(".tab")) {
+  tab.addEventListener("click", () => setTab(tab.dataset.tab));
+}
+$("rules-refresh").addEventListener("click", () => loadRules(true));
+
+/* `#rules` opens the tab directly, so a lead can paste a link that lands on the
+ * budgets instead of the asset list. `?tab=rules` does the same and survives the
+ * tools that strip a fragment (headless capture, some chat clients). */
+const requestedTab = (new URLSearchParams(window.location.search).get("tab")
+  || window.location.hash || "").replace(/^#/, "").toLowerCase();
+if (requestedTab === "rules" || requestedTab === "budgets") {
+  setTab("rules");
+} else {
+  loadRules();          // fetch on load, as specified: the panel is pre-populated
+}
+
+if (params.get("live") !== "0") connectLive();
 
     // ?asset=<id> is a shareable review link: "look at asset 12, LOD2".
     const wanted = Number(params.get("asset"));
