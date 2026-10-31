@@ -1,0 +1,112 @@
+# DCC integrations
+
+Same rules, same `rules.toml`, four different front doors — so the verdict reaches
+the artist where they actually work instead of in a terminal they never open.
+
+| Host | Path | Feedback | Can it block? |
+| :--- | :--- | :--- | :--- |
+| **Blender** | `blender/addon.py` | Panel in the 3D Viewport sidebar, problems in red | Pre-export check (artist decides) |
+| **Maya** | `maya/gatekeeper_maya.py` + `userSetup.py` | Shelf button + dialog + Script Editor list | Pre-export, in-scene |
+| **Houdini** | `houdini/sop_gatekeeper.py` | Node warning badge on cook | Non-fatal warning (never breaks the cook) |
+| **Unreal** | `unreal/init_unreal.py` + `import_gatekeeper.py` | Message Log + dialog after import | **Yes** for scripted imports; warn-only for drag-and-drop |
+
+All four read the project budget through the engine's own parser
+(`asset_gatekeeper.Budget.from_mapping`), so a rule can never mean different things
+in different apps.
+
+## Common environment
+
+```bash
+# folder containing asset_gatekeeper.py
+export ASSETGATEKEEPER_HOME=/path/to/asset-gatekeeper
+# optional: an explicit budget instead of <folder>/rules.toml
+export ASSETGATEKEEPER_RULES=/path/to/rules.toml
+# Unreal only: an interpreter that has trimesh + Pillow (for scripted imports)
+export ASSETGATEKEEPER_PYTHON=/path/to/python
+```
+
+Windows: set them in *System Properties > Environment Variables* or your launch
+script.
+
+## Blender
+
+1. *Edit > Preferences > Add-ons > Install…* → pick `blender/addon.py`, tick it.
+2. Sidebar (`N`) → **AssetGatekeeper** tab. Select objects, press
+   **Run Gatekeeper Check**.
+3. If the panel reports "engine error", the add-on's Python either lacks
+   `trimesh`/`Pillow` or `ASSETGATEKEEPER_HOME` is unset. Set *Engine python* in the
+   panel to any interpreter that has them — Blender's bundled Python usually does
+   not until you install them:
+   `<blender>/4.2/python/bin/python.exe -m pip install trimesh pillow watchdog`.
+
+The add-on exports the selection to a temp `.gltf` (so the check sees exactly what
+the exporter would write, not your viewport), runs the engine with `--json`, and
+paints the returned `problems` list into the panel.
+
+## Maya
+
+1. Copy `maya/gatekeeper_maya.py` and `maya/userSetup.py` to a directory on
+   `MAYA_SCRIPT_PATH` (e.g. `~/maya/scripts`), **or** merge the two blocks marked
+   in `userSetup.py` into your existing one.
+2. Restart Maya → an `AGK` shelf button and an **AssetGatekeeper** menu appear.
+3. Run it: `python("import gatekeeper_maya; gatekeeper_maya.run()")`.
+
+Maya is checked **in-scene, without exporting**: triangles via `polyEvaluate`,
+UV sets via `polyUVSet`, material slots via the connected `shadingEngine`s,
+influences via `polyEvaluate -weightedVertexInfluence` (falling back to a
+`skinPercent` sample), and zero-area faces via OpenMaya face areas. This catches
+things an exporter would silently fix.
+
+## Houdini
+
+1. Create a SOP of type **Python** (or use a *Python SOP* inside your HDA).
+2. Paste `houdini/sop_gatekeeper.py` into its Code field.
+3. On every cook it counts triangles, material slots (`shop_materialpath`), UV
+   channel attributes (`uv`, `uv2`, …) and zero-area prims, then posts a **node
+   warning badge**.
+
+It never raises `hou.Error` — a gate that breaks the cook is worse than no gate.
+Areas are computed on a sample (`MAX_PRIMS_FOR_AREA_SCAN`) so a 4M-prim cook stays
+interactive.
+
+## Unreal
+
+1. Copy `unreal/init_unreal.py` and `unreal/import_gatekeeper.py` into
+   `<Project>/Content/Python/`.
+2. Enable **Python Editor Script Plugin**.
+3. Set `ASSETGATEKEEPER_PYTHON` and `ASSETGATEKEEPER_HOME`; restart the editor.
+
+**Drag-and-drop is warn-only.** `OnAssetPreImport` is a notification, not a veto —
+by the time a Python delegate runs, the factory is already chosen and exceptions
+inside a delegate are swallowed. Dropped PNGs are checked from their header, and
+imported StaticMeshes are evaluated post-import with a dialog.
+
+**Scripted imports can be blocked for real:**
+
+```python
+from import_gatekeeper import import_with_gatekeeper, GatekeeperBlocked
+
+try:
+    import_with_gatekeeper(tasks)          # validates every source file first
+except GatekeeperBlocked as blocked:
+    unreal.log_error(f"{len(blocked.problems)} file(s) rejected")
+```
+
+A hard veto on drag-and-drop requires a C++ `UFactory::FactoryCreateFile` early-out.
+That is a plugin, not a Python script, and deliberately out of scope here.
+
+## What has been verified
+
+Honesty matters more than a green table: **none of these four hosts were available
+on the machine this was built on.** The plugin files are syntax-checked
+(`py_compile`) and written with capability probing plus fallbacks so a wrong API
+name degrades to a warning instead of taking the host down. Treat the first run in
+each app as a smoke test, and please open an issue with the version you tried.
+
+What *is* verified end-to-end is the contract they all depend on:
+
+```bash
+python asset_gatekeeper.py path/to/asset.gltf --json
+# {"file": "...", "name": "asset.gltf", "passed": false,
+#  "metric": "214,301 tris / 7 mat", "problems": ["214,301 triangles exceeds ..."]}
+```

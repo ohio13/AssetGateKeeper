@@ -1,0 +1,39 @@
+# rules.toml — drop this next to the assets you export and AssetGatekeeper picks
+# it up automatically. Every key is optional: anything you leave out keeps the
+# shipped default, so a project file only states what is different.
+#
+# Precedence:  explicit CLI flag  >  this file  >  built-in defaults
+#
+# Loaded with the standard library `tomllib` on Python 3.11+, `tomli` on older
+# interpreters, or the same structure written as JSON (`--rules rules.json`).
+
+[mesh]
+# Hard cap on triangles per mesh file.
+max_triangles = 50000
+
+# Draw-call proxy: how many distinct materials one mesh may reference.
+max_material_slots = 3
+
+# Deep data profiling (the bottlenecks that survive an art review).
+# Per-vertex bone weights. 4 is the mobile/web GPU limit.
+max_bone_influences = 4
+# Texture-coordinate sets (TEXCOORD_n). Engines usually stop at 4-8.
+max_uv_channels = 4
+# Zero-area triangles make Nanite and ray tracing compute garbage.
+allow_degenerate = false
+# Area below which a triangle counts as degenerate (world units squared).
+degenerate_epsilon = 1e-08
+
+[texture]
+# Longest edge in pixels (width or height, whichever is larger).
+max_edge = 2048
+
+# Reject sizes that are not a power of two (512, 1024, 2048, ...).
+power_of_two = true
+
+# Require the filename to end with one of the suffixes below.
+naming = true
+
+# Case-insensitive; a trailing index (`_Albedo_02`) is tolerated. Change this
+# list if your studio uses a different convention (e.g. "_BC", "_N", "_R").
+suffixes = ["_Albedo", "_Normal", "_Roughness"]
