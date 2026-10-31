@@ -769,6 +769,11 @@ td.name { font-weight: 600; }
 footer { color: var(--muted); font-size: 12px; margin-top: 36px; display: flex; gap: 16px; flex-wrap: wrap; }
 code { background: #0c1017; border: 1px solid var(--line); border-radius: 5px; padding: 1px 6px;
        font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+nav { display: flex; gap: 18px; margin-top: 14px; font-size: 13px; flex-wrap: wrap;
+      align-items: baseline; }
+nav a { color: var(--accent); text-decoration: none; font-weight: 600; }
+nav a:hover { text-decoration: underline; }
+nav .chips { color: var(--muted); font-size: 12px; letter-spacing: 0.02em; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 """
 
@@ -807,8 +812,7 @@ button.secondary { background: transparent; color: var(--text); border: 1px soli
 .notice.ok { display: block; color: var(--good); border-color: #1d4034; background: #10231c; }
 .notice.err { display: block; color: var(--bad); border-color: #4a2020; background: #241314; }
 .hint { color: var(--muted); font-size: 12px; margin-top: 8px; }
-nav { display: flex; gap: 14px; margin-top: 10px; font-size: 13px; }
-nav a { color: var(--accent); text-decoration: none; }
+/* nav is styled by the shared stylesheet (see CSS above) */
 """
 
 
@@ -878,10 +882,10 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
   {f'<div class="notice err" style="display:block">{_e(warn)}</div>' if warn else ''}
   <nav>
     <a href="{planner_href}">Budget planner &rarr;</a>
-    <span class="sub">tris&le;{budget['max_triangles']:,} &middot;
-      texture&le;{budget['max_texture_edge']} &middot;
-      mats&le;{budget['max_material_slots']} &middot;
-      heal={'on' if budget['auto_heal'] else 'off'}</span>
+    <span class="chips">tris &le; {budget['max_triangles']:,} &nbsp;|&nbsp;
+      texture &le; {budget['max_texture_edge']}px &nbsp;|&nbsp;
+      materials &le; {budget['max_material_slots']} &nbsp;|&nbsp;
+      auto-heal {'on' if budget['auto_heal'] else 'off'}</span>
   </nav>
 
   <h2>Global status</h2>
