@@ -66,16 +66,21 @@ from __future__ import annotations
 import argparse
 import array
 import base64
+import getpass
 import json
 import logging
 import os
+import platform
 import queue
 import re
 import struct
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from dataclasses import dataclass, replace
+from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Sequence
@@ -113,6 +118,21 @@ except ImportError:  # pragma: no cover
     np = None  # type: ignore[assignment]
 
 RULES_FILENAME = "rules.toml"
+
+# --- enterprise plumbing ---------------------------------------------------- #
+# Everything below is standard library only: the tool still has to run from a
+# bare interpreter on a studio workstation with no wheels of its own.
+SERVER_ENV_URL = "ASSET_GATEKEEPER_SERVER_URL"
+SERVER_ENV_TOKEN = "ASSET_GATEKEEPER_TOKEN"
+REMOTE_RULES_ENV = "ASSET_GATEKEEPER_REMOTE_RULES"
+RULES_CACHE_FILENAME = ".rules.cache.json"
+
+# A strict ceiling: a slow studio endpoint must never hold an artist's terminal.
+HTTP_TIMEOUT = 2.0
+# Bounded queue: an overnight 200k-file sweep must not grow memory without limit.
+TELEMETRY_QUEUE_MAX = 1_000
+PAYLOAD_SCHEMA = 1
+USER_AGENT = "AssetGatekeeper/1.0 (+https://github.com/ohio13/asset-gatekeeper)"
 
 
 LOG = logging.getLogger("assetgatekeeper")
@@ -162,7 +182,7 @@ class Budget:
         """
         if not isinstance(document, dict):
             raise ConfigError("the rules file must contain a table of settings")
-        _reject_unknown(document, ("mesh", "texture"), "the rules file")
+        _reject_unknown(document, ("mesh", "texture", "server"), "the rules file")
 
         mesh = document.get("mesh", {})
         texture = document.get("texture", {})
@@ -217,6 +237,9 @@ class Verdict:
     path: Path
     problems: tuple[str, ...] = ()
     metric: str = ""
+    # Structured equivalent of `metric` for machines: ("triangles", 4000), ...
+    # Kept as a tuple so a Verdict stays immutable and hashable.
+    stats: tuple[tuple[str, int], ...] = ()
 
     @property
     def passed(self) -> bool:
@@ -288,6 +311,15 @@ def _read_strings(table: dict, key: str, where: str) -> Optional[tuple[str, ...]
     return tuple(value)
 
 
+def _read_str(table: dict, key: str, where: str) -> Optional[str]:
+    if key not in table:
+        return None
+    value = table[key]
+    if not isinstance(value, str) or not value.strip():
+        raise ConfigError(f"{where}.{key} must be a non-empty string, got {value!r}")
+    return value.strip()
+
+
 def parse_rules(path: Path) -> dict:
     """Parse a rules file: TOML via tomllib/tomli, or plain JSON.
 
@@ -328,16 +360,28 @@ def load_rules(path: Optional[Path]) -> Optional[tuple[Budget, Path]]:
         raise ConfigError(f"{path}: {exc}") from exc
 
 
-def resolve_budget(root: Path, args: argparse.Namespace) -> tuple[Budget, Optional[Path], list[str]]:
+def resolve_budget(root: Path, args: argparse.Namespace,
+                   remote_document: Optional[dict] = None) -> tuple[Budget, Optional[Path], list[str]]:
     """Decide the effective budget.
 
-    Precedence: explicit CLI flag > ``rules.toml`` > shipped defaults. That keeps
-    the artist's folder authoritative for everyday work while letting CI tighten
-    or relax a single value without editing a file that artists own.
+    Precedence: explicit CLI flag > remote rules > ``rules.toml`` > shipped
+    defaults. The local file keeps the artist's folder authoritative for everyday
+    work; CI tightens a single value without editing a file artists own; and a
+    studio endpoint overrides both when a project is under central control.
+
+    ``remote_document`` is the already-fetched central profile (or None).  It is
+    passed in rather than fetched here so this function stays pure: no sockets,
+    no filesystem surprises, and the same code path in tests and in the field.
     """
-    rules_path = Path(args.rules).expanduser() if args.rules else root / RULES_FILENAME
-    loaded = load_rules(rules_path)
-    budget, source = loaded if loaded is not None else (Budget(), None)
+    if remote_document is not None:
+        try:
+            budget, source = Budget.from_mapping(remote_document), None
+        except ConfigError as exc:
+            raise ConfigError(f"remote rules: {exc}") from exc
+    else:
+        rules_path = Path(args.rules).expanduser() if args.rules else root / RULES_FILENAME
+        loaded = load_rules(rules_path)
+        budget, source = loaded if loaded is not None else (Budget(), None)
 
     overrides: dict[str, object] = {}
     if args.triangles is not None:
@@ -360,6 +404,160 @@ def resolve_budget(root: Path, args: argparse.Namespace) -> tuple[Budget, Option
     if not overrides:
         return budget, source, []
     return replace(budget, **overrides), source, sorted(overrides)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# Enterprise: central rules endpoint, offline cache, server settings
+# --------------------------------------------------------------------------- #
+
+def _utc_now() -> str:
+    """ISO-8601 UTC with a real offset, so logs from two studios can be merged."""
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _http_body(url: str, timeout: float = HTTP_TIMEOUT, token: str = "",
+               accept: str = "application/json") -> str:
+    """GET a URL and return its body as text. Raises on anything abnormal.
+
+    Kept dumb on purpose: the caller decides what a failure means (a cached
+    budget, versus nothing at all).
+    """
+    request = urllib.request.Request(url, headers={"Accept": accept,
+                                                   "User-Agent": USER_AGENT})
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
+        charset = "utf-8"
+        headers = getattr(response, "headers", None)
+        if headers is not None:
+            try:
+                charset = headers.get_content_charset() or "utf-8"
+            except AttributeError:  # plain dict in a test double
+                charset = "utf-8"
+        return response.read().decode(charset, errors="replace")
+
+
+@dataclass(frozen=True)
+class ServerSettings:
+    """Where the platform lives: telemetry sink, central budget, shared token."""
+
+    telemetry_url: str = ""
+    remote_rules_url: str = ""
+    token: str = ""
+
+    @property
+    def telemetry_enabled(self) -> bool:
+        return bool(self.telemetry_url)
+
+    @classmethod
+    def from_mapping(cls, table: dict, where: str = "[server]") -> "ServerSettings":
+        if not isinstance(table, dict):
+            raise ConfigError(f"{where} must be a table")
+        _reject_unknown(table, ("url", "token", "remote_rules_url"), where)
+        return cls(
+            telemetry_url=_read_str(table, "url", where) or "",
+            remote_rules_url=_read_str(table, "remote_rules_url", where) or "",
+            token=_read_str(table, "token", where) or "",
+        )
+
+
+def parse_rules_text(text: str, origin: str = "<remote>") -> dict:
+    """Parse a rules payload: JSON first (every Python), TOML second (3.11+).
+
+    Accepting JSON first means a studio can serve the same object from any web
+    stack, and older interpreters still work without ``tomli``.
+    """
+    body = text.lstrip("\ufeff").strip()
+    if not body:
+        raise ConfigError(f"{origin}: empty rules payload")
+    try:
+        if body.startswith("{"):
+            document = json.loads(body)
+        elif tomllib is not None:
+            document = tomllib.loads(body)
+        else:
+            raise ConfigError(
+                f"{origin}: payload is not JSON and TOML needs Python 3.11+ (tomllib)"
+            )
+    except ConfigError:
+        raise
+    except (ValueError, TypeError) as exc:
+        raise ConfigError(f"{origin}: {exc}") from exc
+    if not isinstance(document, dict):
+        raise ConfigError(f"{origin}: expected a JSON/TOML table at the top level")
+    return document
+
+
+def read_rules_cache(cache_path: Path) -> Optional[dict]:
+    """Return the last good remote profile, or None if there is nothing usable."""
+    try:
+        wrapper = json.loads(cache_path.read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError) as exc:
+        LOG.debug("rules cache unreadable (%s): %s", cache_path, exc)
+        return None
+    rules = wrapper.get("rules") if isinstance(wrapper, dict) else None
+    return rules if isinstance(rules, dict) else None
+
+
+def write_rules_cache(cache_path: Path, url: str, document: dict) -> None:
+    """Persist the remote profile atomically: a half-written cache is worse than none."""
+    payload = {"source": url, "fetched_at": _utc_now(), "rules": document}
+    staging = cache_path.with_name(cache_path.name + ".tmp")
+    try:
+        staging.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+        os.replace(staging, cache_path)
+    except OSError as exc:  # read-only watch folder: keep running, just say so
+        LOG.debug("could not write rules cache %s: %s", cache_path, exc)
+
+
+def fetch_remote_rules(url: str, cache_path: Path, timeout: float = HTTP_TIMEOUT,
+                       token: str = "") -> Optional[dict]:
+    """GET the central budget, falling back to the cached copy. Never raises.
+
+    The failure contract is the whole point of this function: a studio's network
+    being down must degrade to "yesterday's budget", not to a traceback that
+    stops the artists working. The broad ``except`` is deliberate.
+    """
+    try:
+        text = _http_body(url, timeout=timeout, token=token,
+                          accept="application/json, application/toml")
+        document = parse_rules_text(text, url)
+        Budget.from_mapping(document)  # validate before caching: a broken payload
+        write_rules_cache(cache_path, url, document)  # must not poison the good cache
+        LOG.debug("remote rules %s: %d bytes accepted", url, len(text))
+        return document
+    except Exception as exc:  # network, HTTP status, malformed payload, bad types
+        LOG.debug("remote rules fetch failed: %s: %s", type(exc).__name__, exc)
+        cached = read_rules_cache(cache_path)
+        if cached is not None:
+            LOG.warning("Central server offline; using cached rules profile (%s)", cache_path.name)
+            return cached
+        LOG.warning("Central server offline and no cached rules profile; using local settings")
+        return None
+
+
+def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:
+    """Merge server settings: CLI flag > environment > ``[server]`` > nothing.
+
+    Kept separate from :func:`resolve_budget` because the two answer different
+    questions — "what is allowed" versus "where does it come from, where does it
+    report" — and a studio may centralise one without the other.
+    """
+    from_file = ServerSettings()
+    rules_path = Path(args.rules).expanduser() if getattr(args, "rules", None) else root / RULES_FILENAME
+    if rules_path.is_file():
+        try:
+            from_file = ServerSettings.from_mapping(parse_rules(rules_path).get("server", {}))
+        except (ConfigError, ValueError, OSError) as exc:
+            raise ConfigError(f"{rules_path}: {exc}") from exc
+    return replace(
+        from_file,
+        telemetry_url=(getattr(args, "telemetry_url", None)
+                       or os.environ.get(SERVER_ENV_URL) or from_file.telemetry_url),
+        remote_rules_url=(getattr(args, "remote_rules", None)
+                          or os.environ.get(REMOTE_RULES_ENV) or from_file.remote_rules_url),
+        token=os.environ.get(SERVER_ENV_TOKEN) or from_file.token,
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -780,6 +978,7 @@ class Gatekeeper:
 
         problems: list[str] = []
         metrics = [f"{triangles:,} tris"]
+        stats: list[tuple[str, int]] = [("triangles", triangles)]
 
         if triangles == 0:
             # A zero-triangle mesh is never a legitimate export: it means a
@@ -798,6 +997,7 @@ class Gatekeeper:
             problems.append(str(exc))
         else:
             metrics.append(f"{slots} mat")
+            stats.append(("material_slots", slots))
             limit = self.budget.max_material_slots
             if slots > limit:
                 problems.append(
@@ -811,6 +1011,7 @@ class Gatekeeper:
         else:
             if influences:
                 metrics.append(f"{influences} inf")
+                stats.append(("max_bone_influences", influences))
                 limit = self.budget.max_bone_influences
                 if influences > limit:
                     problems.append(
@@ -824,6 +1025,7 @@ class Gatekeeper:
         else:
             if uv_channels:
                 metrics.append(f"{uv_channels} uv")
+                stats.append(("uv_channels", uv_channels))
                 limit = self.budget.max_uv_channels
                 if uv_channels > limit:
                     problems.append(f"{uv_channels} UV channels exceeds the {limit} channel limit")
@@ -834,13 +1036,14 @@ class Gatekeeper:
             except AssetError as exc:
                 problems.append(str(exc))
             else:
+                stats.append(("degenerate_triangles", degenerate))
                 if degenerate:
                     problems.append(
                         f"{degenerate:,} degenerate triangles (zero-area) - Nanite and ray "
                         f"tracing compute garbage from these"
                     )
 
-        return Verdict(path, tuple(problems), " / ".join(metrics))
+        return Verdict(path, tuple(problems), " / ".join(metrics), tuple(stats))
 
     # -- textures ---------------------------------------------------------- #
 
@@ -863,12 +1066,153 @@ class Gatekeeper:
             expected = ", ".join(self.budget.texture_suffixes)
             problems.append(f"name does not end with a standard suffix ({expected})")
 
-        return Verdict(path, tuple(problems), f"{width}x{height}")
+        return Verdict(path, tuple(problems), f"{width}x{height}",
+                       (("width", width), ("height", height)))
 
 
 # --------------------------------------------------------------------------- #
 # Reporting
 # --------------------------------------------------------------------------- #
+
+def _safe_username() -> str:
+    try:
+        return getpass.getuser()
+    except Exception:  # no passwd entry / locked-down container
+        return ""
+
+
+def build_telemetry_payload(verdict: Verdict, root: Optional[Path] = None) -> dict:
+    """One flat JSON object per asset: the studio's record of what was gated.
+
+    Deliberately flat — a data warehouse can ingest it without a nested schema,
+    and the plugin contract (``--json``) stays a superset of these keys.
+    """
+    path = verdict.path
+    relative = path.name
+    if root is not None:
+        try:
+            relative = path.relative_to(root).as_posix()
+        except ValueError:  # single-file mode: outside the watch folder
+            pass
+    try:
+        size_bytes = path.stat().st_size
+    except OSError:
+        size_bytes = -1
+    return {
+        "schema": PAYLOAD_SCHEMA,
+        "timestamp": _utc_now(),
+        "hostname": platform.node(),
+        "username": _safe_username(),
+        "platform": platform.platform(),
+        "python": platform.python_version(),
+        "name": path.name,
+        "path": relative,
+        "size_bytes": size_bytes,
+        "passed": verdict.passed,
+        "metric": verdict.metric,
+        "stats": dict(verdict.stats),
+        "problems": list(verdict.problems),
+    }
+
+
+class Telemetry:
+    """Fire-and-forget POST of every verdict to the studio endpoint.
+
+    Three rules, in priority order:
+
+    1. **Never raise.** A dead endpoint is a debug line, not a crash — the artist
+       still gets their PASSED/FAILED verdict either way.
+    2. **Never block the gate.** ``submit()`` only enqueues; one daemon thread
+       owns the sockets. A 2 s timeout can therefore delay the *network*, never
+       the inspection.
+    3. **Never grow without bound.** The queue is capped; past that, payloads are
+       dropped and counted rather than slowing the local run.
+    """
+
+    def __init__(self, url: str, root: Optional[Path] = None, token: str = "",
+                 timeout: float = HTTP_TIMEOUT, queue_max: int = TELEMETRY_QUEUE_MAX) -> None:
+        self.url = url
+        self.root = root
+        self.token = token
+        self.timeout = float(timeout)
+        self.sent = 0
+        self.failed = 0
+        self.dropped = 0
+        self._queue: "queue.Queue[Optional[dict]]" = queue.Queue(maxsize=queue_max)
+        self._thread: Optional[threading.Thread] = None
+        self._closed = False
+        if not url.lower().startswith("https://"):
+            # Asset names and paths are shipping in clear text; say it once.
+            LOG.warning("telemetry endpoint is not https - payloads are sent in clear text")
+
+    # -- producer side ------------------------------------------------------ #
+
+    def submit(self, verdict: Verdict, root: Optional[Path] = None) -> None:
+        """Enqueue one verdict. Never blocks, never raises."""
+        if self._closed:
+            return
+        try:
+            payload = build_telemetry_payload(verdict, self.root if root is None else root)
+        except Exception as exc:  # a malformed Verdict must not stop the line
+            self.dropped += 1
+            LOG.debug("telemetry: could not build payload: %s", exc)
+            return
+        self._ensure_worker()
+        try:
+            self._queue.put_nowait(payload)
+        except queue.Full:
+            self.dropped += 1
+            LOG.debug("telemetry: queue full, dropped %s", verdict.path.name)
+
+    def _ensure_worker(self) -> None:
+        if self._thread is None:
+            self._thread = threading.Thread(target=self._run, name="agk-telemetry", daemon=True)
+            self._thread.start()
+
+    # -- worker side -------------------------------------------------------- #
+
+    def _run(self) -> None:
+        while True:
+            payload = self._queue.get()
+            if payload is None:  # shutdown sentinel
+                return
+            self._post(payload)
+
+    def _post(self, payload: dict) -> None:
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            self.url, data=body, method="POST",
+            headers={"Content-Type": "application/json", "User-Agent": USER_AGENT},
+        )
+        if self.token:
+            request.add_header("Authorization", f"Bearer {self.token}")
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:  # noqa: S310
+                response.read()  # drain, so the socket is released promptly
+            self.sent += 1
+        except urllib.error.HTTPError as exc:
+            self.failed += 1
+            LOG.debug("telemetry: POST rejected (%s %s)", exc.code, exc.reason)
+        except Exception as exc:
+            # Silent by contract. The artist's terminal is not a network monitor,
+            # and -v turns this into a visible line for whoever is debugging it.
+            self.failed += 1
+            LOG.debug("telemetry: POST failed (%s): %s", type(exc).__name__, exc)
+
+    # -- lifecycle ---------------------------------------------------------- #
+
+    def close(self, timeout: Optional[float] = None) -> None:
+        """Flush what is already queued, bounded by one request timeout."""
+        self._closed = True
+        if self._thread is None:
+            return
+        try:
+            self._queue.put_nowait(None)
+        except queue.Full:
+            pass
+        self._thread.join(self.timeout if timeout is None else timeout)
+        LOG.debug("telemetry: %d sent, %d failed, %d dropped", self.sent, self.failed, self.dropped)
+
 
 class Reporter:
     """Formats verdicts as one terminal line each, with optional ANSI colour."""
@@ -879,10 +1223,11 @@ class Reporter:
     RESET = "\033[0m"
 
     def __init__(self, color: bool = True, root: Optional[Path] = None,
-                 json_mode: bool = False) -> None:
+                 json_mode: bool = False, telemetry: Optional[Telemetry] = None) -> None:
         self.color = color and self._ansi_supported()
         self.root = root
         self.json_mode = json_mode
+        self.telemetry = telemetry
         self.passed = 0
         self.failed = 0
         self._lock = threading.Lock()
@@ -913,6 +1258,9 @@ class Reporter:
         return str(path)
 
     def report(self, verdict: Verdict) -> None:
+        # Telemetry mirrors the local verdict; it never influences it.
+        if self.telemetry is not None:
+            self.telemetry.submit(verdict)
         if self.json_mode:
             # Machine-readable contract for the DCC plugins: one object per file.
             with self._lock:
@@ -945,6 +1293,11 @@ class Reporter:
                                           "failed": self.failed}}), flush=True)
             return
         LOG.info("%d asset(s): %d passed, %d failed", total, self.passed, self.failed)
+
+    def close(self, timeout: Optional[float] = None) -> None:
+        """Flush pending telemetry. Bounded, and a no-op when it is switched off."""
+        if self.telemetry is not None:
+            self.telemetry.close(timeout)
 
 
 # --------------------------------------------------------------------------- #
@@ -1155,6 +1508,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="accept texture names without a standard suffix")
     parser.add_argument("--rules", metavar="PATH",
                         help=f"rules file to use instead of <folder>/{RULES_FILENAME}")
+    parser.add_argument("--remote-rules", metavar="URL", default=None,
+                        help="fetch the budget from a central endpoint; cached locally for "
+                             f"offline use (or set {REMOTE_RULES_ENV})")
+    parser.add_argument("--telemetry-url", metavar="URL", default=None,
+                        help="POST every verdict to this endpoint (or set "
+                             f"{SERVER_ENV_URL})")
     parser.add_argument("--once", action="store_true", help="scan existing files and exit")
     parser.add_argument("--recursive", action="store_true", help="include subfolders")
     parser.add_argument("--json", action="store_true",
@@ -1192,19 +1551,42 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 2
 
     try:
-        budget, rules_source, overrides = resolve_budget(watch_dir, args)
+        server = resolve_server(watch_dir, args)
+    except ConfigError as exc:
+        LOG.error("invalid server settings: %s", exc)
+        return 2
+
+    # Fetch before resolution so precedence is one flat decision:
+    # CLI flag > remote rules > local rules.toml > defaults.
+    remote_document = None
+    if server.remote_rules_url:
+        remote_document = fetch_remote_rules(
+            server.remote_rules_url, watch_dir / RULES_CACHE_FILENAME, token=server.token
+        )
+
+    try:
+        budget, rules_source, overrides = resolve_budget(watch_dir, args, remote_document)
     except ConfigError as exc:
         LOG.error("invalid rules file: %s", exc)
         return 2
 
-    LOG.info("rules   %s", rules_source if rules_source is not None else "none (defaults)")
+    if remote_document is not None:
+        LOG.info("rules   %s (remote, cached as %s)",
+                 server.remote_rules_url, RULES_CACHE_FILENAME)
+    else:
+        LOG.info("rules   %s", rules_source if rules_source is not None else "none (defaults)")
     if overrides:
         LOG.info("cli     overriding %s", ", ".join(overrides))
     LOG.info("budget  %s", describe_budget(budget))
 
+    telemetry = None
+    if server.telemetry_enabled:
+        telemetry = Telemetry(server.telemetry_url, root=watch_dir, token=server.token)
+        LOG.info("report  %s", server.telemetry_url)
+
     gatekeeper = Gatekeeper(budget)
     reporter = Reporter(color=not args.no_color and not args.json, root=watch_dir,
-                        json_mode=args.json)
+                        json_mode=args.json, telemetry=telemetry)
 
     if root.is_file():
         if not is_candidate(root):
@@ -1212,11 +1594,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             return 2
         verdict = gatekeeper.check(root)
         reporter.report(verdict)
+        reporter.close()
         return 0 if verdict.passed else 1
 
     if args.once:
-        return run_once(watch_dir, gatekeeper, reporter, args.recursive)
-    return run_watch(watch_dir, gatekeeper, reporter, args.recursive)
+        status = run_once(watch_dir, gatekeeper, reporter, args.recursive)
+    else:
+        status = run_watch(watch_dir, gatekeeper, reporter, args.recursive)
+    reporter.close()
+    return status
 
 
 if __name__ == "__main__":

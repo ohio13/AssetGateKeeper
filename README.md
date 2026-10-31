@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-82%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-127%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -147,7 +147,7 @@ Drop a `rules.toml` in the folder you're watching and it becomes the project's b
 ```toml
 # rules.toml — lives next to the assets it governs.
 #
-# Precedence:  explicit CLI flag  >  this file  >  built-in defaults
+# Precedence:  explicit CLI flag  >  remote rules  >  this file  >  built-in defaults
 
 [mesh]
 max_triangles = 50000        # hard cap per mesh file
@@ -192,6 +192,94 @@ Load a shared file explicitly with `--rules path/to/rules.toml`. On Python < 3.1
 ```
 
 Files saved by Notepad or PowerShell carry a UTF-8 BOM; those load fine.
+
+---
+
+## Enterprise: central rules and telemetry
+
+Two optional integrations for teams running this behind a studio platform. Both
+are standard library only (`urllib`, `json`, `threading`) — the dependency-free
+profile is intact, and with neither switched on the tool behaves exactly as before.
+
+```toml
+# rules.toml — [server] is optional
+[server]
+url = "https://studio.example/api/verdicts"          # telemetry sink
+remote_rules_url = "https://studio.example/rules.json"  # central budget
+# token = "..."       # prefer ASSET_GATEKEEPER_TOKEN over committing this
+```
+
+| Knob | CLI | Environment | `rules.toml` |
+| :--- | :--- | :--- | :--- |
+| Telemetry sink | `--telemetry-url URL` | `ASSET_GATEKEEPER_SERVER_URL` | `[server] url` |
+| Central budget | `--remote-rules URL` | `ASSET_GATEKEEPER_REMOTE_RULES` | `[server] remote_rules_url` |
+| Shared token | — | `ASSET_GATEKEEPER_TOKEN` | `[server] token` |
+
+### Remote rules with an offline cache
+
+```bash
+python asset_gatekeeper.py "D:\Exports" --remote-rules https://studio.example/rules.json
+```
+
+The endpoint returns the same document as `rules.toml`, as JSON (any Python) or
+TOML (3.11+). Precedence becomes **CLI flag > remote rules > `rules.toml` > defaults**,
+so central policy overrides an artist-owned file while CI can still tighten one
+value for a ship build.
+
+A successful fetch is cached to `.rules.cache.json` in the watch folder. If the
+network is down, slow, or returns something unparseable, the tool loads the cached
+profile, prints one warning, and keeps working:
+
+```
+14:22:31 Central server offline; using cached rules profile (.rules.cache.json)
+14:22:31 rules   https://studio.example/rules.json (remote, cached as .rules.cache.json)
+14:22:31 budget  tris<=20  texture<=2048px  pot=on  materials<=1  ...
+```
+
+A malformed payload can never poison the cache: the new document is validated
+tightly *before* it is written, and the previous good copy survives. With no cache
+at all, the run degrades to the local `rules.toml` and then to the shipped defaults.
+
+### Verdict telemetry
+
+Every verdict is POSTed as one flat JSON object, so a warehouse can ingest it
+without bespoke parsing:
+
+```json
+{
+  "schema": 1,
+  "timestamp": "2026-10-31T15:23:28+00:00",
+  "hostname": "WS-ART-014", "username": "jdoe",
+  "platform": "Windows-11-10.0.26100-SP0", "python": "3.11.0",
+  "name": "boss_statue.gltf", "path": "props/boss_statue.gltf", "size_bytes": 1160991,
+  "passed": false, "metric": "72,500 tris / 4 mat",
+  "stats": {"triangles": 72500, "material_slots": 4, "degenerate_triangles": 0},
+  "problems": ["72,500 triangles exceeds the 50,000 budget (+22,500)",
+               "4 material slots exceeds the 3 slot budget (draw calls)"]
+}
+```
+
+`path` is **relative to the watch folder**, never the artist's absolute layout.
+A token, when configured, is sent as `Authorization: Bearer <token>`.
+
+**The network cannot slow the gate.** Three separate guards, because this is the
+one feature that could ruin a studio's day:
+
+| Guard | What it prevents |
+| :--- | :--- |
+| `submit()` only enqueues; one daemon thread owns the sockets | A slow endpoint delaying a verdict, ever |
+| `urlopen(..., timeout=2.0)` on every request | A hung TCP connection parking the worker forever |
+| Capped queue (1,000) that drops and counts | An overnight 200k-file sweep growing memory without bound |
+
+Failures are silent by contract: `-v` turns them into `telemetry: POST failed
+(TimeoutError): timed out`, and `telemetry: 2 sent, 0 failed, 0 dropped` appears at
+shutdown. Nothing is retried — a gate that spools failed telemetry to disk is a
+gate that will eventually fill an artist's drive.
+
+> **Costs worth knowing:** shutdown flushes the queue with at most one 2 s wait,
+> and an unreachable `--remote-rules` endpoint adds up to 2 s to startup. Both are
+> once per run, never per asset. Telemetry over plain `http://` is allowed but
+> warned about, since asset names and paths travel in clear text.
 
 ---
 
@@ -322,6 +410,8 @@ python asset_gatekeeper.py [folder] [options]
 | `--once` | Inspect everything present, print a summary, exit `0`/`1` |
 | `--recursive` | Include subfolders |
 | `--rules PATH` | Use a specific rules file instead of `<folder>/rules.toml` |
+| `--remote-rules URL` | Fetch the budget from a central endpoint, cached offline as `.rules.cache.json` |
+| `--telemetry-url URL` | POST every verdict to this endpoint (2 s timeout, never blocks) |
 | `--triangles N` | Override the triangle budget |
 | `--max-texture EDGE` | Override the max texture edge, in pixels |
 | `--max-materials N` | Override the material-slot budget |
@@ -363,7 +453,7 @@ No changes are needed in the watcher, the reporter, or the queue. Rules are data
 Two layers, because unit tests and DCC reality fail in different ways.
 
 ```bash
-# 1. rules, parsers, config precedence — 82 assertions, no network, no GPU
+# 1. rules, parsers, config precedence — 127 assertions, no network, no GPU
 python tests/gen_test_assets.py
 python tests/test_gatekeeper.py
 
@@ -374,13 +464,13 @@ python tests/run_headless_integration.py
 ```
 asset_gatekeeper.py              the tool (single file)
 asset_gatekeeper.example.toml    rules.toml template
-README.md  LICENSE  .gitignore
+README.md  LICENSE  .gitignore  .gitattributes
 .github/workflows/
-  ci.yml                         every push/PR: lint + 82 assertions + integration
+  ci.yml                         every push/PR: lint + 127 assertions + integration
   dcc-nightly.yml                nightly Blender export through the real watcher
 tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
-  test_gatekeeper.py             82 assertions over rules, parsers, config
+  test_gatekeeper.py             127 assertions over rules, parsers, config
   run_headless_integration.py    drives headless DCC exports through the gate
 plugins/
   blender/addon.py               sidebar panel + selection check
@@ -457,7 +547,7 @@ Both DCC snippets are written to `<workdir>/dcc_snippets/` every run, ready to p
 `.github/workflows/ci.yml` runs on every push and pull request: `pyflakes` over the
 engine and tests, a syntax check of all four plugins (`compileall`, because
 `bpy.props` annotations make pyflakes emit bogus F722 forward-annotation errors),
-the 82-assertion suite, and the integration harness in `--synthetic` mode, on
+the 127-assertion suite, and the integration harness in `--synthetic` mode, on
 Ubuntu and Windows × Python 3.11 and 3.12.
 
 `.github/workflows/dcc-nightly.yml` downloads a pinned Blender (cached between
@@ -476,6 +566,13 @@ can't live in a runner.
 - **Material slots are per file, not per object.** A merged export with three materials across forty objects reads as three slots. Correct for draw calls; not a per-object budget.
 - **Stability is a heuristic.** A file that pauses longer than the quiet window mid-write can still be inspected early. Prefer atomic writes (write to `.tmp`, then rename) in your exporter and this problem disappears entirely.
 - **Textures embedded inside a glTF** aren't inspected — only standalone `.png` files.
+- **Remote rules are trusted, not signed.** Whoever controls the endpoint controls the
+  budget; run it over HTTPS and rotate the shared token. There is no signature check
+  and no pinning — deliberately, because the alternative is a key-management story
+  nobody wants to hear about for a linting tool.
+- **Telemetry is fire-and-forget.** No retry, no spooling, no batching; a verdict lost
+  to a network blip is lost. If you need delivery guarantees, point the endpoint at
+  something durable rather than making the gate block to provide them.
 - **Not a substitute for an engine-side audit.** This gate stops mistakes at source; it doesn't replace profiling.
 
 ---

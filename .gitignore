@@ -9,6 +9,10 @@ venv/
 dropbox/
 scratch/
 
+# Runtime state written into a watch folder by --remote-rules
+.rules.cache.json
+.rules.cache.json.tmp
+
 # Local editor / OS noise
 .DS_Store
 Thumbs.db

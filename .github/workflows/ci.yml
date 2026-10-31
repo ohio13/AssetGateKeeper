@@ -44,7 +44,7 @@ jobs:
       - name: Generate fixtures
         run: python tests/gen_test_assets.py
 
-      - name: Unit suite (82 assertions)
+      - name: Unit suite (127 assertions)
         run: python tests/test_gatekeeper.py
 
       - name: Headless integration (synthetic exporter)

@@ -2,7 +2,7 @@
 # it up automatically. Every key is optional: anything you leave out keeps the
 # shipped default, so a project file only states what is different.
 #
-# Precedence:  explicit CLI flag  >  this file  >  built-in defaults
+# Precedence:  explicit CLI flag  >  remote rules  >  this file  >  defaults
 #
 # Loaded with the standard library `tomllib` on Python 3.11+, `tomli` on older
 # interpreters, or the same structure written as JSON (`--rules rules.json`).
@@ -37,3 +37,23 @@ naming = true
 # Case-insensitive; a trailing index (`_Albedo_02`) is tolerated. Change this
 # list if your studio uses a different convention (e.g. "_BC", "_N", "_R").
 suffixes = ["_Albedo", "_Normal", "_Roughness"]
+
+# --------------------------------------------------------------------------- #
+# Optional: studio platform integration. Delete this table for a standalone tool.
+# --------------------------------------------------------------------------- #
+
+[server]
+# POST one JSON object per verdict here. 2 s timeout, background thread, never
+# blocks the gate. Environment variable ASSET_GATEKEEPER_SERVER_URL overrides it.
+# url = "https://studio.example/api/verdicts"
+
+# Central budget. Cached to .rules.cache.json so an outage degrades to the last
+# known-good profile instead of stopping the artists.
+# remote_rules_url = "https://studio.example/rules.json"
+
+# Bearer token for both calls. Prefer ASSET_GATEKEEPER_TOKEN: a committed rules
+# file is a committed secret.
+# token = ""
+
+# NOTE: all three keys are commented out on purpose. An empty [server] table is
+# valid (it means "no platform"), but a stray "url = " with no value is not.
