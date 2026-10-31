@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-127%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-197%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -283,6 +283,73 @@ gate that will eventually fill an artist's drive.
 
 ---
 
+## AssetHealth: the receiving dashboard
+
+`server/asset_health_server.py` is the studio end of the pipe: one file,
+`http.server` + `sqlite3` + `json`, no framework, no ORM, no JS build step. Point
+the gate at it and it becomes the answer to "which rules are actually costing us?"
+
+```bash
+python server/asset_health_server.py --port 8080
+# then, in each artist's terminal or CI job:
+python asset_gatekeeper.py "D:\Exports" --once --telemetry-url http://studio:8080/api/telemetry
+```
+
+![AssetHealth dashboard](server/dashboard.png)
+
+| Route | Method | Returns |
+| :--- | :--- | :--- |
+| `/api/telemetry` | `POST` | Stores one verdict + its problems, `201 {"stored": true, "id": 41}` |
+| `/dashboard` | `GET` | The HTML page above |
+| `/api/summary` | `GET` | The same totals and ranking as JSON, for a wallboard or a test |
+| `/` | `GET` | `302` → `/dashboard` |
+
+### Auth
+
+Set `AUTH_TOKEN` (or pass `--token`) and every request needs
+`Authorization: Bearer <token>`; anything else is a `401` before the database is
+touched. The comparison is constant-time, and the server binds to `127.0.0.1` by
+default — reaching it from the network is a deliberate `--host 0.0.0.0`, which the
+boot log calls out when no token is set.
+
+### What it stores
+
+```sql
+verdicts(id, timestamp, received_at, hostname, username, os,
+         filename, filepath, filesize, passed, metric)
+problems(id, verdict_id REFERENCES verdicts(id) ON DELETE CASCADE, message)
+meta(key, value)          -- 'seeded' marker
+```
+
+One row per asset, one row per problem, joined by `verdict_id` — which is why the
+`Verdict` tuple of problems exists in the first place. `PRAGMA foreign_keys=ON` is
+set per connection so deleting a verdict takes its problems with it, and WAL mode
+keeps the dashboard readable while verdicts are landing.
+
+### The three numbers
+
+- **Global status** — total scanned, passed, failed, pass rate, distinct workstations.
+- **Wall of shame** — the last 20 failures, newest first, each with *every* reason it
+  broke, plus who and which machine.
+- **Top bottlenecks** — every problem string is bucketed into the rule a lead thinks
+  in (`Triangle budget`, `Non-power-of-two`, `Bone influences`, …) and ranked. Unknown
+  text is counted, never dropped, under `Other`.
+
+### Demo data on first launch
+
+A brand-new database is seeded with 13 fake verdicts across four workstations and
+six rules, so the page is layout-complete the first time you open it. It happens
+exactly once — a `meta.seeded` marker makes reseeding impossible even if you delete
+rows. Use `--no-seed` for a clean deployment.
+
+> **Limits worth knowing:** `timestamp` is the client's clock (`received_at` is the
+> server's, if you doubt a workstation); bottlenecks reads the `problems` table and
+> buckets in Python, which is fine to ~100k rows and wants a `GROUP BY` after that;
+> there is no pagination, no retention policy, and no TLS — put it behind your
+> reverse proxy, and treat the shared token as shared, not per-user.
+
+---
+
 ## DCC integrations
 
 Same rules, four front doors — the verdict arrives where the artist actually works.
@@ -450,14 +517,17 @@ No changes are needed in the watcher, the reporter, or the queue. Rules are data
 
 ## Testing
 
-Two layers, because unit tests and DCC reality fail in different ways.
+Three layers, because unit tests, networks and DCC reality fail in different ways.
 
 ```bash
 # 1. rules, parsers, config precedence — 127 assertions, no network, no GPU
 python tests/gen_test_assets.py
 python tests/test_gatekeeper.py
 
-# 2. real exporter -> real file -> real verdict (headless Blender / Unreal)
+# 2. the dashboard server — 70 assertions over real sockets, ephemeral port
+python tests/test_server.py
+
+# 3. real exporter -> real file -> real verdict (headless Blender / Unreal)
 python tests/run_headless_integration.py
 ```
 
@@ -471,7 +541,11 @@ README.md  LICENSE  .gitignore  .gitattributes
 tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
   test_gatekeeper.py             127 assertions over rules, parsers, config
+  test_server.py                 70 assertions: ingest, auth, HTML, cascade delete
   run_headless_integration.py    drives headless DCC exports through the gate
+server/
+  asset_health_server.py         dashboard: HTTP + SQLite, stdlib only
+  dashboard.png                  what /dashboard looks like (README) 
 plugins/
   blender/addon.py               sidebar panel + selection check
   maya/gatekeeper_maya.py        in-scene checks via maya.cmds / OpenMaya
@@ -486,6 +560,16 @@ The suite generates its own fixtures — OBJ + MTL with 1 and 4 materials, an OB
 ```
 FAILURES: none
 ```
+
+### Server suite
+
+`tests/test_server.py` starts the real `ThreadingTCPServer` on port `0` and talks
+to it over real sockets, because the failures that matter there are HTTP-level:
+status codes, keep-alive, bodies. It covers the payload contract and aliases,
+`401` for a missing/wrong token or wrong scheme, `400` for invalid JSON, arrays
+and missing filenames, `413` for an oversized body, `404`/`405` routing, HTML
+escaping of hostile filenames, the `ON DELETE CASCADE` on `problems`, and that
+seeding happens exactly once.
 
 ### Headless DCC integration
 

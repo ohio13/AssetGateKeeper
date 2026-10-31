@@ -35,8 +35,8 @@ jobs:
       # bpy.props property annotations make pyflakes emit bogus F722
       # ("syntax error in forward annotation"), so the engine and tests are
       # linted here and the plugins are syntax-checked below instead.
-      - name: Lint engine + tests
-        run: python -m pyflakes asset_gatekeeper.py tests/test_gatekeeper.py tests/gen_test_assets.py tests/run_headless_integration.py
+      - name: Lint engine, server + tests
+        run: python -m pyflakes asset_gatekeeper.py server/asset_health_server.py tests/test_gatekeeper.py tests/test_server.py tests/gen_test_assets.py tests/run_headless_integration.py
 
       - name: Syntax-check DCC plugins
         run: python -m compileall -q plugins
@@ -46,6 +46,11 @@ jobs:
 
       - name: Unit suite (127 assertions)
         run: python tests/test_gatekeeper.py
+
+      # Spins the real dashboard server on an ephemeral port and drives it over
+      # real sockets: ingest, bearer auth, 400/404/405/413, HTML, cascade delete.
+      - name: Server suite (70 assertions)
+        run: python tests/test_server.py
 
       - name: Headless integration (synthetic exporter)
         run: python tests/run_headless_integration.py --synthetic

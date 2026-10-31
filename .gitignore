@@ -13,6 +13,11 @@ scratch/
 .rules.cache.json
 .rules.cache.json.tmp
 
+# AssetHealth server database (created on first run)
+asset_health.db
+asset_health.db-wal
+asset_health.db-shm
+
 # Local editor / OS noise
 .DS_Store
 Thumbs.db
