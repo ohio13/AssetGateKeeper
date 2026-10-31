@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-490%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-551%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -57,17 +57,54 @@ Everything is configurable per folder with a `rules.toml`, and every rule can be
 
 ## Install
 
+Two ways in. The dependency line is worth stating plainly, because it is the
+question everyone asks first:
+
+| Part | Needs |
+| :--- | :--- |
+| **The gate** (`asset_gatekeeper.py`) | `trimesh` + `pillow` — the texture lookups and deep mesh profiling cannot be done without them, and a gate that silently skipped half its rules would be worse than one that refuses to start |
+| **The watch loop** | `watchdog`, or nothing at all: it falls back to polling |
+| **Healer, LOD engine, AssetHealth, Art Workstation** | standard library only |
+| **The viewer** | Three.js, from a CDN |
+
 ```bash
-python -m pip install watchdog trimesh pillow
+# 1. as a package (recommended: gives you the `asset-gatekeeper` command)
+pip install "asset-gatekeeper[full]"       # or: pip install .[full] from a checkout
 ```
 
-Then grab the single file and run it — there is nothing to install, build, or register.
-
 ```bash
+# 2. as a single file, no install at all
 curl -O https://raw.githubusercontent.com/ohio13/asset-gatekeeper/main/asset_gatekeeper.py
+python asset_gatekeeper.py --help
 ```
 
 **Requirements:** Python 3.11+ (uses the standard-library `tomllib`). Python 3.9–3.10 works if you `pip install tomli`, or if you provide rules as JSON.
+
+### First run: the setup wizard
+
+```bash
+asset-gatekeeper --init
+# AssetGatekeeper setup
+# Folder to watch [C:\pipeline\assets]:
+# Triangle budget per mesh [50000]:
+# Material slots per mesh [3]:
+# Max texture edge (512/1024/2048/4096) [2048]:
+# Default platform profile (none/mobile/console/pc) [none]:
+# Enable auto-healing (off is safer) [y/N]:
+#
+#   folder   C:\pipeline\assets
+#   rules    C:\pipeline\assets\rules.toml
+#   budget   tris<=50,000  texture<=2048px  materials<=3
+#
+# Next:
+#   asset-gatekeeper "C:\pipeline\assets" --once          # one sweep
+#   asset-gatekeeper "C:\pipeline\assets"                 # watch it live
+```
+
+`--init` writes a `rules.toml` with your answers, the three platform profiles, and
+healing explicitly off. `--yes` takes every default (safe for scripts), `--force`
+overwrites an existing file, and a prompt that hits EOF falls back to its default
+instead of hanging a CI job.
 
 ---
 
@@ -803,7 +840,7 @@ No changes are needed in the watcher, the reporter, or the queue. Rules are data
 Three layers, because unit tests, networks and DCC reality fail in different ways.
 
 ```bash
-# 1. rules, config, healing, VCS hooks — 252 assertions, no network, no GPU
+# 1. rules, config, healing, VCS hooks — 282 assertions, no network, no GPU
 python tests/gen_test_assets.py
 python tests/test_gatekeeper.py
 
@@ -818,6 +855,7 @@ python tests/run_headless_integration.py
 asset_gatekeeper.py              the tool (single file)
 healer.py                        opt-in repair engine (only loaded with --auto-heal)
 asset_gatekeeper.example.toml    rules.toml template
+pyproject.toml  setup.py         pip-installable (sset-gatekeeper command)
 ASSET_DIFF_ENGINE_SPEC.md        design for the next subsystem (not implemented)
 README.md  LICENSE  .gitignore  .gitattributes
 .github/workflows/
@@ -825,9 +863,9 @@ README.md  LICENSE  .gitignore  .gitattributes
   dcc-nightly.yml                nightly Blender export through the real watcher
 tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
-  test_gatekeeper.py             252 assertions: rules, config, healing, hooks, audits
-  test_server.py                 161 assertions: tenancy, ingest, alerts, throttle
-  test_workstation.py            77 assertions: storage, LODs, collision, notes, refs, auth
+  test_gatekeeper.py             283 assertions: rules, config, healing, hooks, audits, packaging
+  test_server.py                 172 assertions: tenancy, ingest, alerts, throttle, SSE
+  test_workstation.py            96 assertions: storage, LODs, collision, notes, refs, SSE, report
   run_headless_integration.py    drives headless DCC exports through the gate
 server/
   asset_health_server.py         dashboard + planner + ingest, stdlib only
@@ -941,6 +979,12 @@ Both DCC snippets are written to `<workdir>/dcc_snippets/` every run, ready to p
 
 ### Continuous integration
 
+`.github/workflows/asset_gatekeeper.yml` is the template to copy into *your*
+repository: it triggers on changes to `*.obj` / `*.gltf` / `*.glb` / `*.png` /
+`rules.toml`, installs the package, runs `--audit` (advisory, summarised in the job)
+and then `--once` (blocking). Broken references fail the PR because
+`check_references` is on by default — the audit step is a report, not the gate.
+
 `.github/workflows/ci.yml` runs on every push and pull request: `pyflakes` over the
 engine and tests, a syntax check of all four plugins (`compileall`, because
 `bpy.props` annotations make pyflakes emit bogus F722 forward-annotation errors),
@@ -984,6 +1028,43 @@ or with the button.
 
 `/viewer?asset=12&lod=LOD2` is a shareable link straight to one asset at one LOD —
 paste it into a review thread instead of "open the workstation and find it".
+
+### Live updates (Server-Sent Events)
+
+Both servers stream changes to open pages, so a lead watching the dashboard sees a
+verdict the moment an artist exports — no polling, no refresh button.
+
+| Server | Endpoint | Events |
+| :--- | :--- | :--- |
+| AssetHealth | `GET /api/events` | `verdict`, `budget` |
+| Art Workstation | `GET /api/events` | `asset`, `asset-deleted`, `notes`, `collision`, `lod` |
+
+It is a long-lived `GET` with `Connection: close` and no chunked encoding, one
+daemon thread per open tab, a bounded queue per subscriber, and a `: ping` every
+15 s so proxies do not hang up. A tab that stops reading drops its oldest events
+rather than growing without bound — the dashboard cares about the latest state,
+not the history. The dashboard reloads itself only when the tab is visible and at
+most once every 3 s, so a 300-asset sweep cannot lock the browser in a loop.
+
+```js
+const source = new EventSource("/api/events?token=" + token);
+source.addEventListener("verdict", (event) => {
+  const { status, name } = JSON.parse(event.data);   // {"type":"verdict", ...}
+});
+```
+
+### Export a report
+
+`GET /api/assets/<id>/report` returns a **single self-contained HTML file** —
+inline CSS, no scripts, no external images — with the asset's metadata, the gate's
+verdict, the reference audit, the LOD table, the collision proxy and every review
+note. `?download=1` adds `Content-Disposition: attachment`.
+
+It is built to be attached to a ticket, printed, or opened in five years and still
+look the same. The verdict comes from running the gate over the stored file with
+the **default budget** (50k tris / 3 slots / 2048px), and the report says so:
+the workstation does not own budgets, and pretending otherwise would invent
+numbers.
 
 ### LOD generation (zero dependencies)
 

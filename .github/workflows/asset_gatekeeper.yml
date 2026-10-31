@@ -1,0 +1,98 @@
+name: Asset Gatekeeper
+
+# Drops the gate onto the pull request: a mesh that blows a budget, a texture
+# that is not a power of two, or a .gltf pointing at a texture nobody committed
+# turns the PR red before an artist ever opens the engine.
+#
+# Set the folder to gate with the workflow input, the ASSET_DIR environment
+# variable below, or by committing your assets to ./assets.
+
+on:
+  pull_request:
+    # Only run when something that can affect assets changed.
+    paths:
+      - "**/*.obj"
+      - "**/*.gltf"
+      - "**/*.glb"
+      - "**/*.png"
+      - "**/*.mtl"
+      - "rules.toml"
+      - ".github/workflows/asset_gatekeeper.yml"
+  push:
+    branches: [main]
+    paths:
+      - "**/*.obj"
+      - "**/*.gltf"
+      - "**/*.glb"
+      - "**/*.png"
+      - "rules.toml"
+  workflow_dispatch:
+    inputs:
+      path:
+        description: Folder containing the assets to gate
+        required: false
+        default: ""
+
+env:
+  ASSET_DIR: assets          # change this, or use the workflow input
+
+jobs:
+  gate:
+    name: gate assets
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the gate
+        run: |
+          python -m pip install --upgrade pip
+          # [full] adds watchdog/trimesh/pillow, which the texture and PBR checks
+          # need. The tool still runs on a bare interpreter without them.
+          python -m pip install ".[full]"
+
+      - name: Resolve the asset folder
+        id: target
+        shell: bash
+        run: |
+          dir="${{ github.event.inputs.path || '' }}"
+          dir="${dir:-$ASSET_DIR}"
+          if [ ! -d "$dir" ]; then
+            echo "::warning::'$dir' does not exist in this repository; skipping the gate."
+            echo "found=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          fi
+
+      # Advisory, never blocking: an orphaned texture is worth knowing about but
+      # is not a reason to stop a merge. Broken references *are* blocking, and
+      # they come through the gate below because check_references is on by default.
+      - name: Reference and orphan audit
+        if: steps.target.outputs.found == 'true'
+        continue-on-error: true
+        run: |
+          asset-gatekeeper "${{ steps.target.outputs.dir }}" --audit --no-color \
+            | tee audit.txt
+          echo "### Reference audit" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat audit.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Gate every asset
+        if: steps.target.outputs.found == 'true'
+        run: asset-gatekeeper "${{ steps.target.outputs.dir }}" --once --no-color
+
+      - name: Publish the audit summary
+        if: always() && steps.target.outputs.found == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-audit
+          path: audit.txt
+          retention-days: 7
+          if-no-files-found: ignore

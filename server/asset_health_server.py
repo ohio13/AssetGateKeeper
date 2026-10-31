@@ -696,6 +696,52 @@ def claim_alert_slot(db_path: str | Path, scope: str, cooldown: float,
         return cursor.rowcount == 1
 
 
+class Broadcaster:
+    """Fan-out of live events to connected dashboards (Server-Sent Events).
+
+    Every subscriber gets its own bounded queue: one slow browser tab must never
+    stall the ingest thread, and a tab that stops reading must not grow memory.
+    """
+
+    def __init__(self, queue_max: int = 100) -> None:
+        self._subscribers: set[queue.Queue] = set()
+        self._lock = threading.Lock()
+        self._queue_max = queue_max
+        self.published = 0
+
+    def subscribe(self) -> "queue.Queue[dict]":
+        channel: "queue.Queue[dict]" = queue.Queue(maxsize=self._queue_max)
+        with self._lock:
+            self._subscribers.add(channel)
+        return channel
+
+    def unsubscribe(self, channel: "queue.Queue[dict]") -> None:
+        with self._lock:
+            self._subscribers.discard(channel)
+
+    @property
+    def listeners(self) -> int:
+        with self._lock:
+            return len(self._subscribers)
+
+    def publish(self, event: dict) -> None:
+        """Never blocks, never raises: a dead tab is not an error."""
+        with self._lock:
+            channels = list(self._subscribers)
+        self.published += 1
+        for channel in channels:
+            try:
+                channel.put_nowait(event)
+            except queue.Full:
+                # Drop the oldest for this one subscriber rather than skipping the
+                # newest: the dashboard cares about the latest state, not history.
+                try:
+                    channel.get_nowait()
+                    channel.put_nowait(event)
+                except (queue.Empty, queue.Full):
+                    pass
+
+
 class Notifier:
     """Fire-and-forget webhook POSTs. Same three rules as the gate's telemetry.
 
@@ -974,6 +1020,7 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
   <h2>Top bottlenecks</h2>
   {tops_html}
 
+  <div id="live" class="sub" style="margin-top:14px"></div>
   <footer>
     <span>Generated {_e(generated)}</span>
     <span>Database <code>{_e(db_path)}</code></span>
@@ -981,6 +1028,44 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
     <span><a href="/api/summary" style="color:#7aa2f7">/api/summary</a></span>
   </footer>
 </div>
+<script>
+/* Live updates over Server-Sent Events. The page is a server-rendered snapshot,
+ * so the cheapest correct reaction to "something changed" is a reload — but we
+ * only reload when the tab is visible, and never more than once every 3 s, so a
+ * 300-asset sweep cannot lock the browser in a refresh loop. */
+(function () {{
+  var live = document.getElementById("live");
+  var token = new URLSearchParams(location.search).get("token") || "";
+  var url = "/api/events" + (token ? "?token=" + encodeURIComponent(token) : "");
+  if (!window.EventSource) {{ live.textContent = "live: unsupported browser"; return; }}
+  var source = new EventSource(url);
+  var pending = 0, timer = null;
+
+  function mark(text) {{ live.textContent = text; }}
+
+  function scheduleReload() {{
+    if (timer) return;
+    timer = setTimeout(function () {{
+      timer = null;
+      if (document.visibilityState === "visible") {{ location.reload(); }}
+      else {{ pending = 0; }}          // hidden tab: drop it, it will reload when shown
+    }}, 3000);
+  }}
+
+  source.addEventListener("verdict", function (event) {{
+    var data = JSON.parse(event.data);
+    pending += 1;
+    mark("live · " + pending + " new since load · last: " + data.status + " " + (data.name || ""));
+    scheduleReload();
+  }});
+  source.addEventListener("budget", function () {{
+    mark("live · budget published, reloading");
+    scheduleReload();
+  }});
+  source.onopen = function () {{ mark(pending ? live.textContent : "live · connected"); }};
+  source.onerror = function () {{ mark("live · reconnecting…"); }};
+}})();
+</script>
 </body>
 </html>
 """
@@ -1254,6 +1339,8 @@ class Handler(BaseHTTPRequestHandler):
                 self._summary(identity)
             elif path == "/api/rules":
                 self._rules(identity)
+            elif path == "/api/events":
+                self._stream(identity)
             else:
                 self._json(404, {"error": "not found", "path": path})
         except Exception as exc:  # a query error must not kill the handler thread
@@ -1338,6 +1425,53 @@ class Handler(BaseHTTPRequestHandler):
                        "suppressed": server.alerts_suppressed},
         })
 
+    def _stream(self, identity: dict) -> None:
+        """Server-Sent Events: push each new verdict to open dashboards.
+
+        Deliberately a long-lived GET with ``Connection: close``: no chunked
+        encoding to implement, every browser's EventSource reconnects on its own,
+        and the only cost is one thread per open tab (daemon threads, so Ctrl+C
+        is never held up).
+        """
+        if identity["role"] == "denied":
+            self._json(401, {"error": "unauthorised"})
+            return
+        project_id, error = self._scope(identity)
+        if error is not None:
+            self._json(error, {"error": "bad project scope"})
+            return
+
+        server = self.server  # type: ignore[attr-defined]
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.send_header("X-Accel-Buffering", "no")   # nginx: do not buffer this
+        self.end_headers()
+
+        channel = server.broadcaster.subscribe()
+        try:
+            self.wfile.write(b"retry: 3000\n\n: connected\n\n")
+            self.wfile.flush()
+            while not getattr(server, "stopping", False):
+                try:
+                    event = channel.get(timeout=15.0)
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")   # keep proxies from closing
+                    self.wfile.flush()
+                    continue
+                if event.get("project_id") not in (None, project_id) and project_id is not None:
+                    continue
+                payload = json.dumps(event, default=str)
+                self.wfile.write(f"event: {event.get('type', 'message')}\n"
+                                 f"data: {payload}\n\n".encode("utf-8"))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+            pass                                       # the tab was closed: normal
+        finally:
+            server.broadcaster.unsubscribe(channel)
+
     def _rules(self, identity: dict) -> None:
         """The published budget, in exactly the shape rules.toml uses.
 
@@ -1420,6 +1554,17 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._maybe_alert(payload, project_id)
+        broadcaster = getattr(self.server, "broadcaster", None)  # type: ignore[attr-defined]
+        if broadcaster is not None:
+            broadcaster.publish({
+                "type": "verdict",
+                "id": verdict_id,
+                "project_id": project_id,
+                "name": payload.get("name") or payload.get("filename"),
+                "passed": bool(payload.get("passed")),
+                "status": payload.get("status") or ("PASSED" if payload.get("passed") else "FAILED"),
+                "metric": payload.get("metric", ""),
+            })
         self._json(201, {"stored": True, "id": verdict_id, "project_id": project_id})
 
     def _maybe_alert(self, payload: dict, project_id: int | None) -> None:
@@ -1470,6 +1615,9 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:
             self._json(400, {"error": str(exc)})
             return
+        broadcaster = getattr(self.server, "broadcaster", None)  # type: ignore[attr-defined]
+        if broadcaster is not None:
+            broadcaster.publish({"type": "budget", "project_id": requested})
         self._json(200, {"saved": True, "project_id": requested,
                          "budget": {k: v for k, v in saved.items()
                                     if k not in ("updated_at", "updated_by")}})
@@ -1512,7 +1660,13 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
         self.notifier = notifier
         self.alert_cooldown = float(alert_cooldown)
         self.alerts_suppressed = 0       # visible in /api/summary for tuning
+        self.broadcaster = Broadcaster()  # /api/events, one queue per open tab
+        self.stopping = False            # flips so stream threads exit on shutdown
         super().__init__(address, Handler)
+
+    def shutdown(self) -> None:          # noqa: D401 - stdlib override
+        self.stopping = True
+        super().shutdown()
 
 
 def build_server(host: str, port: int, db_path: str | Path,

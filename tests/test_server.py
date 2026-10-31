@@ -693,7 +693,70 @@ expect("the second alert belongs to the second tenant",
 batch_server.shutdown()
 batch_server.server_close()
 
-print("13. CLI wiring")
+print("13. live updates (Server-Sent Events)")
+cast = ahs.Broadcaster(queue_max=2)
+first, second = cast.subscribe(), cast.subscribe()
+expect("subscribers are counted", cast.listeners == 2, str(cast.listeners))
+cast.publish({"type": "verdict", "n": 1})
+expect("every subscriber receives the event",
+       first.get_nowait()["n"] == 1 and second.get_nowait()["n"] == 1)
+for index in range(5):
+    cast.publish({"type": "verdict", "n": 100 + index})
+expect("a lagging tab keeps only the newest events",
+       first.qsize() == 2 and first.get_nowait()["n"] == 103, str(first.qsize()))
+while not first.empty():          # drain before asserting silence
+    first.get_nowait()
+cast.unsubscribe(first)
+cast.publish({"type": "verdict", "n": 9})
+expect("unsubscribing stops delivery", first.empty() and second.qsize() > 0)
+cast.unsubscribe(second)
+expect("no listeners left", cast.listeners == 0)
+
+sse_db = fresh_db("sse.db")
+sse_pid, sse_tok = ahs.create_project(sse_db, "Live")
+sse_server = ahs.build_server("127.0.0.1", 0, sse_db, quiet=True)
+sse_port = sse_server.server_address[1]
+threading.Thread(target=sse_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+
+received_events = []
+
+
+def read_stream():
+    try:
+        url = f"http://127.0.0.1:{sse_port}/api/events?token={sse_tok}"
+        with urllib.request.urlopen(url, timeout=20) as stream:
+            for raw in stream:
+                line = raw.decode("utf-8", "replace").strip()
+                if line.startswith("data:"):
+                    received_events.append(json.loads(line[5:].strip()))
+                    break
+    except Exception as exc:                  # surfaced as a test failure below
+        received_events.append({"error": str(exc)})
+
+
+reader = threading.Thread(target=read_stream, daemon=True)
+reader.start()
+time.sleep(0.4)                              # let the subscription land
+request(sse_port, "/api/telemetry", method="POST",
+        headers={"Authorization": f"Bearer {sse_tok}"},
+        body=dict(heavy, name="live_one.gltf"))
+reader.join(10)
+
+event = received_events[0] if received_events else {}
+expect("the open stream receives the verdict", event.get("type") == "verdict", str(event))
+expect("the event names the asset", event.get("name") == "live_one.gltf", str(event.get("name")))
+expect("the event carries the verdict status", event.get("status") == "FAILED", str(event.get("status")))
+expect("the event carries the project", event.get("project_id") == sse_pid)
+expect("the stream closes when the client goes away", not reader.is_alive())
+
+# One tab with no token must not be able to watch a tenant.
+status, _, _ = request(sse_port, "/api/events")
+expect("/api/events is not a hole in the auth", status == 401, str(status))
+sse_server.shutdown()
+sse_server.server_close()
+
+print("14. CLI wiring")
 parser = ahs.build_parser()
 options = parser.parse_args(["--port", "9999", "--db", "x.db", "--token", "t", "--no-seed"])
 expect("CLI accepts host/port/db/token/no-seed",

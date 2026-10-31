@@ -591,6 +591,50 @@ $("note-form").addEventListener("submit", async (event) => {
   }
 });
 
+/* -------------------------------------------------------------- live events */
+
+function connectLive() {
+  if (!window.EventSource) return;
+  const query = state.token ? `?token=${encodeURIComponent(state.token)}` : "";
+  const source = new EventSource(`/api/events${query}`);
+
+  source.addEventListener("asset", () => {
+    refreshAssets().catch(() => {});
+  });
+  source.addEventListener("asset-deleted", (event) => {
+    const payload = JSON.parse(event.data);
+    if (state.asset && state.asset.id === payload.asset_id) {
+      state.asset = null;
+      disposeObject(state.sceneObjects.model);
+      state.sceneObjects.model = null;
+      $("viewport-hint").style.display = "";
+      $("note-submit").disabled = true;
+      $("readout").textContent = "";
+    }
+    refreshAssets().catch(() => {});
+  });
+  for (const type of ["notes", "collision", "lod"]) {
+    source.addEventListener(type, (event) => {
+      const payload = JSON.parse(event.data || "{}");
+      if (!state.asset || (payload.asset_id && payload.asset_id !== state.asset.id)) return;
+      // Someone else changed what this tab is looking at: re-read, don't guess.
+      json(`/api/assets/${state.asset.id}`).then((asset) => {
+        const keepLevel = state.level;
+        state.asset = asset;
+        renderNotes();
+        refreshCollisionOverlay().catch(() => {});
+        if (type === "lod") {
+          state.level = keepLevel;
+          buildLodButtons();
+        }
+      }).catch(() => {});
+    });
+  }
+  source.onerror = () => {
+    $("status").textContent = "live: reconnecting…";
+  };
+}
+
 /* -------------------------------------------------------------------- boot */
 
 resize();
@@ -601,8 +645,12 @@ animate();
     $("status").textContent = health.auth ? "token mode" : "solo mode";
     await refreshAssets();
 
-    // ?asset=<id> is a shareable review link: "look at asset 12, LOD2".
+    // ?live=0 turns the stream off: headless screenshots and kiosk displays never
+    // finish loading while an EventSource holds the connection open.
     const params = new URLSearchParams(location.search);
+    if (params.get("live") !== "0") connectLive();
+
+    // ?asset=<id> is a shareable review link: "look at asset 12, LOD2".
     const wanted = Number(params.get("asset"));
     if (Number.isFinite(wanted) && wanted > 0) {
       await selectAsset(wanted);

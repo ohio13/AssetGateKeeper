@@ -41,10 +41,18 @@ jobs:
       - name: Syntax-check DCC plugins
         run: python -m compileall -q plugins
 
+      # The viewer is ~900 lines of ES modules and nothing else in this pipeline
+      # parses it. A duplicate `const` shipped once and left the page blank.
+      - name: Syntax-check the viewer
+        shell: bash
+        run: |
+          cp server/static/viewer.js "$RUNNER_TEMP/viewer.mjs"
+          node --check "$RUNNER_TEMP/viewer.mjs"
+
       - name: Generate fixtures
         run: python tests/gen_test_assets.py
 
-      - name: Unit suite (252 assertions)
+      - name: Unit suite (283 assertions)
         run: python tests/test_gatekeeper.py
 
       - name: Workstation suite (77 assertions)

@@ -41,8 +41,10 @@ Routes
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import os
+import queue
 import re
 import shutil
 import sqlite3
@@ -79,6 +81,11 @@ COLLISION_KINDS = ("box", "sphere", "hull")
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def html_escape(value: object) -> str:
+    """Every string in a report is artist-supplied: escape all of it."""
+    return html.escape("" if value is None else str(value))
 
 
 # --------------------------------------------------------------------------- #
@@ -137,6 +144,43 @@ CREATE INDEX IF NOT EXISTS idx_coll_asset  ON collisions(asset_id);
 """
 
 _WRITE_LOCK = threading.Lock()
+
+
+class Broadcaster:
+    """Server-Sent Events fan-out: one bounded queue per open viewer tab."""
+
+    def __init__(self, queue_max: int = 100) -> None:
+        self._subscribers: set = set()
+        self._lock = threading.Lock()
+        self._queue_max = queue_max
+
+    def subscribe(self):
+        channel: "queue.Queue[dict]" = queue.Queue(maxsize=self._queue_max)
+        with self._lock:
+            self._subscribers.add(channel)
+        return channel
+
+    def unsubscribe(self, channel) -> None:
+        with self._lock:
+            self._subscribers.discard(channel)
+
+    @property
+    def listeners(self) -> int:
+        with self._lock:
+            return len(self._subscribers)
+
+    def publish(self, event: dict) -> None:
+        with self._lock:
+            channels = list(self._subscribers)
+        for channel in channels:
+            try:
+                channel.put_nowait(event)
+            except queue.Full:
+                try:                       # keep the newest, drop the stale one
+                    channel.get_nowait()
+                    channel.put_nowait(event)
+                except (queue.Empty, queue.Full):
+                    pass
 
 
 class WorkstationError(Exception):
@@ -578,6 +622,154 @@ def repository_stats(db_path: str | Path) -> dict:
     }
 
 
+REPORT_CSS = """
+:root { --ink:#11161f; --muted:#5b667a; --line:#d9dee8; --good:#127a4d; --bad:#b3261e; }
+* { box-sizing:border-box; }
+body { margin:0; padding:32px 28px 64px; color:var(--ink); background:#fff;
+       font:14px/1.55 ui-sans-serif,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+.wrap { max-width:900px; margin:0 auto; }
+h1 { font-size:22px; margin:0 0 2px; letter-spacing:-.01em; }
+h2 { font-size:12px; text-transform:uppercase; letter-spacing:.08em; color:var(--muted);
+     margin:30px 0 8px; border-bottom:1px solid var(--line); padding-bottom:6px; }
+.sub { color:var(--muted); font-size:12px; }
+.badge { display:inline-block; padding:2px 9px; border-radius:999px; font-size:12px;
+         font-weight:600; border:1px solid currentColor; }
+.pass { color:var(--good); } .fail { color:var(--bad); }
+table { width:100%; border-collapse:collapse; font-size:13px; margin-top:6px; }
+th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+     color:var(--muted); border-bottom:1px solid var(--line); padding:6px 8px; }
+td { padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top;
+     font-variant-numeric:tabular-nums; }
+ul { margin:6px 0 0 18px; padding:0; }
+li { margin:2px 0; }
+.note { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-top:8px; }
+.note .meta { color:var(--muted); font-size:11px; margin-bottom:4px; }
+.mono { font-family:ui-monospace,Consolas,monospace; font-size:12px; }
+footer { margin-top:36px; color:var(--muted); font-size:11px; }
+@media print { body { padding:0; } h2 { break-after:avoid; } }
+"""
+
+
+def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
+    """One standalone HTML file: facts, verdict, LODs, collision, notes.
+
+    Everything is inline — no CSS file, no script, no image — so the file can be
+    attached to a ticket or printed and still look the same in five years.
+
+    The verdict comes from running the *gate* over the stored file with the
+    default budget. That is stated in the report: the workstation does not own
+    budgets, and pretending otherwise would invent numbers.
+    """
+    asset = get_asset(db_path, asset_id)
+    lods = list_lods(db_path, asset_id)
+    notes = list_notes(db_path, asset_id)
+    collision = get_collision(db_path, asset_id)
+    references = asset_references(db_path, data_dir, asset_id)
+
+    stored = resolve_inside(data_dir, asset["file_path"])
+    verdict_html = "<li>the stored file is missing</li>"
+    status_class, status_label = "fail", "UNREADABLE"
+    problems: list[str] = []
+    if stored is not None and stored.is_file():
+        try:
+            verdict = agk.Gatekeeper(agk.Budget()).check(stored)
+            problems = list(verdict.problems)
+            status_label = verdict.status
+            status_class = "pass" if verdict.passed else "fail"
+            verdict_html = "".join(f"<li>{html_escape(problem)}</li>" for problem in problems)
+            if not problems:
+                verdict_html = "<li>no violations under the default budget</li>"
+        except Exception as exc:                  # a report must always render
+            verdict_html = f"<li>the gate could not read this file: {html_escape(str(exc))}</li>"
+            status_class, status_label = "fail", "UNREADABLE"
+
+    def rows(items: list[tuple[str, object]]) -> str:
+        return "".join(f"<tr><th>{html_escape(k)}</th><td>{html_escape(v)}</td></tr>"
+                       for k, v in items)
+
+    lod_rows = "".join(
+        f"<tr><td>{html_escape(lod['level'])}</td><td>{lod['triangle_count']:,}</td>"
+        f"<td>{lod['vertex_count']:,}</td><td>{lod['ratio']:.2f}</td>"
+        f"<td>{lod['triangle_count'] / asset['triangle_count'] * 100:.1f}%</td></tr>"
+        if asset["triangle_count"] else
+        f"<tr><td>{html_escape(lod['level'])}</td><td>{lod['triangle_count']:,}</td>"
+        f"<td>{lod['vertex_count']:,}</td><td>{lod['ratio']:.2f}</td><td>-</td></tr>"
+        for lod in lods)
+
+    reference_rows = "".join(
+        f"<tr><td class='mono'>{html_escape(item['uri'])}</td>"
+        f"<td class='{'pass' if item['exists'] else 'fail'}'>"
+        f"{'present' if item['exists'] else 'MISSING'}</td></tr>"
+        for item in references["references"])
+
+    collision_html = "<p class='sub'>No collision proxy stored.</p>"
+    if collision:
+        data = collision["data"]
+        if collision["kind"] == "box":
+            size = [round(data["max"][i] - data["min"][i], 3) for i in range(3)]
+            detail = f"min {data['min']} · max {data['max']} · size {size}"
+        elif collision["kind"] == "sphere":
+            detail = f"center {data['center']} · radius {data['radius']}"
+        else:
+            detail = f"{len(data['points'])} hull points"
+        collision_html = (f"<p><strong>{html_escape(collision['kind'])}</strong> "
+                          f"<span class='sub mono'>{html_escape(detail)}</span></p>")
+
+    notes_html = "".join(
+        f"<div class='note'><div class='meta'><strong>{html_escape(note['category'])}</strong>"
+        f" · {html_escape(note['author'] or 'anonymous')}"
+        f" · {html_escape(note['created_at'].replace('T', ' '))}</div>"
+        f"{html_escape(note['note_text'])}</div>"
+        for note in notes) or "<p class='sub'>No review notes.</p>"
+
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>{html_escape(asset['filename'])} — asset report</title>
+<style>{REPORT_CSS}</style></head>
+<body><div class="wrap">
+  <h1>{html_escape(asset['filename'])}
+    <span class="badge {status_class}">{html_escape(status_label)}</span></h1>
+  <div class="sub">Asset Health report · asset #{asset['id']} ·
+    uploaded {html_escape(asset['uploaded_at'].replace('T', ' '))}
+    by {html_escape(asset['uploader'] or 'unknown')}</div>
+
+  <h2>Geometry</h2>
+  <table><tbody>{rows([
+      ("triangles", f"{asset['triangle_count']:,}"),
+      ("vertices", f"{asset['vertex_count']:,}"),
+      ("material slots", asset["material_slots"]),
+      ("file size", f"{asset['filesize']:,} bytes"),
+      ("stored path", asset["file_path"]),
+  ])}</tbody></table>
+
+  <h2>Validation (default budget: 50,000 tris · 3 slots · 2048px)</h2>
+  <ul>{verdict_html}</ul>
+
+  <h2>Reference integrity</h2>
+  <table><thead><tr><th>reference</th><th>state</th></tr></thead>
+  <tbody>{reference_rows or "<tr><td class='sub'>no external references</td><td></td></tr>"}
+  </tbody></table>
+  <p class="sub">{len(references['missing'])} missing ·
+     {len(references['orphaned'])} orphaned texture(s) in the asset store</p>
+
+  <h2>LOD breakdown</h2>
+  <table><thead><tr><th>level</th><th>triangles</th><th>vertices</th>
+    <th>ratio</th><th>of source</th></tr></thead>
+  <tbody>{lod_rows or "<tr><td class='sub' colspan='5'>no LODs generated</td></tr>"}</tbody></table>
+
+  <h2>Collision</h2>
+  {collision_html}
+
+  <h2>Review notes</h2>
+  {notes_html}
+
+  <footer>Generated by Art Workstation ·
+    {html_escape(datetime.now(timezone.utc).isoformat(timespec="seconds"))} ·
+    this file is self-contained (no external assets).</footer>
+</div></body></html>
+"""
+
+
 # --------------------------------------------------------------------------- #
 # HTTP
 # --------------------------------------------------------------------------- #
@@ -602,6 +794,7 @@ ASSET_LOD_FILE_RE = re.compile(r"^/api/assets/(\d+)/lods/(LOD[1-4])/file$")
 ASSET_NOTES_RE = re.compile(r"^/api/assets/(\d+)/notes$")
 ASSET_COLLISION_RE = re.compile(r"^/api/assets/(\d+)/collision$")
 ASSET_REFERENCES_RE = re.compile(r"^/api/assets/(\d+)/references$")
+ASSET_REPORT_RE = re.compile(r"^/api/assets/(\d+)/report$")
 NOTE_RE = re.compile(r"^/api/notes/(\d+)$")
 
 
@@ -749,6 +942,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"notes": list_notes(server.db_path, int(match.group(1)))})
             return
 
+        if path == "/api/events":
+            self._stream()
+            return
+
+        match = ASSET_REPORT_RE.match(path)
+        if match:
+            self._report(int(match.group(1)))
+            return
+
         match = ASSET_REFERENCES_RE.match(path)
         if match:
             self._json(200, asset_references(server.db_path, Path(server.data_dir),
@@ -764,6 +966,43 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         self._json(404, {"error": "not found", "path": path})
+
+    def _stream(self) -> None:
+        """SSE for the viewer: new assets, new notes, new collisions."""
+        server = self.server  # type: ignore[attr-defined]
+        self.close_connection = True
+        self.send_response(200)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "close")
+        self.send_header("X-Accel-Buffering", "no")
+        self.end_headers()
+
+        channel = server.broadcaster.subscribe()
+        try:
+            self.wfile.write(b"retry: 3000\n\n: connected\n\n")
+            self.wfile.flush()
+            while not getattr(server, "stopping", False):
+                try:
+                    event = channel.get(timeout=15.0)
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    continue
+                self.wfile.write(f"event: {event.get('type', 'message')}\n"
+                                 f"data: {json.dumps(event, default=str)}\n\n".encode("utf-8"))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionAbortedError, ConnectionResetError, OSError):
+            pass
+        finally:
+            server.broadcaster.unsubscribe(channel)
+
+    def _report(self, asset_id: int) -> None:
+        server = self.server  # type: ignore[attr-defined]
+        body = render_report(server.db_path, Path(server.data_dir), asset_id).encode("utf-8")
+        headers = {"Content-Disposition": 'attachment; filename="report.html"'} \
+            if self._query().get("download", ["0"])[0] in ("1", "true", "yes") else {}
+        self._send(200, body, "text/html; charset=utf-8", headers)
 
     def _serve_asset_file(self, asset_id: int) -> None:
         server = self.server  # type: ignore[attr-defined]
@@ -803,6 +1042,11 @@ class Handler(BaseHTTPRequestHandler):
         self._send(200, candidate.read_bytes(),
                    MIME.get(candidate.suffix.lower(), "application/octet-stream"))
 
+    def _publish(self, event_type: str, asset_id: int | None = None) -> None:
+        broadcaster = getattr(self.server, "broadcaster", None)  # type: ignore[attr-defined]
+        if broadcaster is not None:
+            broadcaster.publish({"type": event_type, "asset_id": asset_id})
+
     # -- POST --------------------------------------------------------------- #
 
     def do_POST(self) -> None:  # noqa: N802
@@ -823,6 +1067,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise WorkstationError("filename is required (query or X-Filename)", 400)
                 asset = create_asset(server.db_path, Path(server.data_dir), filename, raw,
                                      uploader=self._query().get("uploader", [""])[0])
+                self._publish("asset", asset["id"])
                 self._json(201, asset)
                 return
 
@@ -836,6 +1081,7 @@ class Handler(BaseHTTPRequestHandler):
                 note = add_note(server.db_path, asset_id, str(payload.get("category", "")),
                                 str(payload.get("note_text", "")),
                                 str(payload.get("author", "")))
+                self._publish("notes", asset_id)
                 self._json(201, note)
                 return
 
@@ -853,6 +1099,7 @@ class Handler(BaseHTTPRequestHandler):
                 lods = generate_lods(server.db_path, Path(server.data_dir),
                                      int(match.group(1)),
                                      [float(r) for r in ratios], caps)
+                self._publish("lod", int(match.group(1)))
                 self._json(201, {"lods": lods})
                 return
 
@@ -864,6 +1111,7 @@ class Handler(BaseHTTPRequestHandler):
                 kind = str(payload.get("kind", ""))
                 data = payload.get("data", payload)
                 collision = set_collision(server.db_path, int(match.group(1)), kind, data)
+                self._publish("collision", int(match.group(1)))
                 self._json(200, collision)
                 return
 
@@ -887,11 +1135,13 @@ class Handler(BaseHTTPRequestHandler):
             match = ASSET_RE.match(path)
             if match:
                 delete_asset(server.db_path, Path(server.data_dir), int(match.group(1)))
+                self._publish("asset-deleted", int(match.group(1)))
                 self._json(200, {"deleted": True})
                 return
             match = NOTE_RE.match(path)
             if match:
                 delete_note(server.db_path, int(match.group(1)))
+                self._publish("notes")
                 self._json(200, {"deleted": True})
                 return
             self._json(404, {"error": "not found", "path": path})
@@ -920,7 +1170,13 @@ class WorkstationServer(socketserver.ThreadingTCPServer):
         self.data_dir = str(data_dir)
         self.token = token
         self.quiet = quiet
+        self.broadcaster = Broadcaster()   # /api/events
+        self.stopping = False
         super().__init__(address, Handler)
+
+    def shutdown(self) -> None:            # noqa: D401 - stdlib override
+        self.stopping = True
+        super().shutdown()
 
 
 def build_server(host: str, port: int, db_path: str | Path, data_dir: str | Path,

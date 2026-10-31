@@ -63,6 +63,10 @@ Notes for extending
 
 from __future__ import annotations
 
+# Single source of truth for the version: pyproject.toml reads it from here
+# (setuptools parses this literal statically), so it cannot drift.
+__version__ = "1.0.0"
+
 import argparse
 import array
 import base64
@@ -408,6 +412,20 @@ def _read_str(table: dict, key: str, where: str) -> Optional[str]:
 PLATFORM_KEYS = ("max_triangles", "max_material_slots", "max_texture_edge",
                  "max_bone_influences", "max_uv_channels")
 
+# A second, narrower whitelist for *physical* strictness, expressed as nested
+# tables so the flat namespace stays budget-only:
+#
+#     [platforms.mobile.texture]
+#     pbr_floor = 0.05        # mobile screens are seen in daylight; be stricter
+#
+# Deliberately excludes every on/off switch (check_references, audit_transforms,
+# require_indexed, pbr, naming). A profile may tighten a threshold; it may never
+# make a check disappear — that would let one platform ship unaudited assets.
+PLATFORM_SECTION_KEYS: dict[str, tuple[str, ...]] = {
+    "mesh": ("pivot_tolerance", "transform_epsilon"),
+    "texture": ("pbr_floor", "pbr_ceiling"),
+}
+
 
 def apply_platform(document: dict, platform: str) -> dict:
     """Overlay ``[platforms.<name>]`` onto the base budget, returning a new document.
@@ -428,13 +446,24 @@ def apply_platform(document: dict, platform: str) -> dict:
     profile = platforms[platform]
     if not isinstance(profile, dict):
         raise ConfigError(f"[platforms.{platform}] must be a table")
-    _reject_unknown(profile, PLATFORM_KEYS, f"[platforms.{platform}]")
+    _reject_unknown(profile, (*PLATFORM_KEYS, *PLATFORM_SECTION_KEYS), f"[platforms.{platform}]")
 
     merged = {key: value for key, value in document.items() if key not in ("platforms", "platform")}
     merged["mesh"] = dict(document.get("mesh", {}) or {})
     merged["texture"] = dict(document.get("texture", {}) or {})
     for key, value in profile.items():
-        if key == "max_texture_edge":
+        if isinstance(value, dict):
+            # A nested table is a strictness override, validated by the second
+            # whitelist. Unknown sections or keys are refused loudly: silently
+            # ignoring a typo here would mean shipping an unaudited platform.
+            allowed = PLATFORM_SECTION_KEYS.get(key)
+            if allowed is None:
+                raise ConfigError(
+                    f"[platforms.{platform}.{key}] is not a known section "
+                    f"(known: {', '.join(sorted(PLATFORM_SECTION_KEYS))})")
+            _reject_unknown(value, allowed, f"[platforms.{platform}.{key}]")
+            merged[key].update(value)
+        elif key == "max_texture_edge":
             merged["texture"]["max_edge"] = value
         else:
             merged["mesh"][key] = value
@@ -559,6 +588,184 @@ def resolve_budget(root: Path, args: argparse.Namespace,
     if not overrides:
         return budget, source, []
     return replace(budget, **overrides), source, sorted(overrides)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# `--init`: the five-question setup wizard
+# --------------------------------------------------------------------------- #
+
+PLATFORM_CHOICES = ("none", "mobile", "console", "pc")
+
+RULES_TEMPLATE = """\
+# rules.toml - created by `asset-gatekeeper --init` on {date}
+#
+# Precedence: explicit CLI flag > remote rules > [platforms.*] > this file > defaults.
+{platform_line}
+[mesh]
+max_triangles = {max_triangles}
+max_material_slots = {max_material_slots}
+check_references = true
+
+[texture]
+max_edge = {max_edge}
+power_of_two = true
+naming = true
+pbr = true
+
+[healer]
+# Off by default: the gate fails and locks. Turn this on only if you want
+# textures padded and degenerate faces stripped, verified before adoption.
+enabled = {auto_heal}
+
+[platforms.mobile]
+max_triangles = {mobile_triangles}
+max_material_slots = 2
+max_texture_edge = 1024
+
+[platforms.console]
+max_triangles = 250000
+max_material_slots = 8
+max_texture_edge = 4096
+
+[platforms.pc]
+max_triangles = 120000
+max_material_slots = 6
+max_texture_edge = 4096
+"""
+
+
+def _ask_number(ask: "object", question: str, default: int, low: int = 0) -> int:
+    """Prompt until the answer is a number in range; Enter takes the default."""
+    while True:
+        try:
+            raw = ask(f"{question} [{default}]: ")        # type: ignore[operator]
+        except EOFError:                                   # piped input / CI
+            return default
+        text = (raw or "").strip().replace(",", "").replace("_", "")
+        if not text:
+            return default
+        try:
+            value = int(text)
+        except ValueError:
+            print(f"  '{text}' is not a number, try again")
+            continue
+        if value < low:
+            print(f"  must be at least {low}")
+            continue
+        return value
+
+
+def _ask_choice(ask: "object", question: str, default: str, choices: Sequence[str]) -> str:
+    while True:
+        try:
+            raw = ask(f"{question} ({'/'.join(choices)}) [{default}]: ")  # type: ignore[operator]
+        except EOFError:
+            return default
+        text = (raw or "").strip().lower()
+        if not text:
+            return default
+        if text in choices:
+            return text
+        print(f"  pick one of: {', '.join(choices)}")
+
+
+def _ask_bool(ask: "object", question: str, default: bool = False) -> bool:
+    suffix = "Y/n" if default else "y/N"
+    try:
+        raw = ask(f"{question} [{suffix}]: ")              # type: ignore[operator]
+    except EOFError:
+        return default
+    text = (raw or "").strip().lower()
+    if not text:
+        return default
+    return text in ("y", "yes", "1", "true", "on")
+
+
+def write_rules(target: Path, *, max_triangles: int = 50_000, max_material_slots: int = 3,
+                max_edge: int = 2_048, platform: str = "none",
+                auto_heal: bool = False, force: bool = False) -> Path:
+    """Render and write a rules.toml. Refuses to clobber one unless forced."""
+    rules_path = target / RULES_FILENAME
+    if rules_path.exists() and not force:
+        raise ConfigError(f"{rules_path} already exists (use --force to overwrite)")
+    rules_path.write_text(RULES_TEMPLATE.format(
+        date=datetime.now().strftime("%Y-%m-%d %H:%M"),
+        platform_line=(f'platform = "{platform}"' if platform != "none" else
+                       "# platform = \"mobile\"   # uncomment to pick a default profile"),
+        max_triangles=max_triangles,
+        max_material_slots=max_material_slots,
+        max_edge=max_edge,
+        auto_heal="true" if auto_heal else "false",
+        # A mobile-first project should not be born with a 50k default.
+        mobile_triangles=min(max_triangles, 15_000),
+    ), encoding="utf-8")
+    return rules_path
+
+
+def run_init(target: Optional[Path] = None, ask=input, out=None,
+             assume_yes: bool = False, force: bool = False,
+             max_triangles: Optional[int] = None, max_edge: Optional[int] = None,
+             max_material_slots: Optional[int] = None,
+             platform: Optional[str] = None) -> int:
+    """Create a watched folder and its rules.toml, asking five questions.
+
+    ``ask`` is injected so the wizard is testable without stdin, and any prompt
+    hitting EOF falls back to its default — ``--init`` inside a CI script must
+    not hang waiting for a human.
+    """
+    say = out or print
+    say("AssetGatekeeper setup")
+    say("")
+
+    if target is None:
+        try:
+            raw = ask(f"Folder to watch [{Path.cwd() / 'assets'}]: ")
+        except EOFError:
+            raw = ""
+        text = (raw or "").strip().strip('"')
+        target = Path(text) if text else Path.cwd() / "assets"
+    target = Path(target).expanduser()
+
+    if assume_yes:
+        values = {
+            "max_triangles": max_triangles or 50_000,
+            "max_material_slots": max_material_slots or 3,
+            "max_edge": max_edge or 2_048,
+            "platform": platform or "none",
+            "auto_heal": False,
+        }
+    else:
+        values = {
+            "max_triangles": max_triangles if max_triangles is not None else _ask_number(
+                ask, "Triangle budget per mesh", 50_000, low=1),
+            "max_material_slots": (max_material_slots if max_material_slots is not None
+                                   else _ask_number(ask, "Material slots per mesh", 3, low=1)),
+            "max_edge": max_edge if max_edge is not None else _ask_number(
+                ask, "Max texture edge (512/1024/2048/4096)", 2_048, low=16),
+            "platform": platform or _ask_choice(
+                ask, "Default platform profile", "none", PLATFORM_CHOICES),
+            "auto_heal": _ask_bool(ask, "Enable auto-healing (off is safer)", False),
+        }
+
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+        rules_path = write_rules(target, force=force, **values)
+    except (OSError, ConfigError) as exc:
+        say(f"error: {exc}")
+        return 2
+
+    say("")
+    say(f"  folder   {target.resolve()}")
+    say(f"  rules    {rules_path}")
+    say(f"  budget   tris<={values['max_triangles']:,}  texture<={values['max_edge']}px  "
+        f"materials<={values['max_material_slots']}")
+    if values["platform"] != "none":
+        say(f"  profile  {values['platform']}")
+    say("")
+    say("Next:")
+    say(f"  asset-gatekeeper \"{target}\" --once          # one sweep")
+    say(f"  asset-gatekeeper \"{target}\"                 # watch it live")
+    return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -2146,7 +2353,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="asset_gatekeeper",
         description="Watch a folder of art exports and enforce asset budgets.",
     )
-    parser.add_argument("folder", nargs="?", default=".", help="folder to watch (default: current directory)")
+    parser.add_argument("folder", nargs="?", default=None,
+                        help="folder to watch (default: current directory)")
     parser.add_argument("--triangles", type=int, default=None,
                         help="max triangles per mesh (overrides rules.toml; default 50,000)")
     parser.add_argument("--max-texture", type=int, default=None, metavar="EDGE",
@@ -2177,6 +2385,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="flag unbaked node transforms, uncentred pivots and unindexed geometry")
     parser.add_argument("--require-indexed", action="store_true", dest="require_indexed",
                         default=None, help="also fail triangle-soup geometry (implies the audit)")
+    parser.add_argument("--init", action="store_true",
+                        help="interactive setup: create the watch folder and its rules.toml")
+    parser.add_argument("--yes", action="store_true",
+                        help="with --init: accept every default instead of prompting")
+    parser.add_argument("--force", action="store_true",
+                        help="with --init: overwrite an existing rules.toml")
     parser.add_argument("--audit", action="store_true",
                         help="audit the whole folder for broken references and orphaned "
                              "textures, then exit")
@@ -2217,7 +2431,13 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(message)s", datefmt="%H:%M:%S", stream=stream)
 
-    root = Path(args.folder).expanduser().resolve()
+    # The wizard runs before anything touches the folder: it may be creating it.
+    if getattr(args, "init", False):
+        target = Path(args.folder).expanduser() if args.folder else None
+        return run_init(target, ask=input, assume_yes=args.yes, force=args.force,
+                        max_triangles=None, max_edge=None, max_material_slots=None)
+
+    root = Path(args.folder or ".").expanduser().resolve()
     if not root.exists():
         LOG.error("not found: %s", root)
         return 2

@@ -1173,6 +1173,131 @@ expect("triangle soup is flagged as unindexed",
        "unindexed geometry" in check(soup, indexed_budget).reason,
        check(soup, indexed_budget).reason[:90])
 
+print("17. packaging, the setup wizard, and profile whitelists")
+
+pkg_root = Path(__file__).resolve().parent.parent
+pyproject_path = pkg_root / "pyproject.toml"
+expect("pyproject.toml exists", pyproject_path.is_file())
+pyproject_text = pyproject_path.read_text(encoding="utf-8")
+expect("the console script is declared",
+       'asset-gatekeeper = "asset_gatekeeper:main"' in pyproject_text)
+expect("the version is dynamic so it cannot drift",
+       'dynamic = ["version"]' in pyproject_text
+       and 'version = { attr = "asset_gatekeeper.__version__" }' in pyproject_text)
+# The gate refuses to run without trimesh+Pillow, so they are honest hard
+# requirements; watchdog is a speed-up and must stay optional.
+expect("trimesh and pillow are declared as required",
+       'dependencies = ["trimesh>=4.0", "pillow>=9.0"]' in pyproject_text)
+expect("watchdog is only an extra",
+       'full = ["watchdog>=3.0"]' in pyproject_text
+       and "watchdog" not in pyproject_text.split("[project.optional-dependencies]")[0])
+expect("the version attribute exists", isinstance(agk.__version__, str) and agk.__version__)
+expect("setup.py is a shim, not a second configuration",
+       (pkg_root / "setup.py").is_file()
+       and 'setup()' in (pkg_root / "setup.py").read_text(encoding="utf-8"))
+
+wiz_root = audit_root / "wizard"
+if wiz_root.exists():
+    force_rmtree(wiz_root)
+
+# The wizard, driven by an injected `ask` so it needs no stdin.
+# With the folder supplied, the prompts are: triangles, materials, texture edge,
+# platform, auto-heal — in that order.
+answers = ["15000", "2", "1024", "", "y"]
+asked = []
+
+
+def fake_ask(question):
+    asked.append(question)
+    return answers[len(asked) - 1] if len(asked) <= len(answers) else ""
+
+
+wiz_target = wiz_root / "game_assets"
+wiz_out = []
+expect("--init succeeds", agk.run_init(wiz_target, ask=fake_ask, out=wiz_out.append) == 0)
+wiz_rules = wiz_target / agk.RULES_FILENAME
+expect("it creates the folder and the rules file", wiz_rules.is_file())
+expect("the first question is the triangle budget", "Triangle budget" in asked[0], asked[0])
+expect("it asks all five questions", len(asked) == 5, str(asked))
+wiz_doc = agk.parse_rules(wiz_rules)
+wiz_budget = agk.Budget.from_mapping(wiz_doc)
+expect("the answers become the budget", wiz_budget.max_triangles == 15_000,
+       str(wiz_budget.max_triangles))
+expect("the texture edge answer sticks", wiz_budget.max_texture_edge == 1024)
+expect("the material answer sticks", wiz_budget.max_material_slots == 2)
+expect("yes enables healing in the generated file",
+       wiz_doc.get("healer", {}).get("enabled") is True, str(wiz_doc.get("healer")))
+expect("the generated file ships platform profiles",
+       set(wiz_doc.get("platforms", {})) >= {"mobile", "console", "pc"},
+       str(sorted(wiz_doc.get("platforms", {}))))
+expect("the mobile profile is clamped to the smaller budget",
+       wiz_doc["platforms"]["mobile"]["max_triangles"] == 15_000)
+expect("the wizard prints next steps", any("--once" in line for line in wiz_out))
+
+# Re-running must not silently destroy a studio's rules.
+expect("an existing rules.toml is protected",
+       agk.run_init(wiz_target, ask=lambda _q: "", out=wiz_out.append) == 2)
+expect("--force overwrites it",
+       agk.run_init(wiz_target, ask=lambda _q: "", out=wiz_out.append, force=True) == 0)
+
+# Piped input / CI: every prompt hitting EOF must fall back, never hang.
+eof_target = wiz_root / "ci_assets"
+
+
+def eof_ask(_question):
+    raise EOFError
+
+
+expect("EOF falls back to defaults", agk.run_init(eof_target, ask=eof_ask,
+                                                 out=wiz_out.append) == 0)
+expect("the CI default budget is 50k",
+       agk.Budget.from_mapping(agk.parse_rules(eof_target / agk.RULES_FILENAME))
+       .max_triangles == 50_000)
+
+# The CLI entry point itself.
+cli_target = wiz_root / "cli_assets"
+expect("--init --yes works through main()",
+       agk.main(["--init", str(cli_target), "--yes"]) == 0)
+expect("and it wrote a usable rules file", (cli_target / agk.RULES_FILENAME).is_file())
+# Platform-neutral "impossible" target: a file cannot contain a folder.
+blocker = wiz_root / "i_am_a_file"
+blocker.write_text("x", encoding="utf-8")
+expect("--init on an impossible path exits 2",
+       agk.main(["--init", str(blocker / "assets"), "--yes"]) == 2,
+       "mkdir under a regular file must fail")
+
+# Secondary whitelist: platform profiles may tighten thresholds, never disable checks.
+prof_dir = audit_root / "profile_sections"
+prof_dir.mkdir()
+(prof_dir / "rules.toml").write_text(
+    "[mesh]\nmax_triangles = 50000\n"
+    "[platforms.mobile]\nmax_triangles = 15000\n"
+    "[platforms.mobile.texture]\npbr_floor = 0.08\n"
+    "[platforms.mobile.mesh]\npivot_tolerance = 0.01\n",
+    encoding="utf-8")
+sec_budget, _src, _ = agk.resolve_budget(prof_dir, agk.build_parser().parse_args(
+    [str(prof_dir), "--platform", "mobile"]))
+expect("a nested table tightens a threshold", sec_budget.pbr_floor == 0.08,
+       str(sec_budget.pbr_floor))
+expect("the other section works too", sec_budget.pivot_tolerance == 0.01)
+expect("budget keys still apply alongside", sec_budget.max_triangles == 15_000)
+
+for label, body, expected in (
+    ("an unknown section is rejected",
+     "[platforms.mobile.nonsense]\nx = 1\n", "section"),
+    ("an unknown threshold is rejected",
+     "[platforms.mobile.texture]\npbr_brightness = 0.5\n", "pbr_brightness"),
+    ("a profile cannot switch a check off",
+     "check_references = false\n", "check_references"),
+):
+    (prof_dir / "bad.toml").write_text("[platforms.mobile]\n" + body, encoding="utf-8")
+    try:
+        agk.resolve_budget(prof_dir, agk.build_parser().parse_args(
+            [str(prof_dir), "--rules", str(prof_dir / "bad.toml"), "--platform", "mobile"]))
+        expect(label, False, "no error raised")
+    except agk.ConfigError as exc:
+        expect(label, expected in str(exc), str(exc)[:70])
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

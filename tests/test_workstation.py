@@ -377,7 +377,83 @@ expect("an unknown asset is a 404", status == 404, str(status))
 ref_server.shutdown()
 ref_server.server_close()
 
-print("8. CLI wiring")
+print("8. live events and the printable report")
+live_db, live_data = fresh("live")
+live_server = aws.build_server("127.0.0.1", 0, live_db, live_data, quiet=True)
+lport = live_server.server_address[1]
+threading.Thread(target=live_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+
+stream_events = []
+
+
+def read_events():
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{lport}/api/events", timeout=20) as stream:
+            for raw in stream:
+                line = raw.decode("utf-8", "replace").strip()
+                if line.startswith("data:"):
+                    stream_events.append(json.loads(line[5:].strip()))
+                    break
+    except Exception as exc:
+        stream_events.append({"error": str(exc)})
+
+
+reader = threading.Thread(target=read_events, daemon=True)
+reader.start()
+time.sleep(0.4)
+status, created = Client(lport).json("/api/assets?filename=live.obj&uploader=dev",
+                                     method="POST", body=OBJ.encode())
+reader.join(10)
+event = stream_events[0] if stream_events else {}
+expect("the viewer stream receives uploads", event.get("type") == "asset", str(event))
+expect("the event names the new asset", event.get("asset_id") == created["id"], str(event))
+expect("the stream thread ended with the client", not reader.is_alive())
+live_server.shutdown()
+live_server.server_close()
+
+report = aws.render_report(live_db, live_data, created["id"])
+expect("the report is a standalone document",
+       report.startswith("<!DOCTYPE html>") and "<style>" in report)
+expect("it carries no external references",
+       "http://" not in report and "https://" not in report and "<script" not in report)
+expect("it names the asset", "live.obj" in report)
+expect("it shows the measured geometry", "12" in report and "8" in report)
+expect("it includes a validation verdict",
+       "PASSED" in report or "FAILED" in report, report[:0])
+expect("it shows the reference section", "Reference integrity" in report)
+expect("it shows the LOD section", "LOD breakdown" in report)
+expect("it shows the collision proxy", "Collision" in report and "box" in report)
+expect("it shows notes", "Review notes" in report)
+
+# Notes are stored verbatim, so they are the real hostile-input vector for the
+# report. Filenames are sanitised before they ever reach the database.
+aws.add_note(live_db, created["id"], "Other", "<script>alert(1)</script> and **bold**", "eve")
+evil_report = aws.render_report(live_db, live_data, created["id"])
+expect("note text is escaped in the report", "<script>alert(1)</script>" not in evil_report)
+expect("the escaped note is still readable", "&lt;script&gt;alert(1)&lt;/script&gt;" in evil_report)
+evil_asset = aws.create_asset(live_db, live_data,
+                              "<script>alert(2)</script>.obj", OBJ.encode())
+expect("filenames are sanitised on the way in",
+       "<" not in evil_asset["filename"] and ">" not in evil_asset["filename"],
+       evil_asset["filename"])
+
+report_server = aws.build_server("127.0.0.1", 0, live_db, live_data, quiet=True)
+rport = report_server.server_address[1]
+threading.Thread(target=report_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+status, raw, headers = Client(rport).call(f"/api/assets/{created['id']}/report")
+expect("the report route serves HTML", status == 200 and b"<!DOCTYPE html>" in raw, str(status))
+expect("inline by default", "Content-Disposition" not in headers, str(headers.get("Content-Disposition")))
+status, _, headers = Client(rport).call(f"/api/assets/{created['id']}/report?download=1")
+expect("?download=1 forces a file download",
+       headers.get("Content-Disposition", "").startswith("attachment"), str(headers.get("Content-Disposition")))
+status, _ = Client(rport).json("/api/assets/999/report")
+expect("an unknown asset has no report", status == 404, str(status))
+report_server.shutdown()
+report_server.server_close()
+
+print("9. CLI wiring")
 options = aws.build_parser().parse_args(["--port", "9999", "--db", "x.db",
                                          "--data", "y", "--token", "t"])
 expect("CLI accepts the storage and auth flags",
