@@ -11,6 +11,9 @@ recursive-include server/static *
 recursive-include tests *.py
 recursive-include engine *.py
 recursive-include tools *.py
+recursive-include enterprise *.py
+recursive-include plugins *.py *.md
+recursive-include docs *.md
 prune .agk
 prune build
 prune dist

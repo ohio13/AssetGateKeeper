@@ -66,5 +66,10 @@ jobs:
       # Accounts, sessions, CSRF, role enforcement, atomic rules writes, the\n      # audit trail and a streamed rescan - the parts a security review asks about.\n      - name: Admin suite (123 assertions)
         run: python tests/test_admin.py
 
+      # No server, no IdP, no DCC: the enterprise suite fakes every
+      # external system, and asserts the fail-closed path when one is absent.
+      - name: Enterprise suite (148 assertions)
+        run: python tests/test_enterprise.py
+
       - name: Headless integration (synthetic exporter)
         run: python tests/run_headless_integration.py --synthetic
