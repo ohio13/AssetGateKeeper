@@ -591,6 +591,49 @@ rules_options = aws.build_parser().parse_args(["--rules", "studio.toml"])
 expect("the CLI can point the panel at a rules file",
        rules_options.rules == "studio.toml", rules_options.rules)
 
+print("18. unmeasured assets stay out of the triangle total")
+# A .blend/.max/.ma is stored because it is a real source file, but nothing in
+# this process can count its triangles. The stored 0 is an absence of
+# measurement, so it must never be added into the library total - a project of
+# source files would otherwise look free.
+um_db, um_data = fresh("unmeasured")
+um_cube = aws.create_asset(um_db, um_data, "cube.obj", OBJ.encode())
+um_blend = aws.create_asset(um_db, um_data, "crate.blend",
+                            b"BLENDER-v403\x00" + b"\x00" * 96)
+expect("the .blend is stored, not refused", um_blend["filename"] == "crate.blend",
+       str(um_blend)[:120])
+expect("and it is marked unverified", um_blend["kind"] == "unverified", um_blend["kind"])
+expect("the .obj is still measured", um_cube["kind"] == "mesh" and um_cube["triangle_count"] == 12,
+       str(um_cube)[:120])
+
+um_stats = aws.repository_stats(um_db)
+expect("the library total counts measured assets only",
+       um_stats["triangles"] == 12, str(um_stats))
+expect("measured and unverified are reported apart",
+       um_stats["measured"] == 1 and um_stats["unverified"] == 1, str(um_stats))
+expect("both assets are still listed", um_stats["assets"] == 2, str(um_stats))
+
+um_report = aws.render_report(um_db, um_data, um_blend["id"])
+expect("the report does not print a fabricated 0 for the mesh",
+       "not measured" in um_report and "<td>0</td>" not in um_report, um_report[:0])
+expect("the report says it was not validated",
+       "not validated" in um_report and "no violations under the default budget" not in um_report,
+       um_report[:0])
+expect("the report badge is honest about it", "UNVERIFIED" in um_report, um_report[:0])
+expect("the passing asset still reports its numbers",
+       "not measured" not in aws.render_report(um_db, um_data, um_cube["id"]))
+
+um_server = aws.build_server("127.0.0.1", 0, um_db, um_data, quiet=True)
+um_port = um_server.server_address[1]
+threading.Thread(target=um_server.serve_forever, daemon=True).start()
+threading.Event().wait(0.05)
+um_body = Client(um_port).json("/api/stats")[1]
+expect("the stats endpoint exposes both counts",
+       um_body["triangles"] == 12 and um_body["unverified"] == 1
+       and um_body["measured"] == 1, str(um_body)[:160])
+um_server.shutdown()
+um_server.server_close()
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

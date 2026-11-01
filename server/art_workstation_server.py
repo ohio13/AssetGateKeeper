@@ -844,10 +844,21 @@ def set_collision(db_path: str | Path, asset_id: int, kind: str, data: dict) -> 
 
 
 def repository_stats(db_path: str | Path) -> dict:
+    """Library totals.
+
+    Unverified assets - a .blend scene, a .max or .ma source file - are stored
+    but cannot be measured without the DCC that made them. Their triangle count
+    is 0 because nobody counted, not because the mesh is cheap, so they are
+    excluded from the triangle total and counted separately. A total that
+    quietly included them would understate the project's cost.
+    """
     with open_db(db_path) as connection:
         assets = connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+        unverified = connection.execute(
+            "SELECT COUNT(*) FROM assets WHERE kind = 'unverified'").fetchone()[0]
         triangles = connection.execute(
-            "SELECT COALESCE(SUM(triangle_count), 0) FROM assets").fetchone()[0]
+            "SELECT COALESCE(SUM(triangle_count), 0) FROM assets"
+            " WHERE kind != 'unverified'").fetchone()[0]
         lods = connection.execute("SELECT COUNT(*) FROM lod_versions").fetchone()[0]
         notes = connection.execute("SELECT COUNT(*) FROM reviews_and_notes").fetchone()[0]
         by_category = connection.execute(
@@ -855,6 +866,9 @@ def repository_stats(db_path: str | Path) -> dict:
             " GROUP BY category ORDER BY n DESC").fetchall()
     return {
         "assets": int(assets),
+        # measured + unverified == assets; triangles covers measured only.
+        "measured": int(assets) - int(unverified),
+        "unverified": int(unverified),
         "triangles": int(triangles),
         "lods": int(lods),
         "notes": int(notes),
@@ -907,10 +921,20 @@ def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
     references = asset_references(db_path, data_dir, asset_id)
 
     stored = resolve_inside(data_dir, asset["file_path"])
+    # A .blend/.max/.ma is stored but nothing in this process can open it. Its
+    # zero triangle count is an absence of measurement, not a measurement of
+    # zero, so the report must not dress it up as a pass or as a cheap mesh.
+    unmeasured = (asset.get("kind") or "") == "unverified"
     verdict_html = "<li>the stored file is missing</li>"
     status_class, status_label = "fail", "UNREADABLE"
     problems: list[str] = []
-    if stored is not None and stored.is_file():
+    if unmeasured:
+        reason = (asset.get("analyse_note") or "").strip()
+        verdict_html = (f"<li>not validated: {html_escape(reason or 'this format needs a DCC to measure')}</li>"
+                        "<li>no triangle or slot budget applies until the file is exported"
+                        " to a mesh format</li>")
+        status_class, status_label = "sub", "UNVERIFIED"
+    elif stored is not None and stored.is_file():
         try:
             verdict = agk.Gatekeeper(agk.Budget()).check(stored)
             problems = list(verdict.problems)
@@ -962,6 +986,17 @@ def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
         f"{html_escape(note['note_text'])}</div>"
         for note in notes) or "<p class='sub'>No review notes.</p>"
 
+    geometry_rows = [
+        ("triangles", "not measured" if unmeasured else f"{asset['triangle_count']:,}"),
+        ("vertices", "not measured" if unmeasured else f"{asset['vertex_count']:,}"),
+        ("material slots", "not measured" if unmeasured else asset["material_slots"]),
+        ("file size", f"{asset['filesize']:,} bytes"),
+        ("stored path", asset["file_path"]),
+    ]
+    geometry_note = ("<p class='sub'>Unmeasured assets are left out of the library triangle"
+                     " total, so a scene full of .blend files cannot look cheap.</p>"
+                     if unmeasured else "")
+
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <title>{html_escape(asset['filename'])} - asset report</title>
@@ -974,13 +1009,8 @@ def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
     by {html_escape(asset['uploader'] or 'unknown')}</div>
 
   <h2>Geometry</h2>
-  <table><tbody>{rows([
-      ("triangles", f"{asset['triangle_count']:,}"),
-      ("vertices", f"{asset['vertex_count']:,}"),
-      ("material slots", asset["material_slots"]),
-      ("file size", f"{asset['filesize']:,} bytes"),
-      ("stored path", asset["file_path"]),
-  ])}</tbody></table>
+  <table><tbody>{rows(geometry_rows)}</tbody></table>
+  {geometry_note}
 
   <h2>Validation (default budget: 50,000 tris  3 slots  2048px)</h2>
   <ul>{verdict_html}</ul>

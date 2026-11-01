@@ -328,7 +328,19 @@ async function refreshAssets() {
     element.className = "asset" + (state.asset && state.asset.id === asset.id ? " active" : "");
     element.dataset.id = asset.id;
     element.dataset.verdict = asset.verdict_status || "";
-    const heavy = asset.triangle_count > 50000 ? ' <span class="bad">!</span>' : "";
+    // An unverified format (.blend, .max, .ma) has no triangle count at all.
+    // Printing "0 tris" would read as a cheap mesh rather than an unmeasured
+    // one, so it is named as unmeasured and its reason moved into the tooltip.
+    const unverified = asset.kind === "unverified";
+    const heavy = unverified ? ""
+      : (asset.triangle_count > 50000 ? ' <span class="bad">!</span>' : "");
+    const suffix = asset.filename.includes(".")
+      ? asset.filename.slice(asset.filename.lastIndexOf(".")) : "";
+    const geometry = unverified
+      ? `<span title="${escapeHtml(asset.analyse_note || "needs a DCC to measure")}">`
+        + `unmeasured ${escapeHtml(suffix)}</span>`
+      : `${fmt(asset.triangle_count)} tris  ${fmt(asset.vertex_count)} verts  `
+        + `${asset.material_slots} mat${heavy}`;
     // Straight from AssetHealth: reviewers should never have to open the
     // dashboard in another tab to know what they are looking at.
     const verdict = asset.verdict_status === "failed"
@@ -337,17 +349,20 @@ async function refreshAssets() {
         ? '<span class="verdict passed" title="AssetHealth: passed">PASSED</span>' : "";
     element.innerHTML =
       `<div class="name">${verdict}${escapeHtml(asset.filename)}</div>`
-      + `<div class="meta">${fmt(asset.triangle_count)} tris  `
-      + `${fmt(asset.vertex_count)} verts  ${asset.material_slots} mat${heavy}</div>`
+      + `<div class="meta">${geometry}</div>`
       + `<div class="meta">${asset.lod_count} LOD  ${asset.note_count} note`
       + `${asset.note_count === 1 ? "" : "s"}</div>`;
     element.addEventListener("click", () => selectAsset(asset.id));
     list.appendChild(element);
   });
   const stats = await json("/api/stats");
+  // Measured and unverified are reported apart: the triangle total only covers
+  // assets something actually counted, so it can never look artificially cheap.
+  const unmeasured = stats.unverified
+    ? `  ${stats.unverified} unmeasured (not in the tri total)` : "";
   $("stats").textContent =
     `${stats.assets} assets  ${fmt(stats.triangles)} tris  ${stats.lods} LODs  `
-    + `${stats.notes} notes`;
+    + `${stats.notes} notes${unmeasured}`;
 }
 
 async function selectAsset(id) {
@@ -401,10 +416,14 @@ function updateReadout() {
   const verts = lod ? lod.vertex_count : asset.vertex_count;
   const share = lod && asset.triangle_count
     ? `${(tris / asset.triangle_count * 100).toFixed(1)}% of source` : "source";
+  const geometry = asset.kind === "unverified"
+    ? "<span>unmeasured - no triangle count</span>"
+    : `<span>${fmt(tris)} tris</span><span>${fmt(verts)} verts</span>`
+      + `<span>${share}</span>`;
   $("readout").innerHTML =
     `<span>${state.level === "source" ? "source" : state.level}</span>`
-    + `<span>${fmt(tris)} tris</span><span>${fmt(verts)} verts</span>`
-    + `<span>${share}</span><span>uploaded ${asset.uploaded_at.replace("T", " ")}</span>`
+    + geometry
+    + `<span>uploaded ${asset.uploaded_at.replace("T", " ")}</span>`
     + `<span>by ${escapeHtml(asset.uploader || "unknown")}</span>`;
 }
 
@@ -554,7 +573,8 @@ async function uploadFile(file) {
   const asset = await response.json();
   await refreshAssets();
   await selectAsset(asset.id);
-  $("status").textContent = `${asset.filename}  ${fmt(asset.triangle_count)} tris`;
+  $("status").textContent = `${asset.filename}  ` + (asset.kind === "unverified"
+    ? "stored, not measured" : `${fmt(asset.triangle_count)} tris`);
 }
 
 /* - wiring */

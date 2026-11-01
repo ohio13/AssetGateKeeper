@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-842%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-853%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -889,14 +889,14 @@ No changes are needed in the watcher, the reporter, or the queue. Rules are data
 Four layers, because unit tests, networks, browser UIs and DCC reality fail
 in different ways.
 ```bash
-# 1. rules, config, healing, VCS hooks, presets - 384 assertions, no network, no GPU
+# 1. rules, config, healing, VCS hooks, presets - 392 assertions, no network, no GPU
 python tests/gen_test_assets.py
 python tests/test_gatekeeper.py
 
 # 2. the servers - 203 assertions over real sockets, ephemeral ports
 python tests/test_server.py
 
-# 3. the workstation UI - 124 assertions (LOD, collision, notes, rules panel)
+# 3. the workstation UI - 135 assertions (LOD, collision, notes, rules panel, unmeasured stats)
 python tests/test_workstation.py
 
 # 4. the admin surface - 123 assertions (accounts, roles, CSRF, audit, rescan)
@@ -915,13 +915,13 @@ pyproject.toml  setup.py         pip-installable (sset-gatekeeper command)
 ASSET_DIFF_ENGINE_SPEC.md        design for the next subsystem (not implemented)
 README.md  LICENSE  .gitignore  .gitattributes
 .github/workflows/
-  ci.yml                         every push/PR: lint + 370 assertions + integration
+  ci.yml                         every push/PR: lint + 392 assertions + integration
   dcc-nightly.yml                nightly Blender export through the real watcher
 tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
-  test_gatekeeper.py             318 assertions: rules, tags, healing, hooks, audits, packaging
-  test_server.py                 172 assertions: tenancy, ingest, alerts, throttle, SSE
-  test_workstation.py            107 assertions: storage, LODs, collision export, notes, refs, SSE, report
+  test_gatekeeper.py             392 assertions: rules, tags, healing, hooks, audits, packaging
+  test_server.py                 203 assertions: tenancy, ingest, alerts, throttle, SSE
+  test_workstation.py            135 assertions: storage, LODs, collision export, notes, refs, SSE, report
   run_headless_integration.py    drives headless DCC exports through the gate
 server/
   asset_health_server.py         dashboard + planner + ingest, stdlib only

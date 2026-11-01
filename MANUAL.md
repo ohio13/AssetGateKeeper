@@ -257,6 +257,18 @@ Only executables (`.exe`, `.dll`, `.ps1`, ...) are refused, with 415. A mesh tha
 fails to parse degrades to "unverified" instead of being dropped - the difference
 between a review tool and a filter.
 
+Unverified assets are stored but **never counted as zero triangles**. Their
+count is unknown, not small, so:
+
+* the library header and `GET /api/stats` add up measured assets only and report
+  `measured` / `unverified` next to the total;
+* the asset card and the status bar say `unmeasured` rather than `0 tris`;
+* the printable report shows `not measured` and `UNVERIFIED`, and states that no
+  triangle or slot budget applies until the file is exported to a mesh format.
+
+A scene of `.blend` sources therefore cannot make the project look cheap, and a
+budget review cannot quietly miss the heaviest asset in the library.
+
 When the dashboard sends a `.gltf`, the sibling files that make it loadable
 (`.bin`, textures sharing the stem) are copied beside it, up to 20 files and
 32 MB each, so the preview is not a blank box.

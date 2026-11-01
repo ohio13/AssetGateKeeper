@@ -52,10 +52,10 @@ jobs:
       - name: Generate fixtures
         run: python tests/gen_test_assets.py
 
-      - name: Gate suite (384 assertions)
+      - name: Gate suite (392 assertions)
         run: python tests/test_gatekeeper.py
 
-      - name: Workstation suite (120 assertions)
+      - name: Workstation suite (135 assertions)
         run: python tests/test_workstation.py
 
       # Spins the real dashboard server on an ephemeral port and drives it over
