@@ -1,0 +1,145 @@
+# rules.toml — drop this next to the assets you export and AssetGatekeeper picks
+# it up automatically. Every key is optional: anything you leave out keeps the
+# shipped default, so a project file only states what is different.
+#
+# Precedence:  explicit CLI flag  >  remote rules  >  this file  >  defaults
+#
+# Loaded with the standard library `tomllib` on Python 3.11+, `tomli` on older
+# interpreters, or the same structure written as JSON (`--rules rules.json`).
+
+# Which [platforms.*] profile to apply by default (empty = none). A CLI
+# --platform flag overrides it, and a platform profile beats the values below.
+platform = ""
+
+[mesh]
+# Hard cap on triangles per mesh file.
+max_triangles = 50000
+
+# Fail an asset whose .gltf/.obj points at a texture or buffer that is not there.
+# On by default: a broken link fails to load in every engine, on every platform.
+check_references = true
+
+# A reference that resolves outside the watch folder (../../shared/wood.png, or a
+# hardcoded C:/Users/... path) fails by default: the build machine will not have
+# it, and anything that follows the path on trust walks out of the repository.
+# Set this to true if your studio keeps a shared texture library one level up;
+# the finding then becomes a warning instead of a failure.
+allow_outside_references = false
+
+# Flags unbaked node translations/rotations and uncentred pivots; with
+# require_indexed it also fails triangle-soup geometry. OFF by default: an
+# offset pivot is often authored on purpose, so this is a review prompt.
+audit_transforms = false
+require_indexed = false
+pivot_tolerance = 0.05      # fraction of the bounding-box diagonal
+transform_epsilon = 0.0001  # metres; translations below this count as baked
+
+# Draw-call proxy: how many distinct materials one mesh may reference.
+max_material_slots = 3
+
+# Deep data profiling (the bottlenecks that survive an art review).
+# Per-vertex bone weights. 4 is the mobile/web GPU limit.
+max_bone_influences = 4
+# Texture-coordinate sets (TEXCOORD_n). Engines usually stop at 4-8.
+max_uv_channels = 4
+# Zero-area triangles make Nanite and ray tracing compute garbage.
+allow_degenerate = false
+# Area below which a triangle counts as degenerate (world units squared).
+degenerate_epsilon = 1e-08
+
+[texture]
+# Longest edge in pixels (width or height, whichever is larger).
+max_edge = 2048
+
+# Reject sizes that are not a power of two (512, 1024, 2048, ...).
+power_of_two = true
+
+# Require the filename to end with one of the suffixes below.
+naming = true
+
+# Case-insensitive; a trailing index (`_Albedo_02`) is tolerated. Change this
+# list if your studio uses a different convention (e.g. "_BC", "_N", "_R").
+# _BaseColor/_ORM are Unreal's spelling of the same two maps and are accepted
+# out of the box, because that is where most exports come from.
+suffixes = ["_Albedo", "_Normal", "_Roughness", "_BaseColor", "_ORM"]
+
+# PBR value sanitisation: albedo is a reflectance colour, not a painting. Real
+# surfaces sit in a narrow band; pure black absorbs all light and pure white
+# blinds the lighting model. Measured as mean Rec.709 luminance on the 0..1 scale.
+pbr = true
+pbr_floor = 0.02          # 5/255
+pbr_ceiling = 0.94        # 240/255
+pbr_suffixes = ["_Albedo", "_Diffuse", "_BaseColor"]   # normal/roughness maps are not albedo
+
+# --------------------------------------------------------------------------- #
+# Optional: studio platform integration. Delete this table for a standalone tool.
+# --------------------------------------------------------------------------- #
+
+[server]
+# POST one JSON object per verdict here. 2 s timeout, background thread, never
+# blocks the gate. Environment variable ASSET_GATEKEEPER_SERVER_URL overrides it.
+# url = "https://studio.example/api/verdicts"
+
+# Central budget. Cached to .rules.cache.json so an outage degrades to the last
+# known-good profile instead of stopping the artists.
+# remote_rules_url = "https://studio.example/rules.json"
+
+# Bearer token for both calls. Prefer ASSET_GATEKEEPER_TOKEN: a committed rules
+# file is a committed secret.
+# token = ""
+
+# How much of the artist's machine travels with each verdict:
+#   "full" - hostname, username and the absolute path
+#   "path" - the absolute path only (DEFAULT: the dashboard's Send-to-Workstation
+#            bridge needs a real file, but nobody needs to know who and where)
+#   "none" - only the path relative to the watch folder
+# identity = "path"
+
+# NOTE: all four keys are commented out on purpose. An empty [server] table is
+# valid (it means "no platform"), but a stray "url = " with no value is not.
+
+# --------------------------------------------------------------------------- #
+# Optional: auto-healing. OFF unless enabled = true here or --auto-heal is
+# passed. The gate fails and locks by default; a repaired file is adopted only if
+# it then verifies as passing under the same budget.
+# --------------------------------------------------------------------------- #
+
+[healer]
+enabled = false        # the only safe default
+
+# Non-power-of-two textures and missing "_Albedo"/"_BaseColor"/"_ORM" suffixes.
+textures = true
+
+# Zero-area faces in .obj files. .gltf/.glb geometry is never rewritten blind.
+meshes = true
+
+# "pad" grows the canvas and replicates edge pixels, preserving every original
+# pixel. "resize" resamples with LANCZOS. Pad by default: it is the only one of
+# the two that cannot change what the texture looks like.
+texture_mode = "pad"
+
+# --------------------------------------------------------------------------- #
+# Optional: per-platform compression profiles.
+#
+# A profile is "what this platform can afford". It overlays the [mesh]/[texture]
+# values above (the profile wins), and an explicit CLI flag still wins over both.
+# Select one with `--platform mobile`, or set `platform = "mobile"` at the top.
+# Only budget keys are allowed here: auditing rules are not per-platform.
+# --------------------------------------------------------------------------- #
+
+[platforms.mobile]
+max_triangles = 15000
+max_material_slots = 2
+max_texture_edge = 1024
+max_bone_influences = 4
+
+[platforms.console]
+max_triangles = 250000
+max_material_slots = 8
+max_texture_edge = 4096
+max_bone_influences = 8
+
+[platforms.pc]
+max_triangles = 120000
+max_material_slots = 6
+max_texture_edge = 4096

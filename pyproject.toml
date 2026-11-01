@@ -1,0 +1,82 @@
+[build-system]
+requires = ["setuptools>=65", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "asset-gatekeeper"
+dynamic = ["version"]
+description = "Gate game assets against technical budgets: triangles, texture memory, materials, PBR realism, broken references."
+readme = "README.md"
+requires-python = ">=3.9"
+license = { text = "MIT" }
+authors = [{ name = "AssetGatekeeper contributors" }]
+keywords = ["gamedev", "pipeline", "technical-art", "assets", "ci", "linter"]
+classifiers = [
+  "Development Status :: 5 - Production/Stable",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: OS Independent",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Multimedia :: Graphics :: 3D Modeling",
+  "Topic :: Software Development :: Quality Assurance",
+]
+
+# What the *gate* genuinely needs. trimesh and Pillow are required, not optional:
+# the texture lookups and the deep mesh profiling cannot be done without them, and
+# a gate that silently skips half its rules is worse than one that refuses to
+# start. Everything else in this repository (the servers, the healer, the LOD
+# engine, the workstation) is standard library only.
+dependencies = ["trimesh>=4.0", "pillow>=9.0",
+                "tomli>=2.0; python_version < '3.11'"]
+
+[project.optional-dependencies]
+# watchdog is a speed-up only: without it the watches fall back to polling.
+full = ["watchdog>=3.0"]
+dev = ["pyflakes>=3.0"]
+# Enterprise extras are split by feature so a studio installs only what it runs.
+# Every one of them is optional: without it the feature refuses with an install
+# hint instead of falling back to something weaker.
+postgres = ["psycopg[binary]>=3.1", "psycopg-pool>=3.1"]
+enterprise = ["psycopg[binary]>=3.1", "psycopg-pool>=3.1", "cryptography>=42"]
+saml = ["signxml>=3.2"]
+
+[project.scripts]
+# The two commands a studio actually types. Everything below them is optional.
+asset-gatekeeper = "asset_gatekeeper:main"
+art-workstation = "server.art_workstation_server:main"
+# The rest of the surface: the metrics dashboard, the launcher that owns ports
+# and logs, and the bulk uploader that loads a folder of exports in one go.
+asset-health = "server.asset_health_server:main"
+art-workstation-upload = "tools.upload_assets:main"
+agk-serve = "tools.agk_serve:main"
+# Enterprise operations: trends, RBAC checks, remote validation, the PostgreSQL
+# migration and the runner farm. See docs/ENTERPRISE.md.
+agk-enterprise = "enterprise.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/ohio13/asset-gatekeeper"
+Issues = "https://github.com/ohio13/asset-gatekeeper/issues"
+
+[tool.setuptools]
+# Both modules ship: the gate loads healer.py by path from its own directory, so
+# they must stay side by side in site-packages too.
+include-package-data = true
+py-modules = ["asset_gatekeeper", "healer", "notifier"]
+
+[tool.setuptools.packages.find]
+# server/ and engine/ are packages so that the dashboard, the workstation and the
+# LOD decimator travel with the wheel. They keep their folder names, which is what
+# the servers' own HERE/REPO_ROOT path bootstrapping already assumes.
+include = ["server*", "engine*", "tools*", "enterprise*", "plugins*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+# Without the static folder the workstation serves a 404 at /viewer and the
+# dashboard renders unstyled, so this is not optional decoration.
+server = ["static/*"]
+
+[tool.setuptools.dynamic]
+version = { attr = "asset_gatekeeper.__version__" }

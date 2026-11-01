@@ -1,0 +1,78 @@
+name: DCC nightly
+
+# The one thing PR CI cannot prove is that a real exporter produces a file a
+# real gate rejects. Blender is a 400 MB download, so it runs nightly instead
+# of on every push. Unreal + Houdini + Maya stay manual (licences).
+
+on:
+  schedule:
+    - cron: "0 4 * * *"   # 04:00 UTC
+  workflow_dispatch:
+    inputs:
+      blender_version:
+        description: Blender version to download
+        default: "4.5.10"
+        required: false
+
+env:
+  BLENDER_VERSION: ${{ github.event.inputs.blender_version || '4.5.10' }}
+
+jobs:
+  blender:
+    name: blender headless export → gate
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install watchdog trimesh pillow numpy
+
+      # Cached so the nightly costs ~20 s instead of a 400 MB download.
+      - name: Cache Blender
+        id: blender-cache
+        uses: actions/cache@v4
+        with:
+          path: C:\blender
+          key: blender-${{ env.BLENDER_VERSION }}-windows-x64
+
+      - name: Download Blender ${{ env.BLENDER_VERSION }}
+        if: steps.blender-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ver = $env:BLENDER_VERSION
+          $parts = $ver -split '\.'
+          $series = "Blender$($parts[0]).$($parts[1])"   # 4.5.10 -> Blender4.5
+          $url = "https://download.blender.org/release/$series/blender-$ver-windows-x64.zip"
+          Write-Host "downloading $url"
+          Invoke-WebRequest -Uri $url -OutFile "$env:RUNNER_TEMP\blender.zip"
+          Expand-Archive -Path "$env:RUNNER_TEMP\blender.zip" -DestinationPath "C:\" -Force
+          Move-Item "C:\blender-$ver-windows-x64" "C:\blender"
+
+      - name: Verify Blender
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "C:\blender\blender.exe")) { throw "blender.exe not found" }
+          & "C:\blender\blender.exe" --background --factory-startup --version
+
+      # The harness starts the gatekeeper in watch mode, lets Blender export a
+      # 180,000-triangle sphere into the folder, and asserts the verdict that
+      # comes back through watchdog. FAILED on a real export = broken gate.
+      - name: Run headless integration against real Blender
+        run: python tests/run_headless_integration.py --blender "C:\blender\blender.exe" --keep
+
+      - name: Upload artefacts (snippets, exports, logs)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dcc-nightly-${{ github.run_id }}
+          path: |
+            scratch/headless_*/**
+          retention-days: 14
+          if-no-files-found: warn

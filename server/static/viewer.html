@@ -1,0 +1,157 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Art Workstation</title>
+<link rel="stylesheet" href="/static/app.css">
+<script type="importmap">
+{
+  "imports": {
+    "three": "/static/vendor/three.module.js",
+    "three/addons/": "/static/vendor/"
+  }
+}
+</script>
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot"></span>
+    <strong>Art Workstation</strong>
+    <span class="sub" id="status">loading…</span>
+  </div>
+  <div class="actions">
+    <label class="file-btn">
+      Upload asset
+      <input type="file" id="upload" accept=".obj,.gltf,.glb" hidden>
+    </label>
+    <span class="sub" id="stats"></span>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ------------------------------------------------- library + rules tabs -->
+  <aside class="panel library">
+    <div class="tabs" role="tablist" aria-label="Sidebar">
+      <button class="tab is-active" id="tab-assets" data-tab="assets" role="tab"
+              aria-selected="true" aria-controls="pane-assets">Assets</button>
+      <button class="tab" id="tab-rules" data-tab="rules" role="tab"
+              aria-selected="false" aria-controls="pane-rules">📋 Rules &amp; Budgets</button>
+    </div>
+
+    <div class="tabpane" id="pane-assets" role="tabpanel" aria-labelledby="tab-assets">
+      <h2>Asset library</h2>
+      <div class="filters" role="group" aria-label="Filter by gate verdict">
+        <button type="button" class="filter is-active" data-filter="all">All</button>
+        <button type="button" class="filter" data-filter="attention">Needs attention</button>
+        <button type="button" class="filter" data-filter="passed">Passed</button>
+      </div>
+      <div id="asset-list" class="list">
+        <div class="empty">Nothing uploaded yet.<br>Drop a .obj / .gltf / .glb anywhere.</div>
+      </div>
+    </div>
+
+    <div class="tabpane is-hidden" id="pane-rules" role="tabpanel" aria-labelledby="tab-rules">
+      <div class="rules-head">
+        <h2>Project rules &amp; budgets</h2>
+        <button id="rules-refresh" class="chip xs" type="button"
+                title="Reload from /api/rules">↻</button>
+      </div>
+      <div id="rules-meta" class="rules-meta">
+        <div class="empty">Loading…</div>
+      </div>
+      <div id="rules-table" class="rules-table-host"></div>
+    </div>
+  </aside>
+
+  <!-- --------------------------------------------------------------- viewport -->
+  <section class="viewport-wrap">
+    <div class="toolbar">
+      <div class="group">
+        <button id="mode-textured" class="chip active" title="Textured view">Textured</button>
+        <button id="mode-geometry" class="chip" title="Flat normal material">Geometry</button>
+        <button id="wireframe" class="chip" title="Show triangle edges">Wireframe</button>
+        <button id="collision" class="chip active" title="Show collision proxy">Collision</button>
+      </div>
+      <div class="group grow">
+        <span class="label">Exposure</span>
+        <input type="range" id="brightness" min="0.2" max="3" step="0.05" value="1">
+        <output id="brightness-out">1.00</output>
+      </div>
+      <div class="group">
+        <span class="label">LOD</span>
+        <span id="lod-buttons" class="lod-buttons">
+          <button class="chip active" data-level="source">Source</button>
+        </span>
+      </div>
+    </div>
+
+    <div class="canvas-host" id="canvas-host">
+      <div class="hint" id="viewport-hint">
+        <strong>No asset loaded</strong>
+        <span>Pick one from the library, or drop a file here to upload it.</span>
+      </div>
+      <div class="dropzone" id="dropzone">Drop to upload</div>
+    </div>
+
+    <div class="readout" id="readout"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- verdict -->
+  <section class="panel inspector" id="verdict-panel">
+    <h2>Gate verdict</h2>
+    <div id="verdict-body"><div class="empty">No asset selected.</div></div>
+  </section>
+
+  <!-- ------------------------------------------------------------- collision -->
+  <section class="panel inspector">
+    <h2>Collision inspector</h2>
+    <div id="collision-info" class="kv">
+      <div class="empty">No asset selected.</div>
+    </div>
+    <div class="field">
+      <label for="collision-kind">Proxy type</label>
+      <select id="collision-kind">
+        <option value="box">Bounding box</option>
+        <option value="sphere">Sphere</option>
+        <option value="hull">Convex hull</option>
+      </select>
+      <button id="collision-derive" class="chip">Rebuild from mesh</button>
+      <a id="collision-export" class="chip" href="#" download
+         title="Download the proxy as a standalone Wavefront .obj">Export .obj</a>
+    </div>
+    <h2 style="margin-top:18px">Materials</h2>
+    <div id="materials" class="materials">
+      <div class="empty">No asset selected.</div>
+    </div>
+  </section>
+
+  <!-- ----------------------------------------------------------------- notes -->
+  <aside class="panel notes">
+    <h2>Review notes</h2>
+    <form id="note-form" class="note-form">
+      <div class="row">
+        <select id="note-category">
+          <option>Geometry</option>
+          <option>Texture</option>
+          <option>LOD</option>
+          <option>Collision</option>
+          <option>Shading</option>
+          <option>Other</option>
+        </select>
+        <input id="note-author" placeholder="your name" autocomplete="off">
+      </div>
+      <textarea id="note-text" rows="4"
+        placeholder="Markdown-ish: **bold**, `code`, - list items"></textarea>
+      <button type="submit" id="note-submit" disabled>Add note</button>
+    </form>
+    <div id="note-list" class="list"></div>
+  </aside>
+</main>
+
+<script type="module" src="/static/viewer.js"></script>
+</body>
+</html>

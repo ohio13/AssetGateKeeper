@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Two layers, same as the README: contract tests on every change, and one
+# end-to-end run through the real watcher path (synthetic exporter, no DCC
+# needed, so it is fast and hermetic).
+
+jobs:
+  tests:
+    name: tests · ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        python: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install watchdog trimesh pillow numpy pyflakes
+
+      # bpy.props property annotations make pyflakes emit bogus F722
+      # ("syntax error in forward annotation"), so the engine and tests are
+      # linted here and the plugins are syntax-checked below instead.
+      - name: Lint engine, server + tests
+        run: python -m pyflakes asset_gatekeeper.py healer.py notifier.py engine/lod_manager.py tools/houdini_export_hook.py server/asset_health_server.py server/art_workstation_server.py vcs_hooks/p4_pre_submit.py vcs_hooks/git_pre_commit.py tests/test_gatekeeper.py tests/test_server.py tests/test_workstation.py tests/test_admin.py tests/gen_test_assets.py tests/run_headless_integration.py
+
+      - name: Syntax-check DCC plugins
+        run: python -m compileall -q plugins
+
+      # The viewer is ~900 lines of ES modules and nothing else in this pipeline
+      # parses it. A duplicate `const` shipped once and left the page blank.
+      - name: Syntax-check the viewer
+        shell: bash
+        run: |
+          cp server/static/viewer.js "$RUNNER_TEMP/viewer.mjs"
+          node --check "$RUNNER_TEMP/viewer.mjs"
+
+      - name: Generate fixtures
+        run: python tests/gen_test_assets.py
+
+      - name: Gate suite (396 assertions)
+        run: python tests/test_gatekeeper.py
+
+      - name: Workstation suite (135 assertions)
+        run: python tests/test_workstation.py
+
+      # Spins the real dashboard server on an ephemeral port and drives it over
+      # real sockets: ingest, bearer auth, 400/404/405/413, HTML, cascade delete.
+      - name: Server suite (203 assertions)
+        run: python tests/test_server.py
+
+      # Accounts, sessions, CSRF, role enforcement, atomic rules writes, the
+      # audit trail and a streamed rescan - the parts a security review asks about.
+      - name: Admin suite (123 assertions)
+        run: python tests/test_admin.py
+
+      # No server, no IdP, no DCC: the enterprise suite fakes every
+      # external system, and asserts the fail-closed path when one is absent.
+      - name: Enterprise suite (218 assertions)
+        run: python tests/test_enterprise.py
+
+      # The server's own queries, run twice: once on SQLite and once through
+      # the PostgreSQL adapter (driver double). The numbers must be equal.
+      - name: Analytics + storage parity (59 assertions)
+        run: python tests/test_analytics.py
+
+      - name: Headless integration (synthetic exporter)
+        run: python tests/run_headless_integration.py --synthetic
