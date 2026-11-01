@@ -36,6 +36,7 @@ import re
 import secrets
 import socketserver
 import sqlite3
+import subprocess
 import sys
 import threading
 import time
@@ -124,6 +125,46 @@ CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
 );
+
+-- ---------------------------------------------------------------------------
+-- Admin: who may change a budget, and the record of every change they made.
+-- Only a PBKDF2 hash is stored - the database never holds a password.
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS admin_users (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    role          TEXT NOT NULL,          -- director | producer | artist
+    password_hash TEXT NOT NULL,
+    created_at    TEXT NOT NULL,
+    created_by    TEXT NOT NULL DEFAULT '',
+    disabled      INTEGER NOT NULL DEFAULT 0
+);
+
+-- Sessions store the hash of the cookie token, so a stolen database is not a
+-- stolen login. csrf is bound to the session for double-submit protection.
+CREATE TABLE IF NOT EXISTS admin_sessions (
+    token_hash TEXT PRIMARY KEY,
+    user_id    INTEGER NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+    created_at TEXT NOT NULL,
+    expires_at REAL NOT NULL,
+    ip         TEXT NOT NULL DEFAULT '',
+    csrf       TEXT NOT NULL DEFAULT ''
+);
+
+-- The audit trail: one row per changed key, with both sides of the change.
+CREATE TABLE IF NOT EXISTS rule_audit (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    changed_at TEXT NOT NULL,
+    user_id    INTEGER,
+    username   TEXT NOT NULL,
+    role       TEXT NOT NULL DEFAULT '',
+    target     TEXT NOT NULL,             -- mesh.max_triangles, tags.boss.max_triangles
+    summary    TEXT NOT NULL DEFAULT '',
+    old_value  TEXT NOT NULL DEFAULT '',
+    new_value  TEXT NOT NULL DEFAULT '',
+    source_ip  TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_rule_audit_when ON rule_audit(changed_at);
 
 -- ---------------------------------------------------------------------------
 -- Multi-tenancy. One row per game project or outsource vendor: they share a
@@ -1351,6 +1392,14 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib naming
         path = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
+        # The admin surface has its own auth domain (accounts, sessions, roles),
+        # so it is routed before the studio-token identity is resolved.
+        if path == "/admin" or path.startswith("/admin/") or path.startswith("/static/"):
+            try:
+                self._admin_get(path)
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+            return
         try:
             identity = self._identify()
             if path == "/":
@@ -1523,8 +1572,329 @@ class Handler(BaseHTTPRequestHandler):
         db_path = self.server.db_path  # type: ignore[attr-defined]
         self._json(200, budget_document(budget_for_project(db_path, project_id)))
 
+    # ------------------------------------------------------------------ admin --
+    # A second, cookie-based auth domain. Studio tokens scope a *pipeline*; the
+    # admin page scopes a *person*, so it needs accounts, roles, sessions and an
+    # audit trail - not a shared secret pasted into a CI variable.
+
+    def _cookie(self, name: str) -> str:
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            key, _, value = part.strip().partition("=")
+            if key == name:
+                return value
+        return ""
+
+    def _admin_user(self) -> dict | None:
+        return session_user(self.server.db_path, self._cookie(SESSION_COOKIE))
+
+    def _same_origin(self) -> bool:
+        """Block cross-site form posts. Non-browser clients send no Origin."""
+        origin = self.headers.get("Origin") or self.headers.get("Referer") or ""
+        if not origin:
+            return True
+        try:
+            return urllib.parse.urlsplit(origin).netloc == self.headers.get("Host", "")
+        except ValueError:
+            return False
+
+    def _csrf_ok(self, user: dict) -> bool:
+        token = self.headers.get("X-CSRF-Token", "")
+        expected = user.get("csrf", "")
+        return bool(token) and bool(expected) and hmac.compare_digest(token, expected)
+
+    def _require_admin(self, writer: bool = False) -> dict | None:
+        user = self._admin_user()
+        if user is None:
+            self._json(401, {"error": "sign in at /admin/login"})
+            return None
+        if writer and user["role"] not in WRITER_ROLES:
+            self._json(403, {"error": f"role '{user['role']}' may read but not change "
+                                      f"rules; ask a director or producer"})
+            return None
+        return user
+
+    def _send_document(self, status: int, content_type: str, body: str | bytes,
+                       extra: list[tuple[str, str]] | None = None) -> None:
+        payload = body.encode("utf-8") if isinstance(body, str) else body
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(payload)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("X-Frame-Options", "DENY")
+        self.send_header("Referrer-Policy", "same-origin")
+        for key, value in (extra or []):
+            self.send_header(key, value)
+        self.end_headers()
+        self.wfile.write(payload)
+
+    def _redirect(self, location: str, extra: list[tuple[str, str]] | None = None) -> None:
+        self.send_response(303)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        for key, value in (extra or []):
+            self.send_header(key, value)
+        self.end_headers()
+
+    def _rules_path(self) -> Path:
+        server = self.server
+        if server.rules_path:
+            return Path(server.rules_path)
+        return Path(server.rules_root) / agk.RULES_FILENAME
+
+    def _serve_admin_static(self, name: str) -> None:
+        if name not in ADMIN_STATIC:
+            self._json(404, {"error": "not found"})
+            return
+        path = STATIC_DIR / name
+        try:
+            payload = path.read_bytes()
+        except OSError:
+            self._json(404, {"error": "not installed"})
+            return
+        suffix = path.suffix.lower()
+        kind = {'.html': 'text/html; charset=utf-8', '.js': 'application/javascript',
+                '.css': 'text/css'}.get(suffix, 'application/octet-stream')
+        self._send_document(200, kind, payload)
+
+    def _admin_get(self, path: str) -> None:
+        if path.startswith("/static/"):
+            self._serve_admin_static(path[len("/static/"):])
+            return
+        if path == "/admin/login":
+            if self._admin_user() is not None:
+                self._redirect("/admin")
+                return
+            error = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            message = (error.get("error") or [""])[0]
+            username = (error.get("u") or [""])[0]
+            self._send_document(200, "text/html; charset=utf-8",
+                                render_login_page(message, username))
+            return
+        user = self._admin_user()
+        if path in ("/admin", "/admin/index.html"):
+            if user is None:
+                self._redirect("/admin/login")
+                return
+            self._serve_admin_static("admin.html")
+            return
+        if path == "/admin/api/state":
+            if self._require_admin() is None:
+                return
+            server = self.server
+            rules_path = self._rules_path()
+            error = ""
+            try:
+                document = agk.parse_rules(rules_path) if rules_path.is_file() else {}
+            except agk.ConfigError as exc:
+                document, error = {}, str(exc)
+            self._json(200, {
+                "user": {"username": user["username"], "role": user["role"]},
+                "csrf": user["csrf"],
+                "can_write": user["role"] in WRITER_ROLES,
+                "rules_path": str(rules_path),
+                "rules_exists": rules_path.is_file(),
+                "rules_error": error,
+                "scan_root": server.scan_root,
+                "document": document,
+                "presets": agk.preset_summary(),
+                "audit": list_audit(server.db_path, 25),
+                "scan": server.scanner.snapshot(),
+            })
+            return
+        if path == "/admin/api/audit":
+            if self._require_admin() is None:
+                return
+            self._json(200, {"audit": list_audit(self.server.db_path, 200)})
+            return
+        if path == "/admin/api/scan/events":
+            self._admin_events()
+            return
+        self._json(404, {"error": "not found", "path": path})
+
+    def _admin_events(self) -> None:
+        if self._require_admin() is None:
+            return
+        server = self.server
+        channel = server.scan_broadcaster.subscribe()
+        try:
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.send_header("X-Accel-Buffering", "no")
+            self.end_headers()
+            for event in server.scanner.recent():
+                self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+            self.wfile.flush()
+            while not server.stopping:
+                try:
+                    event = channel.get(timeout=15)
+                except queue.Empty:
+                    self.wfile.write(b": ping\n\n")
+                    self.wfile.flush()
+                    continue
+                if event is None:
+                    break
+                self.wfile.write(f"data: {json.dumps(event)}\n\n".encode("utf-8"))
+                self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, OSError):
+            pass
+        finally:
+            server.scan_broadcaster.unsubscribe(channel)
+
+    def _client_ip(self) -> str:
+        return self.client_address[0] if self.client_address else "?"
+
+    def _login_throttled(self) -> bool:
+        server = self.server
+        now = time.time()
+        with server._login_lock:
+            failures = [stamp for stamp in server._login_failures.get(self._client_ip(), [])
+                        if now - stamp < LOGIN_WINDOW]
+            server._login_failures[self._client_ip()] = failures
+            return len(failures) >= LOGIN_MAX_FAILURES
+
+    def _note_login_failure(self) -> None:
+        server = self.server
+        with server._login_lock:
+            server._login_failures.setdefault(self._client_ip(), []).append(time.time())
+
+    def _admin_login(self) -> None:
+        if not self._same_origin():
+            self._json(403, {"error": "cross-origin sign-in refused"})
+            return
+        if self._login_throttled():
+            self._json(429, {"error": "too many failed attempts; wait a few minutes"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > MAX_BODY_BYTES:
+            self._redirect("/admin/login?error=Missing+credentials")
+            return
+        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        username = (form.get("username") or [""])[0].strip()
+        password = (form.get("password") or [""])[0]
+        db_path = self.server.db_path
+        row = None
+        with open_db(db_path) as connection:
+            row = connection.execute(
+                "SELECT id, password_hash, role FROM admin_users "
+                " WHERE username = ? AND disabled = 0", (username,)).fetchone()
+        # Always run a hash comparison: a fast path for unknown users leaks which
+        # usernames exist.
+        reference = row["password_hash"] if row else hash_password("never-matches")
+        if not verify_password(password, reference) or row is None:
+            self._note_login_failure()
+            self._redirect("/admin/login?error=Invalid+credentials&u="
+                           + urllib.parse.quote(username))
+            return
+        token, _csrf = create_session(db_path, int(row["id"]), self._client_ip())
+        cookie = (f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; "
+                  f"Max-Age={int(SESSION_TTL)}")
+        self._redirect("/admin", [("Set-Cookie", cookie)])
+
+    def _admin_apply(self) -> None:
+        user = self._require_admin(writer=True)
+        if user is None:
+            return
+        if not self._same_origin():
+            self._json(403, {"error": "cross-origin request refused"})
+            return
+        if not self._csrf_ok(user):
+            self._json(403, {"error": "missing or stale CSRF token; reload the page"})
+            return
+        payload = self._read_json()
+        if payload is None:
+            return
+        submitted = payload.get("document")
+        if not isinstance(submitted, dict):
+            self._json(400, {"error": "document must be an object"})
+            return
+        rules_path = self._rules_path()
+        try:
+            existing = agk.parse_rules(rules_path) if rules_path.is_file() else {}
+        except agk.ConfigError as exc:
+            self._json(409, {"error": f"the current rules.toml does not parse: {exc}",
+                             "detail": "fix it by hand once; the admin page will not "
+                                       "overwrite a file it cannot read"})
+            return
+        merged = merge_rules_document(existing, submitted)
+        # A `platform` name with no matching [platforms.<name>] table makes the gate
+        # refuse the whole file, so such a reference can never be "kept for later".
+        # Dropping it is a repair, and repairs are reported, never silent.
+        notes: list[str] = []
+        platform = str(merged.get("platform") or "").strip()
+        if platform and platform not in (merged.get("platforms") or {}):
+            notes.append(f"dropped platform '{platform}': there is no "
+                         f"[platforms.{platform}] table, so the gate would refuse "
+                         f"this file. The preset's numbers are already in [mesh].")
+            merged.pop("platform", None)
+        try:
+            validate_rules_document(merged)
+        except agk.ConfigError as exc:
+            self._json(400, {"error": f"refused: {exc}"})
+            return
+        changes = diff_documents(existing, merged)
+        try:
+            write_rules_atomic(rules_path, merged)
+        except OSError as exc:
+            self._json(500, {"error": f"cannot write {rules_path}: {exc}"})
+            return
+        for key, old_value, new_value in changes:
+            record_audit(self.server.db_path, user, key, old_value, new_value,
+                         self._client_ip(), summary=payload.get("summary", ""))
+        started = False
+        if payload.get("action") == "rescan":
+            started = self.server.scanner.start(
+                self.server.scan_root, rules_path,
+                f"http://127.0.0.1:{self.server.server_address[1]}/api/telemetry")
+        self._json(200, {
+            "ok": True,
+            "path": str(rules_path),
+            "notes": notes,
+            "changed": [{"key": k, "old": o, "new": n} for k, o, n in changes],
+            "scan": {"started": started, **self.server.scanner.snapshot()},
+        })
+
+    def _admin_scan(self) -> None:
+        user = self._require_admin()
+        if user is None:
+            return
+        if not self._same_origin() or not self._csrf_ok(user):
+            self._json(403, {"error": "missing or stale CSRF token; reload the page"})
+            return
+        started = self.server.scanner.start(
+            self.server.scan_root, self._rules_path(),
+            f"http://127.0.0.1:{self.server.server_address[1]}/api/telemetry")
+        if not started:
+            self._json(409, {"error": "a scan is already running",
+                             **self.server.scanner.snapshot()})
+            return
+        self._json(200, {"ok": True, "scan": self.server.scanner.snapshot()})
+
+    def _admin_post(self, path: str) -> None:
+        if path == "/admin/login":
+            self._admin_login()
+        elif path == "/admin/api/logout":
+            user = self._require_admin()
+            if user is None:
+                return
+            if self._csrf_ok(user):
+                delete_session(self.server.db_path, self._cookie(SESSION_COOKIE))
+            self._redirect("/admin/login", [("Set-Cookie", f"{SESSION_COOKIE}=; Path=/; "
+                                                           f"Max-Age=0; SameSite=Strict")])
+        elif path == "/admin/api/apply":
+            self._admin_apply()
+        elif path == "/admin/api/scan":
+            self._admin_scan()
+        else:
+            self._json(404, {"error": "not found", "path": path})
+
     def do_POST(self) -> None:  # noqa: N802 - stdlib naming
         path = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
+        if path.startswith("/admin/"):
+            self._admin_post(path)
+            return
         if path not in ("/api/telemetry", "/api/save-budget"):
             self._json(404, {"error": "not found", "path": path})
             return
@@ -1671,6 +2041,405 @@ def _constant_time_equal(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
+# --------------------------------------------------------------------------- #
+# Admin: accounts, sessions, audit trail, rules writes
+# --------------------------------------------------------------------------- #
+
+PBKDF2_ROUNDS = 120_000
+ADMIN_ROLES = ("director", "producer", "artist")
+WRITER_ROLES = frozenset({"director", "producer"})
+SESSION_COOKIE = "agk_admin"
+SESSION_TTL = 12 * 3600.0
+LOGIN_MAX_FAILURES = 5
+LOGIN_WINDOW = 300.0
+STATIC_DIR = HERE / "static"
+ADMIN_STATIC = frozenset({"admin.html", "admin.js", "admin.css"})
+
+
+def _b64(raw: bytes) -> str:
+    import base64
+
+    return base64.urlsafe_b64encode(raw).decode("ascii")
+
+
+def _unb64(text: str) -> bytes:
+    import base64
+
+    return base64.urlsafe_b64decode(text.encode("ascii"))
+
+
+def _sha256(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def hash_password(password: str) -> str:
+    """PBKDF2-HMAC-SHA256 with a per-user salt, versioned for future rounds.
+
+    Standard library only, and never reversible: the database holds no password,
+    only this string. ``agk_admin`` passwords are studio credentials, so they get
+    the same treatment as anything else that must not appear in a backup.
+    """
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ROUNDS)
+    return f"pbkdf2_sha256${PBKDF2_ROUNDS}${_b64(salt)}${_b64(digest)}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    """Constant-time check against a stored ``pbkdf2_sha256$rounds$salt$hash``."""
+    try:
+        algorithm, rounds, salt, digest = str(stored).split("$")
+        if algorithm != "pbkdf2_sha256":
+            return False
+        candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                        _unb64(salt), int(rounds))
+        expected = _unb64(digest)
+    except (ValueError, TypeError):
+        return False
+    return hmac.compare_digest(candidate, expected)
+
+
+def create_admin_user(db_path: str | Path, username: str, role: str,
+                      password: str | None = None, created_by: str = "") -> str:
+    """Create an admin account. Returns the password (generated when None)."""
+    username = str(username or "").strip()
+    if not username:
+        raise ValueError("username is required")
+    if role not in ADMIN_ROLES:
+        raise ValueError(f"role must be one of {', '.join(ADMIN_ROLES)}")
+    password = password or secrets.token_urlsafe(18)
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        connection.execute(
+            "INSERT INTO admin_users (username, role, password_hash, created_at, created_by)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (username, role, hash_password(password), _utc_now(), created_by))
+    return password
+
+
+def list_admin_users(db_path: str | Path) -> list[dict]:
+    with open_db(db_path) as connection:
+        rows = connection.execute(
+            "SELECT id, username, role, created_at, disabled FROM admin_users ORDER BY id"
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def set_admin_password(db_path: str | Path, username: str,
+                       password: str | None = None) -> str:
+    password = password or secrets.token_urlsafe(18)
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        cursor = connection.execute("UPDATE admin_users SET password_hash = ? WHERE username = ?",
+                                    (hash_password(password), username))
+        if cursor.rowcount == 0:
+            raise ValueError(f"no such user: {username}")
+        # Resetting a password invalidates every open session for that account.
+        connection.execute("DELETE FROM admin_sessions WHERE user_id IN "
+                           "(SELECT id FROM admin_users WHERE username = ?)", (username,))
+    return password
+
+
+def create_session(db_path: str | Path, user_id: int, ip: str = "") -> tuple[str, str]:
+    """Open a session. Returns (cookie token, CSRF token); only hashes are stored."""
+    token = secrets.token_urlsafe(32)
+    csrf = secrets.token_urlsafe(24)
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        connection.execute(
+            "INSERT INTO admin_sessions (token_hash, user_id, created_at, expires_at, ip, csrf)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (_sha256(token), user_id, _utc_now(), time.time() + SESSION_TTL, ip, csrf))
+        connection.execute("DELETE FROM admin_sessions WHERE expires_at < ?", (time.time(),))
+    return token, csrf
+
+
+def session_user(db_path: str | Path, token: str) -> dict | None:
+    """The signed-in user for this cookie token, or None when it is stale."""
+    if not token:
+        return None
+    with open_db(db_path) as connection:
+        row = connection.execute(
+            "SELECT u.id, u.username, u.role, s.csrf, s.expires_at"
+            "  FROM admin_sessions s JOIN admin_users u ON u.id = s.user_id"
+            " WHERE s.token_hash = ? AND u.disabled = 0", (_sha256(token),)).fetchone()
+    if row is None or float(row["expires_at"]) < time.time():
+        return None
+    return {"id": row["id"], "username": row["username"], "role": row["role"],
+            "csrf": row["csrf"]}
+
+
+def delete_session(db_path: str | Path, token: str) -> None:
+    if not token:
+        return
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        connection.execute("DELETE FROM admin_sessions WHERE token_hash = ?", (_sha256(token),))
+
+
+def record_audit(db_path: str | Path, user: dict, target: str, old_value: object,
+                 new_value: object, ip: str = "", summary: str = "") -> None:
+    """One row per changed key: who, when, where, and both sides of the change."""
+    def show(value: object) -> str:
+        if isinstance(value, str):
+            return value
+        return json.dumps(value, sort_keys=True, default=str)
+
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        connection.execute(
+            "INSERT INTO rule_audit (changed_at, user_id, username, role, target,"
+            " summary, old_value, new_value, source_ip) VALUES (?,?,?,?,?,?,?,?,?)",
+            (_utc_now(), user.get("id"), user.get("username", "?"), user.get("role", ""),
+             target, summary, show(old_value), show(new_value), ip))
+
+
+def list_audit(db_path: str | Path, limit: int = 100) -> list[dict]:
+    with open_db(db_path) as connection:
+        rows = connection.execute(
+            "SELECT changed_at, username, role, target, old_value, new_value"
+            "  FROM rule_audit ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def flatten_document(value: object, prefix: str = "") -> dict[str, object]:
+    """Dotted paths for every leaf, so an audit row can name exactly what moved."""
+    flat: dict[str, object] = {}
+    if isinstance(value, dict):
+        for key, item in value.items():
+            flat.update(flatten_document(item, f"{prefix}.{key}" if prefix else str(key)))
+    else:
+        flat[prefix] = value
+    return flat
+
+
+def diff_documents(old: dict, new: dict) -> list[tuple[str, object, object]]:
+    before = flatten_document(old)
+    after = flatten_document(new)
+    changes: list[tuple[str, object, object]] = []
+    for key in sorted(set(before) | set(after)):
+        if before.get(key, None) != after.get(key, None):
+            changes.append((key, before.get(key), after.get(key)))
+    return changes
+
+
+def merge_rules_document(existing: dict, submitted: dict) -> dict:
+    """Overlay what the form owns, keep every section it does not show.
+
+    The admin page edits budgets, texture policy and categories. [filters],
+    [platforms], [server] and [healer] are not on the form, and an apply must
+    never delete them - so unknown sections are carried through untouched and
+    known tables are merged key by key.
+    """
+    import copy
+
+    merged = copy.deepcopy(existing) if existing else {}
+    for key, value in submitted.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = {**merged[key], **value}
+        else:
+            merged[key] = value
+    return merged
+
+
+def validate_rules_document(document: dict) -> None:
+    """Refuse a document the gate would refuse, before it reaches the disk."""
+    agk.Budget.from_mapping(document)              # unknown keys, bad numbers
+    agk.build_tag_budgets(document)                # [tags.*] tables
+    named = str(document.get("platform") or "").strip()
+    if named:
+        # apply_platform raises for an unknown name; that error is the point -
+        # `platform = "n64"` without [platforms.n64] refuses to load at all.
+        agk.apply_platform(document, named)
+    tagging = document.get("tagging") or {}
+    mode = tagging.get("mode") if isinstance(tagging, dict) else None
+    if mode is not None and mode not in agk.TAG_MODES:
+        raise agk.ConfigError(f"[tagging].mode must be one of {', '.join(agk.TAG_MODES)}")
+    platforms = document.get("platforms") or {}
+    if not isinstance(platforms, dict):
+        raise agk.ConfigError("[platforms] must be a table of tables")
+    for name in platforms:
+        agk.apply_platform(document, name)         # each profile, honouring the whitelist
+
+
+def write_rules_atomic(rules_path: Path, document: dict) -> str:
+    """Write rules.toml atomically and return the text that was written.
+
+    Same directory, ``fsync``, then ``os.replace``: a reader (the gate, CI, an
+    editor) sees either the old file or the new one, never half of each. The
+    file stays plain text so git keeps a real history of every budget change.
+    """
+    text = agk.to_toml(document)
+    rules_path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = rules_path.with_name(f".{rules_path.name}.{os.getpid()}.tmp")
+    with open(temporary, "w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, rules_path)
+    return text
+
+
+class ScanRunner:
+    """One background gate run, streamed as Server-Sent Events.
+
+    Explicitly *not* a live slider: a scan costs a full folder parse, so the UI
+    asks for it with a button and the server refuses a second concurrent run
+    instead of queueing CPU thrash.
+    """
+
+    def __init__(self, broadcaster: "Broadcaster") -> None:
+        self.broadcaster = broadcaster
+        self._lock = threading.Lock()
+        self._process = None
+        self._thread: threading.Thread | None = None
+        self.status = "idle"            # idle | running | done | failed
+        self.root = ""
+        self.error = ""
+        self.started_at = ""
+        self.finished_at = ""
+        self.totals = {"total": 0, "passed": 0, "failed": 0}
+        self._recent: list[dict] = []
+
+    def busy(self) -> bool:
+        with self._lock:
+            return self.status == "running"
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {"status": self.status, "root": self.root, "error": self.error,
+                    "started_at": self.started_at, "finished_at": self.finished_at,
+                    "totals": dict(self.totals)}
+
+    def recent(self) -> list[dict]:
+        with self._lock:
+            return list(self._recent)
+
+    def _emit(self, event: dict) -> None:
+        with self._lock:
+            self._recent.append(event)
+            del self._recent[:-400]          # a late joiner needs the summary, not history
+        self.broadcaster.publish(event)
+
+    def start(self, root: str, rules_path: Path, telemetry_url: str) -> bool:
+        with self._lock:
+            if self.status == "running":
+                return False
+            self.status = "running"
+            self.root = str(root)
+            self.error = ""
+            self.started_at = _utc_now()
+            self.finished_at = ""
+            self.totals = {"total": 0, "passed": 0, "failed": 0}
+            self._recent = []
+            self._thread = threading.Thread(
+                target=self._run, args=(str(root), Path(rules_path), telemetry_url),
+                name="agk-scan", daemon=True)
+            self._thread.start()
+        return True
+
+    def _run(self, root: str, rules_path: Path, telemetry_url: str) -> None:
+        command = [sys.executable, "-m", "asset_gatekeeper", root,
+                   "--rules", str(rules_path), "--recursive", "--once", "--json",
+                   "--no-color", "--no-auto-heal"]
+        if telemetry_url:
+            command += ["--telemetry-url", telemetry_url]
+        environment = dict(os.environ)
+        # `-m asset_gatekeeper` must resolve from a checkout as well as a wheel.
+        environment["PYTHONPATH"] = str(REPO_ROOT) + os.pathsep + environment.get("PYTHONPATH", "")
+        self._emit({"type": "scan_start", "root": root, "at": self.started_at})
+        try:
+            process = subprocess.Popen(
+                command, cwd=str(REPO_ROOT), env=environment,
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True, encoding="utf-8", errors="replace",
+                creationflags=(0x08000000 if os.name == "nt" else 0))
+        except OSError as exc:
+            self._finish("failed", f"cannot start the gate: {exc}")
+            return
+        with self._lock:
+            self._process = process
+        assert process.stdout is not None
+        try:
+            for line in process.stdout:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except ValueError:
+                    self._emit({"type": "log", "text": line[:400]})
+                    continue
+                if not isinstance(payload, dict):
+                    continue
+                with self._lock:
+                    self.totals["total"] += 1
+                    if payload.get("passed"):
+                        self.totals["passed"] += 1
+                    else:
+                        self.totals["failed"] += 1
+                    totals = dict(self.totals)
+                self._emit({"type": "asset", "name": payload.get("name", "?"),
+                            "passed": bool(payload.get("passed")),
+                            "metric": payload.get("metric", ""),
+                            "problems": list(payload.get("problems") or [])[:4],
+                            "totals": totals})
+        finally:
+            code = process.wait()
+            detail = ""
+            if process.stderr is not None:
+                tail = process.stderr.read() or ""
+                detail = tail.strip().splitlines()[-1] if tail.strip() else ""
+            self._finish("done" if code == 0 else "failed", detail,
+                         exit_code=code)
+
+    def _finish(self, status: str, error: str = "", exit_code: int = 0) -> None:
+        with self._lock:
+            self.totals["failed"] += 0
+            self.status = status
+            self.error = error
+            self.finished_at = _utc_now()
+            self._process = None
+            totals = dict(self.totals)
+        self._emit({"type": "scan_end", "status": status, "error": error,
+                    "exit_code": exit_code, "totals": totals,
+                    "at": self.finished_at})
+
+
+LOGIN_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sign in - AssetGatekeeper admin</title>
+<style>
+:root{--bg:#0d1016;--panel:#161b24;--line:#262f3d;--text:#e6e9ef;--muted:#8b94a7;
+--accent:#7aa2f7;--bad:#ff6b6b}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);
+color:var(--text);font:14px/1.55 ui-sans-serif,"Segoe UI",Roboto,Arial,sans-serif}
+form{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+padding:26px 26px 22px;width:min(360px,92vw)}
+h1{font-size:15px;margin:0 0 4px}
+p.sub{color:var(--muted);font-size:12px;margin:0 0 18px}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:12px}
+input{width:100%;margin-top:5px;background:#1d2431;border:1px solid var(--line);
+color:var(--text);border-radius:7px;padding:9px 10px;font:inherit}
+input:focus{outline:2px solid var(--accent);outline-offset:1px}
+button{width:100%;margin-top:6px;padding:10px;border-radius:8px;border:1px solid var(--accent);
+background:var(--accent);color:#0b1020;font:inherit;font-weight:600;cursor:pointer}
+.err{color:var(--bad);font-size:12.5px;margin:0 0 12px}
+.hint{color:var(--muted);font-size:11.5px;margin-top:14px}
+</style></head><body>
+<form method="post" action="/admin/login" autocomplete="on">
+  <h1>Rules &amp; Presets</h1>
+  <p class="sub">Sign in to change platform budgets.</p>
+  <p class="err">{{message}}</p>
+  <label>Username<input name="username" value="{{username}}" autofocus required></label>
+  <label>Password<input name="password" type="password" required></label>
+  <button type="submit">Sign in</button>
+  <p class="hint">Accounts are created by whoever administers this dashboard:
+  <code>asset-health --add-admin &lt;name&gt; --role director</code></p>
+</form></body></html>"""
+
+
+def render_login_page(message: str = "", username: str = "") -> str:
+    return (LOGIN_PAGE.replace("{{message}}", html.escape(message))
+                     .replace("{{username}}", html.escape(username)))
+
+
 class AssetHealthServer(socketserver.ThreadingTCPServer):
     """One thread per connection, so a slow browser tab cannot stall ingest.
 
@@ -1685,7 +2454,8 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
     def __init__(self, address: tuple[str, int], db_path: str | Path, token: str = "",
                  quiet: bool = False, notifier: "Notifier | None" = None,
                  alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
-                 rules_path: str | Path = "", rules_root: str | Path = ""):
+                 rules_path: str | Path = "", rules_root: str | Path = "",
+                 scan_root: str | Path = ""):
         self.db_path = str(db_path)
         self.auth_token = token          # the studio-wide admin token, optional
         self.quiet = quiet
@@ -1698,6 +2468,13 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
         self.alerts_suppressed = 0       # visible in /api/summary for tuning
         self.broadcaster = Broadcaster()  # /api/events, one queue per open tab
         self.stopping = False            # flips so stream threads exit on shutdown
+        # Admin surface: a second broadcaster so the scan stream is not mixed
+        # into the verdict feed, plus per-IP login throttling.
+        self.scan_broadcaster = Broadcaster()
+        self.scan_root = str(scan_root or Path.cwd())
+        self.scanner = ScanRunner(self.scan_broadcaster)
+        self._login_lock = threading.Lock()
+        self._login_failures: dict[str, list[float]] = {}
         super().__init__(address, Handler)
 
     def shutdown(self) -> None:          # noqa: D401 - stdlib override
@@ -1709,9 +2486,10 @@ def build_server(host: str, port: int, db_path: str | Path,
                  token: str = "", quiet: bool = False,
                  notifier: "Notifier | None" = None,
                  alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
-                 rules_path: str | Path = "", rules_root: str | Path = "") -> AssetHealthServer:
+                 rules_path: str | Path = "", rules_root: str | Path = "",
+                 scan_root: str | Path = "") -> AssetHealthServer:
     return AssetHealthServer((host, port), db_path, token, quiet, notifier, alert_cooldown,
-                             rules_path, rules_root)
+                             rules_path, rules_root, scan_root)
 
 
 def describe_rules(server: "AssetHealthServer") -> dict:
@@ -1866,6 +2644,18 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-seed", action="store_true",
                         help="accepted for old scripts; demo data is off unless --demo is given")
     parser.add_argument("--quiet", action="store_true", help="only log errors")
+    parser.add_argument("--scan-root", metavar="PATH", default="",
+                        help="folder 'Apply & Rescan' scans (default: the rules root)"
+                             "; fixed at startup so the admin page can never point "
+                             "the server at an arbitrary directory")
+    admin = parser.add_argument_group("admin accounts")
+    admin.add_argument("--add-admin", metavar="USER", default="",
+                       help="create a rules-admin account; prints its password once")
+    admin.add_argument("--admin-role", default="director",
+                       choices=("director", "producer", "artist"),
+                       help="role for --add-admin (default director)")
+    admin.add_argument("--list-admins", action="store_true",
+                       help="list admin accounts and exit")
     parser.add_argument("--rules", metavar="PATH", default=os.environ.get(RULES_ENV, ""),
                         help="rules.toml that GET /api/rules reports on, read-only "
                              f"(default: ./{agk.RULES_FILENAME} in the working directory, "
@@ -1953,6 +2743,28 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     # Management commands run and exit; they never bind a port.
+    if args.list_admins:
+        rows = list_admin_users(db_path)
+        if not rows:
+            print("no admin accounts yet. create one with:")
+            print("  asset-health --add-admin <name> --role director")
+        for row in rows:
+            flag = "  (disabled)" if row["disabled"] else ""
+            print(f"  {row['username']:<22}{row['role']:<11}created {row['created_at']}{flag}")
+        return 0
+
+    if args.add_admin:
+        try:
+            password = create_admin_user(db_path, args.add_admin, args.admin_role)
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
+        print(f"admin '{args.add_admin}' created with role '{args.admin_role}'")
+        print(f"  password (shown once): {password}")
+        print(f"  sign in at  http://{args.host}:{args.port}/admin/login")
+        print("  only the PBKDF2 hash is stored; this password cannot be recovered")
+        return 0
+
     if args.list_projects:
         rows = list_projects(db_path)
         if not rows:
@@ -1994,7 +2806,8 @@ def main(argv: list[str] | None = None) -> int:
         httpd, bound_port = agk.bind_with_fallback(
             lambda host, port: build_server(host, port, db_path, args.token, args.quiet,
                                             notifier, alert_cooldown,
-                                            rules_path=args.rules, rules_root=Path.cwd()),
+                                            rules_path=args.rules, rules_root=Path.cwd(),
+                                            scan_root=args.scan_root or Path.cwd()),
             args.host, args.port, auto=args.port_auto, tries=args.port_tries,
             reserved=(ART_WORKSTATION_PORT,), report=_moved)
     except OSError as exc:

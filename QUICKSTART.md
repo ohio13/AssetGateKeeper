@@ -222,6 +222,19 @@ set ASSET_GATEKEEPER_TOKEN=<the token it printed>
 
 A `project_id` in a request body can never redirect a write; the token decides.
 
+### Changing budgets from the browser
+
+```bat
+asset-health --add-admin alice --admin-role director    :: password printed once
+asset-health --port 8080 --rules "…\rules.toml" --scan-root "…\Assets"
+```
+
+Open <http://127.0.0.1:8080/admin>. Ten hardware presets (N64 … Modern PC) fill
+the form; **Apply** writes `rules.toml` atomically, **Apply & Rescan** then runs
+the gate over `--scan-root` in the background and streams each verdict into the
+page. Every change lands in an audit table (who, when, old → new) and in git.
+Directors and producers can write; artists can read.
+
 ---
 
 ## 6. The 3D review screen (Art Workstation)

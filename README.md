@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-664%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-774%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -889,17 +889,21 @@ No changes are needed in the watcher, the reporter, or the queue. Rules are data
 Four layers, because unit tests, networks, browser UIs and DCC reality fail
 in different ways.
 ```bash
-# 1. rules, config, healing, VCS hooks - 345 assertions, no network, no GPU
+# 1. rules, config, healing, VCS hooks, presets - 384 assertions, no network, no GPU
 python tests/gen_test_assets.py
 python tests/test_gatekeeper.py
 
-# 2. the servers - 201 assertions over real sockets, ephemeral ports
+# 2. the servers - 203 assertions over real sockets, ephemeral ports
 python tests/test_server.py
 
-# 3. the workstation UI - 118 assertions (LOD, collision, notes, rules panel)
+# 3. the workstation UI - 120 assertions (LOD, collision, notes, rules panel)
 python tests/test_workstation.py
 
-# 4. real exporter -> real file -> real verdict (headless Blender / Unreal)
+# 4. the admin surface - 67 assertions (accounts, roles, CSRF, audit, rescan)
+python tests/test_admin.py
+python tests/test_workstation.py
+
+# 5. real exporter -> real file -> real verdict (headless Blender / Unreal)
 python tests/run_headless_integration.py
 ```
 

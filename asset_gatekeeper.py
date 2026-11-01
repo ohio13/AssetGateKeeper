@@ -472,23 +472,148 @@ def apply_platform(document: dict, platform: str) -> dict:
 # --------------------------------------------------------------------------- #
 
 # A preset is a known-good starting point that lives in code, so a project file
-# cannot quietly degrade it: `--preset retro` beats anything in rules.toml.
-PRESETS: dict[str, dict[str, object]] = {
-    "retro": {
-        # No max_bone_influences here: the budget validator refuses 0, and "this
-        # platform does not skin" is a rules-file policy, not a preset value.
-        "max_triangles": 1_500, "max_material_slots": 1, "max_texture_edge": 256,
-        "max_uv_channels": 1,
-    },
-    "mobile": {
-        "max_triangles": 15_000, "max_material_slots": 2, "max_texture_edge": 1_024,
-        "max_bone_influences": 4, "max_uv_channels": 2,
-    },
-    "pc": {
-        "max_triangles": 120_000, "max_material_slots": 6, "max_texture_edge": 4_096,
-        "max_bone_influences": 8, "max_uv_channels": 4,
-    },
+# cannot quietly degrade it.
+#
+# Two shapes live side by side on purpose:
+#
+#   "profile"   budget numbers only (PLATFORM_KEYS). This is what `--preset`
+#               overlays, so the CLI keeps its one safety property: a preset may
+#               tighten a limit, never switch a check off.
+#   "document"  a full rules fragment - budget numbers *plus* texture policy and
+#               [tags.character] / [tags.prop]. This is what the admin GUI writes
+#               into rules.toml, where those keys are legal and visible in git.
+#
+# The numbers are defensible starting points for each machine, not law. A studio
+# that knows its own frame budget should edit them - that is what the admin page
+# exists for.
+
+def _preset(label: str, notes: str, *, character: int, prop: int, texture: int,
+            slots: int, power_of_two: bool, pbr: bool, uv: int, influences: int,
+            naming: bool = False, legacy: bool = False) -> dict[str, object]:
+    return {
+        "label": label,
+        "notes": notes,
+        "legacy": legacy,
+        "profile": {
+            "max_triangles": character,
+            "max_material_slots": slots,
+            "max_texture_edge": texture,
+            "max_uv_channels": uv,
+            "max_bone_influences": influences,
+        },
+        "document": {
+            "mesh": {
+                "max_triangles": character,
+                "max_material_slots": slots,
+                "max_uv_channels": uv,
+                "max_bone_influences": influences,
+            },
+            "texture": {
+                "max_edge": texture,
+                "power_of_two": power_of_two,
+                "pbr": pbr,
+                "naming": naming,
+            },
+            "tags": {
+                "character": {"max_triangles": character},
+                "prop": {"max_triangles": prop},
+            },
+        },
+    }
+
+
+PLATFORM_PRESETS: dict[str, dict[str, object]] = {
+    "n64": _preset("Nintendo 64", "4 MB RDRAM, 4 KB TMEM, no programmable shading",
+                    character=1_200, prop=400, texture=64, slots=2, power_of_two=True,
+                    pbr=False, uv=1, influences=1),
+    "ps1": _preset("Sony PlayStation", "1 MB VRAM, affine texture mapping",
+                    character=1_100, prop=350, texture=256, slots=1, power_of_two=True,
+                    pbr=False, uv=1, influences=1),
+    "nds": _preset("Nintendo DS", "656 KB VRAM, 2,048 triangles per frame",
+                    character=900, prop=300, texture=128, slots=2, power_of_two=True,
+                    pbr=False, uv=1, influences=1),
+    "gamecube": _preset("Nintendo GameCube", "24 MB 1T-SRAM, fixed-function T&L",
+                         character=6_000, prop=2_000, texture=512, slots=4,
+                         power_of_two=True, pbr=False, uv=2, influences=4),
+    "xbox": _preset("Microsoft Xbox (2001)", "64 MB DDR, programmable vertex shaders",
+                     character=9_000, prop=3_000, texture=1_024, slots=4,
+                     power_of_two=True, pbr=False, uv=2, influences=4),
+    "ps2": _preset("Sony PlayStation 2", "4 MB VRAM, 2 MB VU1 scratchpad",
+                    character=5_000, prop=1_800, texture=256, slots=3, power_of_two=True,
+                    pbr=False, uv=2, influences=4),
+    "n3ds": _preset("Nintendo 3DS", "6 MB VRAM, stereoscopic: draw everything twice",
+                     character=3_000, prop=1_200, texture=256, slots=2,
+                     power_of_two=True, pbr=False, uv=2, influences=4),
+    "wii": _preset("Nintendo Wii", "24 MB 1T-SRAM + 64 MB GDDR3, fixed-function era",
+                    character=5_000, prop=2_000, texture=512, slots=3, power_of_two=True,
+                    pbr=False, uv=2, influences=4),
+    "ps3": _preset("Sony PlayStation 3", "256 MB RSX, specular/gloss workflow, no PBR maps",
+                    character=20_000, prop=8_000, texture=1_024, slots=4,
+                    power_of_two=False, pbr=False, uv=2, influences=8),
+    "pc": _preset("Modern PC", "8 GB+ VRAM, PBR metal/roughness with mip chains",
+                   character=120_000, prop=30_000, texture=4_096, slots=8,
+                   power_of_two=False, pbr=True, uv=4, influences=8, naming=True),
+    # Legacy names, kept so existing scripts and rules files keep working.
+    "retro": _preset("Generic retro (legacy alias)", "Use n64 / ps1 / nds instead",
+                      character=1_500, prop=500, texture=256, slots=1, power_of_two=True,
+                      pbr=False, uv=1, influences=1, legacy=True),
+    "mobile": _preset("Generic mobile (legacy alias)", "Use n3ds or a phone profile",
+                       character=15_000, prop=6_000, texture=1_024, slots=2,
+                       power_of_two=True, pbr=True, uv=2, influences=4, legacy=True),
 }
+
+
+#: Flat budget profiles - what `--preset` overlays. Derived so there is one
+#: catalogue, not two that can disagree.
+PRESETS: dict[str, dict[str, object]] = {
+    name: dict(entry["profile"])          # type: ignore[arg-type]
+    for name, entry in PLATFORM_PRESETS.items()
+}
+
+
+def preset_names(include_legacy: bool = True) -> list[str]:
+    """Preset keys, hardware targets first, legacy aliases last."""
+    names = [name for name, entry in PLATFORM_PRESETS.items()
+             if include_legacy or not entry["legacy"]]
+    return sorted(names, key=lambda name: (bool(PLATFORM_PRESETS[name]["legacy"]), name))
+
+
+def preset_document(name: str) -> dict[str, object]:
+    """A full rules fragment for a platform target (deep copy, safe to mutate).
+
+    This is what the admin GUI writes into rules.toml: budget numbers, texture
+    policy and [tags.character]/[tags.prop], all as plain text in the repository.
+    """
+    key = (name or "").strip().lower()
+    entry = PLATFORM_PRESETS.get(key)
+    if entry is None:
+        raise ConfigError(f"unknown preset '{name}' (known: {', '.join(preset_names())})")
+    import copy
+
+    return copy.deepcopy(entry["document"])  # type: ignore[return-value]
+
+
+def preset_summary() -> list[dict[str, object]]:
+    """What the CLI and the admin dropdown need to describe each target."""
+    rows: list[dict[str, object]] = []
+    for name in preset_names():
+        entry = PLATFORM_PRESETS[name]
+        document = entry["document"]  # type: ignore[index]
+        texture = dict(document["texture"])  # type: ignore[index]
+        tags = dict(document["tags"])  # type: ignore[index]
+        rows.append({
+            "name": name,
+            "label": entry["label"],
+            "notes": entry["notes"],
+            "legacy": entry["legacy"],
+            "character_triangles": tags["character"]["max_triangles"],
+            "prop_triangles": tags["prop"]["max_triangles"],
+            "max_texture_edge": texture["max_edge"],
+            "max_material_slots": document["mesh"]["max_material_slots"],  # type: ignore[index]
+            "power_of_two": texture["power_of_two"],
+            "pbr": texture["pbr"],
+        })
+    return rows
 
 TAG_MODES = ("auto", "suggest", "strict")
 DEFAULT_TAG_SIMILARITY = 0.75
@@ -2935,6 +3060,75 @@ def run_doctor(target: Optional[Path], args: argparse.Namespace,
     return 1 if problems else 0
 
 
+RULES_HEADER = """\
+# rules.toml - AssetGatekeeper
+#
+# Plain text on purpose: this file is reviewed in pull requests, diffed in git
+# and read by CI. Edit it here, or through the admin page (`asset-health` ->
+# /admin), which writes it atomically and records who changed what.
+#
+# Precedence: CLI flag > central/remote rules > [platforms.<name>] > this file
+# > shipped defaults. Unknown keys are a hard error, deliberately.
+"""
+
+
+def _toml_value(value: object) -> str:
+    """One TOML value. Only the types a rules file can legally contain."""
+    import json as _json
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+    if isinstance(value, float):
+        if value != value or value in (float("inf"), float("-inf")):
+            raise ConfigError(f"cannot write {value!r} to TOML")
+        return repr(value)
+    if isinstance(value, str):
+        return _json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        return "[" + ", ".join(_toml_value(item) for item in value) + "]"
+    raise ConfigError(f"cannot write {type(value).__name__} to TOML")
+
+
+def _emit_table(lines: list[str], path: str, table: dict) -> None:
+    if lines:
+        lines.append("")
+    lines.append(f"[{path}]")
+    nested: list[tuple[str, dict]] = []
+    for key, value in table.items():
+        if isinstance(value, dict):
+            nested.append((key, value))
+        else:
+            lines.append(f"{key} = {_toml_value(value)}")
+    for key, value in nested:
+        _emit_table(lines, f"{path}.{key}", value)
+
+
+def to_toml(document: dict, header: str = RULES_HEADER) -> str:
+    """Serialise a rules document as canonical, diff-friendly TOML.
+
+    Canonical matters more than pretty: the admin page rewrites this file on
+    every apply, so a stable key order and stable spacing are what keep the git
+    history readable. Because the file is regenerated, hand-written comments are
+    not preserved - the header says so, and the audit table plus `git log` are
+    the record of who changed what.
+
+    ``parse_rules`` of the output round-trips to the same document (tested).
+    """
+    lines: list[str] = []
+    if header:
+        lines.extend(header.rstrip("\n").splitlines())
+        lines.append("")
+    scalars = [(k, v) for k, v in document.items() if not isinstance(v, dict)]
+    tables = [(k, v) for k, v in document.items() if isinstance(v, dict)]
+    for key, value in scalars:
+        lines.append(f"{key} = {_toml_value(value)}")
+    for key, table in tables:
+        _emit_table(lines, key, table)
+    return "\n".join(lines).rstrip("\n") + "\n"
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="asset_gatekeeper",
@@ -2999,6 +3193,8 @@ def build_parser() -> argparse.ArgumentParser:
                         default=None, help="also fail triangle-soup geometry (implies the audit)")
     parser.add_argument("--doctor", action="store_true",
                         help="check this machine can run the gate (deps, rules, ports), then exit")
+    parser.add_argument("--list-presets", action="store_true", dest="list_presets",
+                        help="print the shipped platform targets and their budgets, then exit")
     parser.add_argument("--init", action="store_true",
                         help="interactive setup: create the watch folder and its rules.toml")
     parser.add_argument("--yes", action="store_true",
@@ -3047,6 +3243,19 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     stream = sys.stderr if args.json else sys.stdout
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(message)s", datefmt="%H:%M:%S", stream=stream)
+
+    if getattr(args, "list_presets", False):
+        rows = preset_summary()
+        print(f"{'preset':<10}{'platform':<26}{'char tris':>10}{'prop tris':>11}"
+              f"{'texture':>9}{'slots':>7}{'POT':>5}{'PBR':>5}")
+        for row in rows:
+            print(f"{row['name']:<10}{str(row['label'])[:25]:<26}{row['character_triangles']:>10,}"
+                  f"{row['prop_triangles']:>11,}{row['max_texture_edge']:>9}"
+                  f"{row['max_material_slots']:>7}{'yes' if row['power_of_two'] else 'no':>5}"
+                  f"{'yes' if row['pbr'] else 'no':>5}")
+        print("\nlegacy aliases (retro, mobile) are kept so old scripts keep working.")
+        print("apply one: asset-gatekeeper <folder> --preset n64")
+        return 0
 
     # The doctor runs before the dependency check on purpose: reporting a missing
     # trimesh is exactly its job.

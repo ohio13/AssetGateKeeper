@@ -1644,5 +1644,65 @@ expect("the workstation port is not in the telemetry URL",
        "8124" not in serve.gate_command(records))
 expect("a missing record reads as empty", serve.read_ports().get("nope") is None)
 
+print("22. platform presets and the TOML writer")
+HARDWARE = {"n64", "ps1", "nds", "gamecube", "xbox", "ps2", "n3ds", "wii", "ps3", "pc"}
+summary = {row["name"]: row for row in agk.preset_summary()}
+expect("ten hardware targets ship", HARDWARE <= set(summary), str(sorted(summary)))
+expect("legacy aliases are kept for old scripts",
+       {"retro", "mobile"} <= set(summary))
+expect("legacy targets are labelled as such",
+       summary["retro"]["legacy"] is True and summary["n64"]["legacy"] is False)
+expect("every target separates character and prop budgets",
+       all(row["character_triangles"] > row["prop_triangles"] > 0
+           for row in summary.values()),
+       str({n: (r["character_triangles"], r["prop_triangles"]) for n, r in summary.items()}))
+expect("every target states texture policy",
+       all(isinstance(row["power_of_two"], bool) and isinstance(row["pbr"], bool)
+           for row in summary.values()))
+expect("handhelds want power-of-two textures, PC does not",
+       summary["n64"]["power_of_two"] and not summary["pc"]["power_of_two"])
+expect("only the modern target requires PBR",
+       summary["pc"]["pbr"] and not summary["ps3"]["pbr"] and not summary["n64"]["pbr"])
+expect("a character budget is not smaller than a prop budget on the same target",
+       summary["n64"]["character_triangles"] >= summary["n64"]["prop_triangles"])
+
+n64 = agk.preset_document("n64")
+expect("a preset document carries mesh, texture and categories",
+       {"mesh", "texture", "tags"} <= set(n64))
+expect("its categories are character and prop",
+       set(n64["tags"]) == {"character", "prop"}, str(sorted(n64["tags"])))
+expect("a preset document is valid input to the gate",
+       agk.Budget.from_mapping(n64).max_triangles == 1500 or
+       agk.Budget.from_mapping(n64).max_triangles == n64["mesh"]["max_triangles"])
+expect("preset_document returns a copy, not the catalogue itself",
+       agk.preset_document("n64") is not agk.PLATFORM_PRESETS["n64"]["document"])
+try:
+    agk.preset_document("dreamcast")
+    raised_missing = False
+except agk.ConfigError as exc:
+    raised_missing = "dreamcast" in str(exc)
+expect("an unknown target is a clear error", raised_missing)
+expect("--preset stays budget-only so it cannot switch a check off",
+       "tags" not in agk.apply_preset({}, "n64"))
+
+# The writer has to round-trip the annotated example, or the admin page would
+# silently reformat somebody's file into something else.
+example = Path(__file__).resolve().parent.parent / "asset_gatekeeper.example.toml"
+import tomllib  # noqa: E402, PLC0415 - local to this section
+original = tomllib.loads(example.read_text(encoding="utf-8"))
+written = agk.to_toml(original)
+expect("the example round-trips through to_toml", tomllib.loads(written) == original)
+expect("the written file explains itself", written.startswith("# rules.toml"))
+expect("tables are written in TOML syntax", "[mesh]" in written and "[texture]" in written)
+expect("arrays stay inline", 'exclude = ["' in written or "exclude" not in written)
+expect("booleans are lowercase TOML", " = true" in written or " = false" in written)
+expect("parse_rules_text sees what to_toml wrote",
+       agk.parse_rules_text(written)["mesh"] == original["mesh"])
+
+preset_cli = agk.build_parser().parse_args(["--list-presets"])
+expect("the CLI accepts --list-presets", preset_cli.list_presets is True)
+
+expect("the example config ships with the checkout", example.is_file())
+
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

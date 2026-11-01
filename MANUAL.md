@@ -246,6 +246,7 @@ Run `asset-gatekeeper --help` for this list on your build.
 | `--init` `--yes` `--force` | write a starter `rules.toml` |
 | `--audit` | whole-folder report: broken references + orphaned textures |
 | `--version` | print the version |
+| `--list-presets` | print the ten hardware targets and their budgets, then exit |
 
 ### Behaviour worth knowing
 
@@ -616,6 +617,71 @@ A new database is **empty**. `--demo` loads the bundled sample set (14 verdicts)
 so you can see a populated page; when present the dashboard says so in a red
 banner. `--no-seed` is still accepted for old scripts.
 
+### Changing budgets from the browser (`/admin`)
+
+The planner edits a per-project budget row. The **admin page** edits the real
+`rules.toml` — the same file the gate reads, in plain text, so the change shows
+up in `git log` like any other commit.
+
+```bat
+asset-health --add-admin alice --admin-role director   :: prints the password ONCE
+asset-health --list-admins
+asset-health --port 8080 --rules "D:\Project\Assets\rules.toml" ^
+             --scan-root "D:\Project\Assets"              :: folder 'Apply & Rescan' scans
+```
+
+Then <http://127.0.0.1:8080/admin>.
+
+| Role | May read | May change budgets |
+|---|---|---|
+| `director` | yes | yes |
+| `producer` | yes | yes |
+| `artist` | yes | no — read-only, and told why |
+
+**The page never edits while you type.** Sliders that rescan on every keystroke
+are a way to make a shared machine unusable, so both actions are explicit:
+
+- **Apply (save only)** — validate, write, stop.
+- **Apply & Rescan** — validate, write, then run the gate once over
+  `--scan-root` in the background and stream every verdict into the page.
+
+On apply the server:
+
+1. merges your form over the current file, **keeping sections the form does not
+   show** (`[filters]`, `[platforms]`, `[server]`, `[healer]` survive an apply);
+2. refuses anything the gate would refuse (unknown keys, bad numbers, a
+   `platform` name with no matching `[platforms.<name>]` table) — a refused
+   document never reaches the disk;
+3. writes atomically (temp file + `fsync` + `os.replace`), so a reader sees the
+   old file or the new one, never half of each;
+4. records one audit row per changed key — timestamp, user, role, the dotted key
+   (`tags.boss.max_triangles`), and both old and new values;
+5. only then starts the scan, one at a time (a second request gets `409`).
+
+**Platform presets.** The dropdown offers ten hardware targets — N64, PS1,
+Nintendo DS, GameCube, Xbox, PS2, 3DS, Wii, PS3 and Modern PC — plus the legacy
+`retro`/`mobile` aliases. Each carries a character budget, a prop budget, a
+texture edge, material slots and the texture policy of that machine. Choosing one
+**fills the numbers**; the file stores the numbers, not the preset's name, so a
+later hand-edit to `[mesh]` is never silently overridden on the next run. Inspect
+the catalogue without a browser:
+
+```bat
+asset-gatekeeper --list-presets
+```
+
+**Security, stated plainly.** Passwords are PBKDF2-HMAC-SHA256 with a per-user
+salt and 120,000 rounds; only the hash is stored. Sessions keep the *hash* of the
+cookie token, expire after 12 hours, are `HttpOnly; SameSite=Strict`, and every
+state-changing request needs a session-bound CSRF token plus a same-origin
+`Origin`/`Referer`. Failed sign-ins are throttled per IP. `/static/` on this
+server is an allow-list of three files, so it cannot be used to read the disk.
+
+The honest limit: this is authentication for a **loopback** dashboard. If you
+bind `--host 0.0.0.0`, put it behind TLS (a reverse proxy) — roles cannot protect
+a password sent in clear text, and a director's token on a shared LAN is only as
+private as the network.
+
 ---
 
 ## 12. Art Workstation: the 3D review screen
@@ -792,6 +858,16 @@ work outside a host, `asset-gatekeeper . --once`.
 asset-gatekeeper "…\Assets" --recursive --once --json > verdicts.json
 asset-gatekeeper "…\Assets" --recursive --audit
 ```
+
+**Changing the budget (whoever owns it)**
+
+```bat
+asset-health --add-admin alice --admin-role director    :: once; password shown once
+:: then http://127.0.0.1:8080/admin  ->  pick a preset, edit, Apply & Rescan
+```
+
+Every change is written atomically to `rules.toml`, committed like any other
+file, and appended to the audit trail with old and new values.
 
 **Weekly review**
 

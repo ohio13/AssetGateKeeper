@@ -36,7 +36,7 @@ jobs:
       # ("syntax error in forward annotation"), so the engine and tests are
       # linted here and the plugins are syntax-checked below instead.
       - name: Lint engine, server + tests
-        run: python -m pyflakes asset_gatekeeper.py healer.py notifier.py engine/lod_manager.py tools/houdini_export_hook.py server/asset_health_server.py server/art_workstation_server.py vcs_hooks/p4_pre_submit.py vcs_hooks/git_pre_commit.py tests/test_gatekeeper.py tests/test_server.py tests/test_workstation.py tests/gen_test_assets.py tests/run_headless_integration.py
+        run: python -m pyflakes asset_gatekeeper.py healer.py notifier.py engine/lod_manager.py tools/houdini_export_hook.py server/asset_health_server.py server/art_workstation_server.py vcs_hooks/p4_pre_submit.py vcs_hooks/git_pre_commit.py tests/test_gatekeeper.py tests/test_server.py tests/test_workstation.py tests/test_admin.py tests/gen_test_assets.py tests/run_headless_integration.py
 
       - name: Syntax-check DCC plugins
         run: python -m compileall -q plugins
@@ -52,16 +52,19 @@ jobs:
       - name: Generate fixtures
         run: python tests/gen_test_assets.py
 
-      - name: Unit suite (318 assertions)
+      - name: Gate suite (384 assertions)
         run: python tests/test_gatekeeper.py
 
-      - name: Workstation suite (107 assertions)
+      - name: Workstation suite (120 assertions)
         run: python tests/test_workstation.py
 
       # Spins the real dashboard server on an ephemeral port and drives it over
       # real sockets: ingest, bearer auth, 400/404/405/413, HTML, cascade delete.
-      - name: Server suite (161 assertions)
+      - name: Server suite (203 assertions)
         run: python tests/test_server.py
+
+      # Accounts, sessions, CSRF, role enforcement, atomic rules writes, the\n      # audit trail and a streamed rescan - the parts a security review asks about.\n      - name: Admin suite (67 assertions)
+        run: python tests/test_admin.py
 
       - name: Headless integration (synthetic exporter)
         run: python tests/run_headless_integration.py --synthetic

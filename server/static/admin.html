@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Rules &amp; Presets — AssetGatekeeper admin</title>
+<link rel="stylesheet" href="/static/admin.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="dot"></span>
+    <strong>Rules &amp; Presets</strong>
+    <span class="sub" id="where"></span>
+  </div>
+  <div class="actions">
+    <span class="who" id="who">…</span>
+    <button type="button" id="logout" class="ghost">Sign out</button>
+  </div>
+</header>
+
+<main class="wrap">
+
+  <div class="notice" id="banner" hidden></div>
+
+  <section class="panel">
+    <h2>Platform target</h2>
+    <p class="help">
+      A preset fills the numbers below from a known hardware budget. Nothing is
+      written until you press <strong>Apply</strong> — this page never edits on
+      every keystroke, and never rescans while you type.
+    </p>
+    <div class="row">
+      <label>Preset
+        <select id="preset"><option value="">— choose a target —</option></select>
+      </label>
+      <label>Target (read-only)
+        <input id="target" readonly value="— choose a preset —">
+      </label>
+      <label>Category matching
+        <select id="tag-mode">
+          <option value="suggest">suggest (warns)</option>
+          <option value="auto">auto (quiet)</option>
+          <option value="strict">strict (fails)</option>
+        </select>
+      </label>
+    </div>
+    <p class="help" id="preset-notes">
+      Presets fill the numbers below. The file stores those numbers, not the
+      preset's name, so a later hand-edit is never silently overridden.
+    </p>
+  </section>
+
+  <section class="panel">
+    <h2>Budgets</h2>
+    <div class="grid">
+      <label>Character polygons <input id="char-tris" type="number" min="1" step="1"></label>
+      <label>Prop polygons <input id="prop-tris" type="number" min="1" step="1"></label>
+      <label>Max texture edge <input id="tex-edge" type="number" min="1" step="1"></label>
+      <label>Material slots <input id="slots" type="number" min="1" step="1"></label>
+      <label>UV channels <input id="uvs" type="number" min="1" step="1"></label>
+      <label>Bone influences <input id="influences" type="number" min="1" step="1"></label>
+    </div>
+    <div class="checks">
+      <label><input type="checkbox" id="pot"> Require power-of-two textures</label>
+      <label><input type="checkbox" id="pbr"> PBR albedo range check</label>
+      <label><input type="checkbox" id="naming"> Require texture name suffixes</label>
+      <label><input type="checkbox" id="refs"> Fail broken references</label>
+      <label><input type="checkbox" id="degenerate"> Allow degenerate triangles</label>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Categories <span class="help">([tags.*] — a folder or filename prefix)</span></h2>
+    <table class="tags">
+      <thead>
+        <tr><th>Tag</th><th class="num">Max polygons</th><th></th></tr>
+      </thead>
+      <tbody id="tags"></tbody>
+    </table>
+    <div class="row">
+      <input id="new-tag" placeholder="boss, normal_enemy, …" autocomplete="off">
+      <input id="new-tag-tris" type="number" min="1" step="1" placeholder="polygons">
+      <button type="button" id="add-tag" class="ghost">Add category</button>
+    </div>
+  </section>
+
+  <section class="panel actions-panel">
+    <div class="row">
+      <button type="button" id="save" class="ghost">Apply (save only)</button>
+      <button type="button" id="apply-scan" class="primary">Apply &amp; Rescan</button>
+      <span class="help" id="dirty"></span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <h2>Scan</h2>
+    <p class="help">
+      A rescan runs the gate once over <code id="scan-root">…</code> in the
+      background and streams every verdict here. One scan at a time.
+    </p>
+    <div class="counts" id="counts">
+      <span><b id="c-total">0</b> assets</span>
+      <span class="good"><b id="c-passed">0</b> passed</span>
+      <span class="bad"><b id="c-failed">0</b> failed</span>
+      <span class="sub" id="scan-status">idle</span>
+    </div>
+    <div class="log" id="scan-log"></div>
+  </section>
+
+  <section class="panel">
+    <h2>Audit trail</h2>
+    <p class="help">Every applied change, oldest last. Also in git — this table is the short version.</p>
+    <table class="audit">
+      <thead>
+        <tr><th>When</th><th>Who</th><th>Where</th><th>Old</th><th>New</th></tr>
+      </thead>
+      <tbody id="audit"></tbody>
+    </table>
+  </section>
+
+</main>
+
+<script src="/static/admin.js" defer></script>
+</body>
+</html>
