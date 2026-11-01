@@ -34,6 +34,7 @@ for extra in (str(ROOT), str(ROOT / "server"), str(ROOT / "engine")):
     if extra not in sys.path:
         sys.path.insert(0, extra)
 
+import re                                          # noqa: E402
 import enterprise.analytics as analytics          # noqa: E402
 import enterprise.auth as auth                    # noqa: E402
 import enterprise.config as econfig               # noqa: E402
@@ -388,6 +389,7 @@ expect_raises("PostgreSQL without psycopg fails with an install hint", store.Sto
 db_path = WORK / "metrics.db"
 metrics = store.open_store(db_path)
 import server.asset_health_server as health  # noqa: E402
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 metrics.executescript(health.SCHEMA)
 expect("the real AssetHealth schema runs on SQLite through the store", True)
 metrics.execute("INSERT INTO projects (name, api_token, created_at) VALUES (?, ?, ?)",
@@ -661,6 +663,354 @@ good_tag = preflight.assess(asset="rock.obj", triangles=100, folder="Environment
                             tag_budgets=tag_budgets, budget=budget)
 expect("a correct folder resolves to its tag", good_tag.tag == "environment rock", str(good_tag.tag))
 expect("a normalised folder name is not reported as a typo", good_tag.tag_suggestion is None)
+
+# --------------------------------------------------------------------------- #
+# 9. Resilience primitives
+# --------------------------------------------------------------------------- #
+print("9. circuit breakers, retries and the health loop")
+
+import enterprise.resilience as rz                 # noqa: E402
+
+clock_now = [0.0]
+breaker = rz.CircuitBreaker("db", failure_threshold=2, reset_timeout=10.0,
+                            clock=lambda: clock_now[0])
+expect("a fresh breaker admits traffic", breaker.allow() and breaker.state is rz.State.CLOSED)
+breaker.record_failure("boom")
+expect("one failure is not enough to trip it", breaker.allow())
+breaker.record_failure("boom again")
+expect("it trips after the threshold", breaker.state is rz.State.OPEN and not breaker.allow())
+expect("the breaker remembers why it opened", "boom again" in breaker.stats().last_error)
+clock_now[0] = 10.5
+expect("after the cooldown it half-opens", breaker.state is rz.State.HALF_OPEN)
+expect("half-open admits exactly one probe", breaker.allow())
+expect("the second probe is refused until the first answers", not breaker.allow())
+breaker.record_success()
+expect("a successful probe closes it again",
+       breaker.state is rz.State.CLOSED and breaker.allow())
+
+sleeps = []
+def flaky():
+    flaky.calls += 1
+    if flaky.calls < 3:
+        raise OSError("transient")
+    return "ok"
+flaky.calls = 0
+expect("a retrying call succeeds after transient failures",
+       rz.retry(flaky, attempts=3, base_delay=0.01, rng=__import__("random").Random(1),
+                sleep=sleeps.append) == "ok")
+expect("it backed off between attempts and not after success", len(sleeps) == 2, str(sleeps))
+def always_fails():
+    raise OSError("still down")
+expect_raises("retries are bounded, not infinite", OSError,
+              lambda: rz.retry(always_fails, attempts=2, base_delay=0.0, sleep=lambda _: None))
+
+ping_ok = [False]
+monitor = rz.HealthMonitor(lambda: (_ for _ in ()).throw(OSError("down")) if not ping_ok[0]
+                           else True, name="db", interval=0.01, breaker=breaker)
+sample = monitor.check_now()
+monitor.check_now()
+expect("a failed ping is recorded and trips the breaker",
+       sample.ok is False and breaker.state is rz.State.OPEN, str(sample))
+ping_ok[0] = True
+sample = monitor.check_now()
+expect("a good ping closes it again", sample.ok and breaker.state is rz.State.CLOSED)
+expect("the monitor keeps a history", len(monitor.history) == 3)
+expect("the monitor reports counters", monitor.as_dict()["checks"] == 3)
+
+# --------------------------------------------------------------------------- #
+# 10. Versioned migrations
+# --------------------------------------------------------------------------- #
+print("10. versioned migrations")
+
+import shutil as _shutil                            # noqa: E402
+from enterprise.migrations import (MigrationError, MigrationRunner,  # noqa: E402
+                                   discover, effective_statements, lint)
+
+repo_migrations = discover(ROOT / "migrations")
+expect("the shipped migrations are found and ordered",
+       [m.key for m in repo_migrations] == ["0001_baseline", "0002_verdict_metrics"],
+       str([m.key for m in repo_migrations]))
+expect("checksums are stable across reads",
+       repo_migrations[0].checksum == discover(ROOT / "migrations")[0].checksum)
+expect("the baseline covers every table the server creates",
+       {"verdicts", "problems", "projects", "budgets", "alerts_state",
+        "admin_users", "admin_sessions", "rule_audit", "meta",
+        "modifications", "project_roots"} <=
+       set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", repo_migrations[0].up)))
+expect("the shipped migrations pass the zero-downtime linter on PostgreSQL",
+       lint(repo_migrations[0], "postgres") == [] and lint(repo_migrations[1], "postgres") == [],
+       str(lint(repo_migrations[0], "postgres")))
+expect("and on SQLite", lint(repo_migrations[0], "sqlite") == [])
+
+pg_statements = effective_statements(repo_migrations[1].up, "postgres")
+expect("indexes become CONCURRENTLY on PostgreSQL",
+       any("CREATE INDEX CONCURRENTLY" in s for s in pg_statements), str(pg_statements)[:160])
+expect("foreign keys are added NOT VALID so the table is not scanned",
+       any("NOT VALID" in s and "ADD CONSTRAINT" in s for s in pg_statements),
+       str(pg_statements)[:160])
+expect("identity columns replace AUTOINCREMENT",
+       any("GENERATED BY DEFAULT AS IDENTITY" in s for s in
+           effective_statements(repo_migrations[0].up, "postgres")))
+expect("SQLite gets the plain statements", all("CONCURRENTLY" not in s for s in
+       effective_statements(repo_migrations[1].up, "sqlite")))
+
+blocking = WORK / "blocking_migrations"
+if blocking.exists():
+    _shutil.rmtree(blocking)
+blocking.mkdir(parents=True)
+(blocking / "0001_risky.up.sql").write_text(
+    "ALTER TABLE verdicts DROP COLUMN metric;", encoding="utf-8")
+(blocking / "0001_risky.down.sql").write_text("SELECT 1;", encoding="utf-8")
+risky = discover(blocking)[0]
+expect("a blocking migration is refused by the linter",
+       any("DROP COLUMN" in problem for problem in lint(risky, "postgres")),
+       str(lint(risky, "postgres")))
+(blocking / "0001_risky.up.sql").write_text(
+    "-- agk:allow-blocking\nALTER TABLE verdicts DROP COLUMN metric;", encoding="utf-8")
+risky = discover(blocking)[0]
+expect("the marker lets an operator override it on purpose",
+       lint(risky, "postgres") == [], str(lint(risky, "postgres")))
+
+(blocking / "0003_gap.up.sql").write_text("SELECT 1;", encoding="utf-8")
+(blocking / "0003_gap.down.sql").write_text("SELECT 1;", encoding="utf-8")
+expect_raises("a gap in the sequence is refused", MigrationError,
+              lambda: discover(blocking), "contiguous")
+if (WORK / "half").exists():
+    _shutil.rmtree(WORK / "half")
+(WORK / "half").mkdir(parents=True)
+_write(WORK / "half" / "0001_x.up.sql", "SELECT 1;")
+expect_raises("a missing down script is refused", MigrationError,
+              lambda: discover(WORK / "half"), "both")
+
+mig_db = WORK / "migrated.db"
+mig_store = store.open_store(mig_db)
+runner = MigrationRunner(mig_store, ROOT / "migrations")
+expect("the plan lists every pending migration",
+       [m.key for m in runner.plan()] == ["0001_baseline", "0002_verdict_metrics"])
+dry = runner.apply(dry_run=True)
+expect("a dry run reports the steps without writing",
+       len(dry) == 2 and runner.applied() == {}, str(dry))
+applied = runner.apply()
+expect("apply runs both migrations", [step["key"] for step in applied] ==
+       ["0001_baseline", "0002_verdict_metrics"])
+expect("the history is recorded with checksums",
+       runner.applied()[1]["checksum"] == repo_migrations[0].checksum)
+expect("verify is clean after a rollout", runner.verify() == [], str(runner.verify()))
+expect("nothing is left to plan", runner.plan() == [])
+expect("the tables the code needs actually exist",
+       runner.check_tables(["verdicts", "projects", "verdict_metrics"]) == [])
+
+held = WORK / "drifted_migrations"
+if held.exists():
+    _shutil.rmtree(held)
+_shutil.copytree(ROOT / "migrations", held)
+(held / "0002_verdict_metrics.up.sql").write_text(
+    (held / "0002_verdict_metrics.up.sql").read_text(encoding="utf-8") + "\n-- edited\n",
+    encoding="utf-8")
+drift = MigrationRunner(mig_store, held).verify()
+expect("editing an applied migration is detected",
+       any("checksum changed" in problem for problem in drift), str(drift))
+
+rolled = runner.rollback(to=0)
+expect("rollback runs the down scripts newest-first",
+       [step["key"] for step in rolled] == ["0002_verdict_metrics", "0001_baseline"])
+expect("rollback empties the history", runner.applied() == {})
+expect("rollback removed the tables",
+       len(runner.check_tables(["verdicts", "verdict_metrics"])) == 2)
+mig_store.close()
+
+# --------------------------------------------------------------------------- #
+# 11. Audit and SIEM forwarding
+# --------------------------------------------------------------------------- #
+print("11. audit and SIEM forwarding")
+
+import enterprise.audit as audit                   # noqa: E402
+
+event = audit.AuditEvent(event="rbac.denied", severity="notice", actor="ana",
+                         action="rules.override", path="/environments/rock.obj",
+                         outcome="denied", detail={"token": "s3cret", "why": "no grant"})
+payload = json.loads(event.as_json())
+expect("events carry a versioned schema and a timestamp",
+       payload["schema"] == audit.SCHEMA and payload["ts"].endswith("Z"))
+expect("secrets are redacted before serialisation",
+       payload["detail"]["token"] == audit.REDACTED and payload["detail"]["why"] == "no grant")
+expect("redaction is recursive", audit.redact({"a": {"password": "x"}})["a"]["password"]
+       == audit.REDACTED)
+expect("long values are truncated", len(audit.redact("x" * 5000)) <= 400)
+expect("an unknown severity is refused", True)
+expect_raises("an unknown severity is rejected", audit.AuditError,
+              lambda: audit.AuditEvent(event="x", severity="shout"))
+
+audit_file = WORK / "audit.jsonl"
+file_emitter = audit.JsonLineEmitter(audit_file)
+sink = []
+class Grabber:
+    def emit(self, item):
+        sink.append(item)
+    def close(self):
+        return
+
+log = audit.AuditLog([file_emitter, Grabber()], min_severity="notice").start()
+log.emit("budget.violation", actor="ana", action="validate", outcome="failed",
+         detail={"asset": "rock.obj", "problem_count": 2})
+log.emit("rbac.denied", actor="bob", path="/x")
+log.flush(2.0)
+lines = [json.loads(line) for line in audit_file.read_text(encoding="utf-8").splitlines()]
+expect("the JSONL emitter writes one object per line", len(lines) == 2, str(len(lines)))
+expect("every sink receives the same event", len(sink) == 2)
+expect("the fan-out counts deliveries", log.stats()["emitted"] == 2)
+log.close()
+
+quiet = audit.AuditLog([Grabber()], min_severity="error").start()
+quiet.emit("rbac.denied", actor="x")
+quiet.flush(1.0)
+expect("the severity floor drops quieter events", quiet.stats()["emitted"] == 0)
+quiet.close()
+
+class FakeSock:
+    def __init__(self):
+        self.sent = []
+    def sendto(self, payload, address):
+        self.sent.append((payload, address))
+    def settimeout(self, value):
+        return
+    def connect(self, address):
+        return
+    def sendall(self, payload):
+        self.sent.append((payload, None))
+    def close(self):
+        return
+
+sock = FakeSock()
+syslog = audit.SyslogEmitter("siem.internal", 514, facility=13,
+                             socket_factory=lambda *a, **k: sock)
+syslog.emit(event)
+raw = sock.sent[0][0].decode("utf-8")
+expect("syslog frames an RFC 5424 message with the right priority",
+       raw.startswith("<109>1 "), raw[:20])
+expect("the syslog payload is the same JSON", json.loads(raw.split(" - ", 3)[-1])["event"]
+       == "rbac.denied")
+expect("the emitter counts what it sent", syslog.sent == 1)
+
+posted = []
+def fake_poster(url, body, headers, timeout):
+    posted.append(json.loads(body))
+    return 200
+webhook = audit.WebhookEmitter("https://siem.example/ingest", batch_size=2,
+                               flush_interval=0.05, poster=fake_poster)
+webhook.start()
+for index in range(5):
+    webhook.emit(audit.AuditEvent(event="rbac.denied", actor=f"u{index}"))
+webhook.flush(2.0)
+webhook.close()
+expect("the webhook batches events", sum(len(b["events"]) for b in posted) == 5,
+       str([len(b["events"]) for b in posted]))
+expect("the webhook reports what it delivered", webhook.sent == 5)
+
+def failing_poster(url, body, headers, timeout):
+    return 500
+bad = audit.WebhookEmitter("https://siem.example/ingest", batch_size=1,
+                           flush_interval=0.02, poster=failing_poster,
+                           sleep=lambda _: None)
+bad.start()
+bad.emit(audit.AuditEvent(event="rbac.denied"))
+bad.flush(1.0)
+bad.close(timeout=1.0)
+expect("a failing collector is counted, not fatal", bad.failed_batches >= 1 and bad.dropped >= 1)
+
+overflow = audit.WebhookEmitter("https://siem.example/ingest", queue_size=1)
+overflow.emit(audit.AuditEvent(event="a"))
+overflow.emit(audit.AuditEvent(event="b"))
+expect("a full queue drops and counts instead of blocking", overflow.dropped == 1)
+expect("a NullLog never needs a None check", audit.NullLog().stats()["emitted"] == 0)
+
+# --------------------------------------------------------------------------- #
+# 12. Replicas, failover and concurrency
+# --------------------------------------------------------------------------- #
+print("12. read replicas, failover and pool stress")
+
+import _pgsim                                       # noqa: E402  (tests/ on sys.path)
+
+primary_dsn = "postgresql://fake/primary"
+replica_dsn = "postgresql://fake/replica"
+schema_text = health.SCHEMA
+for dsn, name in ((primary_dsn, "primary"), (replica_dsn, "replica")):
+    _pgsim.create(WORK / f"{name}.db", schema_text)
+_pgsim.install({primary_dsn: WORK / "primary.db", replica_dsn: WORK / "replica.db"})
+
+db_config = econfig.DatabaseConfig(dsn=primary_dsn, read_dsns=(replica_dsn,),
+                                   breaker_threshold=2, breaker_reset_seconds=60,
+                                   health_interval_seconds=0)
+primary_store = store.open_store(primary_dsn, db_config)
+for index in range(3):
+    primary_store.execute(
+        "INSERT INTO verdicts (timestamp, received_at, filename, passed, status)"
+        " VALUES (?, ?, ?, ?, ?)",
+        (f"2026-10-{index + 1:02d}T00:00:00", "2026-10-01T00:00:01", f"a{index}.obj",
+         1, "PASSED"))
+replica_store = primary_store._replicas[0][1]
+replica_store.execute(
+    "INSERT INTO verdicts (timestamp, received_at, filename, passed, status)"
+    " VALUES (?, ?, ?, ?, ?)",
+    ("2026-10-09T00:00:00", "2026-10-09T00:00:01", "replica.obj", 1, "PASSED"))
+
+view = primary_store.reader()
+rows = view.query("SELECT COUNT(*) AS n FROM verdicts")
+expect("the reader answers from a replica", rows[0]["n"] == 1, str(rows[0]["n"]))
+expect("writing through the read view is refused", True)
+expect_raises("a write sent to the read view is refused, not silently redirected",
+              store.StoreError, lambda: view.execute("INSERT INTO meta VALUES ('a','b')"))
+
+_pgsim.REGISTRY.dead_dsns.add(replica_dsn)
+first = view.query("SELECT 1 AS one")
+second = view.query("SELECT 1 AS one")
+third = view.query("SELECT COUNT(*) AS n FROM verdicts")
+expect("a failing replica does not fail the query", first[0]["one"] == 1)
+expect("after the threshold the replica is taken out",
+       primary_store._replicas[0][2].state is rz.State.OPEN)
+expect("queries fall back to the primary and its three rows",
+       third[0]["n"] == 3, str(third[0]["n"]))
+expect("the primary breaker stayed closed", primary_store._breaker.state is rz.State.CLOSED)
+_pgsim.REGISTRY.dead_dsns.discard(replica_dsn)
+primary_store._replicas[0][2].reset()
+
+errors = []
+def hammer(index):
+    try:
+        for _ in range(15):
+            primary_store.query("SELECT COUNT(*) AS n FROM verdicts")
+    except Exception as exc:                       # noqa: BLE001 - collected, not swallowed
+        errors.append(exc)
+
+threads = [threading.Thread(target=hammer, args=(index,)) for index in range(8)]
+started = time.time()
+for thread in threads:
+    thread.start()
+for thread in threads:
+    thread.join(timeout=20)
+expect("120 concurrent queries over the pool all succeed", not errors,
+       str(errors[:1]))
+expect("the stress run finishes quickly", time.time() - started < 20)
+expect("the pool stayed bounded", _pgsim.REGISTRY.connections <= 12,
+       str(_pgsim.REGISTRY.connections))
+
+health_store = store.open_store(primary_dsn, econfig.DatabaseConfig(
+    dsn=primary_dsn, breaker_threshold=2, health_interval_seconds=0.05))
+health_store.start_health()
+_pgsim.REGISTRY.dead_dsns.add(primary_dsn)
+time.sleep(0.3)
+expect("the health loop trips the breaker on a dead endpoint",
+       health_store._breaker.state is rz.State.OPEN,
+       health_store.health()["endpoints"][0]["breaker"]["state"])
+_pgsim.REGISTRY.dead_dsns.discard(primary_dsn)
+time.sleep(0.4)
+expect("and closes it again once the endpoint answers",
+       health_store._breaker.state is rz.State.CLOSED,
+       health_store.health()["endpoints"][0]["breaker"]["state"])
+health_store.close()
+primary_store.close()
+expect("the driver never saw untranslated or SQLite-only SQL",
+       not _pgsim.REGISTRY.violations, str(_pgsim.REGISTRY.violations[:2]))
 
 print()
 print("FAILURES:", failures if failures else "none")

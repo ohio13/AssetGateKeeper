@@ -61,6 +61,9 @@ import asset_gatekeeper as agk  # noqa: E402
 # Storage: one abstraction over SQLite (the default) and pooled PostgreSQL.
 # The call sites below are unchanged - they open a unit of work and close it.
 from enterprise import analytics as enterprise_analytics  # noqa: E402
+from enterprise.audit import NullLog, build_audit_log  # noqa: E402
+from enterprise.config import ConfigError as EnterpriseConfigError  # noqa: E402
+from enterprise.config import load_config  # noqa: E402
 from enterprise.store import (Store, StoreError, connection_is_sqlite,  # noqa: E402
                               is_dsn, open_store)
 
@@ -68,6 +71,20 @@ from enterprise.store import (Store, StoreError, connection_is_sqlite,  # noqa: 
 #: sqlite3.Error alone, so a PostgreSQL failure escaped as a bare 500 and the
 #: reason - the only part an operator can act on - was lost.
 STORAGE_ERRORS = (sqlite3.Error, StoreError)
+
+#: SIEM forwarding. A NullLog by default: a studio that has not configured
+#: forwarding should not get a surprise file on disk.
+_AUDIT = NullLog()
+
+
+def set_audit_log(log) -> None:
+    """Install the audit log the server reports security events to."""
+    global _AUDIT
+    _AUDIT = log if log is not None else NullLog()
+
+
+def audit_log():
+    return _AUDIT
 
 # --- #
 # Configuration
@@ -383,6 +400,14 @@ def _normalise(payload: dict) -> dict:
         "problems": problems,
         "modifications": modifications,
     }
+
+
+def _presented_hint(presented: str) -> str:
+    """An actor label for the audit trail that is not the credential itself."""
+    if not presented:
+        return "anonymous"
+    digest = hashlib.sha256(presented.encode("utf-8")).hexdigest()[:8]
+    return f"token:{digest}"
 
 
 def store_verdict(db_path: str | Path, payload: dict,
@@ -1297,7 +1322,9 @@ def analytics_report(db_path, project_id: int | None = None, since: str = "90d",
     triangle count - so each carries its own reason string instead of a silent
     zero.
     """
-    store = store_for(db_path)
+    # Reads go through the replica-aware view: a 2-year trend query has no
+    # business competing with ingest for the primary.
+    store = store_for(db_path).reader()
     report: dict = {"window": {"since": since, "bucket": bucket,
                                "project_id": project_id}}
     try:
@@ -1882,6 +1909,14 @@ class Handler(BaseHTTPRequestHandler):
             return {"role": "project", "project_id": project["id"], "name": project["name"]}
         if not admin and project_count(db_path) == 0:
             return {"role": "open", "project_id": None}
+        _AUDIT.emit("auth.token.rejected",
+                    actor=_presented_hint(presented),
+                    action="authenticate",
+                    outcome="denied",
+                    remote=self.client_address[0],
+                    detail={"path": urllib.parse.urlsplit(self.path).path,
+                            "token_presented": bool(presented),
+                            "admin_token_required": bool(admin)})
         return {"role": "denied", "project_id": None}
 
     def _forbid(self, status: int, headline: str, detail: str) -> None:
@@ -2878,6 +2913,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": "database error", "detail": str(exc)})
             return
 
+        problems = payload.get("problems") or []
+        if problems and not payload.get("passed"):
+            _AUDIT.emit("budget.violation",
+                        actor=str(payload.get("username") or "unknown"),
+                        action="validate",
+                        outcome="failed",
+                        project_id=project_id,
+                        remote=self.client_address[0],
+                        detail={"asset": payload.get("name") or payload.get("filename"),
+                                "problem_count": len(problems),
+                                "first_problem": str(problems[0])})
         self._maybe_alert(payload, project_id)
         broadcaster = getattr(self.server, "broadcaster", None)  # type: ignore[attr-defined]
         if broadcaster is not None:
@@ -3553,7 +3599,10 @@ def build_server(host: str, port: int, db_path: str | Path,
                  scan_root: str | Path = "",
                  allow_roots: tuple[str, ...] = (),
                  workstation_url: str = "",
-                 workstation_token: str = "") -> AssetHealthServer:
+                 workstation_token: str = "",
+                 audit=None) -> AssetHealthServer:
+    if audit is not None:
+        set_audit_log(audit)
     return AssetHealthServer((host, port), db_path, token, quiet, notifier, alert_cooldown,
                              rules_path, rules_root, scan_root, allow_roots,
                              workstation_url, workstation_token)
@@ -3706,6 +3755,9 @@ def build_parser() -> argparse.ArgumentParser:
                                  or os.environ.get("AGK_DB_URL") or DEFAULT_DB),
                         help=f"SQLite file or postgresql:// DSN "
                              f"(default {DEFAULT_DB}, or $ASSET_HEALTH_DB / $AGK_DB_URL)")
+    parser.add_argument("--enterprise-config", metavar="PATH", default="",
+                        help="enterprise.toml: audit forwarding, read replicas, "
+                             "SSO (default: ./enterprise.toml if present)")
     parser.add_argument("--token", default=os.environ.get(DEFAULT_TOKEN_ENV, ""),
                         help=f"require 'Authorization: Bearer <token>' (default ${DEFAULT_TOKEN_ENV})")
     parser.add_argument("--workstation-url", metavar="URL",
@@ -3828,6 +3880,25 @@ def main(argv: list[str] | None = None) -> int:
     except STORAGE_ERRORS as exc:
         print(f"error: cannot initialise {db_path}: {exc}", file=sys.stderr)
         return 2
+
+    # Enterprise configuration is optional. A broken file is not: refuse to
+    # start rather than run with a half-applied policy.
+    try:
+        enterprise = load_config(getattr(args, "enterprise_config", "") or None)
+    except EnterpriseConfigError as exc:
+        print(f"error: enterprise config: {exc}", file=sys.stderr)
+        return 2
+    if enterprise.warnings:
+        for warning in enterprise.warnings:
+            print(f"warning: {warning}", file=sys.stderr)
+    audit = build_audit_log(enterprise.audit)
+    set_audit_log(audit)
+    if enterprise.audit.enabled:
+        print(f"  audit      {', '.join(audit.stats()['emitters']) or 'disabled'}")
+    try:
+        store_for(db_path).start_health()
+    except STORAGE_ERRORS as exc:      # a replica that cannot connect is not fatal
+        print(f"warning: health loop not started: {exc}", file=sys.stderr)
 
     # Management commands run and exit; they never bind a port.
     if args.list_admins:

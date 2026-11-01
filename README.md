@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-1064%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-1134%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -902,7 +902,7 @@ python tests/test_workstation.py
 # 4. the admin surface - 123 assertions (accounts, roles, CSRF, audit, rescan)
 python tests/test_admin.py
 
-# 5. enterprise - 148 assertions, no server, no IdP, no DCC install
+# 5. enterprise - 218 assertions, no server, no IdP, no DCC install
 #    (config, RBAC, tokens, SQL translation, remote validation, pre-flight)
 python tests/test_enterprise.py
 
@@ -928,7 +928,7 @@ tests/
   test_gatekeeper.py             396 assertions: rules, tags, healing, hooks, audits, packaging
   test_server.py                 203 assertions: tenancy, ingest, alerts, throttle, SSE
   test_workstation.py            135 assertions: storage, LODs, collision export, notes, refs, SSE, report
-  test_enterprise.py             148 assertions: config, RBAC, OIDC/SAML, store, remote, pre-flight
+  test_enterprise.py             218 assertions: config, RBAC, OIDC/SAML, store, remote, pre-flight, migrations, audit, failover
   test_analytics.py               59 assertions: storage seam, /analytics, SQLite vs PostgreSQL parity
   run_headless_integration.py    drives headless DCC exports through the gate
 enterprise/                     optional: PostgreSQL, SSO, RBAC, VCS, remote

@@ -21,6 +21,8 @@ from pathlib import Path
 from typing import Optional, Sequence
 
 from . import analytics
+from .audit import build_audit_log
+from .migrations import MigrationError, MigrationRunner, discover
 from .config import ConfigError, describe, load_config
 from .rbac import AuthorizationEngine, Principal, RBACError
 from .store import StoreError, migrate_sqlite, open_store
@@ -65,10 +67,16 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         try:
             store = open_store(config.database.dsn, config.database)
             store.query("SELECT 1 AS one")
+            for endpoint in store.health()["endpoints"]:
+                lines.append(f"endpoint      {endpoint['endpoint']}: "
+                             f"breaker {endpoint['breaker']['state']}")
             store.close()
             lines.append("database      connection OK")
         except StoreError as exc:
             lines.append(f"database      FAILED: {exc}")
+    lines.append("migrations    " +
+                 (f"{len(discover('migrations'))} found in ./migrations"
+                  if Path("migrations").is_dir() else "no ./migrations directory"))
 
     _emit({"config": config.source, "lines": lines}, args.json, "\n".join(lines))
     return 0
@@ -172,22 +180,59 @@ def cmd_validate(args: argparse.Namespace) -> int:
 
 
 def cmd_migrate(args: argparse.Namespace) -> int:
+    """Schema migrations (plan/apply/rollback/verify) and the SQLite data copy."""
     try:
         config = load_config(args.config)
         dsn = args.dsn or config.database.dsn
-        if not dsn.lower().startswith(("postgres://", "postgresql://")):
-            print("error: --dsn must be a postgresql:// DSN", file=sys.stderr)
+        if not dsn:
+            print("error: --dsn (or database.dsn) is required", file=sys.stderr)
             return 2
         target = open_store(dsn, config.database)
-        if args.init_schema:
-            target.executescript(_schema_text())
-        copied = migrate_sqlite(args.sqlite, target, batch=args.batch)
-        target.close()
     except (ConfigError, StoreError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    text = "\n".join(f"{table:<18}{count:>8,}" for table, count in copied.items())
-    _emit({"copied": copied}, args.json, text or "(nothing to copy)")
+
+    schema_requested = any((args.plan, args.apply, args.down, args.verify))
+    try:
+        if schema_requested:
+            audit = build_audit_log(config.audit)
+            runner = MigrationRunner(target, args.schema_dir,
+                                     lock_timeout_ms=args.lock_timeout_ms,
+                                     allow_blocking=args.allow_blocking, log=audit)
+            if args.verify:
+                problems = runner.verify()
+                _emit({"problems": problems}, args.json,
+                      "\n".join(problems) or "history is consistent")
+                return 0 if not problems else 1
+            if args.down:
+                steps = runner.rollback(to=args.to, dry_run=args.plan)
+            else:
+                pending = runner.plan()
+                if args.plan and not pending:
+                    _emit({"steps": []}, args.json, "nothing to apply")
+                    return 0
+                steps = runner.apply(to=args.to or None, dry_run=args.plan)
+            lines = [f"{step['direction']:<5} {step['key']:<28} "
+                     f"{step['statements']} statement(s)"
+                     + ("  [non-transactional]" if step["nontransactional"] else "")
+                     for step in steps] or ["nothing to do"]
+            _emit({"steps": steps}, args.json, "\n".join(lines))
+            audit.close()
+        if args.sqlite:
+            if args.init_schema:
+                target.executescript(_schema_text())
+            copied = migrate_sqlite(args.sqlite, target, batch=args.batch)
+            text = "\n".join(f"{table:<18}{count:>8,}" for table, count in copied.items())
+            _emit({"copied": copied}, args.json, text or "(nothing to copy)")
+        if not schema_requested and not args.sqlite:
+            print("error: choose --plan, --apply, --verify, --down, or --sqlite",
+                  file=sys.stderr)
+            return 2
+    except (ConfigError, StoreError, MigrationError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    finally:
+        target.close()
     return 0
 
 
@@ -275,9 +320,22 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--workdir")
     validate.set_defaults(func=cmd_validate)
 
-    migrate = sub.add_parser("migrate", help="copy SQLite into PostgreSQL")
-    migrate.add_argument("--sqlite", required=True)
-    migrate.add_argument("--dsn", required=True)
+    migrate = sub.add_parser(
+        "migrate", help="schema migrations (plan/apply/rollback/verify) and the "
+                        "SQLite -> PostgreSQL data copy")
+    migrate.add_argument("--dsn", help="target PostgreSQL DSN (or database.dsn)")
+    migrate.add_argument("--sqlite", help="copy this SQLite database's rows too")
+    migrate.add_argument("--schema-dir", default="migrations")
+    migrate.add_argument("--plan", action="store_true", help="show what would run")
+    migrate.add_argument("--apply", action="store_true", help="apply pending migrations")
+    migrate.add_argument("--down", action="store_true", help="roll back down-scripts")
+    migrate.add_argument("--to", type=int, default=0,
+                         help="target version (0 = all the way down / up)")
+    migrate.add_argument("--verify", action="store_true",
+                         help="check history and zero-downtime rules, change nothing")
+    migrate.add_argument("--allow-blocking", action="store_true",
+                         help="permit DDL the linter considers blocking")
+    migrate.add_argument("--lock-timeout-ms", type=int, default=2000)
     migrate.add_argument("--batch", type=int, default=500)
     migrate.add_argument("--init-schema", action="store_true",
                          help="create tables before copying")

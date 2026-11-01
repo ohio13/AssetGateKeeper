@@ -68,7 +68,7 @@ jobs:
 
       # No server, no IdP, no DCC: the enterprise suite fakes every
       # external system, and asserts the fail-closed path when one is absent.
-      - name: Enterprise suite (148 assertions)
+      - name: Enterprise suite (218 assertions)
         run: python tests/test_enterprise.py
 
       # The server's own queries, run twice: once on SQLite and once through

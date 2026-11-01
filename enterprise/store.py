@@ -37,6 +37,7 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator, Optional, Sequence
 
 from .config import DatabaseConfig
+from .resilience import CircuitBreaker, HealthMonitor
 
 
 class StoreError(Exception):
@@ -466,8 +467,28 @@ class Store:
         self._pool: Optional[PgPool] = None
         self._sqlite: Optional[sqlite3.Connection] = None
         self._lock = threading.Lock()
+        settings = config or DatabaseConfig(dsn=self.target)
+        self._config = settings
+        self._breaker = CircuitBreaker(
+            f"primary:{_short(self.target)}",
+            failure_threshold=settings.breaker_threshold,
+            reset_timeout=settings.breaker_reset_seconds)
+        self._replicas: list[tuple[str, "Store", CircuitBreaker]] = []
+        self._read_cursor = 0
+        self._monitors: list[HealthMonitor] = []
         if self.dialect.is_postgres:
-            self._pool = PgPool(config or DatabaseConfig(dsn=self.target))
+            self._pool = PgPool(settings)
+            # Replicas are plain Stores with no replicas of their own: a replica
+            # of a replica is a latency bug wearing a feature's clothes.
+            for dsn in settings.read_dsns:
+                replica_config = DatabaseConfig(
+                    dsn=dsn, pool_min=1, pool_max=max(2, settings.pool_max // 2),
+                    statement_timeout_ms=settings.statement_timeout_ms,
+                    breaker_threshold=settings.breaker_threshold,
+                    breaker_reset_seconds=settings.breaker_reset_seconds,
+                    health_interval_seconds=0)
+                replica = Store(dsn, replica_config)
+                self._replicas.append((dsn, replica, replica._breaker))
         else:
             connection = sqlite3.connect(self.target, timeout=10.0,
                                          check_same_thread=False)
@@ -527,6 +548,84 @@ class Store:
     def is_sqlite(self) -> bool:
         return self._sqlite is not None
 
+    # -- resilience -------------------------------------------------------- #
+
+    def endpoints(self) -> list[tuple[str, "Store", CircuitBreaker]]:
+        """Primary plus replicas, in the order a reader should try them."""
+        return [(self.target, self, self._breaker)] + list(self._replicas)
+
+    def ping(self) -> bool:
+        """One round trip, used by the health loop."""
+        self.query("SELECT 1 AS one")
+        return True
+
+    def start_health(self, interval: Optional[float] = None) -> "Store":
+        """Start a ping loop per PostgreSQL endpoint.
+
+        Off unless asked for: a library that starts threads on construction is a
+        library that hangs test suites. The server calls this once at startup.
+        """
+        if not self.dialect.is_postgres or self._monitors:
+            return self
+        interval = self._config.health_interval_seconds if interval is None else interval
+        if not interval:
+            return self
+        for name, endpoint, breaker in self.endpoints():
+            monitor = HealthMonitor(endpoint.ping, name=_short(name),
+                                    interval=interval, breaker=breaker)
+            monitor.start()
+            self._monitors.append(monitor)
+        return self
+
+    def stop_health(self) -> None:
+        for monitor in self._monitors:
+            monitor.stop()
+        self._monitors.clear()
+
+    def health(self) -> dict:
+        return {
+            "dialect": self.dialect.name,
+            "endpoints": [
+                {"endpoint": _short(name), "breaker": breaker.as_dict(),
+                 "health": (self._monitors[index].as_dict()
+                            if index < len(self._monitors) else None)}
+                for index, (name, _, breaker) in enumerate(self.endpoints())
+            ],
+        }
+
+    def reader(self) -> "ReadView":
+        """A read-only view that prefers a replica and falls back to the primary."""
+        if not self._replicas:
+            return ReadView(self, None)
+        return ReadView(self, self)
+
+    def _next_replica(self) -> Optional[tuple[str, "Store", CircuitBreaker]]:
+        """Round-robin over replicas whose breaker will admit a call."""
+        if not self._replicas:
+            return None
+        with self._lock:
+            start = self._read_cursor
+            self._read_cursor = (self._read_cursor + 1) % max(1, len(self._replicas))
+        order = self._replicas[start:] + self._replicas[:start]
+        for entry in order:
+            if entry[2].allow():
+                return entry
+        return None
+
+    def read(self, sql: str, params: Sequence[Any] | dict | None = None) -> list[Any]:
+        """Run a read-only statement against a replica when one is healthy."""
+        replica = self._next_replica()
+        if replica is not None:
+            name, endpoint, breaker = replica
+            try:
+                rows = endpoint.query(sql, params)
+                breaker.record_success()
+                return rows
+            except Exception as exc:
+                breaker.record_failure(exc)
+                # Fall through to the primary: a stale read beats no dashboard.
+        return self.query(sql, params)
+
     def execute(self, sql: str, params: Sequence[Any] | dict | None = None) -> Any:
         with self.connect() as connection:
             if params is None:
@@ -547,6 +646,10 @@ class Store:
         with self.connect() as connection:
             connection.executescript(script)            # type: ignore[attr-defined]
     def close(self) -> None:
+        self.stop_health()
+        for _, replica, _ in self._replicas:
+            with contextlib.suppress(Exception):
+                replica.close()
         if self._sqlite is not None:
             self._sqlite.close()
         if self._pool is not None:
@@ -557,6 +660,48 @@ class Store:
 
     def __exit__(self, *exc_info: Any) -> None:
         self.close()
+
+
+class ReadView:
+    """What analytics and audit listings get: reads only, replica-first.
+
+    Writes are refused rather than silently redirected, so a query is never
+    accidentally applied to a replica that will not accept it.
+    """
+
+    def __init__(self, owner: Store, router: Optional[Store]) -> None:
+        self._owner = owner
+        self._router = router
+
+    @property
+    def dialect(self) -> Dialect:
+        return self._owner.dialect
+
+    @property
+    def endpoints(self) -> int:
+        return len(self._owner._replicas)
+
+    def query(self, sql: str, params: Sequence[Any] | dict | None = None) -> list[Any]:
+        if self._router is not None:
+            return self._router.read(sql, params)
+        return self._owner.query(sql, params)
+
+    def one(self, sql: str, params: Sequence[Any] | dict | None = None) -> Any:
+        rows = self.query(sql, params)
+        return rows[0] if rows else None
+
+    def execute(self, *args: Any, **kwargs: Any) -> Any:
+        raise StoreError("this is a read view: analytics and audit listings never "
+                         "write, and a write sent here would go to a replica")
+
+
+def _short(dsn: str) -> str:
+    """A DSN without its credentials, for logs and health output."""
+    text = str(dsn)
+    if "@" in text and "://" in text:
+        scheme, rest = text.split("://", 1)
+        return f"{scheme}://***@{rest.split('@', 1)[1]}"
+    return text if len(text) <= 40 else text[:37] + "..."
 
 
 def open_store(target: str | Path, config: Optional[DatabaseConfig] = None) -> Store:

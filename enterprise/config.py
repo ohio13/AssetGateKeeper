@@ -135,6 +135,15 @@ class DatabaseConfig:
     pool_max: int = 10
     statement_timeout_ms: int = 30_000
     migrate_on_start: bool = True
+    #: Read replicas, in preference order. Analytics and audit listings read
+    #: here so a heavy dashboard query cannot slow down ingest.
+    read_dsns: tuple[str, ...] = ()
+    #: A failing endpoint trips after this many consecutive failures ...
+    breaker_threshold: int = 5
+    #: ... and is probed again after this many seconds.
+    breaker_reset_seconds: float = 30.0
+    #: How often the health loop pings each endpoint, in seconds (0 = off).
+    health_interval_seconds: float = 30.0
 
     @property
     def is_postgres(self) -> bool:
@@ -225,6 +234,27 @@ class RBACConfig:
 
 
 @dataclass(frozen=True)
+class AuditConfig:
+    """SIEM forwarding. Off by default; a local JSONL file when enabled."""
+
+    enabled: bool = False
+    file: str = ""
+    syslog_host: str = ""
+    syslog_port: int = 514
+    syslog_facility: int = 13
+    syslog_transport: str = "udp"
+    webhook_url: str = ""
+    webhook_token: str = ""
+    webhook_batch: int = 25
+    webhook_interval: float = 2.0
+    min_severity: str = "info"
+
+    @property
+    def forwarding(self) -> bool:
+        return bool(self.syslog_host or self.webhook_url)
+
+
+@dataclass(frozen=True)
 class EnterpriseConfig:
     database: DatabaseConfig = field(default_factory=DatabaseConfig)
     oidc: OIDCConfig = field(default_factory=OIDCConfig)
@@ -232,6 +262,7 @@ class EnterpriseConfig:
     vcs: VCSConfig = field(default_factory=VCSConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     rbac: RBACConfig = field(default_factory=RBACConfig)
+    audit: AuditConfig = field(default_factory=AuditConfig)
     source: str = "defaults"
     warnings: tuple[str, ...] = ()
 
@@ -296,12 +327,14 @@ def load_config(path: str | Path | None = None) -> EnterpriseConfig:
         source = str(file_path)
 
     _reject_unknown(document, {"database", "oidc", "saml", "vcs", "session",
-                               "rbac", "session_secret"}, "[enterprise]")
+                               "rbac", "audit", "session_secret"}, "[enterprise]")
 
     # --- database ---
     db_table = _require_table(document.get("database"), "[enterprise.database]")
     _reject_unknown(db_table, {"dsn", "sqlite_path", "pool_min", "pool_max",
-                               "statement_timeout_ms", "migrate_on_start"},
+                               "statement_timeout_ms", "migrate_on_start",
+                               "read_dsns", "breaker_threshold",
+                               "breaker_reset_seconds", "health_interval_seconds"},
                     "[enterprise.database]")
     dsn = _read(ENV["database.dsn"], _as_str(db_table, "dsn", "[enterprise.database]"))
     database = DatabaseConfig(
@@ -314,6 +347,13 @@ def load_config(path: str | Path | None = None) -> EnterpriseConfig:
                                      "[enterprise.database]", 30_000),
         migrate_on_start=_as_bool(db_table, "migrate_on_start",
                                   "[enterprise.database]", True),
+        read_dsns=_as_list(db_table, "read_dsns", "[enterprise.database]"),
+        breaker_threshold=_as_int(db_table, "breaker_threshold",
+                                  "[enterprise.database]", 5),
+        breaker_reset_seconds=float(_as_int(db_table, "breaker_reset_seconds",
+                                            "[enterprise.database]", 30)),
+        health_interval_seconds=float(_as_int(db_table, "health_interval_seconds",
+                                              "[enterprise.database]", 30)),
     )
     if database.pool_min > database.pool_max:
         raise ConfigError("[enterprise.database] pool_min is larger than pool_max")
@@ -407,6 +447,38 @@ def load_config(path: str | Path | None = None) -> EnterpriseConfig:
         secure_cookie=_as_bool(session_table, "secure_cookie", "[enterprise.session]", True),
     )
 
+    # --- audit ---
+    audit_table = _require_table(document.get("audit"), "[enterprise.audit]")
+    _reject_unknown(audit_table, {"enabled", "file", "syslog_host", "syslog_port",
+                                  "syslog_facility", "syslog_transport",
+                                  "webhook_url", "webhook_batch",
+                                  "webhook_interval", "min_severity"},
+                    "[enterprise.audit]")
+    if "webhook_token" in audit_table:
+        raise ConfigError(
+            "refusing 'webhook_token' in a config file: set "
+            "AGK_AUDIT_WEBHOOK_TOKEN in the environment instead")
+    audit = AuditConfig(
+        enabled=_as_bool(audit_table, "enabled", "[enterprise.audit]", False),
+        file=_as_str(audit_table, "file", "[enterprise.audit]"),
+        syslog_host=_as_str(audit_table, "syslog_host", "[enterprise.audit]"),
+        syslog_port=_as_int(audit_table, "syslog_port", "[enterprise.audit]", 514),
+        syslog_facility=_as_int(audit_table, "syslog_facility", "[enterprise.audit]", 13),
+        syslog_transport=_as_str(audit_table, "syslog_transport",
+                                 "[enterprise.audit]", "udp"),
+        webhook_url=_as_str(audit_table, "webhook_url", "[enterprise.audit]"),
+        webhook_token=_env("AGK_AUDIT_WEBHOOK_TOKEN"),
+        webhook_batch=_as_int(audit_table, "webhook_batch", "[enterprise.audit]", 25),
+        webhook_interval=float(_as_int(audit_table, "webhook_interval",
+                                       "[enterprise.audit]", 2)),
+        min_severity=_as_str(audit_table, "min_severity", "[enterprise.audit]", "info"),
+    )
+    if audit.syslog_transport not in ("udp", "tcp"):
+        raise ConfigError("[enterprise.audit] syslog_transport must be udp or tcp")
+    if audit.enabled and not (audit.file or audit.forwarding):
+        warnings.append("audit is enabled with no destination: a local "
+                        "agk-audit.jsonl will be written")
+
     # --- rbac ---
     rbac_table = _require_table(document.get("rbac"), "[enterprise.rbac]")
     _reject_unknown(rbac_table, {"grant", "default_deny", "director_role"},
@@ -418,7 +490,7 @@ def load_config(path: str | Path | None = None) -> EnterpriseConfig:
     )
 
     return EnterpriseConfig(database=database, oidc=oidc, saml=saml, vcs=vcs,
-                            session=session, rbac=rbac, source=source,
+                            session=session, rbac=rbac, audit=audit, source=source,
                             warnings=tuple(warnings))
 
 
@@ -436,4 +508,8 @@ def describe(config: EnterpriseConfig) -> list[str]:
         f"rbac          {len(config.rbac.grants)} grant(s), "
         f"{'deny by default' if config.rbac.default_deny else 'ALLOW BY DEFAULT'}",
         f"session       {'on' if config.session.enabled else 'off (no secret)'}",
+        f"read replicas {len(config.database.read_dsns)} "
+        f"({', '.join(config.database.read_dsns)})" if config.database.read_dsns
+        else "read replicas none",
+        f"audit         {'on: ' + (', '.join(filter(None, [config.audit.file, config.audit.syslog_host, config.audit.webhook_url]))) if config.audit.enabled else 'off'}",
     ]

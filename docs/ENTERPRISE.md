@@ -328,6 +328,73 @@ is caught before export rather than rejected at submit.
 
 ---
 
+## 5. Schema migrations, SIEM forwarding and read replicas
+
+### Versioned migrations
+
+```
+migrations/0001_baseline.up.sql / .down.sql
+migrations/0002_verdict_metrics.up.sql / .down.sql
+```
+
+```bash
+agk-enterprise migrate --dsn $AGK_DB_URL --verify     # history + zero-downtime rules
+agk-enterprise migrate --dsn $AGK_DB_URL --plan       # what would run, changes nothing
+agk-enterprise migrate --dsn $AGK_DB_URL --apply
+agk-enterprise migrate --dsn $AGK_DB_URL --down --to 0
+```
+
+* Every applied version is recorded with its **checksum**; editing an applied
+  migration is reported instead of silently re-run.
+* `SET lock_timeout` (2 s default) precedes every migration: if the lock cannot
+  be taken, the migration fails fast rather than queueing every writer behind it.
+* The linter refuses DDL that takes an exclusive lock (DROP COLUMN, type changes,
+  renames, SET NOT NULL, TRUNCATE) and the runner rewrites what it can do safely:
+  `CREATE INDEX` becomes `CREATE INDEX CONCURRENTLY` (making that migration
+  non-transactional automatically), and `ADD CONSTRAINT ... FOREIGN KEY` gains
+  `NOT VALID`.
+* `--verify` after a rollout also checks that the tables the code needs exist.
+
+### SIEM forwarding
+
+```toml
+[enterprise.audit]
+enabled = true
+file = "/var/log/agk/audit.jsonl"
+syslog_host = "siem.studio.internal"   # RFC 5424, UDP or TCP
+syslog_port = 514
+webhook_url = "https://splunk.studio.internal:8088/services/collector"
+webhook_batch = 50
+min_severity = "notice"
+```
+
+Token for the webhook: `AGK_AUDIT_WEBHOOK_TOKEN` (never in the file).
+
+Events: `auth.token.rejected`, `auth.login.failed`, `rbac.denied`,
+`rbac.override`, `budget.violation`, `admin.action`, `migration.applied` - each a
+JSON object with `schema`, `ts`, `event`, `severity`, `actor`, `action`, `path`,
+`outcome`, `project_id`, `request_id`, `remote`, `detail`. Credentials are
+redacted recursively before serialisation, and the request path never blocks: a
+bounded queue drops and counts when a collector is slow.
+
+### Read replicas and circuit breakers
+
+```toml
+[enterprise.database]
+dsn = "postgresql://agk@primary:5432/assets"
+read_dsns = ["postgresql://agk@replica-1:5432/assets"]
+breaker_threshold = 5
+breaker_reset_seconds = 30
+health_interval_seconds = 30
+```
+
+`/analytics`, `/api/analytics` and audit listings read through `Store.reader()`,
+which round-robins healthy replicas and falls back to the primary. Each endpoint
+has its own breaker: after `breaker_threshold` consecutive failures it opens,
+refuses calls immediately (no 30-second timeout per request), and half-opens a
+single probe after `breaker_reset_seconds`. The health loop shares the same
+breaker, so there is one truth per endpoint.
+
 ## Security posture
 
 | Concern | Behaviour |
@@ -372,6 +439,14 @@ network and no external services):
   server sends so the two-pass foreign-key strategy is asserted;
 * the pre-flight core: budget errors, warnings, sorting, text rendering, fuzzy
   tag suggestion in strict and suggest modes;
+* migrations: discovery, gaps, checksums, blocking-DDL refusal, dry run,
+  apply/verify/rollback on SQLite, drift detection, and the PostgreSQL
+  rewrites (CONCURRENTLY, NOT VALID, identity columns);
+* audit: JSON shape, recursive redaction, severity floor, syslog framing and
+  priority, webhook batching, failing collectors, bounded-queue drops;
+* replicas and failover: a dead replica trips its breaker and queries fall
+  back to the primary, the health loop closes the breaker again, and 120
+  concurrent queries across 8 threads run clean over the pool;
 * the **Blender panel inside Blender 4.0.2 headless** - it imports, registers its
   N-panel and reports a real scene (`CLEAN - nothing to fix`, 12 tris, 1
   material) from the evaluated depsgraph, not from a fixture.
