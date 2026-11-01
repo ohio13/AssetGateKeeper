@@ -415,8 +415,12 @@ try:
     expect("its growth equals the SQLite server's",
            pg_payload["growth"]["points"] == sqlite_report["growth"]["points"],
            f"pg={str(pg_payload['growth']['points'])[:110]}")
-    expect("its summary equals the SQLite server's",
-           pg_payload["summary"] == sqlite_report["summary"])
+    # The summary embeds its own resolved window, which is wall-clock dependent
+    # ("90d" is re-evaluated per call); the counts must match exactly.
+    expect("its summary counts equal the SQLite server's",
+           {k: v for k, v in pg_payload["summary"].items() if k != "window"}
+           == {k: v for k, v in sqlite_report["summary"].items() if k != "window"},
+           str(pg_payload["summary"])[:120])
     expect("its clusters equal the SQLite server's",
            pg_payload["errors"] == sqlite_report["errors"])
 
