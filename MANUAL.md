@@ -241,6 +241,26 @@ Run `asset-gatekeeper --help` for this list on your build.
 | `-v` / `--verbose` | debug logging |
 | `--no-color` | plain output for logs |
 
+### What the review screen accepts
+
+Anything a DCC exports, not only `.obj`/`.glb`:
+
+* **Measured**: every format the installed trimesh can open (`.obj`, `.gltf`,
+  `.glb`, `.ply`, `.stl`, `.dae`, `.3mf`, ...).
+* **Stored with dimensions**: textures - `.png`, `.tga`, `.dds`, `.exr`, `.hdr`,
+  `.ktx`, `.ktx2`, ...
+* **Stored without a 3D preview**: `.fbx`, `.abc`, `.usd`/`.usdz`, `.blend`,
+  `.max`, `.ma`, `.mb`, `.lwo`, `.mdl`, ... The geometry is not parsed, but the
+  asset is reviewable, its notes and verdict survive, and the reason is shown.
+
+Only executables (`.exe`, `.dll`, `.ps1`, ...) are refused, with 415. A mesh that
+fails to parse degrades to "unverified" instead of being dropped - the difference
+between a review tool and a filter.
+
+When the dashboard sends a `.gltf`, the sibling files that make it loadable
+(`.bin`, textures sharing the stem) are copied beside it, up to 20 files and
+32 MB each, so the preview is not a blank box.
+
 ### Safety and repair
 
 | Flag | Effect |
@@ -930,6 +950,23 @@ asset-health --add-admin alice --admin-role director    :: once; password shown 
 
 Every change is written atomically to `rules.toml`, committed like any other
 file, and appended to the audit trail with old and new values.
+
+### Browsing the whole history
+
+The dashboard trims to a top-N; these two pages do not.
+
+* /audit/full - every verdict, 50 per page, newest first.
+* /audit/passes - the same list locked to passes.
+
+Both take ?status=all|pass|fail, repeatable ?tag=<category>, and ?page=N.
+Rows are grouped into collapsible <details> blocks per category (with an
+Uncategorised group), the filter bar offers a multi-select category picker, and
+every row keeps its **Send to Workstation** button.
+
+Tag filtering happens after the rows are loaded because categories are derived
+from the path rather than stored per verdict - bounded at 20,000 rows so a huge
+history cannot exhaust memory. Pagination is applied after filtering, so page
+counts are always truthful.
 
 ### Sending a single asset to the review screen
 

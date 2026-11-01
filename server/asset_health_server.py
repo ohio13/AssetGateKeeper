@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""AssetHealth Server ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the receiving end of the AssetGatekeeper ecosystem.
+r"""AssetHealth Server - the receiving end of the AssetGatekeeper ecosystem.
 
 A single stdlib-only file: ``http.server`` + ``sqlite3`` + ``json``. No Flask, no
 ORM, no JS build step. Drop it next to the gatekeeper, run it, open the dashboard.
@@ -17,7 +17,7 @@ Routes
 Auth
     Set ``AUTH_TOKEN`` (or ``--token``) and every request must carry
     ``Authorization: Bearer <token>``. Unset means "trust the network", which is
-    fine for 127.0.0.1 and not fine for anything else ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the server says so on boot.
+    fine for 127.0.0.1 and not fine for anything else - the server says so on boot.
 
 Exit codes: 0 normal shutdown, 2 startup/config problem.
 """
@@ -58,9 +58,9 @@ for _path in (str(HERE), str(REPO_ROOT)):
 # Ingest and the dashboard stay pure stdlib - agk has no side effects on import.
 import asset_gatekeeper as agk  # noqa: E402
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Configuration
-# --------------------------------------------------------------------------- #
+# --- #
 
 DEFAULT_HOST = "127.0.0.1"       # loopback by default: no accidental exposure
 DEFAULT_PORT = 8080
@@ -81,9 +81,9 @@ BOTTLENECK_LIMIT = 8
 UTC_FORMAT = "%Y-%m-%dT%H:%M:%S+00:00"
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Database
-# --------------------------------------------------------------------------- #
+# --- #
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS verdicts (
@@ -129,10 +129,10 @@ CREATE TABLE IF NOT EXISTS meta (
     value TEXT NOT NULL
 );
 
--- ---------------------------------------------------------------------------
+-- -
 -- Admin: who may change a budget, and the record of every change they made.
--- Only a PBKDF2 hash is stored - the database never holds a password.
--- ---------------------------------------------------------------------------
+-- Only a PBKDF2 hash is stored -- the database never holds a password.
+-- -
 CREATE TABLE IF NOT EXISTS admin_users (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     username      TEXT NOT NULL UNIQUE COLLATE NOCASE,
@@ -176,10 +176,10 @@ CREATE TABLE IF NOT EXISTS project_roots (
     last_used TEXT NOT NULL
 );
 
--- ---------------------------------------------------------------------------
+-- -
 -- Multi-tenancy. One row per game project or outsource vendor: they share a
 -- server, never a row.
--- ---------------------------------------------------------------------------
+-- -
 CREATE TABLE IF NOT EXISTS projects (
     id         INTEGER PRIMARY KEY AUTOINCREMENT,
     name       TEXT    NOT NULL UNIQUE,
@@ -352,16 +352,16 @@ def store_verdict(db_path: str | Path, payload: dict,
     return verdict_id
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Tenancy: projects, tokens, published budgets
-# --------------------------------------------------------------------------- #
+# --- #
 
 def hash_token(token: str) -> str:
     return "sha256:" + hashlib.sha256(token.encode("utf-8")).hexdigest()
 
 
 def create_project(db_path: str | Path, name: str, token: str | None = None) -> tuple[int, str]:
-    """Add a project. Returns (id, token) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the token is shown once and hashed.
+    """Add a project. Returns (id, token) - the token is shown once and hashed.
 
     Only the hash is stored: a metrics database that leaks is bad, a metrics
     database that also leaks every vendor's token is a breach.
@@ -410,7 +410,7 @@ def project_count(db_path: str | Path) -> int:
         return int(connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0])
 
 
-# --- published budgets ----------------------------------------------------- #
+# --- published budgets - #
 
 DEFAULT_BUDGET_ROW = {
     "max_triangles": 50_000,
@@ -444,7 +444,7 @@ def budget_for_project(db_path: str | Path, project_id: int | None) -> dict:
 
 
 def budget_document(budget: dict) -> dict:
-    """The saved budget as a rules document ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â exactly what `--remote-rules` eats.
+    """The saved budget as a rules document - exactly what `--remote-rules` eats.
 
     Same shape as rules.toml, so a client never has to learn a second format and
     the gate's own parser validates it on the way in.
@@ -529,9 +529,9 @@ def save_budget(db_path: str | Path, project_id: int, form: dict,
     return budget_for_project(db_path, project_id)
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Dashboard queries
-# --------------------------------------------------------------------------- #
+# --- #
 
 def _project_clause(project_id: int | None) -> tuple[str, tuple]:
     """Shared WHERE fragment. Every tenant-facing query goes through this."""
@@ -632,7 +632,7 @@ def classify(problem: str) -> str:
 
 def bottlenecks(db_path: str | Path, limit: int = BOTTLENECK_LIMIT,
                 project_id: int | None = None) -> list[tuple[str, int]]:
-    """Which rule is broken most often ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the ranking that decides next sprint."""
+    """Which rule is broken most often - the ranking that decides next sprint."""
     with open_db(db_path) as connection:
         if project_id is None:
             rows = connection.execute("SELECT message FROM problems").fetchall()
@@ -649,9 +649,9 @@ def bottlenecks(db_path: str | Path, limit: int = BOTTLENECK_LIMIT,
     return ranked[:limit]
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Alerting: how badly over budget, and a notifier that cannot slow ingest
-# --------------------------------------------------------------------------- #
+# --- #
 
 # Alert when a budget is exceeded by more than this factor (50% over).
 ALERT_FACTOR = 1.5
@@ -716,7 +716,7 @@ def alert_text(payload: dict, budget: dict,
     reasons = "; ".join(p for p in payload.get("problems", []) if isinstance(p, str)) or "unknown"
     details = ", ".join(f"{label} {int(value):,} vs {limit:,} ({ratio:.1f}x)"
                         for label, value, limit, ratio in overshoot)
-    return (f"ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ‚Â´ CRITICAL PIPELINE ALERT: User {payload.get('username') or 'unknown'} on "
+    return (f"- CRITICAL PIPELINE ALERT: User {payload.get('username') or 'unknown'} on "
             f"{payload.get('hostname') or 'unknown'} failed validation for "
             f"{payload.get('name') or payload.get('filename') or 'unknown'}. "
             f"Reasons: {reasons}. Over budget: {details}")
@@ -812,9 +812,9 @@ class Broadcaster:
 class Notifier:
     """Fire-and-forget webhook POSTs. Same three rules as the gate's telemetry.
 
-    1. Never raise ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a dead webhook must not fail an ingest.
-    2. Never block ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â `submit()` enqueues; one daemon thread owns the sockets.
-    3. Never grow without bound ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a capped queue drops and counts.
+    1. Never raise - a dead webhook must not fail an ingest.
+    2. Never block - `submit()` enqueues; one daemon thread owns the sockets.
+    3. Never grow without bound - a capped queue drops and counts.
     """
 
     def __init__(self, url: str, provider: str = "slack", timeout: float = 2.0,
@@ -868,7 +868,7 @@ class Notifier:
         """Wait for the queue to drain without shutting the worker down.
 
         Used at shutdown and by tests that assert on what was delivered. Never
-        called on the ingest path ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â that path must not wait for a network.
+        called on the ingest path - that path must not wait for a network.
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -893,9 +893,9 @@ class Notifier:
         self._thread.join(self.timeout if timeout is None else timeout)
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # HTML
-# --------------------------------------------------------------------------- #
+# --- #
 
 CSS = """
 :root {
@@ -989,6 +989,180 @@ button.secondary { background: transparent; color: var(--text); border: 1px soli
 
 MAX_REFRESH_SECONDS = 3600
 
+
+#: One page of the full audit. 50 rows keeps the HTML small enough to render in
+#: a frame even when the database holds tens of thousands of verdicts.
+AUDIT_PAGE_SIZE = 50
+#: Ceiling on how many rows are loaded to resolve tag filters. Tags are derived
+#: from the path (they are not stored per verdict), so filtering happens in
+#: Python - bounded on purpose rather than letting a 200k-row table eat memory.
+AUDIT_SCAN_LIMIT = 20_000
+
+
+def resolve_tags(path: str, scan_root: str | Path, tag_names: list[str]) -> list[str]:
+    """Which configured categories this verdict's file falls into."""
+    if not path or not tag_names:
+        return []
+    known = {agk.normalise_tag(name): name for name in tag_names}
+    matched: list[str] = []
+    try:
+        for candidate in agk.tag_candidates(Path(path), Path(scan_root)):
+            name = known.get(agk.normalise_tag(candidate))
+            if name and name not in matched:
+                matched.append(name)
+    except (OSError, ValueError):
+        return []
+    return matched[:3]
+
+
+def audit_query(db_path: str | Path, statuses: tuple[str, ...],
+                project_id: int | None = None) -> list[dict]:
+    """Every matching verdict, newest first (the caller pages it)."""
+    clauses, params = [], []
+    if statuses:
+        clauses.append(f"passed IN ({','.join('?' * len(statuses))})")
+        params.extend(1 if item == "pass" else 0 for item in statuses)
+    if project_id is not None:
+        clauses.append("project_id = ?")
+        params.append(int(project_id))
+    where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
+    sql = (f"SELECT id, filename, filepath, passed, hostname, received_at "
+           f"FROM verdicts {where} ORDER BY id DESC LIMIT ?")
+    params.append(AUDIT_SCAN_LIMIT)
+    try:
+        with open_db(db_path) as connection:
+            rows = [dict(row) for row in connection.execute(sql, params)]
+            counts = {True: 0, False: 0}
+            for label, passed in connection.execute(
+                    f"SELECT 1, COUNT(*) FROM verdicts {where} "
+                    f"GROUP BY passed", params[:-1]):
+                counts[bool(label)] = int(passed)
+    except sqlite3.Error:
+        return [], {True: 0, False: 0}
+    return rows, counts
+
+
+def audit_page(db_path: str | Path, scan_root: str | Path, tag_names: list[str],
+               statuses: tuple[str, ...], wanted_tags: list[str],
+               page: int, project_id: int | None = None) -> dict:
+    rows, counts = audit_query(db_path, statuses, project_id)
+    for row in rows:
+        row["tags"] = resolve_tags(row.get("filepath") or "", scan_root, tag_names)
+    if wanted_tags:
+        wanted = {agk.normalise_tag(item) for item in wanted_tags}
+        rows = [row for row in rows
+                if wanted & {agk.normalise_tag(tag) for tag in row["tags"]}]
+    total = len(rows)
+    pages = max(1, (total + AUDIT_PAGE_SIZE - 1) // AUDIT_PAGE_SIZE)
+    page = max(1, min(page, pages))
+    start = (page - 1) * AUDIT_PAGE_SIZE
+    groups: dict[str, list[dict]] = {}
+    for row in rows[start:start + AUDIT_PAGE_SIZE]:
+        groups.setdefault(row["tags"][0] if row["tags"] else "Uncategorised", []).append(row)
+    return {"rows": rows[start:start + AUDIT_PAGE_SIZE], "groups": groups,
+            "total": total, "pages": pages, "page": page, "counts": counts}
+
+def render_audit_page(data: dict, *, title: str, status_filter: str,
+                      tag_names: list[str], selected: list[str],
+                      base_path: str) -> str:
+    """The full audit: every verdict, paginated, grouped by category."""
+    def href(page: int, status: str = status_filter) -> str:
+        params = [f"status={urllib.parse.quote(status)}", f"page={page}"]
+        params += [f"tag={urllib.parse.quote(item)}" for item in selected]
+        return f"{base_path}?{'&'.join(params)}"
+
+    def row_html(entry: dict) -> str:
+        state = "passed" if entry["passed"] else "failed"
+        when = (entry.get("received_at") or "")[:19]
+        return (
+            f'<tr><td class="when">{_e(when)}</td>'
+            f'<td class="file">{_e(entry.get("filename") or "")}'
+            f'<div class="path">{_e((entry.get("filepath") or "")[:120])}</div></td>'
+            f'<td><span class="badge {state}">{state.upper()}</span></td>'
+            f'<td class="act">{_send_button(entry)}</td></tr>')
+
+    groups = "".join(
+        f"<details class='tree' open><summary>{_e(name)} "
+        f"<span class='count'>{len(items)}</span></summary>"
+        f"<table><tbody>{''.join(row_html(item) for item in items)}</tbody></table>"
+        f"</details>"
+        for name, items in sorted(data["groups"].items()))
+
+    if not groups:
+        groups = "<div class='panel'><div class='empty'>Nothing matches those filters.</div></div>"
+
+    tag_boxes = "".join(
+        f"<label class='check'><input type='checkbox' name='tag' value='{_e(name)}'"
+        f"{' checked' if name in selected else ''}> {_e(name)}</label>"
+        for name in tag_names) or "<span class='sub'>no categories configured</span>"
+
+    status_options = "".join(
+        f"<option value='{value}'{' selected' if value == status_filter else ''}>{label}</option>"
+        for value, label in (("all", "All verdicts"), ("fail", "Failures only"),
+                             ("pass", "Passes only")))
+
+    pages = []
+    for page in range(1, data["pages"] + 1):
+        if data["pages"] > 9 and abs(page - data["page"]) > 3 and page not in (1, data["pages"]):
+            if pages and pages[-1] != "...":
+                pages.append("...")
+            continue
+        pages.append(page)
+    pager = " ".join(
+        "<span class='sub'>...</span>" if item == "..." else
+        f"<a class='page{' active' if item == data['page'] else ''}' href='{href(item)}'>{item}</a>"
+        for item in pages)
+
+    return f"""<!DOCTYPE html><html lang="en"><head><meta charset="utf-8">
+<title>{_e(title)} - AssetGatekeeper</title>
+<style>
+body{{margin:0;background:#0d1016;color:#e6e9ef;font:14px/1.5 ui-sans-serif,"Segoe UI",sans-serif}}
+header{{padding:18px 24px;border-bottom:1px solid #262f3d;display:flex;gap:14px;align-items:baseline}}
+h1{{font-size:17px;margin:0}} a{{color:#7aa2f7;text-decoration:none}} a:hover{{text-decoration:underline}}
+main{{padding:20px 24px;max-width:1100px}}
+form.filters{{display:flex;gap:10px;flex-wrap:wrap;align-items:flex-start;margin-bottom:18px;
+  background:#161b24;border:1px solid #262f3d;border-radius:10px;padding:12px}}
+select,input[type=submit],button{{background:#1d2431;color:#e6e9ef;border:1px solid #262f3d;
+  border-radius:7px;padding:6px 10px;font:inherit;cursor:pointer}}
+details.picker{{position:relative}} details.picker>summary{{list-style:none;cursor:pointer;
+  background:#1d2431;border:1px solid #262f3d;border-radius:7px;padding:6px 10px}}
+details.picker .menu{{position:absolute;z-index:5;background:#161b24;border:1px solid #262f3d;
+  border-radius:8px;padding:8px;margin-top:4px;min-width:190px}}
+label.check{{display:block;padding:2px 0;font-size:13px;white-space:nowrap}}
+details.tree{{border:1px solid #262f3d;border-radius:10px;margin-bottom:12px;overflow:hidden}}
+details.tree>summary{{padding:9px 13px;cursor:pointer;background:#161b24;font-weight:600}}
+details.tree .count{{color:#8b94a7;font-weight:400;margin-left:6px}}
+table{{width:100%;border-collapse:collapse;font-size:13px}}
+td{{padding:7px 13px;border-top:1px solid #1e2530;vertical-align:top}}
+td.when{{color:#8b94a7;white-space:nowrap;width:150px}}
+.path{{color:#8b94a7;font-size:11px;word-break:break-all}}
+.badge{{padding:1px 7px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.05em}}
+.badge.failed{{background:rgba(255,107,107,.16);color:#ff6b6b}}
+.badge.passed{{background:rgba(62,207,142,.16);color:#3ecf8e}}
+button.send{{font-size:11px;padding:3px 8px}}
+.page{{display:inline-block;padding:3px 9px;border:1px solid #262f3d;border-radius:6px;margin-right:3px}}
+.page.active{{background:#1d2431;border-color:#7aa2f7}}
+.empty,.sub{{color:#8b94a7}} .panel{{background:#161b24;border:1px solid #262f3d;border-radius:10px;padding:14px}}
+</style></head><body>
+<header><h1>{_e(title)}</h1>
+<span class="sub">{data['total']} matching  page {data['page']} of {data['pages']}</span>
+<a href="/dashboard">dashboard</a>
+<a href="/audit/full">all verdicts</a>
+<a href="/audit/passes">passes</a>
+</header>
+<main>
+<form class="filters" method="get" action="{base_path}">
+  <select name="status">{status_options}</select>
+  <details class="picker"><summary>Categories ({len(selected)} selected)</summary>
+    <div class="menu">{tag_boxes}</div></details>
+  <input type="submit" value="Apply filters">
+  <a href="{base_path}" class="sub">clear</a>
+</form>
+{groups}
+<div class="pager">{pager}</div>
+</main>
+<script src="/static/dashboard.js" defer></script>
+</body></html>"""
 
 def _send_button(entry: dict) -> str:
     """The one-click hand-off to the Art Workstation, for a single row.
@@ -1094,7 +1268,7 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {auto_refresh}
-<title>AssetHealth ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â studio pipeline dashboard</title>
+<title>AssetHealth - studio pipeline dashboard</title>
 <style>{CSS}</style>
 </head>
 <body>
@@ -1124,7 +1298,7 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
     <div class="card"><div class="k">Workstations</div><div class="v">{stats['hosts']:,}</div></div>
   </div>
 
-  <h2>Wall of shame ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â last {min(len(shame), WALL_OF_SHAME_LIMIT)} failures</h2>
+  <h2>Wall of shame - last {min(len(shame), WALL_OF_SHAME_LIMIT)} failures</h2><span class='sub' style='margin-left:10px;font-weight:400'><a href='/audit/full'>all verdicts</a>  <a href='/audit/passes'>all passes</a></span>
   {shame_html}
 {passed_html}
 
@@ -1141,7 +1315,7 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
 </div>
 <script>
 /* Live updates over Server-Sent Events. The page is a server-rendered snapshot,
- * so the cheapest correct reaction to "something changed" is a reload ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â but we
+ * so the cheapest correct reaction to "something changed" is a reload - but we
  * only reload when the tab is visible, and never more than once every 3 s, so a
  * 300-asset sweep cannot lock the browser in a refresh loop. */
 (function () {{
@@ -1166,15 +1340,15 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
   source.addEventListener("verdict", function (event) {{
     var data = JSON.parse(event.data);
     pending += 1;
-    mark("live Ãƒâ€šÃ‚Â· " + pending + " new since load Ãƒâ€šÃ‚Â· last: " + data.status + " " + (data.name || ""));
+    mark("live  " + pending + " new since load  last: " + data.status + " " + (data.name || ""));
     scheduleReload();
   }});
   source.addEventListener("budget", function () {{
-    mark("live Ãƒâ€šÃ‚Â· budget published, reloading");
+    mark("live  budget published, reloading");
     scheduleReload();
   }});
-  source.onopen = function () {{ mark(pending ? live.textContent : "live Ãƒâ€šÃ‚Â· connected"); }};
-  source.onerror = function () {{ mark("live Ãƒâ€šÃ‚Â· reconnectingÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦"); }};
+  source.onopen = function () {{ mark(pending ? live.textContent : "live  connected"); }};
+  source.onerror = function () {{ mark("live  reconnecting"); }};
 }})();
 </script>
   <script src="/static/dashboard.js" defer></script>
@@ -1187,7 +1361,7 @@ def render_error_page(status: int, headline: str, detail: str) -> str:
     """A refusal that explains itself, without leaking the project list."""
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
-<title>AssetHealth ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â {status}</title><style>{CSS}</style></head>
+<title>AssetHealth - {status}</title><style>{CSS}</style></head>
 <body><div class="wrap">
   <header><h1>AssetHealth</h1><span class="sub">{status}</span></header>
   <div class="panel" style="margin-top:24px"><div class="empty" style="color:var(--bad)">
@@ -1205,14 +1379,14 @@ def render_planner(db_path: str | Path, project_id: int, project_name: str,
         f'<option value="{row["id"]}"{" selected" if row["id"] == project_id else ""}>'
         f'{_e(row["name"])}</option>' for row in projects)
     updated = budget.get("updated_at") or "never"
-    updated_by = budget.get("updated_by") or "ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â"
+    updated_by = budget.get("updated_by") or "-"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AssetHealth ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â budget planner</title>
+<title>AssetHealth - budget planner</title>
 <style>{CSS}{PLANNER_CSS}</style>
 </head>
 <body>
@@ -1225,7 +1399,7 @@ def render_planner(db_path: str | Path, project_id: int, project_name: str,
     <code>--remote-rules</code> on its next run. No TOML, no build step.</div>
   <nav><a href="/dashboard?project_id={project_id}">&larr; Back to the dashboard</a></nav>
 
-  <form class="form" id="budget-form" data-project="{project_id}" data-token="{_e(token)}">
+  <form class="form" id="budget-form" data-project="{project_id}" data--token="{_e(token)}">
     <div class="field">
       <label for="project">Project</label>
       <select id="project" disabled>{options}</select>
@@ -1335,9 +1509,9 @@ def render_planner(db_path: str | Path, project_id: int, project_name: str,
 """
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # HTTP
-# --------------------------------------------------------------------------- #
+# --- #
 
 class Handler(BaseHTTPRequestHandler):
     """Three routes, one auth check, no framework."""
@@ -1346,7 +1520,7 @@ class Handler(BaseHTTPRequestHandler):
     sys_version = ""
     protocol_version = "HTTP/1.1"   # keep-alive; Content-Length is always set below
 
-    # -- plumbing ----------------------------------------------------------- #
+    # - plumbing - #
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003 - stdlib hook
         if getattr(self.server, "quiet", False):
@@ -1369,7 +1543,7 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, json.dumps(payload).encode("utf-8"),
                    "application/json; charset=utf-8")
 
-    # -- auth --------------------------------------------------------------- #
+    # - auth - #
 
     def _presented_token(self) -> str:
         """Bearer header first, then ?token= for a browser that cannot set one."""
@@ -1433,12 +1607,12 @@ class Handler(BaseHTTPRequestHandler):
             return identity["project_id"], None
         return wanted, None
 
-    # -- routes ------------------------------------------------------------- #
+    # - routes - #
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib naming
         path = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
         # The admin surface has its own auth domain (accounts, sessions, roles),
-        # so it is routed before the studio-token identity is resolved.
+        # so it is routed before the studio--token identity is resolved.
         if path == "/admin" or path.startswith("/admin/") or path.startswith("/static/"):
             try:
                 self._admin_get(path)
@@ -1453,6 +1627,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(302, b"", "text/plain; charset=utf-8", {"Location": location})
             elif path == "/dashboard":
                 self._dashboard(identity)
+            elif path in ("/audit/full", "/audit/passes"):
+                # Every verdict, paginated: the dashboard trims to a top-N, these
+                # pages do not, so nothing is ever unreachable from the UI.
+                self._audit_view(path, urllib.parse.parse_qs(
+                    urllib.parse.urlsplit(self.path).query))
             elif path == "/budget-planner":
                 self._planner(identity)
             elif path == "/api/summary":
@@ -1617,7 +1796,7 @@ class Handler(BaseHTTPRequestHandler):
         db_path = self.server.db_path  # type: ignore[attr-defined]
         self._json(200, budget_document(budget_for_project(db_path, project_id)))
 
-    # ------------------------------------------------------------------ admin --
+    # - admin -
     # A second, cookie-based auth domain. Studio tokens scope a *pipeline*; the
     # admin page scopes a *person*, so it needs accounts, roles, sessions and an
     # audit trail - not a shared secret pasted into a CI variable.
@@ -2117,7 +2296,40 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": "not found", "path": path})
 
-    # ------------------------------------------------------ workstation bridge
+    def _configured_tags(self) -> list[str]:
+        try:
+            rules = self._rules_path()
+            document = agk.parse_rules(rules) if rules.is_file() else {}
+            return sorted((document.get("tags") or {}).keys())
+        except (agk.ConfigError, OSError):
+            return []
+
+    def _audit_view(self, path: str, query: dict) -> None:
+        """Every verdict, paginated - no top-N slicing, no hidden rows."""
+        identity = self._identify()
+        if identity.get("role") == "denied":
+            self._json(401, {"error": "a token is required to view the dashboard"})
+            return
+        default = "pass" if path == "/audit/passes" else "all"
+        status = (query.get("status", [default])[0] or default).lower()
+        if status not in ("all", "pass", "fail"):
+            status = "all"
+        if path == "/audit/passes":
+            status = "pass"
+        selected = [item for item in query.get("tag", []) if item.strip()]
+        try:
+            page = max(1, int(query.get("page", ["1"])[0]))
+        except (TypeError, ValueError):
+            page = 1
+        tag_names = self._configured_tags()
+        data = audit_page(self.server.db_path, self.server.scan_root, tag_names,
+                          () if status == "all" else (status,), selected, page)
+        title = "Passes" if path == "/audit/passes" else "All verdicts"
+        body = render_audit_page(data, title=title, status_filter=status,
+                                 tag_names=tag_names, selected=selected,
+                                 base_path=path)
+        self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+    # - workstation bridge
     def _workstation_url(self) -> str:
         """Where to POST an asset: explicit flag, else the running one.
 
@@ -2316,7 +2528,7 @@ class Handler(BaseHTTPRequestHandler):
         """Push a webhook when a failure blows a budget by more than 50%.
 
         Throttled per scope so a nightly sweep failing 300 assets sends one
-        message, not 300. The asset still lands in the database either way ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the
+        message, not 300. The asset still lands in the database either way - the
         dashboard is the complete record, the webhook is the poke.
         """
         notifier = getattr(self.server, "notifier", None)
@@ -2385,9 +2597,9 @@ def _constant_time_equal(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Admin: accounts, sessions, audit trail, rules writes
-# --------------------------------------------------------------------------- #
+# --- #
 
 PBKDF2_ROUNDS = 120_000
 ADMIN_ROLES = ("director", "producer", "artist")
@@ -2997,9 +3209,9 @@ def describe_rules(server: "AssetHealthServer") -> dict:
                 "tag_budgets": []}
 
 
-# --------------------------------------------------------------------------- #
-# Seed data ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â so the dashboard is not an empty page on first run
-# --------------------------------------------------------------------------- #
+# --- #
+# Seed data - so the dashboard is not an empty page on first run
+# --- #
 
 _SEED: tuple[tuple[str, str, str, str, str, int, int, str, list[str]], ...] = (
     # host, user, os, filename, path, size, passed, metric, problems
@@ -3103,9 +3315,9 @@ def demo_row_count(db_path: str | Path) -> int:
         return 0
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # CLI
-# --------------------------------------------------------------------------- #
+# --- #
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(

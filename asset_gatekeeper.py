@@ -8,7 +8,7 @@ fails fast on assets that would blow a project's technical budget. Written to be
 readable and hackable, not clever.
 
 Rules enforced
---------------
+-
     .obj / .gltf / .glb   triangles     <= 50,000
                           material slots <= 3          (draw-call proxy)
                           at least 1 triangle          (catches truncated writes)
@@ -17,7 +17,7 @@ Rules enforced
                           filename ends with _Albedo / _Normal / _Roughness
 
 Usage
------
+-
     # watch forever (Ctrl+C to stop)
     python asset_gatekeeper.py "D:\\Exports\\Incoming"
 
@@ -34,7 +34,7 @@ Usage
     python asset_gatekeeper.py . --rules studio/rules.toml
 
 Configuration
--------------
+-
 If ``rules.toml`` sits in the watched folder it supplies the baseline budget;
 CLI flags still win, so CI can tighten one value without editing a file the
 artists own. Precedence: explicit CLI flag > rules.toml > built-in defaults.
@@ -43,11 +43,11 @@ See ``asset_gatekeeper.example.toml`` for the schema.
 Exit codes (--once): 0 = every asset passed, 1 = at least one failed, 2 = bad setup.
 
 Install
--------
+-
     python -m pip install watchdog trimesh pillow
 
 Notes for extending
--------------------
+-
 * Every budget value lives in one dataclass (``Budget``); add a field, a matching
   ``_*_problems`` check, and an entry in ``Budget.from_mapping`` to make it
   configurable from ``rules.toml``.
@@ -93,9 +93,9 @@ from pathlib import Path
 from typing import Callable, Optional, Sequence
 from urllib.parse import unquote
 
-# --------------------------------------------------------------------------- #
-# Optional dependencies — fail with a readable message instead of a traceback.
-# --------------------------------------------------------------------------- #
+# --- #
+# Optional dependencies - fail with a readable message instead of a traceback.
+# --- #
 
 try:
     import trimesh
@@ -126,7 +126,7 @@ except ImportError:  # pragma: no cover
 
 RULES_FILENAME = "rules.toml"
 
-# --- enterprise plumbing ---------------------------------------------------- #
+# --- enterprise plumbing - #
 # Everything below is standard library only: the tool still has to run from a
 # bare interpreter on a studio workstation with no wheels of its own.
 SERVER_ENV_URL = "ASSET_GATEKEEPER_SERVER_URL"
@@ -162,9 +162,9 @@ GLB_MAGIC = b"glTF"
 GLB_JSON_CHUNK = 0x4E4F534A  # 'JSON'
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Configuration
-# --------------------------------------------------------------------------- #
+# --- #
 
 @dataclass(frozen=True)
 class Budget:
@@ -182,17 +182,17 @@ class Budget:
     allow_degenerate: bool = False        # zero-area triangles: poison for Nanite / RT
     degenerate_epsilon: float = 1e-8      # area below which a triangle counts as degenerate
 
-    # -- filters ------------------------------------------------------------ #
+    # - filters - #
     # Globs that look like assets but are not: review renders, 4x paint sources,
     # hashed build caches. From [filters] exclude. Empty by default.
     exclude: tuple[str, ...] = ()
 
-    # -- reference & hierarchy auditing ------------------------------------ #
+    # - reference & hierarchy auditing - #
     # On by default: a .gltf pointing at a texture nobody shipped is broken in
     # every engine, on every platform, with no ambiguity to argue about.
     check_references: bool = True
 
-    # -- PBR value sanitisation --------------------------------------------- #
+    # - PBR value sanitisation - #
     # Albedo is *not* a painting. Real-world base colour reflectance lives in a
     # narrow band; pure black absorbs everything and pure white blinds the
     # lighting model, which is why graders ask for it to be clamped.
@@ -201,7 +201,7 @@ class Budget:
     pbr_ceiling: float = 0.94             # 240/255: above this, albedo is "pure white"
     pbr_suffixes: tuple[str, ...] = ("_Albedo", "_Diffuse")
 
-    # -- geometric boundary profiling --------------------------------------- #
+    # - geometric boundary profiling - #
     # Off by default, on purpose: plenty of legitimate exports are authored with
     # an offset pivot (a door hinged at its edge) or as a triangle soup. That is
     # a conversation with the artist, not a violation, so it is opt-in.
@@ -365,9 +365,9 @@ class ConfigError(Exception):
     """Raised when a rules file exists but cannot be used."""
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Rules file: optional per-folder configuration (``rules.toml``)
-# --------------------------------------------------------------------------- #
+# --- #
 
 def _reject_unknown(table: dict, allowed: Sequence[str], where: str) -> None:
     """A silently ignored typo in a budget file is worse than a hard failure."""
@@ -437,7 +437,7 @@ PLATFORM_KEYS = ("max_triangles", "max_material_slots", "max_texture_edge",
 #
 # Deliberately excludes every on/off switch (check_references, audit_transforms,
 # require_indexed, pbr, naming). A profile may tighten a threshold; it may never
-# make a check disappear — that would let one platform ship unaudited assets.
+# make a check disappear - that would let one platform ship unaudited assets.
 PLATFORM_SECTION_KEYS: dict[str, tuple[str, ...]] = {
     "mesh": ("pivot_tolerance", "transform_epsilon"),
     "texture": ("pbr_floor", "pbr_ceiling"),
@@ -467,11 +467,11 @@ def apply_platform(document: dict, platform: str) -> dict:
                             keep_tag_tables=True)
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Shipped presets and tag-based profiles
-# --------------------------------------------------------------------------- #
+# --- #
 
-# A preset is a known-good starting point that lives in code, so a project file
+# A preset is a known--good starting point that lives in code, so a project file
 # cannot quietly degrade it.
 #
 # Two shapes live side by side on purpose:
@@ -708,7 +708,7 @@ def _overlay_profile(document: dict, profile: dict, where: str,
                      keep_tag_tables: bool = False) -> dict:
     """Merge one budget profile into a rules document, or refuse it loudly.
 
-    Used by `[platforms.*]`, `[tags.*]` and the shipped presets — one merge
+    Used by `[platforms.*]`, `[tags.*]` and the shipped presets - one merge
     implementation means one set of rules about what a profile may say, so a tag
     cannot do something a platform could not.
     """
@@ -873,9 +873,9 @@ def resolve_budget(root: Path, args: argparse.Namespace,
     return replace(budget, **overrides), source, sorted(overrides)  # type: ignore[arg-type]
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # `--init`: the five-question setup wizard
-# --------------------------------------------------------------------------- #
+# --- #
 
 PLATFORM_CHOICES = ("none", "mobile", "console", "pc")
 
@@ -993,7 +993,7 @@ def run_init(target: Optional[Path] = None, ask=input, out=None,
     """Create a watched folder and its rules.toml, asking five questions.
 
     ``ask`` is injected so the wizard is testable without stdin, and any prompt
-    hitting EOF falls back to its default — ``--init`` inside a CI script must
+    hitting EOF falls back to its default - ``--init`` inside a CI script must
     not hang waiting for a human.
     """
     say = out or print
@@ -1051,9 +1051,9 @@ def run_init(target: Optional[Path] = None, ask=input, out=None,
     return 0
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Repository audit: the whole folder, not one asset
-# --------------------------------------------------------------------------- #
+# --- #
 
 def walk_files(root: Path, recursive: bool = True, follow_symlinks: bool = False,
                on_skip: Optional[Callable[[str], None]] = None) -> list[Path]:
@@ -1061,7 +1061,7 @@ def walk_files(root: Path, recursive: bool = True, follow_symlinks: bool = False
 
     ``Path.rglob`` raises on the first entry it cannot traverse - a dangling
     symlink, a junction to a detached drive, ``WinError 1920`` on a reparse point
-    - and that exception used to abort an entire scan, which makes a project with
+    -- and that exception used to abort an entire scan, which makes a project with
     one odd folder un-gateable. ``os.walk`` accepts an ``onerror`` hook, so a bad
     entry is reported and skipped while everything else is still checked.
 
@@ -1100,7 +1100,7 @@ def walk_files(root: Path, recursive: bool = True, follow_symlinks: bool = False
 def run_audit(root: Path) -> int:
     """Report broken references and orphaned textures across a repository.
 
-    Exit 0 when the repository is clean, 1 when anything is wrong — a folder that
+    Exit 0 when the repository is clean, 1 when anything is wrong - a folder that
     looks shut but is missing its textures is exactly the failure this catches.
     """
     assets = sorted(p for p in walk_files(root)
@@ -1130,9 +1130,9 @@ def run_audit(root: Path) -> int:
     return 1 if (broken_total or orphans) else 0
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Enterprise: central rules endpoint, offline cache, server settings
-# --------------------------------------------------------------------------- #
+# --- #
 
 def _utc_now() -> str:
     """ISO-8601 UTC with a real offset, so logs from two studios can be merged."""
@@ -1264,7 +1264,7 @@ def fetch_remote_rules(url: str, cache_path: Path, timeout: float = HTTP_TIMEOUT
 class HealSettings:
     """Opt-in healing policy.
 
-    ``enabled`` is False unless a human says otherwise — via ``--auto-heal`` or
+    ``enabled`` is False unless a human says otherwise - via ``--auto-heal`` or
     ``[healer] enabled = true``. Nothing in this tool ever repairs an asset as a
     side effect of failing it; automated mesh decimation and resampling destroy
     artistic intent, so the default answer is "no".
@@ -1325,7 +1325,7 @@ def resolve_healer(root: Path, args: argparse.Namespace,
 
 
 def load_healer(budget: Budget, settings: HealSettings):
-    """Import the companion ``healer.py`` next to this file — only when asked.
+    """Import the companion ``healer.py`` next to this file - only when asked.
 
     Loaded by path rather than by import name so the tool still works when it is
     copied alone into a studio's tools folder next to its healer.
@@ -1454,8 +1454,8 @@ def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:
     """Merge server settings: CLI flag > environment > ``[server]`` > nothing.
 
     Kept separate from :func:`resolve_budget` because the two answer different
-    questions — "what is allowed" versus "where does it come from, where does it
-    report" — and a studio may centralise one without the other.
+    questions - "what is allowed" versus "where does it come from, where does it
+    report" - and a studio may centralise one without the other.
     """
     from_file = ServerSettings()
     rules_path = Path(args.rules).expanduser() if getattr(args, "rules", None) else root / RULES_FILENAME
@@ -1474,9 +1474,9 @@ def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:
     )
 
 
-# --------------------------------------------------------------------------- #
-# Analyzers — one concern each, no logging, no watching.
-# --------------------------------------------------------------------------- #
+# --- #
+# Analyzers - one concern each, no logging, no watching.
+# --- #
 
 @lru_cache(maxsize=8)
 def _load_scene_cached(path_string: str, modified_ns: int) -> object:
@@ -1651,9 +1651,9 @@ def count_material_slots(path: Path) -> int:
     return _count_material_slots_trimesh(path)
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Deep data profiling: skin weights, UV sets, degenerate geometry
-# --------------------------------------------------------------------------- #
+# --- #
 
 _COMPONENT_TYPES = {
     5120: ("b", 1),   # byte
@@ -1775,7 +1775,7 @@ def max_bone_influences(path: Path, epsilon: float = 1e-4) -> int:
     """Worst per-vertex bone-weight count across every JOINTS_n/WEIGHTS_n set.
 
     glTF encodes four influences per set, so a vertex bound to six bones carries a
-    second set (JOINTS_1/WEIGHTS_1). We sum non-zero weights across all sets —
+    second set (JOINTS_1/WEIGHTS_1). We sum non-zero weights across all sets -
     which is exactly what a mobile GPU cannot afford above four.
     """
     if path.suffix.lower() not in GLTF_SUFFIXES:
@@ -1863,13 +1863,13 @@ def build_naming_pattern(suffixes: Sequence[str]) -> Optional[re.Pattern[str]]:
     return re.compile(rf"_(?:{'|'.join(tokens)})(?:_?\d+)?$", re.IGNORECASE)
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # The gate itself
-# --------------------------------------------------------------------------- #
+# --- #
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Reference & hierarchy auditing
-# --------------------------------------------------------------------------- #
+# --- #
 
 # What counts as a texture on disk when hunting orphans. Wider than the gated
 # suffixes on purpose: an orphaned .tga is still an orphan.
@@ -1889,7 +1889,7 @@ def _is_external_uri(uri: object) -> bool:
 
 
 def _gltf_external_uris(document: dict) -> list[str]:
-    """Buffer and image URIs — the two places glTF stores a sibling file."""
+    """Buffer and image URIs - the two places glTF stores a sibling file."""
     uris: list[str] = []
     for section in ("buffers", "images"):
         for entry in document.get(section, []) or []:
@@ -1995,9 +1995,9 @@ def orphaned_files(root: Path) -> list[Path]:
     return sorted(orphans)
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # PBR value sanitisation
-# --------------------------------------------------------------------------- #
+# --- #
 
 def _luma(pixel: tuple[int, int, int]) -> float:
     """Rec. 709 luminance on the 0..1 scale the shader will see."""
@@ -2040,9 +2040,9 @@ def pbr_violation(path: Path, budget: Budget) -> Optional[str]:
     return None
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Geometric boundary profiling
-# --------------------------------------------------------------------------- #
+# --- #
 
 def _node_translation(node: dict) -> tuple[float, float, float]:
     """Translation from a TRS node or from a 4x4 matrix, in metres."""
@@ -2265,7 +2265,7 @@ class Gatekeeper:
             return self._check_texture(path)
         return Verdict(path)
 
-    # -- meshes ------------------------------------------------------------ #
+    # - meshes - #
 
     def _check_mesh(self, path: Path) -> Verdict:
         try:
@@ -2359,7 +2359,7 @@ class Gatekeeper:
 
         return Verdict(path, tuple(problems), " / ".join(metrics), tuple(stats))
 
-    # -- textures ---------------------------------------------------------- #
+    # - textures - #
 
     def _check_texture(self, path: Path) -> Verdict:
         try:
@@ -2396,9 +2396,9 @@ class Gatekeeper:
         return any(stem.endswith(suffix.lower()) for suffix in self.budget.pbr_suffixes)
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Reporting
-# --------------------------------------------------------------------------- #
+# --- #
 
 def _safe_username() -> str:
     try:
@@ -2410,7 +2410,7 @@ def _safe_username() -> str:
 def build_telemetry_payload(verdict: Verdict, root: Optional[Path] = None) -> dict:
     """One flat JSON object per asset: the studio's record of what was gated.
 
-    Deliberately flat — a data warehouse can ingest it without a nested schema,
+    Deliberately flat - a data warehouse can ingest it without a nested schema,
     and the plugin contract (``--json``) stays a superset of these keys.
     """
     path = verdict.path
@@ -2456,7 +2456,7 @@ class Telemetry:
 
     Three rules, in priority order:
 
-    1. **Never raise.** A dead endpoint is a debug line, not a crash — the artist
+    1. **Never raise.** A dead endpoint is a debug line, not a crash - the artist
        still gets their PASSED/FAILED verdict either way.
     2. **Never block the gate.** ``submit()`` only enqueues; one daemon thread
        owns the sockets. A 2 s timeout can therefore delay the *network*, never
@@ -2481,7 +2481,7 @@ class Telemetry:
             # Asset names and paths are shipping in clear text; say it once.
             LOG.warning("telemetry endpoint is not https - payloads are sent in clear text")
 
-    # -- producer side ------------------------------------------------------ #
+    # - producer side - #
 
     def submit(self, verdict: Verdict, root: Optional[Path] = None) -> None:
         """Enqueue one verdict. Never blocks, never raises."""
@@ -2505,7 +2505,7 @@ class Telemetry:
             self._thread = threading.Thread(target=self._run, name="agk-telemetry", daemon=True)
             self._thread.start()
 
-    # -- worker side -------------------------------------------------------- #
+    # - worker side - #
 
     def _run(self) -> None:
         while True:
@@ -2535,7 +2535,7 @@ class Telemetry:
             self.failed += 1
             LOG.debug("telemetry: POST failed (%s): %s", type(exc).__name__, exc)
 
-    # -- lifecycle ---------------------------------------------------------- #
+    # - lifecycle - #
 
     def close(self, timeout: Optional[float] = None) -> None:
         """Flush what is already queued, bounded by one request timeout."""
@@ -2652,9 +2652,9 @@ class Reporter:
             self.notifier.close(timeout)
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Watching
-# --------------------------------------------------------------------------- #
+# --- #
 
 def is_candidate(path: Path, exclude: Sequence[str] = ()) -> bool:
     """Cheap pre-filter: right extension, not a hidden/scratch/excluded file.
@@ -2787,12 +2787,12 @@ class WatchWorker(threading.Thread):
         self._reporter.report(self._gatekeeper.check(path))
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Entry points
-# --------------------------------------------------------------------------- #
+# --- #
 
 def describe_budget(budget: Budget) -> str:
-    """One-line summary of the active rules, printed at startup."""
+    """One--line summary of the active rules, printed at startup."""
     return (
         f"tris<={budget.max_triangles:,}  "
         f"texture<={budget.max_texture_edge}px  "

@@ -539,6 +539,78 @@ bridge_server.shutdown()
 bridge_server.server_close()
 ws_server.shutdown()
 ws_server.server_close()
+# --------------------------------------------------------------------------- #
+print("13. the full audit: pagination, filters and the tag tree")
+# The dashboard shows a top-N; these pages must reach every row, so the fixture is
+# deliberately bigger than one page (120 rows = 3 pages at 50).
+audit_root = WORK / "audit-root"
+audit_rules = WORK / "audit-rules.toml"
+audit_rules.write_text(
+    "[mesh]\nmax_triangles = 1500\n\n[tags.boss]\nmax_triangles = 9000\n"
+    "\n[tags.enemies]\nmax_triangles = 2000\n", encoding="utf-8")
+audit_db = WORK / "audit.db"
+ahs.init_db(audit_db)
+audit_server, audit_base = start(audit_db, audit_rules, audit_root, allow=(str(WORK),))
+
+
+def fetch(path: str) -> tuple[int, str]:
+    with urllib.request.urlopen(audit_base + path, timeout=15) as response:
+        return response.status, response.read().decode("utf-8", "replace")
+
+
+def ingest(target: Path, passed: bool) -> None:
+    payload = json.dumps({
+        "filename": target.name, "path": str(target), "passed": passed,
+        "status": "PASSED" if passed else "FAILED",
+        "problems": [] if passed else ["triangle budget exceeded"],
+    }).encode("utf-8")
+    request = urllib.request.Request(audit_base + "/api/telemetry", data=payload,
+                                     headers={"Content-Type": "application/json"},
+                                     method="POST")
+    urllib.request.urlopen(request, timeout=10).read()
+
+
+for folder, count in (("Boss", 40), ("Enemies", 40), ("Props", 40)):
+    (audit_root / folder).mkdir(parents=True, exist_ok=True)
+    for index in range(count):
+        target = audit_root / folder / f"{folder.lower()}_{index:03d}.glb"
+        target.write_bytes(b"glTF")
+        ingest(target, index % 3 == 0)          # one in three passes
+
+status, page1 = fetch("/audit/full")
+expect("the full audit renders", status == 200 and "All verdicts" in page1, str(status))
+expect("it pages instead of slicing to a top-N", "page 1 of 3" in page1,
+       page1[:200])
+expect("a page holds fifty rows", page1.count('<td class="when">') == 50,
+       str(page1.count('<td class="when">')))
+expect("rows group into collapsible categories",
+       "<details" in page1 and page1.count("<summary>") >= 2)
+expect("every row keeps the send button",
+       page1.count("Send to Workstation") == 50,
+       str(page1.count("Send to Workstation")))
+
+status, page3 = fetch("/audit/full?page=3")
+expect("the last page holds the remainder", page3.count('<td class="when">') == 20,
+       str(page3.count('<td class="when">')))
+
+status, passes_only = fetch("/audit/full?status=pass")
+expect("the status filter narrows the set", passes_only.count('<td class="when">') == 42,
+       str(passes_only.count('<td class="when">')))
+expect("and shows only passes", "badge failed" not in passes_only)
+
+status, passes_page = fetch("/audit/passes")
+expect("the passes route renders", status == 200 and "Passes" in passes_page, str(status))
+expect("it is the same set as status=pass", passes_page.count('<td class="when">') == 42,
+       str(passes_page.count('<td class="when">')))
+
+status, boss_only = fetch("/audit/full?tag=boss")
+expect("a tag filter narrows to that category", boss_only.count('<td class="when">') == 40,
+       str(boss_only.count('<td class="when">')))
+expect("the tree names the category", "boss" in boss_only)
+
+audit_server.shutdown()
+audit_server.server_close()
+
 server.shutdown()
 server.server_close()
 shutil.rmtree(WORK, ignore_errors=True)

@@ -357,7 +357,7 @@ print("9. multi-tenant isolation")
 ten_db = fresh_db("tenant.db")
 pid_a, tok_a = ahs.create_project(ten_db, "Game A")
 pid_b, tok_b = ahs.create_project(ten_db, "Game B")
-pid_c, tok_c = ahs.create_project(ten_db, "Legacy", token="plain-token")
+pid_c, tok_c = ahs.create_project(ten_db, "Legacy", token="plain--token")
 
 with ahs.open_db(ten_db) as connection:
     stored_tokens = [row["api_token"] for row in connection.execute(
@@ -365,14 +365,14 @@ with ahs.open_db(ten_db) as connection:
 expect("project tokens are hashed at rest", all(t.startswith("sha256:") for t in stored_tokens),
        str(stored_tokens[:1]))
 expect("the plain token is not readable from the database",
-       not any("plain-token" in t for t in stored_tokens))
+       not any("plain--token" in t for t in stored_tokens))
 expect("a token resolves to its own project",
        ahs.project_for_token(ten_db, tok_a)["id"] == pid_a)
 expect("another project's token resolves separately",
        ahs.project_for_token(ten_db, tok_b)["id"] == pid_b)
 expect("an unknown token resolves to nothing", ahs.project_for_token(ten_db, "nope") is None)
-expect("a hand-written plain-text token still works",
-       ahs.project_for_token(ten_db, "plain-token")["id"] == pid_c)
+expect("a hand-written plain--text token still works",
+       ahs.project_for_token(ten_db, "plain--token")["id"] == pid_c)
 try:
     ahs.create_project(ten_db, "Game A")
     expect("duplicate project names are rejected", False, "no error raised")
@@ -497,7 +497,7 @@ _real_urlopen = urllib.request.urlopen
 
 
 def fake_post(request, *args, **kwargs):
-    """Intercept webhook traffic only ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the test client's own calls must pass through.
+    """Intercept webhook traffic only - the test client's own calls must pass through.
 
     Patching urllib.request.urlopen globally also swallowed the requests this
     suite makes to the server under test, which looked like "three alerts fired".
@@ -552,7 +552,7 @@ expect("healed and mild failures stay quiet",
 alert_server.shutdown()
 alert_server.server_close()
 
-print("11. budget planner and remote-rules")
+print("11. budget planner and remote--rules")
 plan_db = fresh_db("planner.db")
 plan_pid, plan_tok = ahs.create_project(plan_db, "Planner Game")
 plan_server = ahs.build_server("127.0.0.1", 0, plan_db, quiet=True)
@@ -596,7 +596,7 @@ status, _, _ = request(pport, "/api/save-budget", method="POST",
                        body={"project_id": plan_pid, "max_triangles": 1000})
 expect("publishing without a token is refused", status == 401, str(status))
 
-# The whole point: what the planner saves is what --remote-rules receives.
+# The whole point: what the planner saves is what --remote--rules receives.
 status, body, _ = request(pport, f"/api/rules?project_id={plan_pid}&token={plan_tok}")
 document = json.loads(body)
 expect("the rules endpoint serves the published budget", status == 200, str(status))

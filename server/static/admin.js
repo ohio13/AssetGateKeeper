@@ -20,13 +20,13 @@ const state = {
   stream: null,
 };
 
-/* ------------------------------------------------------------------- project */
+/* - project */
 
 function setProjectStatus(info) {
   const parts = [];
   parts.push(`rules.toml: ${info.rules_path}`);
   parts.push(info.rules_exists ? "found" : "will be created on save");
-  $("project-status").textContent = parts.join(" — ");
+  $("project-status").textContent = parts.join(" - ");
   $("project-status").style.color = info.rules_error ? "var(--bad)" : "var(--muted)";
 }
 
@@ -64,14 +64,14 @@ async function useProject() {
     // budget they did not intend.
     $("preset").value = "";
     state.presetName = "";
-    $("target").value = info.rules_exists ? "from rules.toml" : "— no rules.toml yet —";
+    $("target").value = info.rules_exists ? "from rules.toml" : "- no rules.toml yet -";
     $("preset-notes").textContent = info.rules_exists
       ? "Numbers loaded from the project's rules.toml."
-      : "No rules.toml here yet — pick a preset or type the numbers, then Save.";
+      : "No rules.toml here yet - pick a preset or type the numbers, then Save.";
     $("scan-root").textContent = info.project;
     notice(info.rules_exists
-      ? `Project set: ${info.project} — existing rules.toml loaded.`
-      : `Project set: ${info.project} — no rules.toml yet; Save will create one.`,
+      ? `Project set: ${info.project} - existing rules.toml loaded.`
+      : `Project set: ${info.project} - no rules.toml yet; Save will create one.`,
       "ok");
   } catch (error) {
     notice(`That folder cannot be used: ${error.message}`, "err");
@@ -80,7 +80,7 @@ async function useProject() {
   }
 }
 
-/* ------------------------------------------------------------------ helpers */
+/* - helpers */
 
 function notice(message, kind = "ok") {
   const banner = $("banner");
@@ -120,7 +120,7 @@ async function api(path, options = {}) {
   return body;
 }
 
-/* --------------------------------------------------------------- the form */
+/* - the form */
 
 function budgetDocument() {
   // No `platform` key on purpose: the preset is a formula that fills these
@@ -169,7 +169,7 @@ function renderTags(tags) {
   const entries = Object.entries(tags || {});
   if (!entries.length) {
     body.innerHTML = `<tr class="empty-row"><td colspan="3" class="sub">`
-      + `No categories — every asset uses the project default. Add one below `
+      + `No categories - every asset uses the project default. Add one below `
       + `(the folder or filename prefix, e.g. <code>actors</code>).</td></tr>`;
     return;
   }
@@ -248,16 +248,16 @@ function applyPreset(name) {
   state.presetName = preset.name;
   $("target").value = `${preset.label} (${preset.name})`;
   $("preset-notes").textContent =
-    `${preset.label}: ${preset.notes || ""} — these numbers are written directly; no platform overlay is set.`;
+    `${preset.label}: ${preset.notes || ""} - these numbers are written directly; no platform overlay is set.`;
   markDirty();
 }
 
-/* ---------------------------------------------------------------- actions */
+/* - actions */
 
 async function saveWithRescan(rescan) {
   const buttons = [$("save"), $("apply-scan")];
   buttons.forEach((button) => { button.disabled = true; });
-  notice(rescan ? "Applying and starting a rescan…" : "Applying…", "warn");
+  notice(rescan ? "Applying and starting a rescan" : "Applying", "warn");
   try {
     const result = await api("/admin/api/apply", {
       method: "POST",
@@ -270,7 +270,7 @@ async function saveWithRescan(rescan) {
     const notes = (result.notes || []).join(" ");
     notice((changed
       ? `Applied ${changed} change${changed === 1 ? "" : "s"} to ${result.path}.`
-      : `No changes — ${result.path} already matches.`) + (notes ? ` ${notes}` : ""),
+      : `No changes - ${result.path} already matches.`) + (notes ? ` ${notes}` : ""),
       notes ? "warn" : "ok");
     await loadState(false);
     if (result.scan && result.scan.started) watchScan();
@@ -282,7 +282,7 @@ async function saveWithRescan(rescan) {
   }
 }
 
-/* ------------------------------------------------------------- scan stream */
+/* - scan stream */
 
 function scanLine(text, kind = "muted") {
   const line = document.createElement("div");
@@ -332,11 +332,11 @@ function watchScan() {
   };
   stream.onerror = () => {
     // EventSource retries by itself; a clean end closes above.
-    $("scan-status").textContent = "reconnecting…";
+    $("scan-status").textContent = "reconnecting";
   };
 }
 
-/* ------------------------------------------------------------------- boot */
+/* - boot */
 
 async function loadState(firstTime = true) {
   const data = await api("/admin/api/state");
@@ -344,7 +344,7 @@ async function loadState(firstTime = true) {
   state.user = data.user;
   state.presets = data.presets || [];
   state.document = data.document || {};
-  $("who").textContent = `${data.user.username} · ${data.user.role}`;
+  $("who").textContent = `${data.user.username}  ${data.user.role}`;
   $("where").textContent = data.rules_path;
   $("scan-root").textContent = data.scan_root;
   $("project-path").value = data.project || data.scan_root || "";
@@ -357,7 +357,7 @@ async function loadState(firstTime = true) {
     for (const preset of state.presets) {
       const option = document.createElement("option");
       option.value = preset.name;
-      option.textContent = `${preset.label} — ${preset.character_triangles.toLocaleString()} char`;
+      option.textContent = `${preset.label} - ${preset.character_triangles.toLocaleString()} char`;
       select.appendChild(option);
     }
     $("project-use").addEventListener("click", useProject);

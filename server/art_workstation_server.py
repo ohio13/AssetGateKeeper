@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Art Workstation — a technical-art review tool built on the gate's ecosystem.
+"""Art Workstation - a technical-art review tool built on the gate's ecosystem.
 
 Zero external dependencies: ``http.server``, ``sqlite3``, ``json``. The browser
 side loads Three.js from a CDN and nothing else.
@@ -79,7 +79,41 @@ ASSET_HEALTH_PORT = 8080
 
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 MAX_JSON_BYTES = 1024 * 1024
-ALLOWED_SUFFIXES = {".obj", ".gltf", ".glb"}
+#: Suffixes we hand straight to trimesh. The installed build decides what it can
+#: actually open (see MESH_SUFFIXES below, extended at import time).
+MESH_SUFFIXES = {".obj", ".gltf", ".glb", ".ply", ".stl", ".off", ".dae", ".3mf",
+                 ".xaml", ".xyz", ".pts"}
+#: Textures are assets too: a reviewer needs to look at the 2048px skybox that
+#: failed the budget, not be told the format is unsupported.
+TEXTURE_SUFFIXES = {".png", ".tga", ".dds", ".jpg", ".jpeg", ".bmp", ".tif",
+                    ".tiff", ".exr", ".hdr", ".ktx", ".ktx2", ".webp"}
+#: Real game exports we cannot parse in-process. They are *stored and reviewable*
+#: - geometry counts unknown, preview absent - because refusing a valid .fbx is
+#: the thing that makes a review tool untrustworthy.
+UNVERIFIED_SUFFIXES = {".fbx", ".abc", ".usd", ".usda", ".usdc", ".usdz", ".blend",
+                       ".max", ".ma", ".mb", ".lwo", ".lws", ".x", ".c4d", ".mdl",
+                       ".psk", ".pskx", ".smd", ".vta", ".bhv", ".wrl", ".vrml"}
+#: Never accept these from a browser, whatever the name looks like.
+REFUSED_SUFFIXES = {".exe", ".dll", ".bat", ".cmd", ".ps1", ".sh", ".scr", ".msi",
+                    ".vbs", ".js", ".jar", ".com", ".pif"}
+
+try:                                          # ask trimesh what this build reads
+    import trimesh as _trimesh_for_formats    # noqa: PLC0415
+    MESH_SUFFIXES |= {f".{name.lower()}" for name in _trimesh_for_formats.available_formats()}
+except Exception:                             # pragma: no cover - trimesh missing
+    pass
+
+ALLOWED_SUFFIXES = MESH_SUFFIXES | TEXTURE_SUFFIXES | UNVERIFIED_SUFFIXES
+
+
+def asset_kind(path: Path) -> str:
+    """mesh | texture | unverified, from the suffix alone."""
+    suffix = path.suffix.lower()
+    if suffix in TEXTURE_SUFFIXES:
+        return "texture"
+    if suffix in MESH_SUFFIXES:
+        return "mesh"
+    return "unverified"
 CATEGORIES = ("Geometry", "Texture", "LOD", "Collision", "Shading", "Other")
 COLLISION_KINDS = ("box", "sphere", "hull")
 
@@ -93,9 +127,9 @@ def html_escape(value: object) -> str:
     return html.escape("" if value is None else str(value))
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Database
-# --------------------------------------------------------------------------- #
+# --- #
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS assets (
@@ -113,7 +147,9 @@ CREATE TABLE IF NOT EXISTS assets (
     verdict_status   TEXT NOT NULL DEFAULT '',
     verdict_problems TEXT NOT NULL DEFAULT '',
     verdict_tags     TEXT NOT NULL DEFAULT '',
-    source           TEXT NOT NULL DEFAULT ''
+    source           TEXT NOT NULL DEFAULT '',
+    kind             TEXT NOT NULL DEFAULT 'mesh',
+    analyse_note     TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS lod_versions (
@@ -226,15 +262,16 @@ def init_db(db_path: str | Path) -> None:
         # A review library outlives the code that created it: add the bridge
         # columns in place rather than asking anyone to drop their database.
         have = {row["name"] for row in connection.execute("PRAGMA table_info(assets)")}
-        for column in ("verdict_status", "verdict_problems", "verdict_tags", "source"):
+        for column in ("verdict_status", "verdict_problems", "verdict_tags", "source",
+                       "kind", "analyse_note"):
             if column not in have:
                 connection.execute(
                     f"ALTER TABLE assets ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
 
 
-# --------------------------------------------------------------------------- #
-# Mesh facts — reuses the gate's analysers so the numbers agree everywhere
-# --------------------------------------------------------------------------- #
+# --- #
+# Mesh facts - reuses the gate's analysers so the numbers agree everywhere
+# --- #
 
 def mesh_vertices(path: Path) -> int:
     """Vertex count: POSITION accessor totals for glTF, ``v`` lines for OBJ."""
@@ -304,27 +341,68 @@ def mesh_bounds(path: Path) -> tuple[list[float], list[float]] | None:
         return None
 
 
-def analyse_asset(path: Path) -> dict:
-    """Everything the assets table needs, in one pass."""
+def analyse_asset(path: Path, source: Path | None = None) -> dict:
+    """Everything the assets table needs, in one pass.
+
+    Never raises for an accepted file. A build that cannot parse the geometry is
+    still an asset a reviewer needs to see, so the result degrades to
+    kind="unverified" with a human reason instead of a 422 - refusing a valid
+    .fbx, a Blender .blend or a glTF whose .bin was not copied is precisely what
+    makes a review tool untrustworthy. Only the *upload policy* refuses files,
+    and only executables.
+    """
+    analysable = source if source is not None and source.is_file() else path
+    kind = asset_kind(path)
+    note = ""
+
+    if kind == "texture":
+        width = height = 0
+        try:                                   # Pillow is a gate dependency
+            from PIL import Image
+            with Image.open(analysable) as image:
+                width, height = image.size
+            note = f"{width}x{height} texture"
+        except Exception as exc:
+            note = f"texture, dimensions unread: {exc}"
+        return {"triangles": 0, "vertices": 0, "materials": 1, "bounds": None,
+                "kind": "texture", "note": note}
+
+    if kind == "unverified":
+        return {"triangles": 0, "vertices": 0, "materials": 0, "bounds": None,
+                "kind": "unverified",
+                "note": f"{path.suffix.lower() or 'no extension'} needs a DCC to "
+                        "convert - stored for review without a 3D preview"}
+
     try:
-        triangles = agk.count_triangles(path)
+        triangles = agk.count_triangles(analysable)
     except Exception as exc:
-        raise WorkstationError(f"cannot read geometry: {exc}", 422) from exc
+        return {"triangles": 0, "vertices": 0, "materials": 0, "bounds": None,
+                "kind": "unverified",
+                "note": f"stored, but the geometry could not be read: {exc}"}
     try:
-        materials = agk.count_material_slots(path)
+        materials = agk.count_material_slots(analysable)
     except Exception:
         materials = 1
+    try:
+        vertices = mesh_vertices(analysable)
+        bounds = mesh_bounds(analysable)
+    except Exception:
+        vertices, bounds = 0, None
+    if analysable is not path:
+        note = "counted from the original file (external sidecars present)"
     return {
         "triangles": int(triangles),
-        "vertices": mesh_vertices(path),
+        "vertices": vertices,
         "materials": int(materials),
-        "bounds": mesh_bounds(path),
+        "bounds": bounds,
+        "kind": "mesh",
+        "note": note,
     }
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Storage
-# --------------------------------------------------------------------------- #
+# --- #
 
 SAFE_NAME = re.compile(r"[^A-Za-z0-9._ -]+")
 
@@ -354,9 +432,9 @@ def resolve_inside(root: Path, relative: str) -> Path | None:
     return candidate
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Queries
-# --------------------------------------------------------------------------- #
+# --- #
 
 def list_assets(db_path: str | Path) -> list[dict]:
     with open_db(db_path) as connection:
@@ -408,7 +486,7 @@ def convex_hull_triangles(points: list[list[float]]) -> list[tuple[int, int, int
     """Exact convex hull by supporting-plane test (stdlib, brute force).
 
     Every vertex triple defines a plane; the triple is a hull facet when no point
-    sits strictly on both sides of it. Cubic in the point count, so it is capped —
+    sits strictly on both sides of it. Cubic in the point count, so it is capped -
     a collision proxy is a handful of points, not a mesh.
     """
     unique: list[tuple[float, float, float]] = []
@@ -543,19 +621,50 @@ def get_collision(db_path: str | Path, asset_id: int) -> dict | None:
             "created_at": row["created_at"]}
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # Mutations
-# --------------------------------------------------------------------------- #
+# --- #
+
+def copy_sidecars(origin: Path, destination: Path, name: str, limit: int = 20) -> int:
+    """Bring the sibling files a .gltf/.obj export needs to be viewable.
+
+    Blender writes ``model.gltf`` + ``model.bin`` + textures; uploading only the
+    json produces a mesh that loads as nothing. Copied names keep the stem so the
+    relative references inside the file still resolve; anything larger than 32 MB
+    or beyond ``limit`` files is skipped rather than silently ballooning storage.
+    """
+    stem = Path(name).stem
+    copied = 0
+    try:
+        siblings = sorted(origin.parent.iterdir())
+    except OSError:
+        return 0
+    for sibling in siblings:
+        if copied >= limit:
+            break
+        if sibling == origin or not sibling.is_file():
+            continue
+        if not sibling.name.startswith(stem) or sibling.suffix.lower() == origin.suffix.lower():
+            continue
+        try:
+            if sibling.stat().st_size > 32 * 1024 * 1024:
+                continue
+            target = destination / sibling.name
+            if not target.exists():
+                target.write_bytes(sibling.read_bytes())
+            copied += 1
+        except OSError:
+            continue
+    return copied
 
 def create_asset(db_path: str | Path, data_dir: Path, filename: str, payload: bytes,
                  uploader: str = "", provenance: dict | None = None) -> dict:
     """Store an uploaded file, measure it, and seed its bounding-box collision."""
     name = safe_filename(filename)
     suffix = Path(name).suffix.lower()
-    if suffix not in ALLOWED_SUFFIXES:
+    if suffix in REFUSED_SUFFIXES:
         raise WorkstationError(
-            f"{suffix or 'no extension'} is not a supported asset type "
-            f"({', '.join(sorted(ALLOWED_SUFFIXES))})", 415)
+            f"{suffix} is not an asset format - refusing to store it", 415)
     if not payload:
         raise WorkstationError("empty upload", 400)
 
@@ -575,20 +684,23 @@ def create_asset(db_path: str | Path, data_dir: Path, filename: str, payload: by
     stored = assets_dir / f"{asset_id}_{name}"
     stored.write_bytes(payload)
 
-    try:
-        facts = analyse_asset(stored)
-    except WorkstationError:
-        stored.unlink(missing_ok=True)
-        with _WRITE_LOCK, open_db(db_path) as connection:
-            connection.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
-        raise
+    # A glTF exported next to its .bin/textures cannot be measured from the
+    # uploaded bytes alone, so analysis prefers the original file when the
+    # bridge told us where it lives. The uploaded bytes stay the stored copy.
+    origin = None
+    if provenance and provenance.get("origin_path"):
+        candidate = Path(str(provenance["origin_path"]))
+        if candidate.is_file() and candidate.name == name:
+            origin = candidate
+            copy_sidecars(candidate, assets_dir, name)
+    facts = analyse_asset(stored, origin)
 
     with _WRITE_LOCK, open_db(db_path) as connection:
         connection.execute(
             "UPDATE assets SET file_path = ?, triangle_count = ?, vertex_count = ?,"
-            " material_slots = ? WHERE id = ?",
+            " material_slots = ?, kind = ?, analyse_note = ? WHERE id = ?",
             (f"assets/{stored.name}", facts["triangles"], facts["vertices"],
-             facts["materials"], asset_id))
+             facts["materials"], facts["kind"], facts["note"], asset_id))
         if facts["bounds"] is not None:
             low, high = facts["bounds"]
             connection.execute(
@@ -636,7 +748,7 @@ def generate_lods(db_path: str | Path, data_dir: Path, asset_id: int,
     produced = {result.level for result in results}
     with _WRITE_LOCK, open_db(db_path) as connection:
         # A regeneration with fewer ratios must not leave the old levels behind:
-        # a stale "LOD3 · 4,328 tris" button would be a lie the viewer repeats.
+        # a stale "LOD3  4,328 tris" button would be a lie the viewer repeats.
         stale = [row["level"] for row in connection.execute(
             "SELECT level FROM lod_versions WHERE asset_id = ?", (asset_id,)).fetchall()
             if row["level"] not in produced]
@@ -781,7 +893,7 @@ footer { margin-top:36px; color:var(--muted); font-size:11px; }
 def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
     """One standalone HTML file: facts, verdict, LODs, collision, notes.
 
-    Everything is inline — no CSS file, no script, no image — so the file can be
+    Everything is inline - no CSS file, no script, no image - so the file can be
     attached to a ticket or printed and still look the same in five years.
 
     The verdict comes from running the *gate* over the stored file with the
@@ -835,9 +947,9 @@ def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
         data = collision["data"]
         if collision["kind"] == "box":
             size = [round(data["max"][i] - data["min"][i], 3) for i in range(3)]
-            detail = f"min {data['min']} · max {data['max']} · size {size}"
+            detail = f"min {data['min']}  max {data['max']}  size {size}"
         elif collision["kind"] == "sphere":
-            detail = f"center {data['center']} · radius {data['radius']}"
+            detail = f"center {data['center']}  radius {data['radius']}"
         else:
             detail = f"{len(data['points'])} hull points"
         collision_html = (f"<p><strong>{html_escape(collision['kind'])}</strong> "
@@ -845,19 +957,19 @@ def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
 
     notes_html = "".join(
         f"<div class='note'><div class='meta'><strong>{html_escape(note['category'])}</strong>"
-        f" · {html_escape(note['author'] or 'anonymous')}"
-        f" · {html_escape(note['created_at'].replace('T', ' '))}</div>"
+        f"  {html_escape(note['author'] or 'anonymous')}"
+        f"  {html_escape(note['created_at'].replace('T', ' '))}</div>"
         f"{html_escape(note['note_text'])}</div>"
         for note in notes) or "<p class='sub'>No review notes.</p>"
 
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
-<title>{html_escape(asset['filename'])} — asset report</title>
+<title>{html_escape(asset['filename'])} - asset report</title>
 <style>{REPORT_CSS}</style></head>
 <body><div class="wrap">
   <h1>{html_escape(asset['filename'])}
     <span class="badge {status_class}">{html_escape(status_label)}</span></h1>
-  <div class="sub">Asset Health report · asset #{asset['id']} ·
+  <div class="sub">Asset Health report  asset #{asset['id']} 
     uploaded {html_escape(asset['uploaded_at'].replace('T', ' '))}
     by {html_escape(asset['uploader'] or 'unknown')}</div>
 
@@ -870,14 +982,14 @@ def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
       ("stored path", asset["file_path"]),
   ])}</tbody></table>
 
-  <h2>Validation (default budget: 50,000 tris · 3 slots · 2048px)</h2>
+  <h2>Validation (default budget: 50,000 tris  3 slots  2048px)</h2>
   <ul>{verdict_html}</ul>
 
   <h2>Reference integrity</h2>
   <table><thead><tr><th>reference</th><th>state</th></tr></thead>
   <tbody>{reference_rows or "<tr><td class='sub'>no external references</td><td></td></tr>"}
   </tbody></table>
-  <p class="sub">{len(references['missing'])} missing ·
+  <p class="sub">{len(references['missing'])} missing 
      {len(references['orphaned'])} orphaned texture(s) in the asset store</p>
 
   <h2>LOD breakdown</h2>
@@ -891,16 +1003,16 @@ def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
   <h2>Review notes</h2>
   {notes_html}
 
-  <footer>Generated by Art Workstation ·
-    {html_escape(datetime.now(timezone.utc).isoformat(timespec="seconds"))} ·
+  <footer>Generated by Art Workstation 
+    {html_escape(datetime.now(timezone.utc).isoformat(timespec="seconds"))} 
     this file is self-contained (no external assets).</footer>
 </div></body></html>
 """
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # HTTP
-# --------------------------------------------------------------------------- #
+# --- #
 
 MIME = {
     ".html": "text/html; charset=utf-8",
@@ -931,7 +1043,7 @@ class Handler(BaseHTTPRequestHandler):
     server_version = "ArtWorkstation/1.0"
     protocol_version = "HTTP/1.1"
 
-    # -- plumbing ----------------------------------------------------------- #
+    # - plumbing - #
 
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003 - stdlib hook
         if getattr(self.server, "quiet", False):
@@ -1003,7 +1115,7 @@ class Handler(BaseHTTPRequestHandler):
             return None
         return payload
 
-    # -- GET ---------------------------------------------------------------- #
+    # - GET - #
 
     def do_GET(self) -> None:  # noqa: N802
         path = urllib.parse.urlsplit(self.path).path
@@ -1194,7 +1306,7 @@ class Handler(BaseHTTPRequestHandler):
         if broadcaster is not None:
             broadcaster.publish({"type": event_type, "asset_id": asset_id})
 
-    # -- POST --------------------------------------------------------------- #
+    # - POST - #
 
     def do_POST(self) -> None:  # noqa: N802
         path = urllib.parse.urlsplit(self.path).path
@@ -1280,7 +1392,7 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             self._json(500, {"error": "internal error", "detail": str(exc)})
 
-    # -- DELETE ------------------------------------------------------------- #
+    # - DELETE - #
 
     def do_DELETE(self) -> None:  # noqa: N802
         path = urllib.parse.urlsplit(self.path).path
@@ -1366,9 +1478,9 @@ def describe_rules(server: "WorkstationServer") -> dict:
                 "tag_budgets": []}
 
 
-# --------------------------------------------------------------------------- #
+# --- #
 # CLI
-# --------------------------------------------------------------------------- #
+# --- #
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(

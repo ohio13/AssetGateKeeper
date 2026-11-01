@@ -131,11 +131,26 @@ payload = json.loads(box["data_json"])
 expect("the derived box matches the mesh",
        payload["min"] == [0.0, 0.0, 0.0] and payload["max"] == [1.0, 1.0, 1.0], str(payload))
 
+# A .txt is not a game export: the suffix is unknown, so it is stored as
+# "unverified" rather than refused - reviewers sometimes attach sidecar notes.
+# Executables are the only thing the policy refuses outright.
 try:
-    aws.create_asset(db, data_dir, "notes.txt", b"hello")
-    expect("non-asset uploads are refused", False, "no error raised")
+    aws.create_asset(db, data_dir, "payload.exe", b"MZ\x90\x00")
+    expect("executables are refused with 415", False, "no error raised")
 except aws.WorkstationError as exc:
-    expect("non-asset uploads are refused", exc.status == 415, str(exc))
+    expect("executables are refused with 415", exc.status == 415, str(exc))
+
+fbx = aws.create_asset(db, data_dir, "character.fbx", b"Kaydara FBX Binary  \x00")
+expect("an unparseable game export is accepted, not 422", fbx["kind"] == "unverified", str(fbx)[:120])
+expect("and says why it has no preview", "DCC" in (fbx["analyse_note"] or ""), fbx["analyse_note"][:90])
+
+from PIL import Image as _PILImage  # noqa: PLC0415 - local to this section
+import io as _io
+buffer = _io.BytesIO()
+_PILImage.new("RGBA", (32, 16), (255, 0, 0, 255)).save(buffer, format="PNG")
+skin = aws.create_asset(db, data_dir, "hero_skin.png", buffer.getvalue())
+expect("a texture is accepted as an asset", skin["kind"] == "texture", str(skin)[:120])
+expect("its size is measured", "32x16" in (skin["analyse_note"] or ""), skin["analyse_note"])
 try:
     aws.create_asset(db, data_dir, "../../evil.obj", OBJ.encode())
     stored = [p.name for p in (data_dir / "assets").iterdir()]

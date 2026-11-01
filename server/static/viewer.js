@@ -1,7 +1,7 @@
 /* Art Workstation viewer.
  *
  * Three.js comes from a CDN (the only external dependency in the whole system);
- * everything else — routing, auth, notes, collision — is the stdlib server.
+ * everything else - routing, auth, notes, collision - is the stdlib server.
  */
 import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
@@ -23,7 +23,7 @@ const state = {
   originals: new Map(), // material -> {color, map, ...} for the textured restore
 };
 
-/* ------------------------------------------------------------------ auth */
+/* - auth */
 
 async function api(path, options = {}) {
   const headers = Object.assign({}, options.headers || {});
@@ -49,9 +49,9 @@ async function api(path, options = {}) {
 
 const json = (path, options) => api(path, options).then((r) => r.json());
 
-/* --------------------------------------------------------------- three.js */
+/* - three.js */
 
-const host = $("canvas-host");
+const host = $("canvas--host");
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0d1016);
 
@@ -97,7 +97,7 @@ function animate() {
   renderer.render(scene, camera);
 }
 
-/* ---------------------------------------------------------------- loading */
+/* - loading */
 
 const gltfLoader = new GLTFLoader();
 const objLoader = new OBJLoader();
@@ -188,7 +188,7 @@ async function loadModel(assetId, level) {
   await refreshCollisionOverlay();
 }
 
-/* -------------------------------------------------------------- materials */
+/* - materials */
 
 function applyMaterialMode() {
   const object = state.sceneObjects.model;
@@ -230,7 +230,7 @@ function applyWireframe() {
   });
 }
 
-/* --------------------------------------------------------------- collision */
+/* - collision */
 
 function collisionLines(kind, data) {
   const group = new THREE.Group();
@@ -292,7 +292,7 @@ function renderCollisionInfo(collision) {
   if (collision.kind === "box") {
     const size = collision.data.max.map((v, i) => (v - collision.data.min[i]).toFixed(3));
     const volume = size.reduce((a, b) => a * Number(b), 1);
-    push("size", size.join(" × "));
+    push("size", size.join(" - "));
     push("volume", volume.toFixed(3));
   } else if (collision.kind === "sphere") {
     push("radius", Number(collision.data.radius).toFixed(3));
@@ -304,7 +304,7 @@ function renderCollisionInfo(collision) {
   $("collision-info").innerHTML = `<div class="kv">${rows.join("")}</div>`;
 }
 
-/* ------------------------------------------------------------------ assets */
+/* - assets */
 
 function fmt(n) { return Number(n || 0).toLocaleString(); }
 
@@ -337,16 +337,16 @@ async function refreshAssets() {
         ? '<span class="verdict passed" title="AssetHealth: passed">PASSED</span>' : "";
     element.innerHTML =
       `<div class="name">${verdict}${escapeHtml(asset.filename)}</div>`
-      + `<div class="meta">${fmt(asset.triangle_count)} tris · `
-      + `${fmt(asset.vertex_count)} verts · ${asset.material_slots} mat${heavy}</div>`
-      + `<div class="meta">${asset.lod_count} LOD · ${asset.note_count} note`
+      + `<div class="meta">${fmt(asset.triangle_count)} tris  `
+      + `${fmt(asset.vertex_count)} verts  ${asset.material_slots} mat${heavy}</div>`
+      + `<div class="meta">${asset.lod_count} LOD  ${asset.note_count} note`
       + `${asset.note_count === 1 ? "" : "s"}</div>`;
     element.addEventListener("click", () => selectAsset(asset.id));
     list.appendChild(element);
   });
   const stats = await json("/api/stats");
   $("stats").textContent =
-    `${stats.assets} assets · ${fmt(stats.triangles)} tris · ${stats.lods} LODs · `
+    `${stats.assets} assets  ${fmt(stats.triangles)} tris  ${stats.lods} LODs  `
     + `${stats.notes} notes`;
 }
 
@@ -360,7 +360,7 @@ async function selectAsset(id) {
     await loadModel(id, "source");
     $("status").textContent = state.asset.filename;
     $("note-submit").disabled = false;
-    $("note-text").disabled = false;
+    $("note--text").disabled = false;
     $("collision-derive").disabled = false;
   } catch (error) {
     $("status").textContent = `error: ${error.message}`;
@@ -373,7 +373,7 @@ function buildLodButtons() {
   const levels = [{ level: "source", label: "Source" }].concat(
     (state.asset.lods || []).map((lod) => ({
       level: lod.level,
-      label: `${lod.level} · ${fmt(lod.triangle_count)}`,
+      label: `${lod.level}  ${fmt(lod.triangle_count)}`,
     })));
   levels.forEach((item) => {
     const button = document.createElement("button");
@@ -408,7 +408,7 @@ function updateReadout() {
     + `<span>by ${escapeHtml(asset.uploader || "unknown")}</span>`;
 }
 
-/* ------------------------------------------------------------------- notes */
+/* - notes */
 
 function escapeHtml(text) {
   return String(text).replace(/[&<>"']/g, (ch) => ({
@@ -443,7 +443,7 @@ function inline(text) {
     .replace(/`([^`]+)`/g, "<code>$1</code>");
 }
 
-/* ------------------------------------------------ per-material instruments */
+/* - per-material instruments */
 
 function buildMaterialControls() {
   const host = $("materials");
@@ -538,14 +538,14 @@ function renderNotes() {
   });
 }
 
-/* ------------------------------------------------------------------ upload */
+/* - upload */
 
 async function uploadFile(file) {
   const query = new URLSearchParams({
     filename: file.name,
     uploader: $("note-author").value.trim() || "anonymous",
   });
-  $("status").textContent = `uploading ${file.name}…`;
+  $("status").textContent = `uploading ${file.name}`;
   const response = await api(`/api/assets?${query}`, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
@@ -554,10 +554,10 @@ async function uploadFile(file) {
   const asset = await response.json();
   await refreshAssets();
   await selectAsset(asset.id);
-  $("status").textContent = `${asset.filename} · ${fmt(asset.triangle_count)} tris`;
+  $("status").textContent = `${asset.filename}  ${fmt(asset.triangle_count)} tris`;
 }
 
-/* ------------------------------------------------------------------ wiring */
+/* - wiring */
 
 $("upload").addEventListener("change", (event) => {
   if (event.target.files[0]) uploadFile(event.target.files[0]);
@@ -651,7 +651,7 @@ $("collision-derive").addEventListener("click", async () => {
 $("note-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.asset) return;
-  const text = $("note-text").value.trim();
+  const text = $("note--text").value.trim();
   if (!text) return;
   try {
     await api("/api/notes", {
@@ -664,14 +664,14 @@ $("note-form").addEventListener("submit", async (event) => {
         author: $("note-author").value.trim() || "anonymous",
       }),
     });
-    $("note-text").value = "";
+    $("note--text").value = "";
     await selectAsset(state.asset.id);
   } catch (error) {
     $("status").textContent = `error: ${error.message}`;
   }
 });
 
-/* -------------------------------------------------------------- live events */
+/* - live events */
 
 function connectLive() {
   if (!window.EventSource) return;
@@ -711,11 +711,11 @@ function connectLive() {
     });
   }
   source.onerror = () => {
-    $("status").textContent = "live: reconnecting…";
+    $("status").textContent = "live: reconnecting";
   };
 }
 
-/* -------------------------------------------------------------------- boot */
+/* - boot */
 
 resize();
 animate();
@@ -728,7 +728,7 @@ animate();
     // ?live=0 turns the stream off: headless screenshots and kiosk displays never
     // finish loading while an EventSource holds the connection open.
     const params = new URLSearchParams(location.search);
-/* ------------------------------------------------------- rules inspector */
+/* - rules inspector */
 
 /* Read-only card: what the gate would enforce for this project. It renders the
  * server's /api/rules payload and nothing else - no editing lives here, because
@@ -738,19 +738,19 @@ const rules = { loaded: false, loading: false };
 
 function textureCell(edge, powerOfTwo) {
   if (edge === null || edge === undefined) {
-    return '<span class="na" title="not enforced by the gate">—</span>';
+    return '<span class="na" title="not enforced by the gate">-</span>';
   }
-  const label = `${fmt(edge)} × ${fmt(edge)}`;
+  const label = `${fmt(edge)} - ${fmt(edge)}`;
   if (!powerOfTwo) return escapeHtml(label);
   return `<span title="power-of-two required">${escapeHtml(label)}</span>`;
 }
 
-/* A number the gate does not enforce is not zero, it is unknown: showing "—"
+/* A number the gate does not enforce is not zero, it is unknown: showing "-"
  * with an explanation beats inventing a limit an artist would optimise for. */
 function numberCell(value, options = {}) {
   const { looser = false, title = "" } = options;
   if (value === null || value === undefined || value === "") {
-    return '<span class="na" title="not enforced by the gate">—</span>';
+    return '<span class="na" title="not enforced by the gate">-</span>';
   }
   const className = looser ? ' class="loose"' : "";
   const hint = title ? ` title="${escapeHtml(title)}"` : "";
@@ -824,9 +824,9 @@ function renderRules(data) {
       + ` every asset is measured against the project default.</div>`}
     <div class="rules-note">
       Read-only. Change these in <code>rules.toml</code> (or the AssetHealth budget planner),
-      then press ↻.
+      then press -.
       ${budget.max_vertices === null || budget.max_vertices === undefined
-        ? "Vertex caps are not enforced by the gate, so they show as —."
+        ? "Vertex caps are not enforced by the gate, so they show as -."
         : ""}
     </div>
     <div class="rules-source">${escapeHtml(data.source || "")}</div>`;
@@ -840,7 +840,7 @@ async function loadRules(force = false) {
   if (rules.loading || (rules.loaded && !force)) return;
   rules.loading = true;
   if (force || !rules.loaded) {
-    $("rules-meta").innerHTML = '<div class="empty">Loading rules…</div>';
+    $("rules-meta").innerHTML = '<div class="empty">Loading rules</div>';
   }
   try {
     renderRules(await json("/api/rules"));
@@ -862,8 +862,8 @@ function setTab(name) {
     tab.setAttribute("aria-selected", active ? "true" : "false");
   }
   $("pane-assets").classList.toggle("is-hidden", name !== "assets");
-  $("pane-rules").classList.toggle("is-hidden", name !== "rules");
-  document.body.classList.toggle("rules-open", name === "rules");
+  $("pane--rules").classList.toggle("is-hidden", name !== "rules");
+  document.body.classList.toggle("rules--open", name === "rules");
   if (window.location.hash !== `#${name}`) {
     window.history.replaceState(null, "", `#${name}`);
   }
@@ -878,7 +878,7 @@ $("rules-refresh").addEventListener("click", () => loadRules(true));
 /* `#rules` opens the tab directly, so a lead can paste a link that lands on the
  * budgets instead of the asset list. `?tab=rules` does the same and survives the
  * tools that strip a fragment (headless capture, some chat clients). */
-/* ------------------------------- gate verdicts, carried over from AssetHealth */
+/* - gate verdicts, carried over from AssetHealth */
 state.filter = state.filter || "all";
 
 function applyVerdictFilter() {
@@ -913,7 +913,7 @@ function showVerdict(assetId) {
   }
   const problems = String(asset.verdict_problems || "").split("\n").filter(Boolean);
   body.innerHTML =
-    `<div class="verdict-line ${escapeHtml(asset.verdict_status)}">`
+    `<div class="verdict--line ${escapeHtml(asset.verdict_status)}">`
     + `${escapeHtml(asset.verdict_status.toUpperCase())}</div>`
     + (problems.length
       ? `<ul class="verdict-problems">${problems.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`
