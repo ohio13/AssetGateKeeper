@@ -854,5 +854,27 @@ expect("the CLI can point the inspector at a rules file",
        inspector_options.rules == "custom.toml", inspector_options.rules)
 
 print()
+print("16. demo data is opt-in, and labelled when used")
+# It used to be the default, and every new user asked why the dashboard already
+# held verdicts they never ran. A pass rate that is not yours is a bug.
+defaults = ahs.build_parser().parse_args([])
+expect("demo data is off by default", defaults.demo is False)
+expect("--demo asks for it", ahs.build_parser().parse_args(["--demo"]).demo is True)
+expect("--no-seed is still accepted for old scripts",
+       ahs.build_parser().parse_args(["--no-seed"]).no_seed is True)
+
+optin_db = fresh_db("optin.db")
+expect("a new database starts empty", ahs.totals(optin_db)["total"] == 0)
+expect("an empty page carries no demo banner",
+       "are demo data" not in ahs.render_dashboard(optin_db))
+expect("nothing is labelled as demo yet", ahs.demo_row_count(optin_db) == 0)
+
+expect("seeding inserts the sample set", ahs.seed_if_first_launch(optin_db) is True)
+expect("it records how many rows it added",
+       ahs.demo_row_count(optin_db) == len(ahs._SEED) + 1, str(ahs.demo_row_count(optin_db)))
+expect("the dashboard labels those rows",
+       "are demo data" in ahs.render_dashboard(optin_db))
+expect("and names the way out", "--db myproject.db" in ahs.render_dashboard(optin_db))
+
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

@@ -942,6 +942,16 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
     shame = wall_of_shame(db_path, project_id=project_id)
     tops = bottlenecks(db_path, project_id=project_id)
     budget = budget_for_project(db_path, project_id)
+    # Say it on the page, not just in the console: a demo pass rate that looks
+    # like yours is the most expensive kind of confusion this tool can cause.
+    demo_rows = demo_row_count(db_path)
+    demo_notice = (
+        f'<div class="notice err" style="display:block">'
+        f'<strong>{demo_rows:,} verdicts on this page are demo data</strong> - the'
+        f' bundled sample set, not your assets. Real runs are mixed in below.'
+        f' Start clean with: <code>asset-health --db myproject.db</code>'
+        f'</div>'
+    ) if demo_rows else ""
     generated = _utc_now()
     scope = f"project: {_e(project_name)}" if project_name else "all projects"
     planner_href = "/budget-planner" + (f"?project_id={project_id}" if project_id else "")
@@ -1007,6 +1017,7 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
     <span class="sub">studio pipeline dashboard &middot; {scope}{live_note}</span>
   </header>
   <div class="sub">Every number below comes from live verdicts posted by AssetGatekeeper.</div>
+  {demo_notice}
   {f'<div class="notice err" style="display:block">{_e(warn)}</div>' if warn else ''}
   <nav>
     <a href="{planner_href}">Budget planner &rarr;</a>
@@ -1793,7 +1804,35 @@ def seed_if_first_launch(db_path: str | Path) -> bool:
     })
     with _WRITE_LOCK, open_db(db_path) as connection:
         connection.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('seeded', '1')")
+        # Counted so the dashboard can label them. Demo rows look exactly like
+        # real ones, which is how a producer ends up arguing about a pass rate
+        # that was never theirs.
+        connection.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('demo_rows', ?)",
+                           (str(len(_SEED) + 1),))
     return True
+
+
+def counts_zero(db_path: str | Path) -> bool:
+    """True when nothing has been ingested yet, so the CLI can suggest a command."""
+    try:
+        with open_db(db_path) as connection:
+            return connection.execute("SELECT COUNT(*) FROM verdicts").fetchone()[0] == 0
+    except sqlite3.Error:
+        return False
+
+
+def demo_row_count(db_path: str | Path) -> int:
+    """How many verdicts in this database came from the bundled demo set."""
+    try:
+        with open_db(db_path) as connection:
+            row = connection.execute(
+                "SELECT value FROM meta WHERE key = 'demo_rows'").fetchone()
+    except sqlite3.Error:
+        return 0
+    try:
+        return int(row[0]) if row else 0
+    except (TypeError, ValueError):
+        return 0
 
 
 # --------------------------------------------------------------------------- #
@@ -1813,8 +1852,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"SQLite file (default {DEFAULT_DB}, or $ASSET_HEALTH_DB)")
     parser.add_argument("--token", default=os.environ.get(DEFAULT_TOKEN_ENV, ""),
                         help=f"require 'Authorization: Bearer <token>' (default ${DEFAULT_TOKEN_ENV})")
+    parser.add_argument("--demo", action="store_true",
+                        help="fill a brand-new database with the bundled demo verdicts "
+                             "(716 passed / 64 failed) so the dashboard is not empty")
     parser.add_argument("--no-seed", action="store_true",
-                        help="do not insert the demo verdicts on a brand-new database")
+                        help="accepted for old scripts; demo data is off unless --demo is given")
     parser.add_argument("--quiet", action="store_true", help="only log errors")
     parser.add_argument("--rules", metavar="PATH", default=os.environ.get(RULES_ENV, ""),
                         help="rules.toml that GET /api/rules reports on, read-only "
@@ -1923,8 +1965,11 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  rules URL  /api/rules?project_id={project_id}  (for --remote-rules)")
         return 0
 
+    # Demo data is opt-in. It used to be the default, and the first thing every
+    # new user asked was why the dashboard already had 780 verdicts they never
+    # ran: a pass rate that is not yours is worse than an empty page.
     seeded = False
-    if not args.no_seed:
+    if args.demo and not args.no_seed:
         try:
             seeded = seed_if_first_launch(db_path)
         except sqlite3.Error as exc:
@@ -1939,6 +1984,7 @@ def main(argv: list[str] | None = None) -> int:
                              rules_path=args.rules, rules_root=Path.cwd())
     except OSError as exc:
         print(f"error: cannot bind {args.host}:{args.port}: {exc}", file=sys.stderr)
+        print(agk.port_in_use_hint(args.port), file=sys.stderr)
         return 2
 
     host, port = httpd.server_address[0], httpd.server_address[1]
@@ -1964,7 +2010,12 @@ def main(argv: list[str] | None = None) -> int:
         print(f"             cooldown {alert_cooldown:g}s per project"
               f"{' (disabled)' if alert_cooldown <= 0 else ''}")
     if seeded:
-        print(f"  seeded     {len(_SEED)} demo verdicts (first launch)")
+        print(f"  seeded     {len(_SEED) + 1:,} demo verdicts (--demo) - they are labelled")
+        print("             on the dashboard; use --db project.db for a clean page")
+    elif not projects and counts_zero(db_path):
+        print("  empty      no verdicts yet - point the gate at it:")
+        print(f"             asset-gatekeeper <folder> --once --telemetry-url "
+              f"http://{shown}:{port}/api/telemetry")
 
     try:
         httpd.serve_forever()

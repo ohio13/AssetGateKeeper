@@ -2688,10 +2688,157 @@ def run_watch(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
     return 0
 
 
+def port_in_use_hint(port: int) -> str:
+    """Platform-appropriate commands for finding and freeing a busy TCP port.
+
+    "Address already in use" is the single most common first-run failure: the
+    artist's own previous server is still alive, or another tool owns 8080. The
+    message has to say what to type next, not just what went wrong.
+    """
+    if os.name == "nt":
+        find_it = f"netstat -ano | findstr :{port}"
+        stop_it = "taskkill /PID <pid> /F"
+    else:
+        find_it = f"lsof -i :{port}    (or: fuser -k {port}/tcp)"
+        stop_it = "kill <pid>"
+    # Suggest a port that is neither busy nor another server's default: telling
+    # someone to move AssetHealth onto the workstation's 8100 is not a fix.
+    spare = next(candidate for candidate in range(port + 1, port + 10)
+                 if candidate not in (8080, 8100))
+    return (f"hint: port {port} is already in use by another process.\n"
+            f"      who has it:  {find_it}\n"
+            f"      stop it:     {stop_it}\n"
+            f"      or just move: --port {spare}")
+
+
+def _bindable(host: str, port: int) -> bool:
+    """True if nothing else holds the port (we let it go again immediately)."""
+    import socket
+
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            probe.bind(("127.0.0.1" if host in ("", "0.0.0.0", "::") else host, port))
+        except OSError:
+            return False
+    return True
+
+
+def run_doctor(target: Optional[Path], args: argparse.Namespace,
+               out: Optional[object] = None) -> int:
+    """Answer "can this machine run the gate?" in one command.
+
+    Every check that fails comes with the fix, because a setup tool that only
+    reports failure is just a slower error message. Ports are only a warning:
+    something else using 8080 does not stop you gating a folder.
+    """
+    say = out or print
+    problems = 0
+
+    def line(status: str, label: str, detail: str = "", hint: str = "") -> None:
+        nonlocal problems
+        # Lowercase on purpose: the test harness greps "^  FAIL", and a doctor
+        # line must never be mistaken for a failing assertion.
+        mark = {"ok": "ok  ", "warn": "warn", "fail": "fail"}[status]
+        if status == "fail":
+            problems += 1
+        say(f"  {mark}  {label}" + (f"  [{detail}]" if detail else ""))
+        if hint and status != "ok":
+            say(f"        -> {hint}")
+
+    say(f"AssetGatekeeper {__version__} - environment check")
+    say("")
+
+    version = sys.version_info
+    line("ok" if version >= (3, 9) else "fail", "python",
+         f"{version.major}.{version.minor}.{version.micro}",
+         "the gate needs Python 3.9+; install it, then re-create the venv")
+
+    for name, module in (("trimesh", trimesh), ("pillow", Image)):
+        if module is None:
+            line("fail", name, "not importable",
+                 f"python -m pip install {name if name != 'pillow' else 'pillow'}")
+        else:
+            found = getattr(module, "__version__", "?")
+            line("ok", name, f"version {found}")
+
+    try:
+        import watchdog  # presence check only
+        line("ok", "watchdog", f"{getattr(watchdog, '__version__', '?')} - native events")
+    except Exception:
+        line("warn", "watchdog", "not installed",
+             "optional: python -m pip install watchdog (polling fallback is in use)")
+
+    say("")
+    root = target or Path(".")
+    if not root.exists():
+        line("fail", "target folder", str(root), "check the path, or run without a folder")
+        root = None
+    elif not root.is_dir():
+        line("ok", "target folder", f"{root} (single file)")
+    else:
+        readable = os.access(str(root), os.R_OK)
+        line("ok" if readable else "fail", "target folder", str(root),
+             "the gate cannot read this folder - check the share permissions")
+
+    say("")
+    try:
+        budget, source, _overrides = resolve_budget(root or Path("."), args)
+        if source is None:
+            line("warn", "rules.toml", "not found, using built-in defaults",
+                 "write one with: asset-gatekeeper <folder> --init")
+        else:
+            line("ok", "rules.toml", str(source))
+        line("ok", "budget", f"{budget.max_triangles:,} tris / "
+                             f"{budget.max_texture_edge}px / "
+                             f"{budget.max_material_slots} slots"
+                             + (f" / platform {budget.platform}" if budget.platform else ""))
+        tags, mode, _sim = resolve_tagging(root or Path("."), args)
+        if tags:
+            line("ok", "tag budgets", f"{len(tags)}: {', '.join(sorted(tags))} (mode {mode})")
+        else:
+            line("warn", "tag budgets", f"none (mode {mode})",
+                 "optional: [tags.<name>] gives a folder its own limits")
+    except ConfigError as exc:
+        line("fail", "rules.toml", str(exc),
+             "fix the file, or compare it with asset_gatekeeper.example.toml")
+
+    say("")
+    for port, who in ((8080, "AssetHealth"), (8100, "Art Workstation")):
+        if _bindable("127.0.0.1", port):
+            line("ok", f"port {port}", "free")
+        else:
+            line("warn", f"port {port}", f"in use (would block {who})",
+                 port_in_use_hint(port).splitlines()[0].replace("hint: ", ""))
+
+    say("")
+    if problems:
+        say(f"{problems} problem(s) found - fix the 'fail' lines above.")
+    else:
+        say("No blocking problems. Next:")
+        if root is not None and root.is_dir():
+            say(f'  asset-gatekeeper "{root}" --recursive --once')
+        else:
+            say('  asset-gatekeeper "<folder>" --recursive --once')
+        say("  asset-health --port 8080        (dashboard)")
+        say("  art-workstation --port 8100     (3D review screen)")
+    return 1 if problems else 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="asset_gatekeeper",
         description="Watch a folder of art exports and enforce asset budgets.",
+        epilog=(
+            "common first runs:\n"
+            "  asset-gatekeeper <folder> --recursive --once     one scan, then exit\n"
+            "  asset-gatekeeper <folder> --init                 write a rules.toml\n"
+            "  asset-gatekeeper --doctor                        check this machine\n"
+            "  asset-gatekeeper <folder> --recursive            watch and toast\n"
+            "\n"
+            "exit codes: 0 all passed, 1 at least one failed, 2 bad setup.\n"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     parser.add_argument("folder", nargs="?", default=None,
                         help="folder to watch (default: current directory)")
@@ -2740,6 +2887,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="flag unbaked node transforms, uncentred pivots and unindexed geometry")
     parser.add_argument("--require-indexed", action="store_true", dest="require_indexed",
                         default=None, help="also fail triangle-soup geometry (implies the audit)")
+    parser.add_argument("--doctor", action="store_true",
+                        help="check this machine can run the gate (deps, rules, ports), then exit")
     parser.add_argument("--init", action="store_true",
                         help="interactive setup: create the watch folder and its rules.toml")
     parser.add_argument("--yes", action="store_true",
@@ -2788,6 +2937,12 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     stream = sys.stderr if args.json else sys.stdout
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(message)s", datefmt="%H:%M:%S", stream=stream)
+
+    # The doctor runs before the dependency check on purpose: reporting a missing
+    # trimesh is exactly its job.
+    if getattr(args, "doctor", False):
+        target = Path(args.folder).expanduser() if args.folder else None
+        return run_doctor(target, args)
 
     # The wizard runs before anything touches the folder: it may be creating it.
     if getattr(args, "init", False):

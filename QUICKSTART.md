@@ -174,14 +174,20 @@ asset-health --port 8080 --rules "D:\Projects\MyGame\Assets\rules.toml"
 Open <http://127.0.0.1:8080/> — `/dashboard` is the table view,
 `/budget-planner` edits budgets, `/api/rules` serves the read-only inspector.
 
-**First-run seeding — read this once.** A brand-new database is filled with a
-deterministic demo set (780 verdicts: 716 pass, 64 fail, 1 healed) so the page is
-not empty. Those are sample rows, and `/api/summary` aggregates the whole table,
-so real runs appear to be "already full". Use a clean database for a real project:
+**Demo data is opt-in.** A new database starts empty, which is what a real project
+wants. Add `--demo` if you want the bundled sample set (14 verdicts — 13 assets
+plus one healed row) to see what a populated dashboard looks like — and when you
+do, the page says so in a red banner:
+
+> **14 verdicts on this page are demo data** — the bundled sample set, not your assets.
 
 ```bat
-asset-health --no-seed --db mygame_health.db --rules "…\rules.toml"
+asset-health --no-seed --db mygame_health.db --rules "…\rules.toml"   :: empty, real only
+asset-health --demo  --db demo_health.db                              :: sample data
 ```
+
+`--no-seed` is kept so old scripts keep working; it is only needed if you also pass
+`--demo`.
 
 Now point the gate at it, on every run:
 
@@ -255,7 +261,9 @@ CI: `.github/workflows/asset_gatekeeper.yml` is a drop-in PR gate, and
 | Symptom | Cause |
 |---|---|
 | `error: cannot bind 127.0.0.1:8080: … in use` | a previous run is still alive: find the pid on that port and stop it |
-| dashboard numbers look pre-filled | first-run seeding — see step 5, use `--no-seed` |
+| dashboard numbers look pre-filled | it was started with `--demo`; that is labelled in a banner — use a fresh `--db` |
+| `error: cannot bind …` | another process owns the port; the message prints the exact command to find and stop it |
+| not sure the install works | `asset-gatekeeper --doctor` checks python, trimesh, Pillow, `rules.toml` and the ports |
 | `/viewer` is blank / tabs do nothing | open the browser console; a syntax error in `viewer.js` blanks the whole module |
 | `unknown key` / exit 2 | `rules.toml` has a typo. Compare against `asset_gatekeeper.example.toml` |
 | an asset "passes" that should not | check the `budget` line the gate prints first: it names the file it used |

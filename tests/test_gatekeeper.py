@@ -1495,6 +1495,56 @@ expect("the room tag raises the budget for a folder",
 expect("a room tag does not leak to a sibling folder",
        agk.resolve_tag(folder_root / "props" / "huge.obj", folder_tags, folder_root)[0] is None)
 
+print("20. doctor, port hints and a friendly CLI")
+doc_root = DROP.parent / "scratch" / "doctor"
+doc_root.mkdir(parents=True, exist_ok=True)
+(doc_root / "rules.toml").write_text(
+    'platform = "n64"\n\n[mesh]\nmax_triangles = 1200\n\n[platforms.n64]\nmax_texture_edge = 64\n\n[tags.ruins]\nmax_triangles = 4000\n',
+    encoding="utf-8")
+doc_args = agk.build_parser().parse_args([str(doc_root)])
+# Doctor output is many lines; a detail must stay on one line in the log.
+flat = lambda s: " | ".join(str(s).splitlines())[:160]  # noqa: E731
+lines = []
+code = agk.run_doctor(doc_root, doc_args, out=lines.append)
+text = "\n".join(lines)
+expect("doctor passes on a healthy setup", code == 0, flat(text))
+expect("it names the interpreter", "python" in text)
+expect("it checks the two hard dependencies", "trimesh" in text and "pillow" in text)
+expect("it finds the rules file", str(doc_root / "rules.toml") in text, flat(text)[:200])
+expect("it reports the effective budget", "1,200 tris" in text, flat(text))
+expect("it lists the tag budgets", "ruins" in text)
+expect("it suggests the next command", "--recursive --once" in text)
+
+# A broken rules file must fail the doctor, with the parser's own words.
+(doc_root / "rules.toml").write_text('[mesh]\nmax_triangles = "lots"\n', encoding="utf-8")
+lines = []
+code = agk.run_doctor(doc_root, doc_args, out=lines.append)
+text = "\n".join(lines)
+expect("a broken rules file fails the doctor", code == 1, flat(text))
+expect("the doctor quotes the parser error", "must be an integer" in text, flat(text))
+expect("and tells you how to fix it", "example.toml" in text, flat(text))
+(doc_root / "rules.toml").unlink()
+
+# A missing folder is a failure, not a traceback.
+lines = []
+code = agk.run_doctor(DROP.parent / "scratch" / "no_such_folder", doc_args, out=lines.append)
+expect("a missing folder fails the doctor", code == 1, flat("\n".join(lines)))
+expect("the doctor still finishes and summarises", "problem(s) found" in "\n".join(lines))
+
+# Port advice must be copy-pasteable on the platform it runs on.
+hint = agk.port_in_use_hint(8080)
+expect("the port hint says what to run next",
+       ("netstat -ano" if __import__("os").name == "nt" else "lsof") in hint, hint.splitlines()[0])
+expect("the port hint does not suggest another server's port", "--port 8100" not in hint, hint.splitlines()[0])
+expect("the port hint suggests a nearby spare", "--port 8081" in hint, hint.splitlines()[0])
+
+# --help must show a worked example, not just a flag wall.
+help_text = agk.build_parser().format_help()
+expect("--help lists the common first runs", "--recursive --once" in help_text)
+expect("--help documents the exit codes", "0 all passed" in help_text)
+expect("--version is in the parser",
+       agk.build_parser().parse_args(["--doctor"]).doctor is True)
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

@@ -1383,6 +1383,7 @@ def main(argv: list[str] | None = None) -> int:
                              rules_path=args.rules, rules_root=Path.cwd())
     except OSError as exc:
         print(f"error: cannot bind {args.host}:{args.port}: {exc}", file=sys.stderr)
+        print(agk.port_in_use_hint(args.port), file=sys.stderr)
         return 2
 
     host, port = httpd.server_address[0], httpd.server_address[1]
