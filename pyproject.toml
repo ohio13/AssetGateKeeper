@@ -45,6 +45,7 @@ art-workstation = "server.art_workstation_server:main"
 # Uploads a folder of .glb/.gltf/.obj into a running workstation: the review
 # screen only takes one dropped file at a time, which is no way to load a project.
 art-workstation-upload = "tools.upload_assets:main"
+agk-serve = "tools.agk_serve:main"
 
 [project.urls]
 Homepage = "https://github.com/ohio13/asset-gatekeeper"
