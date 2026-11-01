@@ -365,7 +365,11 @@ async function loadState(firstTime = true) {
       if (event.key === "Enter") { event.preventDefault(); useProject(); }
     });
     const allowed = $("allowed-roots");
+    const seenRoots = new Set();
     for (const root of data.allowed_roots || []) {
+      const key = String(root).toLowerCase();
+      if (seenRoots.has(key)) continue;      // one entry per folder, always
+      seenRoots.add(key);
       const option = document.createElement("option");
       option.value = root;
       option.textContent = root;

@@ -418,6 +418,18 @@ expect("the audit row names the file, not just the key",
        any(str(project_dir / "rules.toml") in (row.get("summary") or "")
            for row in anon.state()["audit"]))
 
+# The launcher seeds the allow-list from both --allow-root and the environment,
+# so the same folder arriving twice is normal - it must not become two identical
+# dropdown entries.
+import os as _os  # noqa: PLC0415 - local to this section
+_variants = [str(WORK), str(WORK) + _os.sep]
+if _os.name == "nt":
+    _variants.append(str(WORK).lower())
+dupe_server = ahs.build_server("127.0.0.1", 0, db, quiet=True, allow_roots=tuple(_variants))
+expect("duplicate allow-roots collapse to a single entry",
+       len(dupe_server.allow_roots) == 1, str(dupe_server.allow_roots))
+dupe_server.server_close()
+
 state = anon.state()
 expect("the scan root follows the project",
        Path(state["scan_root"]) == project_dir.resolve(), state.get("scan_root"))

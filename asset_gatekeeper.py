@@ -90,7 +90,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Optional, Sequence
+from typing import Callable, Optional, Sequence
 from urllib.parse import unquote
 
 # --------------------------------------------------------------------------- #
@@ -1055,14 +1055,56 @@ def run_init(target: Optional[Path] = None, ask=input, out=None,
 # Repository audit: the whole folder, not one asset
 # --------------------------------------------------------------------------- #
 
+def walk_files(root: Path, recursive: bool = True, follow_symlinks: bool = False,
+               on_skip: Optional[Callable[[str], None]] = None) -> list[Path]:
+    """Every readable file under ``root``, surviving entries the OS refuses.
+
+    ``Path.rglob`` raises on the first entry it cannot traverse - a dangling
+    symlink, a junction to a detached drive, ``WinError 1920`` on a reparse point
+    - and that exception used to abort an entire scan, which makes a project with
+    one odd folder un-gateable. ``os.walk`` accepts an ``onerror`` hook, so a bad
+    entry is reported and skipped while everything else is still checked.
+
+    Symlinked folders are **not** followed by default: they re-introduce the same
+    tree twice (double-counted verdicts) and a self-referential link is an
+    infinite walk. ``--follow-symlinks`` opts in.
+    """
+    top = Path(root)
+    found: list[Path] = []
+
+    def _skip(message: str) -> None:
+        LOG.warning("skipping unreadable entry: %s", message)
+        if on_skip is not None:
+            on_skip(message)
+
+    def _walk_error(exc: OSError) -> None:
+        _skip(str(getattr(exc, "filename", None) or exc))
+
+    try:
+        for directory, _dirnames, filenames in os.walk(top, onerror=_walk_error,
+                                                       followlinks=follow_symlinks):
+            for name in filenames:
+                candidate = Path(directory) / name
+                try:
+                    if candidate.is_file():
+                        found.append(candidate)
+                except OSError:
+                    _skip(str(candidate))
+            if not recursive:
+                break
+    except OSError as exc:                    # the root itself is unreadable
+        _skip(str(getattr(exc, "filename", None) or exc))
+    return found
+
+
 def run_audit(root: Path) -> int:
     """Report broken references and orphaned textures across a repository.
 
     Exit 0 when the repository is clean, 1 when anything is wrong — a folder that
     looks shut but is missing its textures is exactly the failure this catches.
     """
-    assets = sorted(p for p in root.rglob("*")
-                    if p.is_file() and p.suffix.lower() in MESH_SUFFIXES)
+    assets = sorted(p for p in walk_files(root)
+                    if p.suffix.lower() in MESH_SUFFIXES)
     broken_total = 0
     for asset in assets:
         broken = missing_references(asset)
@@ -1931,9 +1973,10 @@ def orphaned_files(root: Path) -> list[Path]:
     every asset against every texture on disk.
     """
     root = Path(root)
+    on_disk = walk_files(root)
     referenced: set[Path] = set()
-    for candidate in root.rglob("*"):
-        if not candidate.is_file() or candidate.suffix.lower() not in MESH_SUFFIXES:
+    for candidate in on_disk:
+        if candidate.suffix.lower() not in MESH_SUFFIXES:
             continue
         for _written, target in resolve_references(candidate):
             try:
@@ -1941,8 +1984,8 @@ def orphaned_files(root: Path) -> list[Path]:
             except OSError:      # pragma: no cover - unreadable path
                 continue
     orphans = []
-    for candidate in root.rglob("*"):
-        if not candidate.is_file() or candidate.suffix.lower() not in TEXTURE_DISK_SUFFIXES:
+    for candidate in on_disk:
+        if candidate.suffix.lower() not in TEXTURE_DISK_SUFFIXES:
             continue
         try:
             if candidate.resolve() not in referenced:
@@ -2762,10 +2805,11 @@ def describe_budget(budget: Budget) -> str:
 
 
 def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
-             recursive: bool, exclude: Sequence[str] = ()) -> int:
-    pattern = "**/*" if recursive else "*"
-    candidates = sorted(p for p in root.glob(pattern)
-                        if p.is_file() and is_candidate(p, exclude))
+             recursive: bool, exclude: Sequence[str] = (),
+             follow_symlinks: bool = False) -> int:
+    candidates = sorted(p for p in walk_files(root, recursive=recursive,
+                                              follow_symlinks=follow_symlinks)
+                        if is_candidate(p, exclude))
     if not candidates:
         LOG.info("no tracked assets found in %s", root)
         return 0
@@ -3221,6 +3265,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="print the version and exit (pipelines log this)")
     parser.add_argument("--once", action="store_true", help="scan existing files and exit")
     parser.add_argument("--recursive", action="store_true", help="include subfolders")
+    parser.add_argument("--follow-symlinks", action="store_true",
+                        help="descend into symlinked/junctioned folders. Off by default: "
+                             "a link re-counts the same tree and a self-link never ends. "
+                             "Unreadable entries are always skipped, never fatal")
     parser.add_argument("--json", action="store_true",
                         help="one JSON object per file on stdout (used by the DCC plugins)")
     parser.add_argument("--no-color", action="store_true", help="disable ANSI colour")
@@ -3384,7 +3432,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0 if verdict.passed else 1
 
     if args.once:
-        status = run_once(watch_dir, gatekeeper, reporter, args.recursive, budget.exclude)
+        status = run_once(watch_dir, gatekeeper, reporter, args.recursive, budget.exclude,
+                      follow_symlinks=getattr(args, "follow_symlinks", False))
     else:
         status = run_watch(watch_dir, gatekeeper, reporter, args.recursive, budget.exclude)
     reporter.close()

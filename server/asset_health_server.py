@@ -2758,7 +2758,21 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
         # rules.toml into *any* directory an admin types is an arbitrary-file-write
         # primitive, so the allow-list is the whole guard rail: everything else in
         # this feature is convenience.
-        roots = [Path(item).expanduser().resolve() for item in allow_roots if str(item).strip()]
+        # Normalised and de-duplicated: the launcher seeds this from --allow-root
+        # *and* $AGK_PROJECT_ROOTS, so the same folder arriving twice is normal,
+        # and two identical entries in the picker look like a bug (they were).
+        roots: list[Path] = []
+        seen: set[str] = set()
+        for item in allow_roots:
+            text = str(item).strip().strip('"')
+            if not text:
+                continue
+            resolved = Path(text).expanduser().resolve()
+            key = str(resolved).lower() if os.name == "nt" else str(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            roots.append(resolved)
         if not roots:
             roots = [Path.cwd().resolve()]
         self.allow_roots: tuple[Path, ...] = tuple(roots)

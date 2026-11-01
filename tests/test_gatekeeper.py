@@ -1704,5 +1704,59 @@ expect("the CLI accepts --list-presets", preset_cli.list_presets is True)
 
 expect("the example config ships with the checkout", example.is_file())
 
+print("23. walking a folder that contains something unreadable")
+import shutil as _shutil  # noqa: PLC0415 - local to this section
+
+walk_root = DROP.parent / "scratch" / "walk"
+_shutil.rmtree(walk_root, ignore_errors=True)
+(walk_root / "sub").mkdir(parents=True)
+(walk_root / "a.obj").write_text("v 0 0 0\n", encoding="utf-8")
+(walk_root / "sub" / "b.obj").write_text("v 0 0 0\n", encoding="utf-8")
+(walk_root / "notes.txt").write_text("x", encoding="utf-8")
+expect("the walker finds files at every depth",
+       len(agk.walk_files(walk_root)) == 3,
+       str(sorted(p.name for p in agk.walk_files(walk_root))))
+expect("a non-recursive walk stops at the top level",
+       len(agk.walk_files(walk_root, recursive=False)) == 2)
+
+# The failure from the field: one entry the OS refuses to traverse took the
+# whole scan down. Simulate a scandir failure (WinError 1920) at the root.
+skipped: list[str] = []
+original_walk = agk.os.walk
+
+
+def _broken_walk(top, **_kwargs):
+    raise OSError(1920, "The file cannot be accessed by the system",
+                  str(Path(top) / "MyGame-Final"))
+
+
+agk.os.walk = _broken_walk          # same module object os.walk lives on
+try:
+    survived = agk.walk_files(walk_root, on_skip=skipped.append)
+finally:
+    agk.os.walk = original_walk
+expect("an unreadable entry does not abort the walk", survived == [], str(survived))
+expect("the skipped path is reported rather than swallowed",
+       bool(skipped) and "MyGame-Final" in skipped[0], str(skipped))
+expect("the walker works again once the entry is gone",
+       len(agk.walk_files(walk_root)) == 3)
+
+# A dangling symlink is not an asset and must not be handed to the analyzer.
+try:
+    dangling = walk_root / "gone"
+    dangling.symlink_to(walk_root / "does-not-exist")
+    try:
+        names = {path.name for path in agk.walk_files(walk_root)}
+        expect("a dangling symlink is not reported as a file", "gone" not in names,
+               str(sorted(names)))
+    finally:
+        dangling.unlink()
+except (OSError, NotImplementedError):
+    pass                            # Windows without symlink privilege: skip
+
+symlink_flag = agk.build_parser().parse_args(["--follow-symlinks"])
+expect("symlinked folders are opt-in", symlink_flag.follow_symlinks is True)
+expect("and off by default", agk.build_parser().parse_args([]).follow_symlinks is False)
+
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

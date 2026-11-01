@@ -298,11 +298,27 @@ def project_roots(args: argparse.Namespace) -> list[Path]:
     ``"C:\\path\\"`` has already let the backslash escape its own closing quote - a
     caller can hand us a mangled string, so normalise what arrives.
     """
-    roots: list[Path] = [Path(os.path.normpath(str(item))).expanduser()
-                         for item in (args.allow_root or []) if str(item).strip()]
-    roots += [Path(os.path.normpath(item.strip())).expanduser()
-              for item in os.environ.get("AGK_PROJECT_ROOTS", "").split(os.pathsep)
-              if item.strip()]
+    raw = [str(item) for item in (args.allow_root or [])]
+    raw += os.environ.get("AGK_PROJECT_ROOTS", "").split(os.pathsep)
+    roots: list[Path] = []
+    seen: set[str] = set()
+    for item in raw:
+        # `setx` can leave the quotes on, and the same folder usually arrives from
+        # both the environment and --allow-root, so normalise and de-duplicate.
+        text = item.strip().strip('"')
+        if not text:
+            continue
+        path = Path(os.path.normpath(text)).expanduser()
+        try:
+            key = str(path.resolve())
+        except OSError:
+            key = str(path)
+        if os.name == "nt":
+            key = key.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        roots.append(path)
     if not roots:
         roots = [REPO_ROOT]
     return roots
