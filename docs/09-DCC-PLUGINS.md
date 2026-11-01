@@ -1,0 +1,303 @@
+# 09 - DCC plugins: Blender, Maya, 3ds Max, Houdini, Unreal
+
+Two things ship for every DCC, and they are the same engine:
+
+| Thing | Runs in | Purpose |
+|---|---|---|
+| **Panel / hook** | a live session | tell the artist *before* export |
+| **Headless probe** | a process, no UI | prove the integration in CI |
+
+Both call `plugins/preflight_core.py`, which applies the same `Budget` objects as
+the CLI. That is the reason a panel and a CI run can never disagree: they are not
+two implementations, they are two front doors.
+
+```
+plugins/
+  preflight_core.py              the decision engine (budgets, degenerate faces,
+                                 texture sizes, fuzzy tag near-miss)
+  blender/preflight_panel.py     add-on, N-panel
+  blender/preflight_blender.py   headless entry point
+  maya/maya_preflight.py         window + shelf button
+  max/max_preflight.py           scripted panel
+  houdini/preflight_houdini.py   headless entry point
+  unreal/unreal_preflight.py     editor script + headless entry point
+tools/houdini_export_hook.py     the shell-out hook Houdini actually uses
+```
+
+## The shared report
+
+Every adapter prints the same shape, because an artist who learns it in Blender
+should not have to relearn it in Maya:
+
+```
+BLOCKED - 3 error(s)
+triangles 4,000   vertices 2,800
+materials 4
+budget    tris<=1,500  materials<=1  texture<=64px
+SUGGESTED character  (rename the folder)
+[x] 4,000 triangles exceeds the 1,500 budget (+2,500); decimate or move it to a tag with a bigger budget
+[x] 4 material slots exceeds the 1 slot budget (each slot is a draw call); merge or atlas
+[x] texture 'boss_Albedo.png' is 256x256, over the 64px budget
+```
+
+`SUGGESTED` is the line artists actually act on: the folder is misspelled, and
+the panel knows which folder was meant.
+
+---
+
+## Blender (3.6 / 4.x)
+
+### Install the panel
+
+1. `Edit > Preferences > Add-ons > Install...`
+2. Choose `<AGK>/plugins/blender/preflight_panel.py`
+3. Tick **Asset Gatekeeper**
+4. The panel appears in the 3D Viewport sidebar (`N`) as **Asset Gatekeeper**
+
+The panel needs no restart and no build step. It reads:
+
+* triangles and vertices from the **evaluated depsgraph** - so a subdivision
+  surface, a modifier stack or a geo-nodes setup is measured as it will export,
+  not as it was modelled;
+* material slots that actually have a material;
+* image sizes from the image texture nodes feeding those materials;
+* zero-area faces (degenerate geometry breaks Nanite and ray tracing).
+
+### Using it
+
+Select the objects you care about (or select nothing to measure the whole scene),
+and read the panel. It re-runs as you change selection.
+
+**Budgets:** the panel uses the built-in default budget unless you point it at
+your project. Two ways:
+
+```python
+# in Blender's Python console, once per session - then reopen the panel
+import bpy, sys
+sys.path.insert(0, r"C:\Tools\AssetGatekeeper\plugins\blender")
+import preflight_panel as p
+report = p.run_preflight(rules_path=r"C:\Projects\MyGame\rules.toml")
+print(report.as_text())
+```
+
+or give the panel a preset (no rules file needed):
+
+```python
+p.run_preflight(preset="ps2")
+```
+
+**Fuzzy tags:** the panel takes the folder name from the `.blend` path, so
+`.../assets/charcter/hero.blend` reports `SUGGESTED character`.
+
+### Headless (for CI)
+
+```
+blender.exe --background --factory-startup ^
+  --python "<AGK>\plugins\blender\preflight_blender.py" -- ^
+  --fixture "C:\Proj\assets\char\hero.obj" --preset retro --out result.json
+```
+
+Exit codes: `0` pass, `1` budget failure, `2` harness failure (bad fixture, import
+error). The probe registers the add-on, measures a live cube (12 triangles, a
+sanity check that the depsgraph is really being evaluated), imports the fixture,
+and writes JSON - so a Blender banner cannot corrupt the result.
+
+---
+
+## Maya (2022+)
+
+### Install
+
+No package, no shelf file:
+
+```python
+import sys
+sys.path.append(r"C:\Tools\AssetGatekeeper\plugins")
+import maya_preflight as p
+p.show()
+```
+
+Put those three lines on a shelf button (middle-drag the script to a shelf) and
+it is one click from then on.
+
+### What it measures
+
+* faces and triangles from `polyEvaluate` - the same numbers the Attribute Editor
+  shows;
+* materials from the shading engines actually assigned (not from the material
+  editor's list);
+* texture sizes from the `file` nodes feeding those materials.
+
+### Notes
+
+* `p.run_preflight(rules_path=..., preset=...)` returns the report object if you
+  want to drive it from your own script.
+* The window is Qt-free (plain `cmds`): it works in Maya 2022 to 2026 without a
+  PySide version fight, which is the single most common reason DCC tools break.
+
+---
+
+## 3ds Max (2021+)
+
+### Install
+
+```maxscript
+python.ExecuteFile @"C:\Tools\AssetGatekeeper\plugins\max\max_preflight.py"
+```
+
+Add that line to a macroscript or a toolbar button. The panel is a message box on
+purpose: no `.ms` rollouts to maintain, nothing to break across Max versions.
+
+### What it measures
+
+* `getPolygonCount` triangles and vertices;
+* material slots from `Multimaterial` / `StandardMaterial`;
+* bitmap sizes from the bitmap nodes in the diffuse/bump/specular slots.
+
+---
+
+## Houdini (19+ / 22 tested)
+
+Houdini is the one DCC that needs care, because **its bundled Python has neither
+trimesh nor Pillow**. The gate cannot run inside hython; it has to be a
+subprocess.
+
+### The hook
+
+`tools/houdini_export_hook.py` is that subprocess. From a Houdini Python shell:
+
+```python
+import sys
+sys.path.append(r"C:\Tools\AssetGatekeeper\tools")
+import houdini_export_hook as agk
+
+agk.verify_export([
+    r"C:\Proj\export\env\cliff.obj",
+    r"C:\Proj\export\char\hero.obj",
+], extra_args=["--preset", "ps2"])
+```
+
+It returns one record per file: `path`, `returncode` (0 pass / 1 fail / 2 error),
+`verdict` (the parsed JSON), and the gate's `output`.
+
+### Point it at a Python that has the packages
+
+```
+setx AGK_PYTHON "C:\Tools\agk-venv\Scripts\python.exe"
+setx AGK_HOME   "C:\Tools\AssetGatekeeper"
+```
+
+`AGK_PYTHON` is the studio Python that has `trimesh` and `Pillow`. Without it the
+hook uses `sys.executable`, which is hython - and hython will report the gate as
+broken rather than silently passing, which is the right failure.
+
+**The gotcha that cost a day:** Houdini exports `PYTHONHOME` and `PYTHONPATH`
+into every child process. A child Python then loads *Houdini's* standard library
+and dies with `SRE module mismatch` before it reaches argparse. The hook strips
+those four variables (`PYTHONHOME`, `PYTHONPATH`, `PYTHONSTARTUP`,
+`PYTHONEXECUTABLE`) before spawning the gate. If you write your own shell-out
+from a DCC, do the same.
+
+### Where to call it
+
+* a **shelf tool** after a ROP render/fetch;
+* a **pre-export callback** on your geometry ROP (Houdini's `Before Render` or a
+  Python post-write callback), so a failed gate cancels the file being written;
+* a **PDG/lop** publish step, where the shell-out is natural anyway.
+
+### Headless
+
+```
+hython.exe "<AGK>\plugins\houdini\preflight_houdini.py" ^
+  --out result.json --preset retro crate.obj boss.obj
+```
+
+Exit codes follow the worst file: `0` all passed, `1` at least one failed,
+`2` harness error. The probe records `AGK_PYTHON` in its JSON so a test can
+assert the shell-out really used the configured interpreter.
+
+---
+
+## Unreal Engine 5
+
+### Install
+
+Unreal's Python is enabled per project: **Edit > Plugins > Python Editor Script
+Plugin**. Then either
+
+* run `plugins/unreal/unreal_preflight.py` from **Tools > Execute Python Script**,
+  or
+* copy it next to `init_unreal.py` in your project's `Content/Python` folder and
+  call `run_and_log()` from a menu entry.
+
+```python
+import unreal_preflight as p
+p.run_and_log()      # writes the report to the Output Log
+p.show()             # or a modal dialog
+```
+
+### What it measures
+
+* `get_num_triangles(0)` and `get_num_vertices(0)` on the **LOD 0** StaticMesh -
+  the same numbers the Statistics panel shows;
+* `static_materials` slots (draw calls).
+
+It does not measure textures: Unreal resolves those through material instances
+and a texture may be shared by fifty assets, so a per-asset texture budget would
+be a different feature. State that to your artists rather than letting them
+assume.
+
+### Headless
+
+```
+UnrealEditor-Cmd.exe "<Proj>\AGKProbe.uproject" ^
+  -run=pythonscript -script="<AGK>\plugins\unreal\preflight_unreal.py" ^
+  -unattended -nopause -nosplash -NullRHI -nosound
+```
+
+Configuration is by environment, because Unreal's command line is already
+crowded:
+
+```
+AGK_PROBE_OUT      where to write result.json   (required)
+AGK_PROBE_FIXTURE  an .obj to import and measure
+AGK_PROBE_PRESET   e.g. retro
+```
+
+**Exit codes:** UnrealEditor-Cmd returns the *editor's* status, not the script's;
+a scripted quit reports `-1`. The verdict lives in the JSON (`exit` field). CI
+must read the JSON for Unreal and not `$LASTEXITCODE`.
+
+---
+
+## Testing the DCC layer without opening a DCC
+
+```
+python tests/test_dcc_integration.py --only blender
+python tests/test_dcc_integration.py --deep --deep-timeout 90
+```
+
+It builds two exact fixtures (12 triangles / 1 material, and 4,000 / 4), runs each
+DCC headlessly with a hard timeout, and asserts geometry counts, the fuzzy-tag
+suggestion and the exit codes. A missing DCC is a SKIP; a wrong number is a
+failure. Set `--require` on a machine where a missing DCC is a real problem.
+
+Verified on this machine: Blender 4.0.2, Houdini 22.0.459 and Unreal 5.3 all
+pass headless (34 assertions, 0 skips, ~20 s in `--deep` mode).
+
+---
+
+## DCC troubleshooting, by symptom
+
+| Symptom | Cause | Fix |
+|---|---|---|
+| Blender panel missing after install | add-on ticked but the file was moved | reinstall from the new path; the panel registers on enable |
+| Maya window does not appear | script run inside an IDE context | run it from the Maya script editor or a shelf button |
+| Max prints `python` is not defined | you are in the MAXScript listener | `python.ExecuteFile @"..."` |
+| Houdini gate always fails with no verdict | `PYTHONHOME` leak (see above) | set `AGK_PYTHON`; the hook already strips the variables |
+| Unreal reports no Python module | Python Editor Script Plugin disabled | enable it and restart the editor |
+| Unreal headless run hangs | editor waiting for a project or a splash | pass a `.uproject`, `-unattended -nopause -nosplash -NullRHI` |
+| Panel numbers differ from the gate | panel reads the scene, gate reads the export | that is expected; check the export settings, not the panel |
+
+Next: [10 CI and version control](10-CI-AND-VERSION-CONTROL.md), or back to the
+[index](README.md).

@@ -13,6 +13,7 @@
 *One file. Three dependencies. Zero excuses for a 214k-triangle hero asset.*
 
 **Docs:** [Quickstart](QUICKSTART.md) (5 minutes) &middot; [Manual](MANUAL.md)
+**Full documentation:** [docs/README.md](docs/README.md) - everything, split by role (solo developer, studio rollout, rules, CLI, workstations, DCC plugins, CI, troubleshooting).
 (every flag, every config key, solo vs team workflows)
 
 </div>
