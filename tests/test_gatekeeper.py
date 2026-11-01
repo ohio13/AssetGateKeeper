@@ -1333,6 +1333,29 @@ preset_budget = agk.resolve_budget(preset_cfg, preset_args("--preset", "mobile",
                                                          "--triangles", "4200"))[0]
 expect("an explicit flag still beats the preset", preset_budget.max_triangles == 4200)
 
+# The CLI path used to drop a preset whenever the folder had no rules.toml, so
+# `asset-gatekeeper <folder> --preset retro` - the first command in the manual -
+# silently kept the 50k default. The pure function was tested; the resolver was
+# not, and that is exactly where the bug lived.
+bare_dir = scratch / "preset_bare"
+bare_dir.mkdir(parents=True, exist_ok=True)
+bare = agk.build_parser().parse_args([str(bare_dir), "--preset", "retro"])
+bare_budget, bare_source, _ = agk.resolve_budget(bare_dir, bare)
+expect("--preset works with no rules file at all",
+       bare_budget.max_triangles == 1500 and bare_budget.max_texture_edge == 256,
+       f"{bare_budget.max_triangles}/{bare_budget.max_texture_edge}")
+expect("a preset applied without a rules file reports no rules source", bare_source is None)
+expect("no rules file and no preset is still the shipped default",
+       agk.resolve_budget(bare_dir, agk.build_parser().parse_args([str(bare_dir)]))[0]
+       .max_triangles == 50_000)
+try:
+    agk.resolve_budget(bare_dir, agk.build_parser().parse_args(
+        [str(bare_dir), "--platform", "mobile"]))
+    expect("a platform with no [platforms.*] table is refused, not ignored", False)
+except agk.ConfigError as exc:
+    expect("a platform with no [platforms.*] table is refused, not ignored",
+           "unknown platform profile" in str(exc) and "--preset" in str(exc), str(exc)[:80])
+
 # ---- hierarchical tags -----------------------------------------------------
 tag_doc = {
     "mesh": {"max_triangles": 50000},

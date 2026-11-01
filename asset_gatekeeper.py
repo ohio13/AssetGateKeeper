@@ -819,17 +819,27 @@ def resolve_budget(root: Path, args: argparse.Namespace,
     else:
         rules_path = Path(args.rules).expanduser() if args.rules else root / RULES_FILENAME
         document = parse_rules(rules_path) if rules_path.is_file() else None
-        if document is None:
-            budget, source = Budget(), None
-            platform = requested_platform
-        else:
-            platform = requested_platform or str(document.get("platform", "") or "")
-            try:
-                document = apply_preset(apply_platform(document, platform),
-                                        requested_preset or str(document.get("preset", "") or ""))
-                budget, source = Budget.from_mapping(document), rules_path
-            except ConfigError as exc:
-                raise ConfigError(f"{rules_path}: {exc}") from exc
+        # Start from an empty document when the project published no rules file,
+        # so a shipped profile means the same thing with or without one. It used
+        # to be dropped in that case: `asset-gatekeeper <folder> --preset retro`
+        # quietly kept the 50k default, which is the first command in the manual
+        # and the one a new studio tries first.
+        base = document if document is not None else {}
+        platform = requested_platform or str(base.get("platform", "") or "")
+        preset = requested_preset or str(base.get("preset", "") or "")
+        if platform and not (base.get("platforms") or {}):
+            # "known: none defined" is true but useless: with no rules file the
+            # shipped presets are what the caller almost certainly meant, and a
+            # platform name that matches nothing must never pass silently.
+            raise ConfigError(
+                f"unknown platform profile {platform!r}: this project defines no "
+                f"[platforms.*] tables. Use --preset {platform!r} for a shipped budget "
+                f"({', '.join(preset_names(include_legacy=False))}).")
+        try:
+            budget = Budget.from_mapping(apply_preset(apply_platform(base, platform), preset))
+            source = rules_path if document is not None else None
+        except ConfigError as exc:
+            raise ConfigError(f"{rules_path}: {exc}" if document is not None else str(exc)) from exc
 
     budget = replace(budget, platform=platform)
 
