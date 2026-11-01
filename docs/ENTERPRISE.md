@@ -318,7 +318,10 @@ network and no external services):
 * URL fetching with size cap and 404 handling, changelist validation, runner hub
   claim/report/401 over real sockets;
 * the pre-flight core: budget errors, warnings, sorting, text rendering, fuzzy
-  tag suggestion in strict and suggest modes.
+  tag suggestion in strict and suggest modes;
+* the **Blender panel inside Blender 4.0.2 headless** - it imports, registers its
+  N-panel and reports a real scene (`CLEAN - nothing to fix`, 12 tris, 1
+  material) from the evaluated depsgraph, not from a fixture.
 
 **Needs your infrastructure to verify** (the code paths exist and fail closed,
 but nothing here can exercise them end to end):
@@ -326,7 +329,9 @@ but nothing here can exercise them end to end):
 * a real PostgreSQL server (`agk-enterprise doctor` reports the connection);
 * a real IdP (Okta / Entra ID / ADFS) for the full redirect round-trip;
 * a real Perforce server (`p4 print` against a live depot);
-* Blender, Maya, 3ds Max and Unreal installs for the four panels.
+* Maya, 3ds Max and Unreal installs for the other three panels (their adapters
+  are syntax-checked and share the verified core, but have not been driven in a
+  live session here).
 
 That boundary is stated here rather than implied, because "we integrated with
 Active Directory" means something very different in each case.
