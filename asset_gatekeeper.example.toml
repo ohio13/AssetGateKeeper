@@ -19,6 +19,13 @@ max_triangles = 50000
 # On by default: a broken link fails to load in every engine, on every platform.
 check_references = true
 
+# A reference that resolves outside the watch folder (../../shared/wood.png, or a
+# hardcoded C:/Users/... path) fails by default: the build machine will not have
+# it, and anything that follows the path on trust walks out of the repository.
+# Set this to true if your studio keeps a shared texture library one level up;
+# the finding then becomes a warning instead of a failure.
+allow_outside_references = false
+
 # Flags unbaked node translations/rotations and uncentred pivots; with
 # require_indexed it also fails triangle-soup geometry. OFF by default: an
 # offset pivot is often authored on purpose, so this is a review prompt.
@@ -52,7 +59,9 @@ naming = true
 
 # Case-insensitive; a trailing index (`_Albedo_02`) is tolerated. Change this
 # list if your studio uses a different convention (e.g. "_BC", "_N", "_R").
-suffixes = ["_Albedo", "_Normal", "_Roughness"]
+# _BaseColor/_ORM are Unreal's spelling of the same two maps and are accepted
+# out of the box, because that is where most exports come from.
+suffixes = ["_Albedo", "_Normal", "_Roughness", "_BaseColor", "_ORM"]
 
 # PBR value sanitisation: albedo is a reflectance colour, not a painting. Real
 # surfaces sit in a narrow band; pure black absorbs all light and pure white
@@ -60,7 +69,7 @@ suffixes = ["_Albedo", "_Normal", "_Roughness"]
 pbr = true
 pbr_floor = 0.02          # 5/255
 pbr_ceiling = 0.94        # 240/255
-pbr_suffixes = ["_Albedo", "_Diffuse"]   # normal/roughness maps are not albedo
+pbr_suffixes = ["_Albedo", "_Diffuse", "_BaseColor"]   # normal/roughness maps are not albedo
 
 # --------------------------------------------------------------------------- #
 # Optional: studio platform integration. Delete this table for a standalone tool.
@@ -79,7 +88,14 @@ pbr_suffixes = ["_Albedo", "_Diffuse"]   # normal/roughness maps are not albedo
 # file is a committed secret.
 # token = ""
 
-# NOTE: all three keys are commented out on purpose. An empty [server] table is
+# How much of the artist's machine travels with each verdict:
+#   "full" - hostname, username and the absolute path
+#   "path" - the absolute path only (DEFAULT: the dashboard's Send-to-Workstation
+#            bridge needs a real file, but nobody needs to know who and where)
+#   "none" - only the path relative to the watch folder
+# identity = "path"
+
+# NOTE: all four keys are commented out on purpose. An empty [server] table is
 # valid (it means "no platform"), but a stray "url = " with no value is not.
 
 # --------------------------------------------------------------------------- #
@@ -91,7 +107,7 @@ pbr_suffixes = ["_Albedo", "_Diffuse"]   # normal/roughness maps are not albedo
 [healer]
 enabled = false        # the only safe default
 
-# Non-power-of-two textures and missing "_Albedo"/"_Normal"/"_Roughness" suffixes.
+# Non-power-of-two textures and missing "_Albedo"/"_BaseColor"/"_ORM" suffixes.
 textures = true
 
 # Zero-area faces in .obj files. .gltf/.glb geometry is never rewritten blind.

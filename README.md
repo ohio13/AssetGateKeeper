@@ -837,16 +837,22 @@ python asset_gatekeeper.py [folder] [options]
 | :--- | :--- |
 | `folder` | Folder to watch (default: current directory) |
 | `--once` | Inspect everything present, print a summary, exit `0`/`1` |
+| `--allow-empty` | With `--once`: exit `0` when the folder holds no tracked assets (without it an empty folder fails: a wrong path is the usual reason) |
 | `--recursive` | Include subfolders |
+| `--follow-symlinks` | Descend into symlinked/junctioned folders, with a loop guard (off by default: a link re-counts a tree) |
 | `--rules PATH` | Use a specific rules file instead of `<folder>/rules.toml` |
+| `--preset NAME` | Apply a shipped platform preset (`--list-presets`); beats `rules.toml`, loses to an explicit numeric flag |
 | `--remote-rules URL` | Fetch the budget from a central endpoint, cached offline as `.rules.cache.json` |
 | `--telemetry-url URL` | POST every verdict to this endpoint (2 s timeout, never blocks) |
+| `--telemetry-identity MODE` | What telemetry carries: `full` (host, user, absolute path), `path` (absolute path only, the default), `none` (relative path) |
 | `--triangles N` | Override the triangle budget |
 | `--max-texture EDGE` | Override the max texture edge, in pixels |
 | `--max-materials N` | Override the material-slot budget |
 | `--max-influences N` | Override the per-vertex bone-weight budget |
 | `--max-uvs N` | Override the UV-channel budget |
 | `--platform NAME` | Apply the `[platforms.<NAME>]` compression profile |
+| `--tag-mode MODE` | How a near-miss asset tag is handled: `auto`, `suggest` (default), `strict` |
+| `--exclude GLOB` | Ignore files matching this glob (repeatable; same as `[filters] exclude`) |
 | `--audit` | Report broken references and orphaned textures for the whole folder, then exit |
 | `--no-reference-check` | Do not fail assets whose texture/buffer links are missing |
 | `--no-pbr-check` | Do not clamp albedo luminance |
@@ -854,11 +860,19 @@ python asset_gatekeeper.py [folder] [options]
 | `--require-indexed` | Also fail triangle-soup geometry (implies the transform audit) |
 | `--auto-heal` | Repair failing assets in place (opt-in; see above) |
 | `--no-auto-heal` | Force healing off, even if `rules.toml` enables it |
+| `--notify` / `--no-notify` | Native desktop toasts on failure/heal (on while watching, off in `--once`) |
+| `--notify-max N` | Maximum toasts per minute (default 6) |
 | `--allow-degenerate` | Permit zero-area triangles |
 | `--json` | One JSON object per file on stdout (the contract the DCC plugins use) |
 | `--allow-npot` | Accept non-power-of-two textures |
 | `--no-naming` | Accept texture names without a standard suffix |
 | `--no-color` | Disable ANSI colour |
+| `--doctor` | Check this machine can run the gate (python, trimesh, Pillow, watchdog, rules, ports), then exit |
+| `--list-presets` | Print the shipped platform targets and their budgets, then exit |
+| `--init` | Interactive setup: create the watch folder and its `rules.toml` |
+| `--yes` | With `--init`: accept every default instead of prompting |
+| `--force` | With `--init`: overwrite an existing `rules.toml` |
+| `--version` | Print the version and exit (pipelines log this) |
 | `-v`, `--verbose` | Debug logging (including why a file was skipped) |
 
 ---
@@ -1091,9 +1105,20 @@ python server/art_workstation_server.py --port 8100
 #   Art Workstation  http://127.0.0.1:8100/viewer
 ```
 
-Backend is `http.server` + `sqlite3` + `json` and nothing else; only Three.js
-comes from a CDN. Upload by dragging a `.obj` / `.gltf` / `.glb` onto the viewport
-or with the button.
+Backend is `http.server` + `sqlite3` + `json` and nothing else. Three.js is
+vendored under `server/static/vendor/`, so the viewer works on a machine with no
+internet access; nothing is fetched from a CDN. Upload by dragging a `.obj` /
+`.gltf` / `.glb` onto the viewport or with the button.
+
+Reached by LAN IP or hostname? Add the name you type:
+
+```bash
+python server/art_workstation_server.py --port 8100 --allow-host artbox.studio
+```
+
+Both servers refuse a request whose `Host` header is a name they do not answer
+to - that is the guard against a DNS-rebinding page driving a local viewer. IP
+literals, `localhost` and the machine's own name always work.
 
 | Panel | What it does |
 | :--- | :--- |

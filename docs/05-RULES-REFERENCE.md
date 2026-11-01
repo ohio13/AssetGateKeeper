@@ -36,6 +36,7 @@ Two consequences worth knowing before you debug anything:
 | `max_triangles` | int | 50000 | hard cap per mesh file |
 | `max_material_slots` | int | 3 | distinct materials - a draw-call proxy |
 | `check_references` | bool | true | fail on missing `.bin`, `.mtl`, texture paths |
+| `allow_outside_references` | bool | false | fail on a reference that resolves outside the watch folder; true downgrades it to a warning (shared texture library) |
 | `max_bone_influences` | int | 4 | skin weights per vertex; 4 is the mobile limit |
 | `allow_degenerate` | bool | false | zero-area faces: Nanite and RT compute garbage from them |
 | `audit_transforms` | bool | false | report non-zero object transforms (review, not failure) |
@@ -51,11 +52,11 @@ one asset and gets one budget. If you need per-object budgets, export per object
 | `max_edge` | int | 2048 | longest edge in pixels |
 | `power_of_two` | bool | true | require POT sizes (mobile GPUs and old consoles want this) |
 | `naming` | bool | true | require one of `suffixes` |
-| `suffixes` | list | `["_Albedo","_Normal","_Roughness"]` | accepted texture suffixes |
+| `suffixes` | list | `["_Albedo","_Normal","_Roughness","_BaseColor","_ORM"]` | accepted texture suffixes |
 | `pbr` | bool | false | albedo must look like reflectance, not a painting |
 | `pbr_floor` | float | 0.02 | mean luminance below this is "black" |
 | `pbr_ceiling` | float | 0.94 | above this is "white" |
-| `pbr_suffixes` | list | `["_Albedo","_Diffuse"]` | which suffixes are tested for PBR sanity |
+| `pbr_suffixes` | list | `["_Albedo","_Diffuse","_BaseColor"]` | which suffixes are tested for PBR sanity |
 
 The suffix list is a studio convention, not a universal truth. Change the list
 rather than switching `naming` off: a list documents the convention, a boolean

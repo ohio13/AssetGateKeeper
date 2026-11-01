@@ -32,8 +32,15 @@ except ImportError:                                   # pragma: no cover - addon
 
 
 def scene_facts():
-    """(triangles, vertices, materials, textures, degenerate) for selected objects."""
-    triangles = vertices = materials = degenerate = 0
+    """(triangles, vertices, materials, textures, degenerate) for selected objects.
+
+    ``materials`` counts *distinct* materials, not slots: three props sharing one
+    material is one draw call, and the engine counts distinct materials in the
+    exported file. Summing slots made this panel disagree with ``preflight_panel``
+    and with the gate, on the same scene, by a factor of the object count.
+    """
+    triangles = vertices = degenerate = 0
+    material_names = set()
     textures = []
     seen = set()
     context = bpy.context
@@ -54,8 +61,9 @@ def scene_facts():
                     degenerate += 1
         finally:
             evaluated.to_mesh_clear()
-        materials += len([slot for slot in obj.material_slots if slot.material])
         for slot in obj.material_slots:
+            if slot.material is not None:
+                material_names.add(slot.material.name)
             material = slot.material
             if material is None or not material.use_nodes:
                 continue
@@ -67,7 +75,7 @@ def scene_facts():
                     continue
                 seen.add(image.name)
                 textures.append((image.name, image.size[0], image.size[1]))
-    return triangles, vertices, materials, textures, degenerate
+    return triangles, vertices, len(material_names), textures, degenerate
 
 
 def _asset_folder():

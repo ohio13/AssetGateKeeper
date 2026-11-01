@@ -51,7 +51,7 @@ const json = (path, options) => api(path, options).then((r) => r.json());
 
 /* - three.js */
 
-const host = $("canvas--host");
+const host = $("canvas-host");
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0x0d1016);
 
@@ -375,7 +375,7 @@ async function selectAsset(id) {
     await loadModel(id, "source");
     $("status").textContent = state.asset.filename;
     $("note-submit").disabled = false;
-    $("note--text").disabled = false;
+    $("note-text").disabled = false;
     $("collision-derive").disabled = false;
   } catch (error) {
     $("status").textContent = `error: ${error.message}`;
@@ -671,7 +671,7 @@ $("collision-derive").addEventListener("click", async () => {
 $("note-form").addEventListener("submit", async (event) => {
   event.preventDefault();
   if (!state.asset) return;
-  const text = $("note--text").value.trim();
+  const text = $("note-text").value.trim();
   if (!text) return;
   try {
     await api("/api/notes", {
@@ -684,7 +684,7 @@ $("note-form").addEventListener("submit", async (event) => {
         author: $("note-author").value.trim() || "anonymous",
       }),
     });
-    $("note--text").value = "";
+    $("note-text").value = "";
     await selectAsset(state.asset.id);
   } catch (error) {
     $("status").textContent = `error: ${error.message}`;
@@ -882,8 +882,8 @@ function setTab(name) {
     tab.setAttribute("aria-selected", active ? "true" : "false");
   }
   $("pane-assets").classList.toggle("is-hidden", name !== "assets");
-  $("pane--rules").classList.toggle("is-hidden", name !== "rules");
-  document.body.classList.toggle("rules--open", name === "rules");
+  $("pane-rules").classList.toggle("is-hidden", name !== "rules");
+  document.body.classList.toggle("rules-open", name === "rules");
   if (window.location.hash !== `#${name}`) {
     window.history.replaceState(null, "", `#${name}`);
   }

@@ -100,6 +100,13 @@ escape the list, and a browser cannot widen it.
 
 ## Alerts
 
+Every row carries a status word: `PASSED`, `HEALED`, `FAILED` or `ERROR`. `ERROR`
+means the gate could not read the file at all - a locked handle, a permission the
+account does not have, a reparse point gone stale. It is not a verdict on the
+art, it is counted as a failure so the run goes red, and the audit page shows it
+as `ERROR` rather than `FAILED` so nobody goes looking for a modelling problem
+that does not exist.
+
 ```toml
 # rules.toml or the project settings
 [alerts]

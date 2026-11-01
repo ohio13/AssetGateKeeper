@@ -111,7 +111,7 @@ shadow pipeline in week two.
 
 ```
 # Perforce: warn first
-p4 triggers -> add a change-submit trigger that exits 0 but posts the verdict
+p4 triggers -> add a change-content trigger that exits 0 but posts the verdict
 # CI: warn first
 asset-gatekeeper assets --json --out gate.json || echo "gate failed (not blocking yet)"
 ```

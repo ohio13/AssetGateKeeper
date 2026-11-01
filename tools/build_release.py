@@ -59,7 +59,11 @@ DROP_IN_FILES = (
 )
 
 #: Directories copied whole into the drop-in tree (code + assets, no tests).
-DROP_IN_DIRS = ("server", "engine", "tools", "templates")
+#: enterprise/ and plugins/ are here because a studio that unzips this gets the
+#: console scripts and the DCC panels too; leaving them out meant the drop-in tree
+#: could not do half of what the README promised.
+DROP_IN_DIRS = ("server", "engine", "tools", "templates", "plugins", "enterprise",
+                "vcs_hooks", "docs")
 
 #: Never copied, whatever folder they appear in.
 SKIP_DIRS = {"__pycache__", ".git", ".agk", "build", "dist", "scratch", "dropbox",
@@ -168,7 +172,7 @@ def stage_drop_in(version: str) -> Path:
         "  python asset_gatekeeper.py <folder> --preset retro\n"
         "  python server\\art_workstation_server.py\n"
         "  python server\\asset_health_server.py\n",
-        encoding="utf-8")
+        encoding="utf-8", newline="\n")
     return stage
 
 
@@ -190,9 +194,16 @@ def sha256(path: Path) -> str:
 
 
 def write_sums(artefacts: list[Path]) -> Path:
+    """Checksums in the format ``sha256sum -c`` expects, on every platform.
+
+    ``newline="\n"`` is the whole point: Path.write_text translates to
+    ``os.linesep`` by default, so on Windows every line ended with CRLF and the
+    filename picked up a trailing carriage return. ``sha256sum -c SHA256SUMS.txt``
+    on the Linux box that downloads the release then reports the file as missing.
+    """
     sums = DIST / "SHA256SUMS.txt"
     lines = [f"{sha256(item)}  {item.name}" for item in artefacts]
-    sums.write_text("\n".join(lines) + "\n", encoding="ascii")
+    sums.write_text("\n".join(lines) + "\n", encoding="ascii", newline="\n")
     return sums
 
 

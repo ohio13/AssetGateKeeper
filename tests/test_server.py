@@ -227,6 +227,102 @@ summary = json.loads(body)
 expect("/api/summary is JSON", status == 200 and summary["totals"]["total"] == stats["total"])
 expect("/api/summary ranks rules", summary["bottlenecks"][0]["rule"] == "Triangle budget")
 
+# Security headers belong on every response, and a Host that is not ours is the
+# one signal a DNS-rebinding attack cannot fake.
+status, page_body, page_headers = request(port, "/dashboard")
+for header, expected in (("X-Content-Type-Options", "nosniff"),
+                         ("X-Frame-Options", "DENY"),
+                         ("Referrer-Policy", "same-origin")):
+    expect(f"the dashboard sends {header}", page_headers.get(header) == expected,
+           str(page_headers.get(header)))
+expect("the dashboard refuses to be framed by CSP",
+       "frame-ancestors 'none'" in (page_headers.get("Content-Security-Policy") or ""),
+       str(page_headers.get("Content-Security-Policy")))
+expect("CSP blocks external origins",
+       "default-src 'none'" in (page_headers.get("Content-Security-Policy") or ""))
+status, _, json_headers = request(port, "/api/summary")
+expect("JSON responses carry the security headers too",
+       json_headers.get("X-Content-Type-Options") == "nosniff")
+status, redirect_headers = request_raw(port, "/")
+expect("redirects carry the security headers too",
+       redirect_headers.get("X-Frame-Options") == "DENY", str(redirect_headers.get("X-Frame-Options")))
+
+status, body, _ = request(port, "/dashboard", headers={"Host": "evil.example"})
+expect("a foreign Host header is refused", status == 403, str(status))
+expect("and the refusal explains why", b"rebinding" in body, body[:120].decode("utf-8", "replace"))
+status, _, _ = request(port, "/api/telemetry", method="POST", body=VERDICT,
+                       headers={"Host": "evil.example"})
+expect("a foreign Host cannot write a verdict either", status == 403, str(status))
+status, _, _ = request(port, "/api/summary", headers={"Host": f"localhost:{port}"})
+expect("a loopback Host name is still accepted", status == 200, str(status))
+
+# Round 2 broke a LAN dashboard: only loopback and the bind address were accepted,
+# so every studio that types 192.168.x.x:8080 got 403. An IP literal cannot be
+# produced by a DNS-rebinding page, so it is safe to accept.
+for host_header in (f"192.168.1.10:{port}", f"10.0.0.5:{port}", f"[::1]:{port}",
+                    f"127.0.0.1:{port}"):
+    status, _, _ = request(port, "/api/summary", headers={"Host": host_header})
+    expect(f"an IP-literal Host ({host_header}) is accepted", status == 200, str(status))
+status, _, _ = request(port, "/api/summary", headers={"Host": "artbox.studio.example"})
+expect("an unknown DNS name is still refused", status == 403, str(status))
+status, headers_none, _ = request(port, "/favicon.ico")
+expect("favicon requests do not 404 (the console stays clean)",
+       status in (200, 204), str(status))
+
+# Request smuggling: a refused POST used to leave its body in the socket, where
+# the server parsed it as the next request on the same keep-alive connection.
+def _read_response(conn) -> bytes:
+    """One complete HTTP response (headers plus declared body)."""
+    data = b""
+    while b"\r\n\r\n" not in data:
+        chunk = conn.recv(65536)
+        if not chunk:
+            return data
+        data += chunk
+    head, _, body = data.partition(b"\r\n\r\n")
+    length = 0
+    for line in head.split(b"\r\n"):
+        if line.lower().startswith(b"content-length:"):
+            length = int(line.split(b":", 1)[1])
+    while len(body) < length:
+        chunk = conn.recv(65536)
+        if not chunk:
+            break
+        body += chunk
+    return head + b"\r\n\r\n" + body[:length]
+
+
+smuggled = (f"GET /api/summary HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n").encode()
+head = (f"POST /admin/login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+        f"Origin: http://evil.example\r\n"
+        f"Content-Type: application/x-www-form-urlencoded\r\n"
+        f"Content-Length: {len(smuggled)}\r\n\r\n").encode()
+with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
+    conn.sendall(head + smuggled)
+    first = _read_response(conn)
+    conn.settimeout(1.5)
+    try:
+        second = conn.recv(65536)
+    except socket.timeout:
+        second = b""
+expect("a cross-origin POST is refused", b"403" in first[:40], first[:40])
+expect("and its body is not parsed as the next request", second == b"", second[:80])
+
+# The same for a redirect: a 303 that leaves the body behind is the same hole.
+head = (f"POST /admin/login HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n"
+        f"Origin: http://127.0.0.1:{port}\r\n"
+        f"Content-Type: application/x-www-form-urlencoded\r\n"
+        f"Content-Length: {len(smuggled)}\r\n\r\n").encode()
+with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
+    conn.sendall(head + smuggled)
+    first = _read_response(conn)
+    conn.settimeout(1.5)
+    try:
+        second = conn.recv(65536)
+    except socket.timeout:
+        second = b""
+expect("a redirecting login POST leaves nothing behind", second == b"", second[:80])
+
 status, body, _ = request(port, "/api/telemetry", method="POST", body=VERDICT)
 expect("POST /api/telemetry stores a verdict", status == 201, str(status))
 stored_id = json.loads(body)["id"]

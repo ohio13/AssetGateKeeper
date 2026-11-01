@@ -11,6 +11,8 @@ What can be healed, and why only that:
 
 ``.png``  name suffix (rename) and non-power-of-two (pad or resize). Both are
           reversible in an afternoon and neither changes what the image means.
+          A rename also rewrites the ``.mtl``/``.gltf`` files that named the old
+          filename, and only at the moment the rename is adopted.
 ``.obj``  zero-area faces are deleted. Deleting a face that contributes no pixels
           is the one mesh edit that cannot cost an artist anything.
 
@@ -33,6 +35,7 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional, Sequence
+from urllib.parse import quote, unquote
 
 try:
     from PIL import Image
@@ -51,6 +54,33 @@ STAGING_PREFIX = ".agk-heal-"
 # on a 1000->1024 pad - so it is opt-in and documented as UV-shifting.
 TEXTURE_MODES = ("resize", "pad")
 HEALABLE_MESH_SUFFIXES = {".obj"}
+
+# Text files that can name a sibling texture by filename. A GLB embeds its
+# images, so it never needs rewriting; a .dae/.usda would, but the gate's own
+# reference model does not read them yet either. Keep the two in step.
+REFERENCE_TEXT_SUFFIXES = (".mtl", ".obj", ".gltf")
+
+# What marks the top of a project, for the "is this texture referenced outside the
+# watched folder?" check. The nearest ancestor holding one of these is searched
+# (read-only); without one, only the watched folder's parent is.
+# Strong markers say "this folder IS the project root". rules.toml is weaker: it
+# sits next to the assets it governs (``--init`` writes it into the watch folder),
+# so it only counts on an *ancestor* of the watch root.
+PROJECT_MARKERS = (".git", ".hg", ".svn", ".p4config", ".p4ignore")
+PROJECT_MARKER_GLOBS = ("*.uproject", "*.hip")
+ANCESTOR_MARKERS = ("rules.toml", ".agk")
+# Bounds for that outside search, so watching D:\Exports never walks all of D:\.
+OUTSIDE_SCAN_MAX_DIRS = 5_000
+OUTSIDE_SCAN_MAX_DEPTH = 8
+
+# A scene file larger than this is not read for references. Blind substitution
+# in a 40 MB glTF is slow and the rename is almost never the interesting part.
+MAX_REFERENCE_BYTES = 4 * 1024 * 1024
+
+# A rename may repoint this many files before the healer stops looking. A studio
+# tree holds tens of thousands of .obj files; a texture named by more than this is
+# either a shared library or a mistake, and both deserve a human.
+MAX_REFERENCE_FILES = 20_000
 
 
 class HealError(Exception):
@@ -84,14 +114,26 @@ def looks_power_of_two(value: int) -> bool:
 # Naming
 # --------------------------------------------------------------------------- #
 
-# Hints are matched against the whole stem, longest/most specific first. Order
-# matters: "norm" contains "nrm"? No, but "basecolor" must beat "color".
+# Hints are matched against the *start of a word* inside the stem, longest/most
+# specific first. Order matters twice over: "basecolor" has to beat "color",
+# and "orm" must not match inside "n[orm]al".
 _SUFFIX_HINTS: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("normal", "norm", "nrm", "_n"), "_Normal"),
+    (("basecolor", "base_color", "bc"), "_BaseColor"),
+    (("orm",), "_ORM"),
+    (("normal", "norm", "nrm"), "_Normal"),
     (("rough", "rgh", "roughness"), "_Roughness"),
-    (("albedo", "diffuse", "basecolor", "base_color", "colour", "color", "_bc", "_d", "_alb"),
-     "_Albedo"),
+    (("albedo", "diffuse", "colour", "color", "alb", "d"), "_Albedo"),
 )
+
+
+def _hint_matches(hint: str, lowered: str) -> bool:
+    """True when the stem starts a word with this hint.
+
+    Substring matching read "orm" inside "normal" and "bc" inside "abcd": a
+    texture named ``wall_normal`` was renamed to ``wall_normal_ORM``, which is
+    both wrong and expensive to notice.
+    """
+    return re.search(r"(?:^|[_\-\s.])" + re.escape(hint), lowered) is not None
 
 
 def choose_suffix(stem: str, suffixes: Sequence[str]) -> Optional[str]:
@@ -101,7 +143,7 @@ def choose_suffix(stem: str, suffixes: Sequence[str]) -> Optional[str]:
         if lowered.endswith(suffix.lower()):
             return None  # already compliant: never double-suffix
     for hints, suffix in _SUFFIX_HINTS:
-        if suffix in suffixes and any(hint in lowered for hint in hints):
+        if suffix in suffixes and any(_hint_matches(hint, lowered) for hint in hints):
             return suffix
     # No hint and no suffix: fall back to the first configured suffix, which is
     # the studio's own declared convention (_Albedo by default). Deterministic
@@ -236,6 +278,75 @@ def strip_degenerate_obj(path: Path, epsilon: float = 1e-8) -> Optional[str]:
 
 
 # --------------------------------------------------------------------------- #
+# Renamed files and the references that named them
+# --------------------------------------------------------------------------- #
+
+def _name_pattern(filename: str) -> "re.Pattern[str]":
+    """Match a filename as a whole path component, in prose or inside a URI.
+
+    The lookarounds are what make this safe to run over a whole file: ``./`` and
+    ``textures/`` may precede the name, but another name that merely *ends* in it
+    (``oak_wood.png``) or a backup file (``wood.png.bak``) must not match.
+    """
+    return re.compile(r"(?<![A-Za-z0-9_\-])" + re.escape(filename) + r"(?![A-Za-z0-9_\-.])")
+
+
+def rewrite_reference_names(text: str, renames: dict[str, str]) -> tuple[str, int]:
+    """Point every mention of an old filename at its new name. Returns (text, count)."""
+    total = 0
+    for old, new in renames.items():
+        text, count = _name_pattern(old).subn(lambda _match, _new=new: _new, text)
+        total += count
+    return text, total
+
+
+def _project_boundary(root: Path) -> Optional[Path]:
+    """The folder to search for references outside ``root``, or None if none.
+
+    ``root`` itself being a VCS or engine project root means the whole project
+    is already being watched. Otherwise the nearest marked ancestor (up to four
+    levels, where a rules.toml also counts), else ``root``'s parent.
+    """
+    def marked(folder: Path, weak: bool) -> bool:
+        markers = PROJECT_MARKERS + (ANCESTOR_MARKERS if weak else ())
+        if any((folder / marker).exists() for marker in markers):
+            return True
+        return any(next(folder.glob(pattern), None) is not None
+                   for pattern in PROJECT_MARKER_GLOBS)
+
+    try:
+        if marked(root, weak=False):
+            return None
+        current = root
+        for _ in range(4):
+            parent = current.parent
+            if parent == current:
+                break
+            if marked(parent, weak=True):
+                return parent
+            current = parent
+    except OSError:
+        pass
+    return root.parent if root.parent != root else None
+
+
+def _text_references(text: str, folder: Path, texture: Path, needles: set) -> bool:
+    """Does ``text`` (a file in ``folder``) name ``texture`` by a path that resolves to it?"""
+    target = os.path.normcase(str(texture))
+    for needle in needles:
+        pattern = re.compile(r"[^\s\"'<>=,]*" + re.escape(needle), re.IGNORECASE)
+        for match in pattern.finditer(text):
+            token = unquote(match.group(0).replace("\\", "/"))
+            try:
+                resolved = (folder / token).resolve()
+            except (OSError, ValueError):
+                return True                      # cannot tell: assume it does
+            if os.path.normcase(str(resolved)) == target:
+                return True
+    return False
+
+
+# --------------------------------------------------------------------------- #
 # The healer
 # --------------------------------------------------------------------------- #
 
@@ -247,7 +358,7 @@ class Healer:
     """
 
     def __init__(self, budget, *, textures: bool = True, meshes: bool = True,
-                 texture_mode: str = "resize") -> None:
+                 texture_mode: str = "resize", root: Optional[Path] = None) -> None:
         if texture_mode not in TEXTURE_MODES:
             raise HealError(f"texture_mode must be one of {', '.join(TEXTURE_MODES)}, "
                             f"got {texture_mode!r}")
@@ -257,6 +368,11 @@ class Healer:
         self.textures = textures
         self.meshes = meshes
         self.texture_mode = texture_mode
+        # The project boundary, when the caller knows it. With a root the healer
+        # finds references anywhere in the tree - meshes/, Content/Meshes/,
+        # Shared/Textures - instead of only the texture's folder and its parent,
+        # which missed most real layouts and broke the rename quietly.
+        self.root = Path(root) if root else None
 
     # -- public ------------------------------------------------------------- #
 
@@ -323,6 +439,8 @@ class Healer:
             return None
 
         modifications: list[str] = []
+        # old filename -> new filename, applied to reference files at adoption.
+        reference_renames: dict[str, str] = {}
         suffix = path.suffix.lower()
 
         if suffix == ".obj":
@@ -338,6 +456,19 @@ class Healer:
             if renamed is not None:
                 staged, note = renamed
                 modifications.append(note)
+                # The rename minted a name nothing points at yet. Record it, and
+                # make the staged sidecars agree, or the verify below would fail
+                # on a broken reference the heal itself just created.
+                reference_renames[path.name] = staged.name
+                # A glTF uri may be percent-encoded ("wood%2002.png" for
+                # "wood 02.png"); the gate compares the decoded name, so encode the
+                # replacement the same way or the file keeps pointing at the old one.
+                quoted_old, quoted_new = quote(path.name), quote(staged.name)
+                if quoted_old != path.name:
+                    reference_renames[quoted_old] = quoted_new
+                self._write_reference_edits(
+                    self._prepare_reference_edits(staging_root, reference_renames,
+                                                  include_parent=False))
             try:
                 note = heal_texture_file(staged, self.texture_mode)
             except (OSError, ValueError) as exc:   # corrupt/unreadable: not healable
@@ -363,6 +494,18 @@ class Healer:
             LOG.warning("healing: refusing to overwrite existing %s", target.name)
             return None
 
+        # ... and when nothing *outside* the watched folder still names it. The
+        # repointing below only edits files under the watch root; a mesh beside
+        # it (gate watching Textures/, mesh in ../Meshes/) would be orphaned by
+        # a heal that reports success. Refuse instead: the gate fails and locks.
+        if reference_renames:
+            blocker = self._outside_reference(path)
+            if blocker:
+                LOG.warning("healing: not renaming %s - %s; rename it in the DCC, or run "
+                            "the gate on the project root so every reference is updated",
+                            path.name, blocker)
+                return None
+
         verdict = checker(staged)
         if getattr(verdict, "problems", ()):  # did not actually fix it: keep the original
             LOG.debug("healing: %s still fails after healing, discarding (%s)",
@@ -370,7 +513,7 @@ class Healer:
             return None
 
         try:
-            return self._adopt(path, staged, modifications)
+            return self._adopt(path, staged, modifications, reference_renames)
         except OSError as exc:
             LOG.warning("healing: could not replace %s: %s", path.name, exc)
             return None
@@ -388,13 +531,179 @@ class Healer:
             return None
         return healed, f"renamed {staged.name} -> {healed.name}"
 
-    def _adopt(self, original: Path, staged: Path, modifications: list[str]) -> HealResult:
+    # -- references --------------------------------------------------------- #
+
+    def _outside_reference(self, texture: Path) -> str:
+        """Why renaming ``texture`` would break a file outside the watch root, or "".
+
+        Read-only. Searches the project boundary (nearest ancestor with a
+        project marker, else the watch root's parent) minus the watch root
+        itself, which the repointing already covers. A match only counts when it
+        resolves to *this* texture, so an unrelated ``wood.png`` elsewhere does
+        not block the heal. An incomplete search is treated as a match: the
+        safe answer to "might this orphan a mesh?" is not "probably not".
+        """
+        if self.root is None:
+            return ""
+        try:
+            root = self.root.resolve()
+            texture = texture.resolve()
+        except OSError:
+            return ""
+        boundary = _project_boundary(root)
+        if boundary is None:
+            return ""
+        name = texture.name
+        needles = {name, quote(name)}
+        dirs_seen = 0
+        base_depth = len(boundary.parts)
+        for base, dirnames, filenames in os.walk(boundary, onerror=lambda _exc: None):
+            here = Path(base)
+            dirs_seen += 1
+            if dirs_seen > OUTSIDE_SCAN_MAX_DIRS:
+                return (f"could not finish checking {boundary} for references "
+                        f"(over {OUTSIDE_SCAN_MAX_DIRS:,} folders)")
+            dirnames[:] = sorted(
+                d for d in dirnames
+                if not d.startswith(STAGING_PREFIX)
+                and d not in (".git", ".hg", ".svn", "__pycache__", "node_modules")
+                and (here / d).resolve() != root
+                and len(here.parts) - base_depth < OUTSIDE_SCAN_MAX_DEPTH)
+            if here.resolve() == root:
+                continue
+            for filename in filenames:
+                candidate = here / filename
+                if candidate.suffix.lower() not in REFERENCE_TEXT_SUFFIXES:
+                    continue
+                try:
+                    if candidate.stat().st_size > MAX_REFERENCE_BYTES:
+                        continue
+                    text = candidate.read_text(encoding="utf-8", errors="replace")
+                except OSError:
+                    continue
+                if not any(needle.lower() in text.lower() for needle in needles):
+                    continue
+                if _text_references(text, candidate.parent, texture, needles):
+                    try:
+                        shown = candidate.relative_to(boundary)
+                    except ValueError:
+                        shown = candidate
+                    return f"{shown} outside the watched folder still points at it"
+        return ""
+
+    def _reference_files(self, directory: Path, include_parent: bool = True) -> list[Path]:
+        """Text files that could name a texture living in ``directory``.
+
+        With a project root the whole tree is searched - bounded by suffix, size
+        cap and a file cap. Without one (single-file mode, or a caller that does
+        not know the root) it falls back to the texture's folder and its parent,
+        which is only right for the co-located layout.
+
+        ``include_parent`` is off for the staging folder: its parent *is* the
+        artist's directory, and reaching up from staging would edit the originals
+        before the heal has even been verified.
+        """
+        found: list[Path] = []
+        seen: set[Path] = set()
+
+        def consider(candidate: Path) -> None:
+            if candidate.suffix.lower() not in REFERENCE_TEXT_SUFFIXES:
+                return
+            if candidate in seen or not candidate.is_file():
+                return
+            seen.add(candidate)
+            if len(found) < MAX_REFERENCE_FILES:
+                found.append(candidate)
+
+        if self.root is not None and include_parent:
+            for base, dirnames, filenames in os.walk(self.root, onerror=lambda _exc: None):
+                # Never edit our own staging folders, never descend into a VCS.
+                dirnames[:] = sorted(
+                    name for name in dirnames
+                    if not name.startswith(STAGING_PREFIX)
+                    and name not in (".git", ".hg", ".svn", "__pycache__"))
+                for name in filenames:
+                    consider(Path(base) / name)
+                if len(found) >= MAX_REFERENCE_FILES:
+                    LOG.warning("healing: stopped looking for references after %d files",
+                                MAX_REFERENCE_FILES)
+                    break
+            return found
+
+        folders = [directory, directory.parent] if include_parent else [directory]
+        for folder in folders:
+            try:
+                entries = sorted(folder.iterdir())
+            except OSError:
+                continue
+            for entry in entries:
+                consider(entry)
+        return found
+
+    def _prepare_reference_edits(self, directory: Path, renames: dict[str, str],
+                                 skip: Sequence[Path] = (),
+                                 include_parent: bool = True) -> list[tuple[Path, str, int]]:
+        """Read and substitute in memory. Nothing is written until adoption.
+
+        Doing the reading first is the point: an unreadable reference file must
+        abandon the heal while the artist's bytes are still untouched, not after.
+        """
+        if not renames:
+            return []
+        skipped = set(skip)
+        pending: list[tuple[Path, str, int]] = []
+        for candidate in self._reference_files(directory, include_parent):
+            if candidate in skipped:
+                continue
+            try:
+                if candidate.stat().st_size > MAX_REFERENCE_BYTES:
+                    LOG.debug("healing: not rewriting references in %s (too large)",
+                              candidate.name)
+                    continue
+                text = candidate.read_text(encoding="utf-8")
+            except (OSError, UnicodeDecodeError):
+                continue                 # binary or unreadable: not ours to edit
+            updated, count = rewrite_reference_names(text, renames)
+            if count:
+                pending.append((candidate, updated, count))
+        return pending
+
+    @staticmethod
+    def _write_reference_edits(pending: Sequence[tuple[Path, str, int]]) -> int:
+        """Apply prepared edits atomically. Returns the number of references fixed."""
+        updated = 0
+        for path, text, count in pending:
+            temporary = path.with_name(path.name + ".agk-edit")
+            try:
+                temporary.write_text(text, encoding="utf-8")
+                os.replace(temporary, path)
+                updated += count
+                LOG.info("healed  %s: repointed %d reference(s)", path.name, count)
+            except OSError as exc:
+                LOG.warning("healing: could not update references in %s: %s",
+                            path.name, exc)
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+        return updated
+
+    def _adopt(self, original: Path, staged: Path, modifications: list[str],
+               reference_renames: Optional[dict[str, str]] = None) -> HealResult:
         target = original.parent / staged.name
+        # Reference edits are prepared before anything is replaced, so a file we
+        # cannot read abandons the heal with the original still in place.
+        pending = self._prepare_reference_edits(original.parent, reference_renames or {},
+                                                skip=(original, staged))
         # Atomic swap on the same filesystem; the original is replaced only now,
         # after the staged copy passed inspection.
         os.replace(staged, target)
         if target.name != original.name and original.exists():
             original.unlink()   # the rename case: old name must not survive
+        repointed = self._write_reference_edits(pending)
+        if repointed:
+            modifications.append(f"repointed {repointed} reference"
+                                 f"{'s' if repointed != 1 else ''} to {target.name}")
         for note in modifications:
             LOG.info("healed  %s: %s", target.name, note)
         return HealResult(target, tuple(modifications))

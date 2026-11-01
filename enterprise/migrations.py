@@ -205,6 +205,58 @@ def rewrite_for_postgres(statement: str) -> str:
     return text
 
 
+def _created_table(statement: str) -> str:
+    match = re.match(r"\s*CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?[\"']?([A-Za-z_][A-Za-z0-9_]*)",
+                     statement, re.IGNORECASE)
+    return match.group(1).lower() if match else ""
+
+
+def order_statements(statements: list[str]) -> list[str]:
+    """Put tables before the tables they reference, and constraints last.
+
+    PostgreSQL checks a foreign key when the table is created, so the baseline's
+    ``verdicts`` (which references ``projects``) failed on a fresh server while
+    SQLite accepted it - SQLite defers the check, which is exactly why no test
+    noticed. The file's own order is not authoritative: this is.
+
+    Translation also *moves* foreign keys into ``ALTER TABLE ... ADD CONSTRAINT``
+    statements, and those must run after every table exists, not after their own.
+    """
+    tables: dict[str, str] = {}
+    order: list[str] = []
+    others: list[str] = []
+    constraints: list[str] = []
+
+    for statement in statements:
+        head = statement.lstrip().upper()
+        if head.startswith("CREATE TABLE"):
+            name = _created_table(statement)
+            tables[name] = statement
+            order.append(name)
+        elif head.startswith("ALTER TABLE") and "ADD CONSTRAINT" in head:
+            constraints.append(statement)
+        else:
+            others.append(statement)
+
+    # Kahn's algorithm, stable: a table waits for the tables it references.
+    waiting = {name: {dep for dep in re.findall(r"REFERENCES\s+[\"']?([A-Za-z_][A-Za-z0-9_]*)",
+                                                tables[name], re.IGNORECASE)
+                      if dep.lower() in tables and dep.lower() != name}
+               for name in order}
+    emitted: list[str] = []
+    while waiting:
+        ready = [name for name in order if name in waiting and not waiting[name]]
+        if not ready:                     # a cycle: emit what is left in file order
+            ready = [name for name in order if name in waiting]
+        for name in ready:
+            emitted.append(tables.pop(name))
+            waiting.pop(name)
+        for dependencies in waiting.values():
+            dependencies.difference_update(ready)
+
+    return emitted + others + constraints
+
+
 def effective_statements(sql: str, dialect: str) -> list[str]:
     """The statements that will actually run, after rewriting for the engine.
 
@@ -214,7 +266,9 @@ def effective_statements(sql: str, dialect: str) -> list[str]:
     """
     statements = split_statements(sql)
     if dialect != "postgres":
-        return statements
+        # Ordering is engine-agnostic and SQLite tolerates either, but emitting a
+        # table before the table it points at is a trap for the next reader.
+        return order_statements(statements)
     from .store import SqlTranslator
 
     translator = SqlTranslator()
@@ -227,7 +281,7 @@ def effective_statements(sql: str, dialect: str) -> list[str]:
     # Rewrite *after* translation as well: the translator generates the
     # ADD CONSTRAINT statements for moved foreign keys, and those need NOT VALID
     # just as much as a hand-written one.
-    return [rewrite_for_postgres(statement) for statement in result]
+    return [rewrite_for_postgres(statement) for statement in order_statements(result)]
 
 
 def lint(migration: Migration, dialect: str = "postgres",
@@ -359,7 +413,9 @@ class MigrationRunner:
         if not pending:
             return done
         with self.store.connect() as connection:
+            previous_autocommit = self._enter_autocommit(connection)
             if not self._lock(connection) and self.dialect == "postgres":
+                self._leave_autocommit(connection, previous_autocommit)
                 raise MigrationError("another migration is running (advisory lock held)")
             try:
                 if self.dialect == "postgres":
@@ -376,13 +432,12 @@ class MigrationRunner:
 
                     started = self._clock()
                     began = _time.perf_counter()
-                    for statement in statements:
-                        connection.execute(statement)            # type: ignore[attr-defined]
-                    connection.execute(                          # type: ignore[attr-defined]
+                    self._run_step(
+                        connection, statements,
                         "INSERT INTO schema_migrations (version, name, checksum,"
                         " applied_at, duration_ms, kind) VALUES (?, ?, ?, ?, ?, ?)",
-                        (migration.version, migration.name, migration.checksum,
-                         started, int((_time.perf_counter() - began) * 1000), "up"))
+                        lambda: (migration.version, migration.name, migration.checksum,
+                                 started, int((_time.perf_counter() - began) * 1000), "up"))
                     done.append(step.as_dict())
                     if self.log is not None:
                         self.log.emit("migration.applied", actor="agk-enterprise",
@@ -391,6 +446,7 @@ class MigrationRunner:
                                               "statements": len(statements)})
             finally:
                 self._unlock(connection)
+                self._leave_autocommit(connection, previous_autocommit)
         return done
 
     def rollback(self, to: int = 0, dry_run: bool = False) -> list[dict]:
@@ -403,7 +459,9 @@ class MigrationRunner:
         if not targets:
             return done
         with self.store.connect() as connection:
+            previous_autocommit = self._enter_autocommit(connection)
             if not self._lock(connection) and self.dialect == "postgres":
+                self._leave_autocommit(connection, previous_autocommit)
                 raise MigrationError("another migration is running (advisory lock held)")
             try:
                 for migration in targets:
@@ -413,11 +471,9 @@ class MigrationRunner:
                     if dry_run:
                         done.append(step.as_dict())
                         continue
-                    for statement in statements:
-                        connection.execute(statement)            # type: ignore[attr-defined]
-                    connection.execute(                          # type: ignore[attr-defined]
-                        "DELETE FROM schema_migrations WHERE version = ?",
-                        (migration.version,))
+                    self._run_step(connection, statements,
+                                   "DELETE FROM schema_migrations WHERE version = ?",
+                                   lambda: (migration.version,))
                     done.append(step.as_dict())
                     if self.log is not None:
                         self.log.emit("migration.applied", actor="agk-enterprise",
@@ -425,7 +481,48 @@ class MigrationRunner:
                                       detail={"migration": migration.key})
             finally:
                 self._unlock(connection)
+                self._leave_autocommit(connection, previous_autocommit)
         return done
+
+    # -- running one step ---------------------------------------------------- #
+
+    def _enter_autocommit(self, connection: Any) -> Optional[bool]:
+        """PostgreSQL: run the session in autocommit so each step picks its mode."""
+        if self.dialect != "postgres" or not hasattr(connection, "set_autocommit"):
+            return None
+        return connection.set_autocommit(True)
+
+    @staticmethod
+    def _leave_autocommit(connection: Any, previous: Optional[bool]) -> None:
+        if previous is None:
+            return
+        try:
+            connection.set_autocommit(previous)
+        except Exception:                            # pragma: no cover
+            pass
+
+    def _run_step(self, connection: Any, statements: list[str], record_sql: str,
+                  record_params) -> None:
+        """Run one migration's statements, then record it.
+
+        PostgreSQL refuses ``CREATE INDEX CONCURRENTLY`` inside a transaction
+        block, and the runner rewrites every ``CREATE INDEX`` that way - so a
+        step containing one runs statement by statement in autocommit (the
+        record is written last: a failure leaves the step unrecorded, and
+        re-running it is safe because tables and indexes use IF NOT EXISTS and
+        moved constraints are skipped when present). Every other PostgreSQL
+        step is one explicit transaction. SQLite is unchanged.
+        """
+        concurrent = any("CONCURRENTLY" in statement.upper() for statement in statements)
+        if self.dialect == "postgres" and hasattr(connection, "transaction") and not concurrent:
+            with connection.transaction():
+                for statement in statements:
+                    connection.execute(statement)
+                connection.execute(record_sql, record_params())
+            return
+        for statement in statements:
+            connection.execute(statement)                # type: ignore[attr-defined]
+        connection.execute(record_sql, record_params())  # type: ignore[attr-defined]
 
     # -- verification of the *result* ------------------------------------- #
 

@@ -48,6 +48,11 @@ ENV_RULES = "ASSETGATEKEEPER_RULES"
 MAX_PRIMS_FOR_AREA_SCAN = 50_000
 UV_ATTRIBUTE_PATTERN = re.compile(r"^uv\d*$")
 
+# Prim classes by name, because hou.primType gained members between versions and
+# an AttributeError at cook time used to disable the whole check silently.
+POLYGON_PRIM_TYPES = ("Polygon",)
+PACKED_PRIM_TYPES = ("PackedGeometry", "PackedFragment", "PackedSequence")
+
 
 # --------------------------------------------------------------------------- #
 # Budget
@@ -97,7 +102,49 @@ def material_slots(geometry) -> int:
     return len(values)
 
 
-def triangle_count(geometry, sample_cap: int = 2_000_000) -> int:
+def _type_name(prim) -> str:
+    """'PackedGeometry' for prim.type() -> primType.PackedGeometry."""
+    return str(prim.type()).rsplit(".", 1)[-1]
+
+
+def _vertex_count(prim) -> int:
+    """Houdini 19 renamed ``vertexCount()`` to ``numVertices()``.
+
+    The SOP called the old name unconditionally, so on anything from 19 onwards
+    every cook raised AttributeError, ``run()`` swallowed it as "check skipped",
+    and the gate was decorative.
+    """
+    for attribute in ("numVertices", "vertexCount"):
+        counter = getattr(prim, attribute, None)
+        if callable(counter):
+            return int(counter())
+    return 0
+
+
+def _embedded_geometry(prim):
+    """The geometry inside a packed prim, or None when it cannot be opened."""
+    getter = getattr(prim, "getEmbeddedGeometry", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter()
+    except Exception:                                  # pragma: no cover - version
+        return None
+
+
+def triangle_count(geometry, sample_cap: int = 2_000_000,
+                   uncounted: Optional[list] = None) -> int:
+    """Triangles after triangulation, opening packed primitives as it goes.
+
+    * Polygons count ``vertices - 2``.
+    * Packed prims are *expanded*: a packed prim reports one vertex, so a packed
+      4,000,000-triangle asset used to count as zero and sail through the gate.
+      A pack that cannot be expanded is recorded in ``uncounted`` rather than
+      quietly counted as nothing.
+    * Curves, volumes and particles are not polygons and contribute no triangles.
+      Counting ``vertices - 2`` on a NURBS curve invented triangles out of thin
+      air.
+    """
     prims = geometry.prims()
     total = 0
     for index, prim in enumerate(prims):
@@ -106,17 +153,35 @@ def triangle_count(geometry, sample_cap: int = 2_000_000) -> int:
             average = total / index if index else 0
             total += int(average * (len(prims) - index))
             break
-        total += max(0, prim.vertexCount() - 2)
+        kind = _type_name(prim)
+        if kind in PACKED_PRIM_TYPES:
+            embedded = _embedded_geometry(prim)
+            if embedded is not None:
+                total += triangle_count(embedded, sample_cap, uncounted)
+            elif uncounted is not None:
+                uncounted.append(prim)
+            continue
+        if kind in POLYGON_PRIM_TYPES:
+            total += max(0, _vertex_count(prim) - 2)
     return total
 
 
 def degenerate_prim_count(geometry, epsilon: float = 1e-9) -> int:
+    """Zero-area *polygons*. Packed prims are opened; curves are not polygons."""
     prims = geometry.prims()
     count = 0
     step = max(1, len(prims) // MAX_PRIMS_FOR_AREA_SCAN)
     for index, prim in enumerate(prims):
         if index % step:
             continue
+        kind = _type_name(prim)
+        if kind in PACKED_PRIM_TYPES:
+            embedded = _embedded_geometry(prim)
+            if embedded is not None:
+                count += degenerate_prim_count(embedded, epsilon)
+            continue
+        if kind not in POLYGON_PRIM_TYPES:
+            continue                      # a two-point curve is not degenerate
         points = prim.points()
         if len(points) < 3:
             count += 1
@@ -135,8 +200,14 @@ def degenerate_prim_count(geometry, epsilon: float = 1e-9) -> int:
 def analyse(geometry, budget) -> list[str]:
     problems: list[str] = []
 
-    triangles = triangle_count(geometry)
-    if triangles == 0:
+    uncounted: list = []
+    triangles = triangle_count(geometry, uncounted=uncounted)
+    if uncounted:
+        # Counting an unreadable pack as zero is how a 4M-triangle pack passes.
+        problems.append(
+            f"{len(uncounted)} packed primitive(s) could not be expanded, so the "
+            "triangle count is not trustworthy")
+    if triangles == 0 and not uncounted:
         problems.append("geometry contains no polygons (empty stream)")
     elif triangles > budget.max_triangles:
         problems.append(f"{triangles:,} triangles exceeds the {budget.max_triangles:,} budget "

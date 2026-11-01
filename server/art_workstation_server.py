@@ -65,6 +65,7 @@ for path in (str(HERE), str(REPO_ROOT), str(REPO_ROOT / "engine")):
 
 import asset_gatekeeper as agk  # noqa: E402 - validated glTF/OBJ analysers
 import lod_manager  # noqa: E402 - the decimator
+from server import netguard  # noqa: E402 - shared Host policy with the dashboard
 
 DEFAULT_DB = "art_workstation.db"
 DEFAULT_DATA = "workstation_data"
@@ -115,6 +116,24 @@ def asset_kind(path: Path) -> str:
         return "mesh"
     return "unverified"
 CATEGORIES = ("Geometry", "Texture", "LOD", "Collision", "Shading", "Other")
+
+#: Same reasoning as the dashboard: this page renders artist-supplied names and
+#: notes, and it is a local review tool, so it must not be framed or allowed to
+#: load anything from another origin. Inline script/style stay allowed because
+#: the viewer is built from Python strings; blob: is here because the model
+#: loader hands the canvas an object URL.
+WORKSTATION_SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    # Same reasoning as the dashboard: no-referrer turns a same-origin form POST
+    # into "Origin: null" in Chromium, which reads as cross-origin to the server.
+    ("Referrer-Policy", "same-origin"),
+    ("Content-Security-Policy",
+     "default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; "
+     "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+     "connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; "
+     "base-uri 'none'; form-action 'self'"),
+)
 COLLISION_KINDS = ("box", "sphere", "hull")
 
 
@@ -1080,13 +1099,42 @@ class Handler(BaseHTTPRequestHandler):
             return
         sys.stderr.write("%s  %s\n" % (datetime.now().strftime("%H:%M:%S"), fmt % args))
 
+    def _drain_request_body(self) -> None:
+        """Read and discard a body we are about to refuse (see the dashboard).
+
+        An unread body is parsed as the next request on a keep-alive connection:
+        that is request smuggling, and it applies to this server too.
+        """
+        if getattr(self, "_body_read", False) or self.command not in ("POST", "PUT"):
+            return
+        self._body_read = True
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return
+        if length > MAX_UPLOAD_BYTES:
+            self.close_connection = True
+            return
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                self.close_connection = True
+                return
+            remaining -= len(chunk)
+
     def _send(self, status: int, body: bytes, content_type: str,
               headers: dict[str, str] | None = None) -> None:
+        if status >= 400:
+            self._drain_request_body()
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
+        for key, value in WORKSTATION_SECURITY_HEADERS:
+            self.send_header(key, value)
         for key, value in (headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -1129,7 +1177,9 @@ class Handler(BaseHTTPRequestHandler):
         if length < 0 or length > limit:
             self._json(413, {"error": f"body must be at most {limit} bytes"})
             return None
-        return self.rfile.read(length)
+        raw = self.rfile.read(length)
+        self._body_read = True
+        return raw
 
     def _json_body(self) -> dict | None:
         raw = self._body(MAX_JSON_BYTES)
@@ -1147,8 +1197,36 @@ class Handler(BaseHTTPRequestHandler):
 
     # - GET - #
 
+    def handle_error(self, request, client_address) -> None:
+        """Same quiet handling as the dashboard (see its comment)."""
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
+    def _host_allowed(self) -> bool:
+        """Same Host policy as the dashboard (server/netguard.py).
+
+        This server was left open to DNS rebinding: any Host was answered, which
+        is exactly what the release notes said did not happen.
+        """
+        return netguard.host_allowed(self.headers.get("Host", ""),
+                                     self.server.server_address[0],
+                                     getattr(self.server, "allow_hosts", ()))
+
+    def _reject_host(self) -> None:
+        self._json(403, {"error": "unexpected Host header",
+                         "detail": netguard.refusal_detail(self.headers.get("Host", "")),
+                         "host": self.headers.get("Host", "")})
+
     def do_GET(self) -> None:  # noqa: N802
+        if not self._host_allowed():
+            self._reject_host()
+            return
         path = urllib.parse.urlsplit(self.path).path
+        if path == "/favicon.ico":
+            self._send(204, b"", "image/x-icon")
+            return
         try:
             if path in ("/", "", "/viewer"):
                 if path != "/viewer":
@@ -1339,6 +1417,9 @@ class Handler(BaseHTTPRequestHandler):
     # - POST - #
 
     def do_POST(self) -> None:  # noqa: N802
+        if not self._host_allowed():
+            self._reject_host()
+            return
         path = urllib.parse.urlsplit(self.path).path
         try:
             if not self._authorised():
@@ -1425,6 +1506,9 @@ class Handler(BaseHTTPRequestHandler):
     # - DELETE - #
 
     def do_DELETE(self) -> None:  # noqa: N802
+        if not self._host_allowed():
+            self._reject_host()
+            return
         path = urllib.parse.urlsplit(self.path).path
         try:
             if not self._authorised():
@@ -1455,6 +1539,9 @@ class Handler(BaseHTTPRequestHandler):
         self.do_GET()
 
     def do_PUT(self) -> None:  # noqa: N802
+        if not self._host_allowed():
+            self._reject_host()
+            return
         self._json(405, {"error": "method not allowed"})
 
 
@@ -1465,11 +1552,15 @@ class WorkstationServer(socketserver.ThreadingTCPServer):
 
     def __init__(self, address: tuple[str, int], db_path: str | Path, data_dir: str | Path,
                  token: str = "", quiet: bool = False,
-                 rules_path: str | Path = "", rules_root: str | Path = ""):
+                 rules_path: str | Path = "", rules_root: str | Path = "",
+                 allow_hosts: tuple[str, ...] = ()):
         self.db_path = str(db_path)
         self.data_dir = str(data_dir)
         self.token = token
         self.quiet = quiet
+        # Host header allow-list, same policy as the dashboard: loopback names,
+        # IP literals and this machine's own name are always accepted.
+        self.allow_hosts = tuple(str(item).strip().lower() for item in allow_hosts if item)
         # The /api/rules inspector reports this rules.toml read-only. It is never
         # written and never gates an upload - it is a reference card for artists.
         self.rules_path = str(rules_path or "")
@@ -1485,9 +1576,10 @@ class WorkstationServer(socketserver.ThreadingTCPServer):
 
 def build_server(host: str, port: int, db_path: str | Path, data_dir: str | Path,
                  token: str = "", quiet: bool = False,
-                 rules_path: str | Path = "", rules_root: str | Path = "") -> WorkstationServer:
+                 rules_path: str | Path = "", rules_root: str | Path = "",
+                 allow_hosts: tuple[str, ...] = ()) -> WorkstationServer:
     return WorkstationServer((host, port), db_path, data_dir, token, quiet,
-                             rules_path, rules_root)
+                             rules_path, rules_root, allow_hosts)
 
 
 def describe_rules(server: "WorkstationServer") -> dict:
@@ -1537,6 +1629,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="rules.toml the in-page Rules & Budgets panel reports on, "
                              f"read-only (default: ./{agk.RULES_FILENAME} in the working "
                              f"directory, or ${RULES_ENV})")
+    parser.add_argument("--allow-host", metavar="NAME", action="append", default=[],
+                        help="accept this Host header as well as IP literals, localhost "
+                             "and this machine's own name (repeatable). Requests whose "
+                             "Host names anything else are refused, which is what stops a "
+                             "DNS-rebinding page from driving the viewer")
     return parser
 
 
@@ -1563,7 +1660,8 @@ def main(argv: list[str] | None = None) -> int:
         httpd, bound_port = agk.bind_with_fallback(
             lambda host, port: build_server(host, port, db_path, data_dir, args.token,
                                             args.quiet, rules_path=args.rules,
-                                            rules_root=Path.cwd()),
+                                            rules_root=Path.cwd(),
+                                            allow_hosts=tuple(args.allow_host)),
             args.host, args.port, auto=args.port_auto, tries=args.port_tries,
             reserved=(ASSET_HEALTH_PORT,), report=_moved)
     except OSError as exc:

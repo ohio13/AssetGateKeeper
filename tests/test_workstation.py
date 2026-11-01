@@ -234,6 +234,12 @@ expect("solo mode reports no auth", body["auth"] is False)
 status, raw, headers = client.call("/viewer")
 expect("the viewer page is served", status == 200 and b"Art Workstation" in raw, str(status))
 expect("with the right content type", "text/html" in headers.get("Content-Type", ""))
+expect("the viewer cannot be framed", headers.get("X-Frame-Options") == "DENY",
+       str(headers.get("X-Frame-Options")))
+expect("the viewer sends a CSP",
+       "default-src 'none'" in (headers.get("Content-Security-Policy") or ""),
+       str(headers.get("Content-Security-Policy")))
+expect("the viewer is not sniffed", headers.get("X-Content-Type-Options") == "nosniff")
 status, raw, _ = client.call("/static/app.css")
 expect("css is served", status == 200 and b"--accent" in raw)
 status, _, _ = client.call("/static/../art_workstation_server.py")

@@ -28,6 +28,7 @@ What is deliberately *not* silent
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import queue
 import re
 import sqlite3
@@ -74,6 +75,18 @@ _FK_COLUMN_RE = re.compile(
     r"REFERENCES\s+(?P<table>[A-Za-z_][A-Za-z0-9_]*)\s*\(\s*(?P<target>[A-Za-z_][A-Za-z0-9_]*)\s*\)"
     r"(?P<ondelete>\s+ON\s+DELETE\s+[A-Z ]+?)?(?=\s*,|\s*$)",
     re.IGNORECASE)
+
+#: The inline ``REFERENCES t(c) [ON DELETE ...]`` part of one column definition.
+_REFERENCES_CLAUSE_RE = re.compile(
+    r"\s+REFERENCES\s+[A-Za-z_][A-Za-z0-9_]*\s*\(\s*[A-Za-z_][A-Za-z0-9_]*\s*\)"
+    r"(?:\s+ON\s+DELETE\s+(?:SET\s+NULL|SET\s+DEFAULT|CASCADE|RESTRICT|NO\s+ACTION))?",
+    re.IGNORECASE)
+
+#: ``ALTER TABLE t ADD CONSTRAINT name ...`` - the statements the translator moves
+#: foreign keys into. PostgreSQL has no ``ADD CONSTRAINT IF NOT EXISTS``.
+_ADD_CONSTRAINT_RE = re.compile(
+    r"^\s*ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s+"
+    r"ADD\s+CONSTRAINT\s+([A-Za-z_][A-Za-z0-9_]*)\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -152,13 +165,13 @@ class SqlTranslator:
 
     def schema_statements(self, schema: str) -> list[str]:
         """Turn a SQLite schema script into executable PostgreSQL statements."""
-        statements = [s.strip() for s in schema.split(";") if s.strip()]
+        # Strip comments *before* splitting on ';'. A semicolon inside a comment
+        # ("... on its way in; an ERROR row means ...") split a CREATE TABLE in
+        # half and shipped the fragment to the server as a statement.
+        statements = [s.strip() for s in _strip_comments(schema).split(";") if s.strip()]
         creates: list[str] = []
         constraints: list[str] = []
         for statement in statements:
-            statement = _strip_comments(statement)
-            if not statement:
-                continue
             if "CREATE TABLE" in statement.upper():
                 creates.append(self._translate_create(statement, constraints))
             else:
@@ -186,7 +199,13 @@ class SqlTranslator:
                 # same script, which PostgreSQL refuses and SQLite does not care
                 # about. Drop the inline constraint, re-add it afterwards.
                 on_delete = (fk.group("ondelete") or "").strip()
-                cleaned = (cleaned[:fk.start()] + cleaned[fk.end():]).strip()
+                # Remove the REFERENCES clause only. The match above spans the
+                # whole column definition, and cutting that out dropped the
+                # column itself (``problems.verdict_id``), so the index and
+                # the re-added constraint then failed on a column that was gone.
+                clause = _REFERENCES_CLAUSE_RE.search(cleaned, fk.start())
+                if clause is not None:
+                    cleaned = (cleaned[:clause.start()] + cleaned[clause.end():]).strip()
                 cleaned = re.sub(r",\s*$", "", cleaned)
                 constraints.append(
                     f"ALTER TABLE {table} ADD CONSTRAINT fk_{table}_{fk.group('column')} "
@@ -316,9 +335,54 @@ class PgConnection:
         self._connection = connection
         self._translator = translator
 
+    def _constraint_exists(self, statement: str) -> bool:
+        """True when ``statement`` adds a constraint that is already there.
+
+        The schema is re-run on every dashboard start and every resumed
+        migration, and ``CREATE TABLE IF NOT EXISTS`` is idempotent while the
+        moved foreign keys were not: the second start of a PostgreSQL dashboard
+        died on "constraint ... already exists".
+        """
+        match = _ADD_CONSTRAINT_RE.match(statement)
+        if match is None:
+            return False
+        cursor = self._connection.cursor()
+        try:
+            cursor.execute("SELECT 1 FROM pg_constraint WHERE conname = %s"
+                           " AND conrelid = to_regclass(%s)",
+                           (match.group(2).lower(), match.group(1).lower()))
+            return cursor.fetchone() is not None
+        except Exception:
+            # No catalog to ask (the test suite's PostgreSQL double): fall back
+            # to running the statement and letting the server decide.
+            return False
+        finally:
+            cursor.close()
+
+    def set_autocommit(self, value: bool) -> bool:
+        """Switch autocommit, returning the previous setting.
+
+        Needed by the migration runner: ``CREATE INDEX CONCURRENTLY`` is refused
+        inside a transaction block, and psycopg opens one implicitly.
+        """
+        previous = bool(self._connection.autocommit)
+        if previous != value:
+            if value:
+                self._connection.commit()       # close any implicit transaction first
+            self._connection.autocommit = value
+        return previous
+
+    @contextlib.contextmanager
+    def transaction(self) -> Iterator["PgConnection"]:
+        """An explicit transaction (commits on success, rolls back on error)."""
+        with self._connection.transaction():
+            yield self
+
     def execute(self, sql: str, params: Sequence[Any] | dict | None = None) -> Result:
         translated = self._translator.translate(sql)
         if not translated:
+            return Result([], 0)
+        if self._constraint_exists(translated):
             return Result([], 0)
         cursor = self._connection.cursor()
         try:
@@ -346,6 +410,8 @@ class PgConnection:
 
     def executescript(self, script: str) -> None:
         for statement in self._translator.schema_statements(script):
+            if self._constraint_exists(statement):
+                continue
             cursor = self._connection.cursor()
             try:
                 cursor.execute(statement)
@@ -462,12 +528,34 @@ class Store:
     """One object, two engines, one set of semantics."""
 
     def __init__(self, target: str | Path, config: Optional[DatabaseConfig] = None) -> None:
-        self.target = str(target)
-        self.dialect = dialect_for(target)
+        # An empty DSN means SQLite (config.py says so), so the *config* decides the
+        # engine, not the first argument. ``Store(config)`` used to take the SQLite
+        # branch, then create a file named after the config's repr - so a
+        # postgresql:// deployment silently wrote to disk and every test passed.
+        #
+        # An *explicit* target still has to win over that config: the CLI always
+        # passes ``config.database`` (empty DSN when there is no enterprise.toml),
+        # and letting the config decide sent ``migrate --dsn postgresql://...``
+        # and ``trends --db postgresql://...`` to the local asset_health.db while
+        # reporting success. The rule is now: a target given here is the address;
+        # the config only contributes pool, timeout and replica settings.
+        if isinstance(target, DatabaseConfig):
+            config, target = (config or target), ""
+        explicit = str(target or "").strip()
+        base = config or DatabaseConfig()
+        if explicit and is_dsn(explicit):
+            settings = dataclasses.replace(base, dsn=explicit)
+            self.target = explicit
+        elif explicit:
+            settings = dataclasses.replace(base, dsn="", sqlite_path=explicit)
+            self.target = explicit
+        else:
+            settings = base
+            self.target = str(base.dsn if base.is_postgres else base.sqlite_path)
+        self.dialect = dialect_for(self.target)
         self._pool: Optional[PgPool] = None
         self._sqlite: Optional[sqlite3.Connection] = None
         self._lock = threading.Lock()
-        settings = config or DatabaseConfig(dsn=self.target)
         self._config = settings
         self._breaker = CircuitBreaker(
             f"primary:{_short(self.target)}",
@@ -706,6 +794,8 @@ def _short(dsn: str) -> str:
 
 def open_store(target: str | Path, config: Optional[DatabaseConfig] = None) -> Store:
     """Open SQLite or PostgreSQL from one string, no branching at the call site."""
+    if isinstance(target, DatabaseConfig):
+        return Store(target, config)
     return Store(str(target), config)
 
 

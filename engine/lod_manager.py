@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import argparse
 import array
+import base64
 import json
 import math
+import struct
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -42,6 +44,14 @@ LEVEL_NAMES = ("LOD1", "LOD2", "LOD3", "LOD4")
 
 GLTF_SUFFIXES = {".gltf", ".glb"}
 OBJ_SUFFIXES = {".obj"}
+
+# glTF 2.0 binary container, GLB spec section 4. A .glb that does not begin with
+# this magic is not a GLB: viewers and DCC importers reject it outright, so the
+# bytes we write must match the extension we write them under.
+GLB_MAGIC = 0x46546C67        # "glTF" little-endian
+GLB_VERSION = 2
+GLB_CHUNK_JSON = 0x4E4F534A   # "JSON"
+GLB_CHUNK_BIN = 0x004E4942    # "BIN\0"
 
 
 class LodError(Exception):
@@ -223,8 +233,11 @@ def _score(triangles: int, target: int) -> float:
     between. On a mesh of disconnected triangles there may be no cell size that
     lands near the target at all. Overshooting the count is recoverable (the level
     is simply coarser than asked); collapsing to a handful of faces is not, so a
-    shortfall costs extra.
+    shortfall costs extra - and collapsing to *nothing* is not a LOD at all, so it
+    scores worst of all and is never chosen.
     """
+    if triangles <= 0:
+        return float("inf")
     if triangles >= target:
         return float(triangles - target)
     return float(target - triangles) * 1.5
@@ -289,44 +302,101 @@ def write_obj(path: Path, mesh: Mesh, name: str = "") -> None:
     path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def write_gltf(path: Path, mesh: Mesh, name: str = "") -> None:
-    """A minimal but valid glTF 2.0: one primitive, no UVs (LODs drop materials)."""
+def _gltf_arrays(mesh: Mesh) -> tuple[array.array, array.array, bytes, bytes]:
+    """POSITION as float32 VEC3 and the index buffer as uint32 SCALARs."""
     positions = array.array("f", [coordinate for point in mesh.positions for coordinate in point])
     indices = array.array("I", [index for face in mesh.faces for index in face])
-    blob = positions.tobytes() + indices.tobytes()
-    import base64
+    return positions, indices, positions.tobytes(), indices.tobytes()
 
+
+def _gltf_document(mesh: Mesh, name: str, stem: str, buffer_entry: dict,
+                   position_bytes: int, index_bytes: int) -> dict:
+    """The JSON half of a minimal glTF 2.0: one primitive, no UVs.
+
+    LODs drop materials by design, so one acceptor for POSITION and one index
+    buffer is the whole scene graph. The caller supplies ``buffer_entry``
+    because that is the only part that differs between .gltf and .glb.
+    """
     low, high = mesh.bounds()
-    document = {
+    scene_name = name or stem
+    return {
         "asset": {"version": "2.0", "generator": "engine/lod_manager.py"},
         "scene": 0,
         "scenes": [{"nodes": [0]}],
-        "nodes": [{"mesh": 0, "name": name or path.stem}],
-        "meshes": [{"name": name or path.stem, "primitives": [
+        "nodes": [{"mesh": 0, "name": scene_name}],
+        "meshes": [{"name": scene_name, "primitives": [
             {"attributes": {"POSITION": 0}, "indices": 1, "material": 0}]}],
         "materials": [{"name": "lod", "pbrMetallicRoughness": {
             "baseColorFactor": [0.6, 0.6, 0.62, 1.0]}}],
-        "buffers": [{"byteLength": len(blob),
-                     "uri": "data:application/octet-stream;base64,"
-                            + base64.b64encode(blob).decode("ascii")}],
+        "buffers": [buffer_entry],
         "bufferViews": [
-            {"buffer": 0, "byteOffset": 0, "byteLength": len(positions.tobytes()), "target": 34962},
-            {"buffer": 0, "byteOffset": len(positions.tobytes()), "byteLength": len(indices.tobytes()),
+            {"buffer": 0, "byteOffset": 0, "byteLength": position_bytes, "target": 34962},
+            {"buffer": 0, "byteOffset": position_bytes, "byteLength": index_bytes,
              "target": 34963},
         ],
         "accessors": [
             {"bufferView": 0, "componentType": 5126, "count": mesh.vertices, "type": "VEC3",
              "min": list(low), "max": list(high)},
-            {"bufferView": 1, "componentType": 5125, "count": len(indices), "type": "SCALAR"},
+            {"bufferView": 1, "componentType": 5125, "count": index_bytes // 4,
+             "type": "SCALAR"},
         ],
     }
+
+
+def write_gltf(path: Path, mesh: Mesh, name: str = "") -> None:
+    """A minimal but valid glTF 2.0, buffer embedded as a base64 data URI."""
+    _positions, _indices, position_bytes, index_bytes = _gltf_arrays(mesh)
+    blob = position_bytes + index_bytes
+    buffer_entry = {
+        "byteLength": len(blob),
+        "uri": "data:application/octet-stream;base64,"
+               + base64.b64encode(blob).decode("ascii"),
+    }
+    document = _gltf_document(mesh, name, path.stem, buffer_entry,
+                              len(position_bytes), len(index_bytes))
     path.write_text(json.dumps(document, indent=1), encoding="utf-8")
 
 
+def _pad_to_word(blob: bytes, filler: bytes) -> bytes:
+    """Pad a chunk to a 4-byte boundary. JSON pads with spaces, BIN with zeros."""
+    return blob + filler * (-len(blob) % 4)
+
+
+def write_glb(path: Path, mesh: Mesh, name: str = "") -> None:
+    """A real GLB: 12-byte header, JSON chunk, BIN chunk.
+
+    Writing glTF *text* under a .glb name is the bug this function exists to
+    fix: every viewer sniffs the magic, sees JSON, and refuses the file - after
+    the LOD ladder has already been recorded as generated in the database.
+    """
+    _positions, _indices, position_bytes, index_bytes = _gltf_arrays(mesh)
+    blob = position_bytes + index_bytes
+    # No uri: in a GLB the buffer *is* the BIN chunk that follows the JSON.
+    document = _gltf_document(mesh, name, path.stem, {"byteLength": len(blob)},
+                              len(position_bytes), len(index_bytes))
+    compact = json.dumps(document, separators=(",", ":"))
+    json_blob = _pad_to_word(compact.encode("utf-8"), b" ")
+    bin_blob = _pad_to_word(blob, b"\x00")
+    total = 12 + 8 + len(json_blob) + 8 + len(bin_blob)
+    path.write_bytes(b"".join((
+        struct.pack("<III", GLB_MAGIC, GLB_VERSION, total),
+        struct.pack("<II", len(json_blob), GLB_CHUNK_JSON), json_blob,
+        struct.pack("<II", len(bin_blob), GLB_CHUNK_BIN), bin_blob,
+    )))
+
+
 def write_mesh(path: Path, mesh: Mesh, like: Path, name: str = "") -> None:
-    """Write a LOD in the same format as the source, so the viewer just works."""
-    if like.suffix.lower() in OBJ_SUFFIXES:
+    """Write a LOD in the container the *filename* promises.
+
+    The writer used to be chosen from the source suffix, which meant a ``.glb``
+    LOD was written by the text writer: the name said binary, the bytes said
+    JSON. The name is the contract the viewer reads, so the name decides.
+    """
+    container = path.suffix.lower() or like.suffix.lower()
+    if container in OBJ_SUFFIXES:
         write_obj(path, mesh, name)
+    elif container == ".glb":
+        write_glb(path, mesh, name)
     else:
         write_gltf(path, mesh, name)
 
@@ -379,16 +449,31 @@ class GeneratedLod:
 def generate(source: Path, out_dir: Path, ratios: Sequence[float] = DEFAULT_RATIOS,
              max_triangles: Sequence[int] | None = None,
              name: str = "") -> list[GeneratedLod]:
-    """Decimate `source` into LOD files under `out_dir`."""
+    """Decimate `source` into LOD files under `out_dir`.
+
+    Every level is decimated and checked *before* the first file is written, so
+    a refusal leaves no half-generated ladder behind: the server records what
+    this returns, and files without rows are files the viewer never lists.
+    """
     mesh = load_mesh(source)
-    out_dir.mkdir(parents=True, exist_ok=True)
-    results: list[GeneratedLod] = []
+    planned: list[tuple[str, int, float, Mesh]] = []
     for level, target, ratio in plan_targets(mesh.triangles, ratios, max_triangles):
         if target >= mesh.triangles:
             # Nothing to gain: still emit the level so the viewer shows it as 100%.
             reduced = mesh
         else:
             reduced = decimate_to(mesh, target)
+        if reduced.triangles == 0:
+            # Clustering can collapse a mesh with no connected geometry. A 0-tri
+            # LOD loads as a hole in the viewer, so refuse instead of shipping it.
+            raise LodError(
+                f"{level} would be empty: {target} tris requested from "
+                f"{mesh.triangles:,} collapses to 0 (try a larger ratio)")
+        planned.append((level, target, ratio, reduced))
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    results: list[GeneratedLod] = []
+    for level, target, ratio, reduced in planned:
         path = out_dir / f"{level}_{source.stem}{source.suffix}"
         write_mesh(path, reduced, source, name or source.stem)
         results.append(GeneratedLod(level, path, ratio, target,

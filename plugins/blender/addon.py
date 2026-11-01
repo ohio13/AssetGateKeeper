@@ -46,6 +46,10 @@ import bpy
 ENV_PYTHON = "ASSETGATEKEEPER_PYTHON"
 ENV_HOME = "ASSETGATEKEEPER_HOME"
 TEMP_EXPORT_NAME = "agk_selection.gltf"
+RULES_FILENAME = "rules.toml"
+# A project keeps its budget at the root; the .blend usually sits in a
+# department folder two or three levels down (project/assets/props/player).
+RULES_SEARCH_DEPTH = 3
 
 # Accept both spellings so users can set either env var.
 ENV_RULES = ("ASSETGATEKEEPER_RULES", "ASSETGATEKEEPER_RULES_PATH")
@@ -65,6 +69,35 @@ def default_rules_path() -> str:
         if os.environ.get(name):
             return os.environ[name]
     return ""
+
+
+def project_rules_path(depth: int = RULES_SEARCH_DEPTH) -> str:
+    """The ``rules.toml`` that governs this .blend, or "" when there is none.
+
+    The add-on used to run the engine on a *temporary* export with no rules at
+    all unless someone had typed a path into the panel, so the studio budget was
+    silently replaced by the shipped defaults: the viewport said PASSED and the
+    export failed a minute later. The engine's own convention is
+    ``<project>/rules.toml``, so look there - next to the .blend first, then up.
+    """
+    blend = getattr(bpy.data, "filepath", "") or ""
+    if not blend:
+        return ""
+    folder = os.path.dirname(os.path.abspath(blend))
+    for _ in range(depth + 1):
+        candidate = os.path.join(folder, RULES_FILENAME)
+        if os.path.isfile(candidate):
+            return candidate
+        parent = os.path.dirname(folder)
+        if parent == folder:            # filesystem root: stop
+            break
+        folder = parent
+    return ""
+
+
+def effective_rules_path(settings) -> str:
+    """Explicit setting, then the environment, then the project file."""
+    return settings.rules_path or default_rules_path() or project_rules_path()
 
 
 def run_engine(asset_path: str, python_exe: str, engine_path: str,
@@ -139,7 +172,8 @@ class AGK_OT_check_selection(bpy.types.Operator):
         settings = context.scene.agk_settings
         python_exe = settings.python_exe or os.environ.get(ENV_PYTHON) or sys.executable
         engine_path = settings.engine_path or default_engine_path()
-        rules_path = settings.rules_path or default_rules_path()
+        # The panel shows this too, so "why is it passing?" has a visible answer.
+        rules_path = effective_rules_path(settings)
 
         if not os.path.isfile(engine_path):
             message = f"engine not found: {engine_path}"
@@ -225,6 +259,13 @@ class AGK_PT_panel(bpy.types.Panel):
         column.prop(settings, "python_exe")
         column.prop(settings, "engine_path")
         column.prop(settings, "rules_path")
+        active_rules = effective_rules_path(settings)
+        if active_rules:
+            column.label(text="budget: " + os.path.basename(os.path.dirname(active_rules))
+                              + "/" + os.path.basename(active_rules), icon="FILE")
+        else:
+            column.label(text="budget: shipped defaults (no rules.toml found)",
+                         icon="INFO")
 
 
 CLASSES = (AGK_Settings, AGK_OT_check_selection, AGK_PT_panel)

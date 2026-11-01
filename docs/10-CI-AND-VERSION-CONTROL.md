@@ -85,10 +85,15 @@ judge the file rather than reporting a 130-byte texture as clean.
 vcs_hooks/p4_pre_submit.py
 ```
 
-Add it as a `change-submit` trigger. It runs **before** the submit lands and:
+Add it as a `change-content` trigger. `change-submit` is the wrong hook: it fires
+before the content exists in the depot, so `p4 print //depot/...@=<change>` has
+nothing to resolve and the trigger fails for the wrong reason. `change-content`
+runs after the content has been received and before the commit lands, which is
+exactly the window a gate needs. It:
 
-* resolves each file in the changelist to its **depot** revision (`p4 print`),
-  not the artist's workspace, so what is validated is what will be stored;
+* resolves each file in the changelist to its **depot** revision (`p4 print -q
+  //depot/...@=<change>`), not the artist's workspace, so what is validated is
+  what will be stored;
 * gates those revisions with the project's rules;
 * exits non-zero to refuse the submit, or prints warnings for advisory mode.
 

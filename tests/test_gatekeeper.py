@@ -87,7 +87,13 @@ print("5. Rule outcomes (one line, all violations)")
 expect("bark_Albedo.png passes", not problems("bark_Albedo.png"))
 expect("bark_Normal_02.png passes", not problems("bark_Normal_02.png"))
 expect("atlas_max.png fails naming only", problems("atlas_max.png") == (
-    "name does not end with a standard suffix (_Albedo, _Normal, _Roughness)",))
+    f"name does not end with a standard suffix ({', '.join(agk.Budget().texture_suffixes)})",),
+    str(problems("atlas_max.png")))
+naming_pattern = agk.build_naming_pattern(agk.Budget().texture_suffixes)
+expect("a _BaseColor map passes naming", bool(naming_pattern.search("bark_BaseColor")))
+expect("an _ORM packed map passes naming", bool(naming_pattern.search("bark_ORM")))
+expect("a numbered _BaseColor map passes naming",
+       bool(naming_pattern.search("bark_BaseColor_02")))
 expect("hull_Albedo.png fails resolution only", len(problems("hull_Albedo.png")) == 1,
        str(problems("hull_Albedo.png")))
 expect("ui_icon.png reports 2 violations", len(problems("ui_icon.png")) == 2)
@@ -153,7 +159,7 @@ expect("file values are applied", (budget.max_triangles, budget.max_texture_edge
 expect("booleans from file are applied",
        budget.require_power_of_two is False and budget.enforce_texture_naming is False)
 expect("suffix list from file is applied", budget.texture_suffixes == ("_Diffuse",))
-expect("no CLI overrides reported", overrides == [])
+expect("no CLI overrides reported", not overrides)
 
 strict = agk.Gatekeeper(budget)
 expect("12-tri cube fails a rules.toml budget of 10",
@@ -167,6 +173,31 @@ budget2, _, overrides2 = agk.resolve_budget(cfg, parse("--triangles", "99999"))
 expect("CLI overrides rules.toml", budget2.max_triangles == 99_999 and "max_triangles" in overrides2)
 expect("CLI only overrides what was passed", budget2.max_texture_edge == 512)
 
+# A negative cap is a typo, not a tighter budget: it used to be accepted and then
+# failed every mesh in the repository, blaming the art.
+for flag, value, label in (("--triangles", "-1", "a negative triangle cap"),
+                           ("--triangles", "lots", "a non-numeric triangle cap"),
+                           ("--max-texture", "0", "a zero texture edge"),
+                           ("--max-materials", "-2", "a negative material count"),
+                           ("--max-influences", "-1", "a negative weight count"),
+                           ("--max-uvs", "0", "zero UV channels")):
+    try:
+        agk.build_parser().parse_args([str(cfg), flag, value])
+        expect(f"{label} is refused", False, "the parser accepted it")
+    except SystemExit:
+        expect(f"{label} is refused", True)
+try:
+    agk.Budget(max_triangles=-1)
+    expect("a negative budget is refused wherever it is built", False, "no error raised")
+except agk.ConfigError as exc:
+    expect("a negative budget is refused wherever it is built",
+           "max_triangles" in str(exc), str(exc))
+try:
+    agk.Budget(pbr_floor=0.9, pbr_ceiling=0.1)
+    expect("an inverted PBR band is refused", False, "no error raised")
+except agk.ConfigError:
+    expect("an inverted PBR band is refused", True)
+
 pot_cfg = scratch / "rules_pot"
 pot_cfg.mkdir(exist_ok=True)
 (pot_cfg / "rules.toml").write_text("[texture]\npower_of_two = true\nnaming = true\n", encoding="utf-8")
@@ -175,7 +206,8 @@ expect("file can turn power_of_two back on", from_file.require_power_of_two is T
 forced_off, _, off_overrides = agk.resolve_budget(
     pot_cfg, agk.build_parser().parse_args([str(pot_cfg), "--allow-npot"]))
 expect("--allow-npot beats the file",
-       forced_off.require_power_of_two is False and off_overrides == ["require_power_of_two"],
+       forced_off.require_power_of_two is False
+       and list(off_overrides) == ["require_power_of_two"],
        str(off_overrides))
 
 missing = scratch / "no_rules_here"
@@ -333,6 +365,34 @@ expect("payload carries an absolute path for the dashboard bridge",
        payload["path"])
 expect("and keeps the relative form for display",
        payload["relative_path"] == "boss_statue.gltf", str(payload.get("relative_path")))
+expect("telemetry keeps the machine name so per-host views still work",
+       payload["hostname"] != "", repr(payload["hostname"]))
+expect("telemetry does not volunteer the OS account by default",
+       payload["username"] == "", repr(payload["username"]))
+full_payload = agk.build_telemetry_payload(subject, tele_cfg, identity="full")
+expect("identity=full adds the OS account for a studio that wants it",
+       full_payload["username"] != "", repr(full_payload["username"]))
+expect("identity=full also restores the absolute path",
+       Path(full_payload["path"]).is_absolute(), full_payload["path"])
+anon_payload = agk.build_telemetry_payload(subject, tele_cfg, identity="none")
+expect("identity=none sends only the path inside the watch folder",
+       anon_payload["path"] == "boss_statue.gltf", anon_payload["path"])
+expect("identity=none sends no host and no user",
+       anon_payload["hostname"] == "" and anon_payload["username"] == "",
+       repr((anon_payload["hostname"], anon_payload["username"])))
+expect("an unknown identity mode falls back to the default",
+       agk.build_telemetry_payload(subject, tele_cfg, identity="nonsense")["username"] == "")
+expect("[server] identity accepts the three documented modes",
+       [agk.ServerSettings.from_mapping({"identity": mode}).identity
+        for mode in agk.IDENTITY_MODES] == list(agk.IDENTITY_MODES))
+expect("--telemetry-identity reaches the settings",
+       agk.resolve_server(tele_cfg, agk.build_parser().parse_args(
+           [str(tele_cfg), "--telemetry-identity", "none"])).identity == "none")
+try:
+    agk.ServerSettings.from_mapping({"identity": "anon"})
+    expect("[server] identity rejects a typo", False, "no error raised")
+except agk.ConfigError as exc:
+    expect("[server] identity rejects a typo", "identity must be one of" in str(exc), str(exc))
 expect("payload includes file size", payload["size_bytes"] > 0, str(payload["size_bytes"]))
 expect("payload includes structured stats", payload["stats"].get("triangles") == 72_500,
        str(payload["stats"]))
@@ -498,7 +558,7 @@ expect("without remote, rules.toml still wins",
        local_only.max_triangles == 10 and local_source is not None)
 over_remote, _, over_remote_names = agk.resolve_budget(local_cfg, cli("--triangles", "99"), remote_doc)
 expect("CLI flags beat remote rules",
-       over_remote.max_triangles == 99 and over_remote_names == ["max_triangles"],
+       over_remote.max_triangles == 99 and list(over_remote_names) == ["max_triangles"],
        str(over_remote_names))
 expect("remote rules are validated like any other budget",
        not _accepts_unknown_remote(agk, {"meshes": {"max_triangles": 1}}, local_cfg, cli))
@@ -685,6 +745,59 @@ expect("the renamed file is the one reported",
 expect("the old name is gone", not name_png.exists())
 expect("the new name exists", (name_dir / "stone_texture_Albedo.png").is_file())
 
+# -- a rename must repoint the references that named the old file --------------
+ref_dir = heal_root / "references"
+ref_dir.mkdir()
+(ref_dir / "prop.mtl").write_text("newmtl prop\nmap_Kd wood.png\n", encoding="utf-8")
+(ref_dir / "prop.obj").write_text(
+    "mtllib prop.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+ref_png = make_png(ref_dir / "wood.png", (512, 512))
+ref_obj_before = digest(ref_dir / "prop.obj")
+ref_verdict = agk.Gatekeeper(heal_budget, healer=healer_obj).check(ref_png)
+expect("a renamed texture is adopted", ref_verdict.passed and ref_verdict.healed,
+       ref_verdict.tag[:60])
+expect("the .mtl names the healed texture",
+       "map_Kd wood_Albedo.png" in (ref_dir / "prop.mtl").read_text(encoding="utf-8"),
+       (ref_dir / "prop.mtl").read_text(encoding="utf-8"))
+expect("the mesh's references resolve again",
+       agk.missing_references(ref_dir / "prop.obj") == [],
+       str(agk.missing_references(ref_dir / "prop.obj")))
+expect("the verdict records the repoint",
+       any("repointed 1 reference" in note for note in ref_verdict.heal_notes),
+       str(ref_verdict.heal_notes))
+expect("an .obj that never named the texture is byte-identical",
+       digest(ref_dir / "prop.obj") == ref_obj_before)
+expect("a rename matches a whole filename, not a fragment",
+       agk_healer.rewrite_reference_names("map_Kd oak_wood.png\nmap_Ks wood.png",
+                                          {"wood.png": "wood_Albedo.png"})
+       == ("map_Kd oak_wood.png\nmap_Ks wood_Albedo.png", 1))
+
+gltf_ref_dir = heal_root / "references_gltf"
+(gltf_ref_dir / "textures").mkdir(parents=True)
+(gltf_ref_dir / "scene.gltf").write_text(
+    '{"asset": {"version": "2.0"}, "images": [{"uri": "textures/wood.png"}]}',
+    encoding="utf-8")
+gltf_ref_verdict = agk.Gatekeeper(heal_budget, healer=healer_obj).check(
+    make_png(gltf_ref_dir / "textures" / "wood.png", (512, 512)))
+expect("a texture in a subfolder is healed by renaming", gltf_ref_verdict.healed,
+       gltf_ref_verdict.tag[:60])
+expect("the glTF uri keeps its folder and takes the new name",
+       "textures/wood_Albedo.png" in (gltf_ref_dir / "scene.gltf").read_text(encoding="utf-8"),
+       (gltf_ref_dir / "scene.gltf").read_text(encoding="utf-8"))
+
+discard_dir = heal_root / "references_discarded"
+discard_dir.mkdir()
+(discard_dir / "prop.mtl").write_text("newmtl prop\nmap_Kd wall.png\n", encoding="utf-8")
+discard_mtl_before = digest(discard_dir / "prop.mtl")
+discard_verdict = agk.Gatekeeper(agk.Budget(max_texture_edge=2048),
+                                 healer=healer_obj).check(
+    make_png(discard_dir / "wall.png", (4096, 1000), (120, 90, 70)))
+expect("a refused heal leaves the references untouched",
+       digest(discard_dir / "prop.mtl") == discard_mtl_before)
+expect("a refused heal leaves no edit scratch file",
+       not any(p.name.endswith(".agk-edit") for p in discard_dir.iterdir()),
+       str([p.name for p in discard_dir.iterdir()]))
+
 suffixes = heal_budget.texture_suffixes
 expect("the suffix is inferred from 'nrm'",
        agk_healer.choose_suffix("wall_nrm", suffixes) == "_Normal")
@@ -694,7 +807,17 @@ expect("a stem that already ends with a configured suffix is left alone",
 expect("the suffix is inferred from 'rough'",
        agk_healer.choose_suffix("metal_rough", suffixes) == "_Roughness")
 expect("the suffix is inferred from 'basecolor'",
-       agk_healer.choose_suffix("floor_basecolor", suffixes) == "_Albedo")
+       agk_healer.choose_suffix("floor_basecolor_2k", suffixes) == "_BaseColor")
+expect("the suffix is inferred from 'orm'",
+       agk_healer.choose_suffix("wall_orm_4k", suffixes) == "_ORM")
+expect("a name that already ends in _BaseColor is left alone",
+       agk_healer.choose_suffix("floor_basecolor", suffixes) is None)
+expect("a name that already ends in _ORM is left alone",
+       agk_healer.choose_suffix("wall_orm", suffixes) is None)
+expect("'normal' is not read as an ORM map",
+       agk_healer.choose_suffix("wall_normal", suffixes) is None)
+expect("'abnormal' is not read as a normal map",
+       agk_healer.choose_suffix("abnormal", suffixes) == "_Albedo")
 expect("a compliant name is left alone",
        agk_healer.choose_suffix("wall_Albedo", suffixes) is None)
 expect("a compliant name is matched case-insensitively",
@@ -1796,6 +1919,141 @@ except (OSError, NotImplementedError):
 symlink_flag = agk.build_parser().parse_args(["--follow-symlinks"])
 expect("symlinked folders are opt-in", symlink_flag.follow_symlinks is True)
 expect("and off by default", agk.build_parser().parse_args([]).follow_symlinks is False)
+
+print("an unreadable file is an ERROR, not an empty repository")
+import contextlib  # noqa: E402 - only this group needs it
+import io  # noqa: E402
+
+locked = scratch / "locked"
+locked.mkdir(exist_ok=True)
+empty = scratch / "empty_folder"
+empty.mkdir(exist_ok=True)
+
+original_walk_files = agk.walk_files
+
+
+def walk_with_a_skip(root, recursive=True, follow_symlinks=False, on_skip=None):
+    """Pretend the OS refused one entry, which is what a locked file looks like."""
+    if on_skip is not None:
+        on_skip(str(locked / "big_mesh.obj"))
+    return []
+
+
+def run_json(target, allow_empty=False):
+    buffer = io.StringIO()
+    reporter = agk.Reporter(color=False, root=target, json_mode=True)
+    with contextlib.redirect_stdout(buffer):
+        code = agk.run_once(target, agk.Gatekeeper(agk.Budget()), reporter, False,
+                            allow_empty=allow_empty)
+    payloads = [json.loads(line) for line in buffer.getvalue().splitlines()
+                if line.startswith("{") and '"file"' in line]
+    return code, payloads
+
+
+agk.walk_files = walk_with_a_skip
+try:
+    code, payloads = run_json(locked)
+finally:
+    agk.walk_files = original_walk_files
+expect("an unreadable entry fails the run", code == 1, str(code))
+expect("it is reported as ERROR, not FAILED",
+       [item["status"] for item in payloads] == ["ERROR"], str(payloads))
+expect("an ERROR is not a pass", payloads and payloads[0]["passed"] is False)
+expect("the payload says the file could not be read",
+       payloads and "cannot be read" in payloads[0]["problems"][0], str(payloads))
+expect("the status word survives on the verdict itself",
+       agk.Verdict(Path("x.obj"), ("cannot be read",), unreadable=True).status == "ERROR")
+code, payloads = run_json(empty)
+expect("an empty folder fails the run", code == 1 and payloads == [], str(code))
+code, payloads = run_json(empty, allow_empty=True)
+expect("--allow-empty lets an empty folder pass", code == 0, str(code))
+
+print("every CLI flag survives a real run through main()")
+# argparse accepting a flag proves nothing: --triangles 1000 used to reach
+# Gatekeeper.__init__ as a list of names and die with ValueError, after argparse
+# had already printed a budget banner. Each flag here is run the way a pipeline
+# runs it, over a real folder.
+cli_dir = scratch / "cli_e2e"
+cli_dir.mkdir(exist_ok=True)
+shutil.copy(DROP / "crate_1mtl.obj", cli_dir / "crate_1mtl.obj")
+shutil.copy(DROP / "crate_1mtl.mtl", cli_dir / "crate_1mtl.mtl")
+shutil.copy(DROP / "bark_Albedo.png", cli_dir / "bark_Albedo.png")
+shutil.copy(DROP / "crate_4mtl.obj", cli_dir / "crate_4mtl.obj")
+shutil.copy(DROP / "crate_4mtl.mtl", cli_dir / "crate_4mtl.mtl")
+shutil.copy(DROP / "boss_statue.gltf", cli_dir / "boss_statue.gltf")
+
+CLI_CASES = (
+    ("--triangles", "1000"),
+    ("--max-texture", "512"),
+    ("--max-materials", "5"),
+    ("--max-influences", "2"),
+    ("--max-uvs", "8"),
+    ("--allow-degenerate",),
+    ("--allow-npot",),
+    ("--no-naming",),
+    ("--no-reference-check",),
+    ("--no-pbr-check",),
+    ("--audit-transforms",),
+    ("--require-indexed",),
+    ("--exclude", "*nomatch*"),
+    ("--allow-empty",),
+    ("--recursive",),
+    ("--follow-symlinks",),
+    ("--no-notify",),
+    ("--preset", "retro"),
+    ("--tag-mode", "strict"),
+    ("--json",),
+)
+
+cli_failures = []
+for case in CLI_CASES:
+    try:
+        # No output capture: the gate binds its log handler at import, so a
+        # redirect hides it. What matters is that main() returns a verdict code
+        # instead of raising, which the except below proves.
+        with contextlib.redirect_stdout(io.StringIO()):
+            code = agk.main([str(cli_dir), "--once", "--no-color", *case])
+        if code not in (0, 1):
+            cli_failures.append(f"{' '.join(case)} -> exit {code}")
+    except BaseException as exc:              # noqa: BLE001 - that is the point
+        cli_failures.append(f"{' '.join(case)} raised {type(exc).__name__}: {exc}")
+expect("every flag runs to a verdict, not a traceback", not cli_failures,
+       "; ".join(cli_failures[:3]))
+
+
+# The override must actually bite, not merely parse: a 4-slot mesh passes a
+# 5-slot budget and fails a 1-slot one. Run it as a subprocess, which is how a
+# pipeline invokes the gate.
+def gate_output(*extra):
+    completed = subprocess.run([sys.executable, "asset_gatekeeper.py", str(cli_dir),
+                                "--once", "--no-color", *extra],
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace")
+    return completed.returncode, completed.stdout + completed.stderr
+
+
+_, relaxed = gate_output("--max-materials", "5")
+_, strict = gate_output("--max-materials", "1")
+expect("--max-materials 5 lets the 4-slot mesh through",
+       any("PASSED" in line and "crate_4mtl.obj" in line
+           for line in relaxed.splitlines()), relaxed[-300:])
+expect("--max-materials 1 fails it",
+       any("FAILED" in line and "crate_4mtl.obj" in line
+           for line in strict.splitlines()), strict[-300:])
+
+print("README and the CLI agree")
+readme = Path(__file__).resolve().parent.parent / "README.md"
+if readme.is_file():
+    documentation = readme.read_text(encoding="utf-8")
+    # The flag table drifted from the parser once already: --preset, --tag-mode,
+    # --exclude and the whole --init/--doctor group were documented nowhere.
+    undocumented = sorted(option for action in agk.build_parser()._actions
+                          for option in action.option_strings
+                          if option.startswith("--") and option != "--help"
+                          and f"`{option}" not in documentation)
+    expect("every CLI flag appears in the README", not undocumented, str(undocumented))
+else:                                    # pragma: no cover - shipped without docs
+    print("  skip  README.md is not next to the tests")
 
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

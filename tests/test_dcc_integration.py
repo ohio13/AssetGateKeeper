@@ -323,6 +323,105 @@ def run_unreal(binary: str, fixtures: dict, timeout: float, preset: str) -> None
 # Main
 # --------------------------------------------------------------------------- #
 
+def check_sop_counting() -> None:
+    """The Houdini SOP's counting rules, against fake prims (no hou needed)."""
+    import importlib.util
+
+    path = ROOT / "plugins" / "houdini" / "sop_gatekeeper.py"
+    spec = importlib.util.spec_from_file_location("agk_sop_counting", path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+
+    class FakePrim:
+        """Base fake; subclasses decide which vertex-count API they expose."""
+
+        def __init__(self, kind, vertices=4, points=None, embedded=None, legacy=False):
+            self._kind = kind
+            self._vertices = vertices
+            self._points = points if points is not None else list(range(vertices))
+            self._embedded = embedded
+            self._legacy = legacy
+
+        def type(self):
+            return f"primType.{self._kind}"
+
+        def points(self):
+            return self._points
+
+        def getEmbeddedGeometry(self):
+            return self._embedded
+
+    class ModernPrim(FakePrim):
+        def numVertices(self):
+            return self._vertices
+
+    class LegacyPrim(FakePrim):
+        def vertexCount(self):
+            return self._vertices
+
+    def prim(kind, vertices=4, **kwargs):
+        """The right fake for the requested API generation."""
+        legacy = kwargs.pop("legacy", False)
+        return (LegacyPrim if legacy else ModernPrim)(kind, vertices=vertices, **kwargs)
+
+    class FakeGeometry:
+        def __init__(self, prims):
+            self._prims = prims
+
+        def prims(self):
+            return self._prims
+
+    quads = FakeGeometry([prim("Polygon") for _ in range(6)])
+    print("\nSOP counting (no DCC needed)")
+    expect("a quad is two triangles", module.triangle_count(quads) == 12,
+           str(module.triangle_count(quads)))
+    expect("the old vertexCount() name still works",
+           module.triangle_count(FakeGeometry([prim("Polygon", legacy=True)])) == 2)
+    packed = FakeGeometry([prim("PackedGeometry", vertices=1, points=[0],
+                                embedded=quads)])
+    expect("a packed prim is expanded, not counted as one vertex",
+           module.triangle_count(packed) == 12, str(module.triangle_count(packed)))
+    uncounted: list = []
+    stuck = FakeGeometry([prim("PackedGeometry", vertices=1, points=[0])])
+    module.triangle_count(stuck, uncounted=uncounted)
+    expect("an unexpanded pack is recorded, not silently counted as zero",
+           len(uncounted) == 1, str(len(uncounted)))
+    curve = FakeGeometry([prim("NURBSCurve", vertices=6)])
+    expect("a curve is not a polygon", module.triangle_count(curve) == 0,
+           str(module.triangle_count(curve)))
+    expect("a curve is never reported as degenerate",
+           module.degenerate_prim_count(curve) == 0,
+           str(module.degenerate_prim_count(curve)))
+    class FakePoint:
+        def __init__(self, xyz):
+            self._xyz = xyz
+
+        def position(self):
+            return FakeVector(self._xyz)
+
+    class FakeVector:
+        def __init__(self, xyz):
+            self._xyz = xyz
+
+        def __sub__(self, other):
+            return FakeVector(tuple(a - b for a, b in zip(self._xyz, other._xyz)))
+
+        def cross(self, other):
+            ax, ay, az = self._xyz
+            bx, by, bz = other._xyz
+            return FakeVector((ay * bz - az * by, az * bx - ax * bz, ax * by - ay * bx))
+
+        def length(self):
+            return sum(axis * axis for axis in self._xyz) ** 0.5
+
+    flat = FakeGeometry([prim("Polygon", 3, points=[FakePoint((0, 0, 0)),
+                                                     FakePoint((0, 0, 0)),
+                                                     FakePoint((0, 0, 0))])])
+    expect("a zero-area polygon is degenerate", module.degenerate_prim_count(flat) == 1,
+           str(module.degenerate_prim_count(flat)))
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="Headless DCC integration sweep")
     parser.add_argument("--timeout", type=float, default=15.0,
@@ -341,6 +440,9 @@ def main(argv=None) -> int:
     print(f"fixtures   {fixtures['crate'].name} ({fixtures['crate_tris']} tris), "
           f"{fixtures['boss'].name} ({fixtures['boss_tris']} tris)")
     print(f"guardrail  {args.timeout:g}s per invocation, process tree killed on expiry")
+    # Runs without any DCC installed: the SOP's counting rules are pure Python, and
+    # a machine with no Houdini must still catch a regression in them.
+    check_sop_counting()
 
     targets = args.only or ["blender", "houdini", "unreal"]
     started = time.time()

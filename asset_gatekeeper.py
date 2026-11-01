@@ -65,7 +65,7 @@ from __future__ import annotations
 
 # Single source of truth for the version: pyproject.toml reads it from here
 # (setuptools parses this literal statically), so it cannot drift.
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 import argparse
 import array
@@ -75,6 +75,7 @@ import fnmatch
 import getpass
 import json
 import logging
+import math
 import os
 import platform
 import queue
@@ -131,6 +132,7 @@ RULES_FILENAME = "rules.toml"
 # bare interpreter on a studio workstation with no wheels of its own.
 SERVER_ENV_URL = "ASSET_GATEKEEPER_SERVER_URL"
 SERVER_ENV_TOKEN = "ASSET_GATEKEEPER_TOKEN"
+SERVER_ENV_IDENTITY = "ASSET_GATEKEEPER_TELEMETRY_IDENTITY"
 REMOTE_RULES_ENV = "ASSET_GATEKEEPER_REMOTE_RULES"
 RULES_CACHE_FILENAME = ".rules.cache.json"
 
@@ -138,6 +140,12 @@ RULES_CACHE_FILENAME = ".rules.cache.json"
 HTTP_TIMEOUT = 2.0
 # Bounded queue: an overnight 200k-file sweep must not grow memory without limit.
 TELEMETRY_QUEUE_MAX = 1_000
+
+# See ServerSettings.identity. The default is "host": the machine name keeps
+# per-host dashboards working, while the OS account - "who was on that box" - is
+# the part that needs an explicit opt-in.
+IDENTITY_MODES = ("full", "host", "none")
+DEFAULT_IDENTITY = "host"
 PAYLOAD_SCHEMA = 1
 USER_AGENT = "AssetGatekeeper/1.0 (+https://github.com/ohio13/asset-gatekeeper)"
 
@@ -175,7 +183,8 @@ class Budget:
     max_material_slots: int = 3
     require_power_of_two: bool = True
     enforce_texture_naming: bool = True
-    texture_suffixes: tuple[str, ...] = ("_Albedo", "_Normal", "_Roughness")
+    texture_suffixes: tuple[str, ...] = ("_Albedo", "_Normal", "_Roughness",
+                                        "_BaseColor", "_ORM")
     # Deep data profiling: the bottlenecks that survive an art review.
     max_bone_influences: int = 4          # per-vertex weights; mobile/web GPUs cap at 4
     max_uv_channels: int = 4              # TEXCOORD_n sets; most engines stop at 4-8
@@ -191,6 +200,10 @@ class Budget:
     # On by default: a .gltf pointing at a texture nobody shipped is broken in
     # every engine, on every platform, with no ambiguity to argue about.
     check_references: bool = True
+    # A reference that resolves outside the watch folder is a failure by
+    # default. Studios with a shared texture library one level up can say so in
+    # [mesh] and get a warning instead of a wall of red.
+    allow_outside_references: bool = False
 
     # - PBR value sanitisation - #
     # Albedo is *not* a painting. Real-world base colour reflectance lives in a
@@ -199,7 +212,7 @@ class Budget:
     pbr_check: bool = True
     pbr_floor: float = 0.02               # 5/255: below this, albedo is "pure black"
     pbr_ceiling: float = 0.94             # 240/255: above this, albedo is "pure white"
-    pbr_suffixes: tuple[str, ...] = ("_Albedo", "_Diffuse")
+    pbr_suffixes: tuple[str, ...] = ("_Albedo", "_Diffuse", "_BaseColor")
 
     # - geometric boundary profiling - #
     # Off by default, on purpose: plenty of legitimate exports are authored with
@@ -212,6 +225,61 @@ class Budget:
 
     # Which platform profile produced this budget (for the log line only).
     platform: str = ""
+
+    def __post_init__(self) -> None:
+        """Reject impossible budgets at construction, wherever they came from.
+
+        A negative cap is not a tighter budget, it is a typo: ``--triangles -1``
+        made every mesh in the repository fail, and the report blamed the assets.
+        Rules files, presets, tag budgets and CLI overrides all land here, so
+        this is the one place that has to check.
+        """
+        for field, minimum in (("max_triangles", 0), ("max_texture_edge", 1),
+                               ("max_material_slots", 0), ("max_bone_influences", 0),
+                               ("max_uv_channels", 1)):
+            value = getattr(self, field)
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise ConfigError(f"budget {field} must be an integer, got {value!r}")
+            if value < minimum:
+                raise ConfigError(f"budget {field} must be at least {minimum}, got {value}")
+        if self.degenerate_epsilon < 0:
+            raise ConfigError("budget degenerate_epsilon cannot be negative, got "
+                              f"{self.degenerate_epsilon}")
+        # Finite, non-negative floats. NaN is the dangerous one: every comparison
+        # against it is False, so ``nan > 0`` silently disabled the degenerate-face
+        # check instead of failing loudly.
+        for field in ("degenerate_epsilon", "pivot_tolerance", "transform_epsilon"):
+            value = getattr(self, field)
+            if isinstance(value, bool) or not isinstance(value, (int, float)):
+                raise ConfigError(f"budget {field} must be a number, got {value!r}")
+            if not math.isfinite(value):
+                raise ConfigError(f"budget {field} must be a finite number, got {value}")
+            if value < 0:
+                raise ConfigError(f"budget {field} cannot be negative, got {value}")
+        for field in ("pbr_floor", "pbr_ceiling"):
+            value = getattr(self, field)
+            if not 0.0 <= value <= 1.0:
+                raise ConfigError(f"budget {field} must be between 0 and 1, got {value}")
+        if self.pbr_floor > self.pbr_ceiling:
+            raise ConfigError("budget pbr_floor must not exceed pbr_ceiling "
+                              f"({self.pbr_floor} > {self.pbr_ceiling})")
+
+        # Suffix lists. A blank entry is a typo that either matches every filename
+        # ("") or none, and an empty texture list turns the naming rule into a
+        # regex that matches everything - the check silently stops checking.
+        texture_suffixes = tuple(str(item).strip() for item in self.texture_suffixes)
+        pbr_suffixes = tuple(str(item).strip() for item in self.pbr_suffixes)
+        for field, suffixes in (("texture_suffixes", texture_suffixes),
+                                ("pbr_suffixes", pbr_suffixes)):
+            if any(not item for item in suffixes):
+                raise ConfigError(f"budget {field} contains an empty entry; remove it "
+                                  f"instead of leaving a blank string")
+        if not texture_suffixes:
+            raise ConfigError("budget texture_suffixes is empty: no texture name could "
+                              "ever satisfy the naming rule. List at least one suffix "
+                              "or drop the [texture] table and use the defaults.")
+        object.__setattr__(self, "texture_suffixes", texture_suffixes)
+        object.__setattr__(self, "pbr_suffixes", pbr_suffixes)
 
     @classmethod
     def from_mapping(cls, document: dict) -> "Budget":
@@ -239,24 +307,26 @@ class Budget:
             raise ConfigError("[texture] must be a table")
         _reject_unknown(mesh, ("max_triangles", "max_material_slots", "max_bone_influences",
                                "max_uv_channels", "allow_degenerate", "degenerate_epsilon",
-                               "check_references", "audit_transforms", "require_indexed",
+                               "check_references", "allow_outside_references",
+                               "audit_transforms", "require_indexed",
                                "pivot_tolerance", "transform_epsilon"), "[mesh]")
         _reject_unknown(texture, ("max_edge", "power_of_two", "naming", "suffixes",
                                   "pbr", "pbr_floor", "pbr_ceiling", "pbr_suffixes"), "[texture]")
 
-        max_triangles = _read_int(mesh, "max_triangles", "[mesh]")
+        max_triangles = _read_int(mesh, "max_triangles", "[mesh]", minimum=0)
         max_material_slots = _read_int(mesh, "max_material_slots", "[mesh]", minimum=0)
-        max_bone_influences = _read_int(mesh, "max_bone_influences", "[mesh]")
+        max_bone_influences = _read_int(mesh, "max_bone_influences", "[mesh]", minimum=0)
         max_uv_channels = _read_int(mesh, "max_uv_channels", "[mesh]", minimum=1)
         allow_degenerate = _read_bool(mesh, "allow_degenerate", "[mesh]")
         degenerate_epsilon = _read_float(mesh, "degenerate_epsilon", "[mesh]")
-        max_texture_edge = _read_int(texture, "max_edge", "[texture]")
+        max_texture_edge = _read_int(texture, "max_edge", "[texture]", minimum=1)
         require_power_of_two = _read_bool(texture, "power_of_two", "[texture]")
         enforce_texture_naming = _read_bool(texture, "naming", "[texture]")
         texture_suffixes = _read_strings(texture, "suffixes", "[texture]")
 
         # Reference / hierarchy auditing
         check_references = _read_bool(mesh, "check_references", "[mesh]")
+        allow_outside_references = _read_bool(mesh, "allow_outside_references", "[mesh]")
 
         # PBR sanitisation
         pbr_check = _read_bool(texture, "pbr", "[texture]")
@@ -295,6 +365,10 @@ class Budget:
             check_references=(
                 defaults.check_references if check_references is None else check_references
             ),
+            allow_outside_references=(
+                defaults.allow_outside_references if allow_outside_references is None
+                else allow_outside_references
+            ),
             exclude=defaults.exclude if exclude is None else exclude,
             pbr_check=defaults.pbr_check if pbr_check is None else pbr_check,
             pbr_floor=defaults.pbr_floor if pbr_floor is None else pbr_floor,
@@ -330,10 +404,15 @@ class Verdict:
     # Non-fatal advisories: a fuzzy tag match, a guess a human should confirm.
     # Warnings never change `passed`.
     warnings: tuple[str, ...] = ()
+    # The gate could not read the file at all - a locked handle, a permission the
+    # account does not have, a reparse point gone stale. That is not the artist's
+    # mesh being over budget, so it gets its own word: ERROR. It still fails the
+    # run, because an asset nobody could inspect is an asset nobody can ship.
+    unreadable: bool = False
 
     @property
     def passed(self) -> bool:
-        return not self.problems
+        return not self.problems and not self.unreadable
 
     @property
     def healed(self) -> bool:
@@ -341,7 +420,9 @@ class Verdict:
 
     @property
     def status(self) -> str:
-        """PASSED / HEALED / FAILED - the word a dashboard and a hook can branch on."""
+        """PASSED / HEALED / FAILED / ERROR - the word a dashboard branches on."""
+        if self.unreadable:
+            return "ERROR"
         if not self.passed:
             return "FAILED"
         return "HEALED" if self.healed else "PASSED"
@@ -354,6 +435,8 @@ class Verdict:
     def tag(self) -> str:
         if self.passed:
             return f"PASSED WITH HEALING: {'; '.join(self.heal_notes)}" if self.healed else "PASSED"
+        if self.unreadable:
+            return f"ERROR: {self.reason}"
         return f"FAILED: {self.reason}"
 
 
@@ -807,6 +890,13 @@ def resolve_budget(root: Path, args: argparse.Namespace,
 
     requested_preset = (getattr(args, "preset", None) or "").strip()
 
+    # A remote endpoint can return anything: a bare list, a string, an HTML error
+    # page parsed as JSON. Indexing it produced an AttributeError traceback
+    # instead of the usual exit 2 with the key named.
+    if remote_document is not None and not isinstance(remote_document, dict):
+        raise ConfigError("remote rules: expected a table of settings, got "
+                          f"{type(remote_document).__name__}")
+
     if remote_document is not None:
         platform = requested_platform or str(remote_document.get("platform", "") or "")
         try:
@@ -879,8 +969,12 @@ def resolve_budget(root: Path, args: argparse.Namespace,
         overrides["audit_transforms"] = True
 
     if not overrides:
-        return budget, source, []
-    return replace(budget, **overrides), source, sorted(overrides)  # type: ignore[arg-type]
+        return budget, source, {}
+    # The dict, not its sorted keys: the caller passes this to Gatekeeper, which
+    # applies it to the per-tag budgets with replace(**overrides). Returning the
+    # key list turned every numeric flag into
+    # "ValueError: dictionary update sequence element #0 has length 13".
+    return replace(budget, **overrides), source, overrides  # type: ignore[arg-type]
 
 
 # --- #
@@ -1090,9 +1184,35 @@ def walk_files(root: Path, recursive: bool = True, follow_symlinks: bool = False
     def _walk_error(exc: OSError) -> None:
         _skip(str(getattr(exc, "filename", None) or exc))
 
+    # A self-referential junction (``project/loop -> project``) makes
+    # ``followlinks=True`` walk forever. Remember every real directory we have
+    # already entered and prune repeats: a link back into the tree is then
+    # walked once, as itself, and the scan still terminates.
+    visited: set[str] = set()
+
+    def _directory_key(directory: str) -> str:
+        try:
+            return os.path.normcase(os.path.realpath(directory))
+        except OSError:                       # pragma: no cover - defensive
+            return os.path.normcase(os.path.abspath(directory))
+
+    visited.add(_directory_key(str(top)))
+
     try:
-        for directory, _dirnames, filenames in os.walk(top, onerror=_walk_error,
-                                                       followlinks=follow_symlinks):
+        for directory, dirnames, filenames in os.walk(top, onerror=_walk_error,
+                                                      followlinks=follow_symlinks):
+            if follow_symlinks:
+                keep = []
+                for name in dirnames:
+                    child = os.path.join(directory, name)
+                    key = _directory_key(child)
+                    if key in visited:
+                        LOG.warning("not descending into %s again (symlink loop)", child)
+                        _skip(child)
+                        continue
+                    visited.add(key)
+                    keep.append(name)
+                dirnames[:] = keep          # os.walk honours in-place pruning
             for name in filenames:
                 candidate = Path(directory) / name
                 try:
@@ -1178,6 +1298,14 @@ class ServerSettings:
     telemetry_url: str = ""
     remote_rules_url: str = ""
     token: str = ""
+    # How much identifying detail rides along with each verdict. Every payload
+    # used to carry the machine name, the OS account and an absolute path -
+    # "who worked on what, from which box" - to an endpoint the artist never
+    # chose. That is a studio decision, so it is explicit and conservative:
+    #   "full" - hostname, username and an absolute path
+    #   "host" - hostname and an absolute path, no OS account (DEFAULT)
+    #   "none" - no host or user, and the path relative to the watch folder
+    identity: str = DEFAULT_IDENTITY
 
     @property
     def telemetry_enabled(self) -> bool:
@@ -1187,11 +1315,16 @@ class ServerSettings:
     def from_mapping(cls, table: dict, where: str = "[server]") -> "ServerSettings":
         if not isinstance(table, dict):
             raise ConfigError(f"{where} must be a table")
-        _reject_unknown(table, ("url", "token", "remote_rules_url"), where)
+        _reject_unknown(table, ("url", "token", "remote_rules_url", "identity"), where)
+        identity = _read_str(table, "identity", where)
+        if identity is not None and identity not in IDENTITY_MODES:
+            raise ConfigError(f"{where}.identity must be one of "
+                              f"{', '.join(IDENTITY_MODES)}, got {identity!r}")
         return cls(
             telemetry_url=_read_str(table, "url", where) or "",
             remote_rules_url=_read_str(table, "remote_rules_url", where) or "",
             token=_read_str(table, "token", where) or "",
+            identity=DEFAULT_IDENTITY if identity is None else identity,
         )
 
 
@@ -1260,32 +1393,52 @@ def write_rules_cache(cache_path: Path, url: str, document: dict) -> None:
 
 def fetch_remote_rules(url: str, cache_path: Path, timeout: float = HTTP_TIMEOUT,
                        token: str = "") -> Optional[dict]:
-    """GET the central budget, falling back to the cached copy. Never raises.
+    """GET the central budget, falling back to the last good cached copy.
+
+    Raises ``ConfigError`` only when the server cannot supply a usable budget
+    (unreachable, or serving an invalid one) *and* there is no cached profile.
 
     The failure contract is the whole point of this function: a studio's network
     being down must degrade to "yesterday's budget", not to a traceback that
     stops the artists working. The broad ``except`` is deliberate.
     """
+    problem = ""
     try:
         text = _http_body(url, timeout=timeout, token=token,
                           accept="application/json, application/toml")
-        document = parse_rules_text(text, url)
-        Budget.from_mapping(document)  # validate before caching: a broken payload
-        write_rules_cache(cache_path, url, document)  # must not poison the good cache
-        LOG.debug("remote rules %s: %d bytes accepted", url, len(text))
-        return document
-    except Exception as exc:  # network, HTTP status, malformed payload, bad types
-        LOG.debug("remote rules fetch failed: %s: %s", type(exc).__name__, exc)
-        cached = read_rules_cache(cache_path)
-        if cached is not None:
+    except Exception as exc:  # network, DNS, TLS, HTTP status
+        problem = f"unreachable ({type(exc).__name__}: {exc})"
+        failure: BaseException = exc
+    else:
+        try:
+            document = parse_rules_text(text, url)
+            Budget.from_mapping(document)  # validate before caching: a broken payload
+            write_rules_cache(cache_path, url, document)  # must not poison the good cache
+            LOG.debug("remote rules %s: %d bytes accepted", url, len(text))
+            return document
+        except Exception as exc:  # malformed payload, not a table, impossible values
+            # The server answered; what it served is wrong. Saying "unreachable"
+            # here sent people to debug the network instead of the rules.
+            problem = f"invalid ({exc})"
+            failure = exc
+    LOG.debug("remote rules fetch failed: %s", problem)
+    cached = read_rules_cache(cache_path)
+    if cached is not None:
+        if problem.startswith("invalid"):
+            LOG.warning("Central rules at %s are %s; using the last good cached profile (%s)",
+                        url, problem, cache_path.name)
+        else:
             LOG.warning("Central server offline; using cached rules profile (%s)", cache_path.name)
-            return cached
-        # Fail closed. Falling back to the local 50k default would pass assets the
-        # central budget rejects, which is the worst possible answer from a gate.
-        raise ConfigError(
-            f"remote rules unreachable ({url}) and no cached profile at "
-            f"{cache_path.name}: refusing to validate against local defaults"
-        ) from exc
+        return cached
+    # Fail closed. Falling back to the local 50k default would pass assets the
+    # central budget rejects, which is the worst possible answer from a gate.
+    # Keep the "remote rules unreachable" wording for the network case: pipelines
+    # and the test suite match on it.
+    raise ConfigError(
+        f"remote rules {problem.split(' ', 1)[0]} ({url}: {problem.split(' ', 1)[1][1:-1]}) "
+        f"and no cached profile at {cache_path.name}: refusing to validate against "
+        f"local defaults"
+    ) from failure
 
 
 @dataclass(frozen=True)
@@ -1335,6 +1488,9 @@ def resolve_healer(root: Path, args: argparse.Namespace,
     """
     from_source = HealSettings()
     if remote_document is not None:
+        if not isinstance(remote_document, dict):
+            raise ConfigError("remote rules: expected a table of settings, got "
+                              f"{type(remote_document).__name__}")
         try:
             from_source = HealSettings.from_mapping(remote_document.get("healer", {}))
         except ConfigError as exc:
@@ -1352,7 +1508,7 @@ def resolve_healer(root: Path, args: argparse.Namespace,
     return replace(from_source, enabled=bool(forced))
 
 
-def load_healer(budget: Budget, settings: HealSettings):
+def load_healer(budget: Budget, settings: HealSettings, root: Optional[Path] = None):
     """Import the companion ``healer.py`` next to this file - only when asked.
 
     Loaded by path rather than by import name so the tool still works when it is
@@ -1372,7 +1528,7 @@ def load_healer(budget: Budget, settings: HealSettings):
     spec.loader.exec_module(module)
     try:
         return module.Healer(budget, textures=settings.textures, meshes=settings.meshes,
-                             texture_mode=settings.texture_mode)
+                             texture_mode=settings.texture_mode, root=root)
     except module.HealError as exc:
         raise ConfigError(f"healer cannot start: {exc}") from exc
 
@@ -1499,6 +1655,8 @@ def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:
         remote_rules_url=(getattr(args, "remote_rules", None)
                           or os.environ.get(REMOTE_RULES_ENV) or from_file.remote_rules_url),
         token=os.environ.get(SERVER_ENV_TOKEN) or from_file.token,
+        identity=(getattr(args, "telemetry_identity", None)
+                  or os.environ.get(SERVER_ENV_IDENTITY) or from_file.identity),
     )
 
 
@@ -1994,6 +2152,36 @@ def missing_references(path: Path) -> list[tuple[str, Path]]:
             if not target.is_file()]
 
 
+def escaping_references(path: Path, root: Optional[Path]) -> list[tuple[str, Path]]:
+    """References that resolve outside the project folder.
+
+    ``../../shared/tex.png`` or a hardcoded ``C:/Users/.../wood.png`` is either a
+    mistaken export path or an attempt to read a file the project never shipped.
+    Either way the build machine will not have it, and everything that follows a
+    reference on trust - the dashboard bridge, the workstation importer - walks
+    out of the repository on the asset's say-so.
+
+    ``root is None`` (single-file mode) means there is no boundary to escape, so
+    nothing is reported.
+    """
+    if root is None:
+        return []
+    try:
+        base = Path(root).resolve()
+    except OSError:                       # pragma: no cover - defensive
+        return []
+    escaping: list[tuple[str, Path]] = []
+    for written, target in resolve_references(path):
+        try:
+            resolved = Path(target).resolve()
+        except OSError:
+            escaping.append((written, target))
+            continue
+        if resolved != base and base not in resolved.parents:
+            escaping.append((written, target))
+    return escaping
+
+
 def orphaned_files(root: Path) -> list[Path]:
     """Texture files in the repository that no mesh references.
 
@@ -2213,7 +2401,8 @@ class Gatekeeper:
                  tag_budgets: Optional[dict[str, Budget]] = None,
                  tag_mode: str = "suggest",
                  tag_similarity: float = DEFAULT_TAG_SIMILARITY,
-                 tag_root: Optional[Path] = None) -> None:
+                 tag_root: Optional[Path] = None,
+                 root: Optional[Path] = None) -> None:
         self.budget = budget
         self.healer = healer
         self.tag_budgets = tag_budgets or {}
@@ -2223,6 +2412,10 @@ class Gatekeeper:
         self.overrides = dict(overrides or {})
         self.tag_similarity = tag_similarity
         self.tag_root = tag_root
+        # The project boundary, for the reference-escape check. Separate from
+        # tag_root only so a caller can point tagging at a category root while
+        # the boundary stays the watch folder.
+        self.root = root if root is not None else tag_root
         self._naming = build_naming_pattern(budget.texture_suffixes) if budget.enforce_texture_naming else None
 
     def check(self, path: Path) -> Verdict:
@@ -2312,6 +2505,7 @@ class Gatekeeper:
             return Verdict(path, (str(exc),))
 
         problems: list[str] = []
+        warnings: list[str] = []
         metrics = [f"{triangles:,} tris"]
         stats: list[tuple[str, int]] = [("triangles", triangles)]
 
@@ -2382,11 +2576,29 @@ class Gatekeeper:
         # texture nobody shipped fails to load in every engine, on every platform.
         if self.budget.check_references:
             broken = missing_references(path)
+            broken_names = {written for written, _target in broken}
             for written, _target in broken:
                 problems.append(
                     f"missing reference '{written}' (broken link: the engine cannot load it)")
             if broken:
                 stats.append(("broken_references", len(broken)))
+            # A reference that leaves the watch folder is a build-machine failure
+            # waiting to happen, and a path-traversal hazard for anything that
+            # follows it on trust. Studios with a shared library opt out in rules.
+            escaped = [item for item in escaping_references(path, self.root)
+                       if item[0] not in broken_names]
+            if escaped:
+                if self.budget.allow_outside_references:
+                    warnings.extend(f"reference '{written}' points outside the project "
+                                    "folder ([mesh] allow_outside_references is on)"
+                                    for written, _target in escaped)
+                else:
+                    problems.extend(
+                        f"reference '{written}' points outside the project folder "
+                        "(the build machine will not have it; set "
+                        "allow_outside_references in [mesh] if it is a shared library)"
+                        for written, _target in escaped)
+                stats.append(("outside_references", len(escaped)))
 
         # Transform/pivot/index audits are opt-in (see Budget.audit_transforms).
         if self.budget.audit_transforms or self.budget.require_indexed:
@@ -2395,7 +2607,8 @@ class Gatekeeper:
             except Exception as exc:      # an audit must never break the verdict
                 LOG.debug("transform audit failed for %s: %s", path.name, exc)
 
-        return Verdict(path, tuple(problems), " / ".join(metrics), tuple(stats))
+        return Verdict(path, tuple(problems), " / ".join(metrics), tuple(stats),
+                       warnings=tuple(warnings))
 
     # - textures - #
 
@@ -2445,12 +2658,18 @@ def _safe_username() -> str:
         return ""
 
 
-def build_telemetry_payload(verdict: Verdict, root: Optional[Path] = None) -> dict:
+def build_telemetry_payload(verdict: Verdict, root: Optional[Path] = None,
+                            identity: str = DEFAULT_IDENTITY) -> dict:
     """One flat JSON object per asset: the studio's record of what was gated.
 
     Deliberately flat - a data warehouse can ingest it without a nested schema,
     and the plugin contract (``--json``) stays a superset of these keys.
+
+    ``identity`` decides how much of the artist's machine travels with it; see
+    ``ServerSettings.identity``. The keys are always present, because the ingest
+    contract is a fixed schema - what changes is whether they carry a value.
     """
+    detail = identity if identity in IDENTITY_MODES else DEFAULT_IDENTITY
     path = verdict.path
     relative = path.name
     if root is not None:
@@ -2462,24 +2681,31 @@ def build_telemetry_payload(verdict: Verdict, root: Optional[Path] = None) -> di
         size_bytes = path.stat().st_size
     except OSError:
         size_bytes = -1
+    absolute = (str((root / path).resolve())
+                if root is not None and not Path(path).is_absolute() else str(path))
+    full = detail == "full"
+    # "host" keeps the machine name: a dashboard groups by workstation, and a
+    # fleet of "unknown" buckets is worse than useless. What it drops is the OS
+    # account, which is the identifying half.
+    include_host = detail in ("full", "host")
     return {
         "schema": PAYLOAD_SCHEMA,
         "timestamp": _utc_now(),
-        "hostname": platform.node(),
-        "username": _safe_username(),
+        "hostname": platform.node() if include_host else "",
+        "username": _safe_username() if full else "",
         "platform": platform.platform(),
         "python": platform.python_version(),
         "name": path.name,
-        # Absolute: the dashboard hands this straight to the workstation when a
-        # reviewer clicks "Send to Workstation", so a bare relative name is not
-        # enough. The relative form is kept for display and grouping.
-        "path": (str((root / path).resolve())
-                 if root is not None and not Path(path).is_absolute() else str(path)),
+        # Absolute by default: the dashboard hands this straight to the
+        # workstation when a reviewer clicks "Send to Workstation", so a bare
+        # relative name is not enough. The relative form is kept for display and
+        # grouping, and identity="none" sends only that.
+        "path": absolute if detail in ("full", "host") else relative,
         "relative_path": relative,
         "size_bytes": size_bytes,
         "passed": verdict.passed,
-        # PASSED / HEALED / FAILED: a healed asset passed, but the studio still
-        # wants to know it was rewritten, and what was done to it.
+        # PASSED / HEALED / FAILED / ERROR: a healed asset passed, but the studio
+        # still wants to know it was rewritten, and what was done to it.
         "status": verdict.status,
         "metric": verdict.metric,
         "stats": dict(verdict.stats),
@@ -2504,14 +2730,17 @@ class Telemetry:
     """
 
     def __init__(self, url: str, root: Optional[Path] = None, token: str = "",
-                 timeout: float = HTTP_TIMEOUT, queue_max: int = TELEMETRY_QUEUE_MAX) -> None:
+                 timeout: float = HTTP_TIMEOUT, queue_max: int = TELEMETRY_QUEUE_MAX,
+                 identity: str = DEFAULT_IDENTITY) -> None:
         self.url = url
         self.root = root
         self.token = token
+        self.identity = identity if identity in IDENTITY_MODES else DEFAULT_IDENTITY
         self.timeout = float(timeout)
         self.sent = 0
         self.failed = 0
         self.dropped = 0
+        self._warned = False
         self._queue: "queue.Queue[Optional[dict]]" = queue.Queue(maxsize=queue_max)
         self._thread: Optional[threading.Thread] = None
         self._closed = False
@@ -2526,7 +2755,8 @@ class Telemetry:
         if self._closed:
             return
         try:
-            payload = build_telemetry_payload(verdict, self.root if root is None else root)
+            payload = build_telemetry_payload(verdict, self.root if root is None else root,
+                                              identity=self.identity)
         except Exception as exc:  # a malformed Verdict must not stop the line
             self.dropped += 1
             LOG.debug("telemetry: could not build payload: %s", exc)
@@ -2567,11 +2797,25 @@ class Telemetry:
         except urllib.error.HTTPError as exc:
             self.failed += 1
             LOG.debug("telemetry: POST rejected (%s %s)", exc.code, exc.reason)
+            hint = {401: "check the token (ASSET_GATEKEEPER_TOKEN)",
+                    403: "if the dashboard is reached by name, start it with "
+                         "--allow-host <that name>; otherwise check the token"}.get(
+                exc.code, "the dashboard refused the payload")
+            self._warn_once(f"refused by {self.url} ({exc.code} {exc.reason}) - {hint}")
         except Exception as exc:
-            # Silent by contract. The artist's terminal is not a network monitor,
-            # and -v turns this into a visible line for whoever is debugging it.
+            # Quiet by contract for repeats: the artist's terminal is not a network
+            # monitor. But one line per run is owed - a dashboard that silently
+            # stops filling is how a studio loses a month of verdicts.
             self.failed += 1
             LOG.debug("telemetry: POST failed (%s): %s", type(exc).__name__, exc)
+            self._warn_once(f"cannot reach {self.url} ({type(exc).__name__})")
+
+    def _warn_once(self, problem: str) -> None:
+        if self._warned:
+            return
+        self._warned = True
+        LOG.warning("telemetry %s; verdicts are not being recorded on the dashboard "
+                    "(repeats are only shown with -v)", problem)
 
     # - lifecycle - #
 
@@ -2586,6 +2830,9 @@ class Telemetry:
             pass
         self._thread.join(self.timeout if timeout is None else timeout)
         LOG.debug("telemetry: %d sent, %d failed, %d dropped", self.sent, self.failed, self.dropped)
+        if self.failed or self.dropped:
+            LOG.warning("telemetry: %d verdict(s) not delivered to %s (%d sent)",
+                        self.failed + self.dropped, self.url, self.sent)
 
 
 class Reporter:
@@ -2719,13 +2966,25 @@ def is_candidate(path: Path, exclude: Sequence[str] = ()) -> bool:
     return True
 
 
-def wait_until_stable(path: Path, quiet: float = 0.35, timeout: float = 30.0) -> bool:
+def wait_until_stable(path: Path, quiet: float = 0.35, timeout: float = 30.0,
+                      settled_age: float = 5.0) -> bool:
     """Block until the file stops growing and can be opened.
 
     Exporters (Blender, Substance, Unreal, Maya) fire a create/modify event the
     instant the handle opens, so inspecting immediately means reading a truncated
     file. Poll size until it has been unchanged for ``quiet`` seconds.
+
+    A file nothing has touched for ``settled_age`` seconds is not being written
+    right now, so it is taken as stable immediately. Without that, ``--once`` on
+    a finished repository paid 0.35 s per asset - a 4,000-asset project waited
+    23 minutes before reporting a single verdict.
     """
+    try:
+        if time.time() - path.stat().st_mtime >= settled_age:
+            return True
+    except OSError:
+        return False  # deleted or moved away before we looked
+
     deadline = time.monotonic() + timeout
     last_size: Optional[int] = None
     stable_since = 0.0
@@ -2849,13 +3108,27 @@ def describe_budget(budget: Budget) -> str:
 
 def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
              recursive: bool, exclude: Sequence[str] = (),
-             follow_symlinks: bool = False) -> int:
+             follow_symlinks: bool = False, allow_empty: bool = False) -> int:
+    unreadable: list[str] = []
     candidates = sorted(p for p in walk_files(root, recursive=recursive,
-                                              follow_symlinks=follow_symlinks)
+                                              follow_symlinks=follow_symlinks,
+                                              on_skip=unreadable.append)
                         if is_candidate(p, exclude))
-    if not candidates:
-        LOG.info("no tracked assets found in %s", root)
-        return 0
+
+    # An entry the walker could not even list used to disappear without a word:
+    # a locked 90,000-triangle mesh reported "no tracked assets found" and exit 0,
+    # so CI stayed green on a repository nobody had actually gated.
+    for message in unreadable:
+        reporter.report(Verdict(Path(message), (f"cannot be read ({message})",),
+                                unreadable=True))
+
+    if not candidates and not unreadable:
+        if allow_empty:
+            LOG.info("no tracked assets found in %s (--allow-empty)", root)
+            return 0
+        LOG.error("no tracked assets found in %s - check the path, or pass "
+                  "--allow-empty if this folder is meant to be empty", root)
+        return 1
 
     for path in candidates:
         if wait_until_stable(path):
@@ -3216,6 +3489,29 @@ def to_toml(document: dict, header: str = RULES_HEADER) -> str:
     return "\n".join(lines).rstrip("\n") + "\n"
 
 
+def _non_negative_int(text: str) -> int:
+    """argparse type for a count that may legitimately be 0 (e.g. materials).
+
+    ``--triangles -1`` used to be accepted and then failed every mesh in the
+    repository, which reads as an art problem rather than a typo.
+    """
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"{text!r} is not an integer") from None
+    if value < 0:
+        raise argparse.ArgumentTypeError(f"must be 0 or more, got {value}")
+    return value
+
+
+def _positive_int(text: str) -> int:
+    """argparse type for a size or a rate, which has no meaningful zero."""
+    value = _non_negative_int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more, got 0")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="asset_gatekeeper",
@@ -3233,15 +3529,15 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("folder", nargs="?", default=None,
                         help="folder to watch (default: current directory)")
-    parser.add_argument("--triangles", type=int, default=None,
+    parser.add_argument("--triangles", type=_non_negative_int, default=None,
                         help="max triangles per mesh (overrides rules.toml; default 50,000)")
-    parser.add_argument("--max-texture", type=int, default=None, metavar="EDGE",
+    parser.add_argument("--max-texture", type=_positive_int, default=None, metavar="EDGE",
                         help="max texture width/height in pixels (overrides rules.toml; default 2,048)")
-    parser.add_argument("--max-materials", type=int, default=None, metavar="N",
+    parser.add_argument("--max-materials", type=_non_negative_int, default=None, metavar="N",
                         help="max material slots per mesh (overrides rules.toml; default 3)")
-    parser.add_argument("--max-influences", type=int, default=None, metavar="N",
+    parser.add_argument("--max-influences", type=_non_negative_int, default=None, metavar="N",
                         help="max bone weights per vertex (overrides rules.toml; default 4)")
-    parser.add_argument("--max-uvs", type=int, default=None, metavar="N",
+    parser.add_argument("--max-uvs", type=_positive_int, default=None, metavar="N",
                         help="max UV channels per mesh (overrides rules.toml; default 4)")
     parser.add_argument("--allow-degenerate", action="store_true", default=None,
                         help="do not fail meshes containing zero-area triangles")
@@ -3261,7 +3557,7 @@ def build_parser() -> argparse.ArgumentParser:
                         help="native desktop toasts on failure/heal (default: on while watching)")
     parser.add_argument("--no-notify", action="store_false", dest="notify", default=None,
                         help="never raise desktop toasts")
-    parser.add_argument("--notify-max", type=int, default=None, metavar="N",
+    parser.add_argument("--notify-max", type=_positive_int, default=None, metavar="N",
                         help="maximum toasts per minute (default 6)")
     parser.add_argument("--exclude", action="append", metavar="GLOB", default=None,
                         help="ignore files matching this glob, e.g. 'preview_*' "
@@ -3303,10 +3599,19 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--telemetry-url", metavar="URL", default=None,
                         help="POST every verdict to this endpoint (or set "
                              f"{SERVER_ENV_URL})")
+    parser.add_argument("--telemetry-identity", choices=IDENTITY_MODES, default=None,
+                        metavar="MODE",
+                        help="what identifying detail telemetry carries (or set "
+                             f"{SERVER_ENV_IDENTITY}): full (host, user, absolute path), "
+                             "path (absolute path only, the default), none (relative path)")
     parser.add_argument("--version", action="version",
                         version=f"asset-gatekeeper {__version__}",
                         help="print the version and exit (pipelines log this)")
     parser.add_argument("--once", action="store_true", help="scan existing files and exit")
+    parser.add_argument("--allow-empty", action="store_true", dest="allow_empty",
+                        help="with --once: exit 0 when the folder holds no tracked assets "
+                             "(without it, an empty folder fails the run: a wrong path "
+                             "is the usual reason)")
     parser.add_argument("--recursive", action="store_true", help="include subfolders")
     parser.add_argument("--follow-symlinks", action="store_true",
                         help="descend into symlinked/junctioned folders. Off by default: "
@@ -3390,9 +3695,15 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     # CLI flag > remote rules > local rules.toml > defaults.
     remote_document = None
     if server.remote_rules_url:
-        remote_document = fetch_remote_rules(
-            server.remote_rules_url, watch_dir / RULES_CACHE_FILENAME, token=server.token
-        )
+        try:
+            remote_document = fetch_remote_rules(
+                server.remote_rules_url, watch_dir / RULES_CACHE_FILENAME, token=server.token
+            )
+        except ConfigError as exc:
+            # Exit 2 ("the gate could not run"), never a traceback and exit 1,
+            # which CI would read as "the assets failed".
+            LOG.error("%s", exc)
+            return 2
 
     try:
         budget, rules_source, overrides = resolve_budget(watch_dir, args, remote_document)
@@ -3418,7 +3729,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     healer = None
     if heal_settings.enabled:
         try:
-            healer = load_healer(budget, heal_settings)
+            healer = load_healer(budget, heal_settings, root=watch_dir)
         except ConfigError as exc:
             LOG.error("%s", exc)
             return 2
@@ -3429,7 +3740,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     telemetry = None
     if server.telemetry_enabled:
-        telemetry = Telemetry(server.telemetry_url, root=watch_dir, token=server.token)
+        telemetry = Telemetry(server.telemetry_url, root=watch_dir, token=server.token,
+                              identity=server.identity)
         LOG.info("report  %s", server.telemetry_url)
 
     try:
@@ -3477,7 +3789,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     if args.once:
         status = run_once(watch_dir, gatekeeper, reporter, args.recursive, budget.exclude,
-                      follow_symlinks=getattr(args, "follow_symlinks", False))
+                          follow_symlinks=getattr(args, "follow_symlinks", False),
+                          allow_empty=getattr(args, "allow_empty", False))
     else:
         status = run_watch(watch_dir, gatekeeper, reporter, args.recursive, budget.exclude)
     reporter.close()

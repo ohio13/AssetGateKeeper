@@ -134,6 +134,42 @@ def describe_budget(budget: Any) -> str:
             f"texture<={getattr(budget, 'max_texture_edge', 0)}px")
 
 
+BUDGET_INTEGER_FIELDS = (("max_triangles", 0), ("max_material_slots", 0),
+                         ("max_texture_edge", 1), ("max_bone_influences", 0))
+BUDGET_FLOAT_FIELDS = ("degenerate_epsilon", "pivot_tolerance", "transform_epsilon",
+                       "pbr_floor", "pbr_ceiling")
+
+
+def budget_problem(budget: Any) -> str:
+    """Why this budget cannot be trusted, or "" when it is usable.
+
+    The panels occasionally build a budget themselves (from a panel field, a
+    preset or a tag table) instead of going through ``agk.Budget``. A -1 or a nan
+    that reached them used to be accepted quietly and then either failed every
+    asset or disabled a rule, which reads as "the tool is broken". The gate
+    refuses these; the early warning must say the same thing.
+    """
+    import math
+
+    for field, minimum in BUDGET_INTEGER_FIELDS:
+        if not hasattr(budget, field):
+            continue
+        value = getattr(budget, field)
+        if isinstance(value, bool) or not isinstance(value, int):
+            return f"budget {field} must be a whole number, got {value!r}"
+        if value < minimum:
+            return f"budget {field} must be at least {minimum}, got {value}"
+    for field in BUDGET_FLOAT_FIELDS:
+        if not hasattr(budget, field):
+            continue
+        value = getattr(budget, field)
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            return f"budget {field} must be a number, got {value!r}"
+        if not math.isfinite(value) or value < 0:
+            return f"budget {field} must be a finite, non-negative number, got {value}"
+    return ""
+
+
 # --------------------------------------------------------------------------- #
 # The check
 # --------------------------------------------------------------------------- #
@@ -157,6 +193,14 @@ def assess(asset: str = "untitled", triangles: Optional[int] = None,
     report = PreflightReport(asset=asset, triangles=triangles, vertices=vertices,
                              materials=materials)
     budget = budget if budget is not None else load_budget()
+
+    if budget is not None:
+        problem = budget_problem(budget)
+        if problem:
+            # A budget the gate would refuse is not a budget: report it instead of
+            # judging the mesh against nonsense.
+            report.add("error", "budget", problem)
+            budget = None
 
     if budget is not None:
         report.budget_summary = describe_budget(budget)

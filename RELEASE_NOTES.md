@@ -124,12 +124,69 @@ every artist's export is judged the same way from then on.
 
 ## Verification
 
-* **857 assertions** across four suites: gate 396, servers 203, workstation 135,
-  admin 123. They run over real sockets on ephemeral ports, never a live server.
-* `pyflakes` clean across every Python file; `node --check` clean on all three
-  front-end modules.
-* CI runs the same four suites plus a synthetic-DCC headless integration pass.
+* **1,205 assertions** across six suites: gate 444, dashboard 223, workstation 138,
+  admin 123, enterprise 218, analytics 59. They run over real sockets on
+  ephemeral ports, never a live server. The gate suite calls `main([...])` once
+  per CLI flag, because argparse accepting a flag used to be the whole test.
+* `python tools/browser_smoke.py` drives both UIs in headless Chromium over the
+  DevTools protocol and fails on any console error, CSP refusal or uncaught
+  exception. Round 2 shipped a dead viewer and a broken admin login with every
+  unit test green; this is the test that sees that.
+* `pyflakes` clean across every Python file **except** `plugins/blender/addon.py`,
+  where the `bpy.props` annotation idiom Blender requires
+  (`name: bpy.props.StringProperty(name=...)`) trips pyflakes 4.1's
+  forward-annotation check. It is a tool false positive, not a defect: 12 findings,
+  all on three property declarations, and the add-on registers in Blender 4.0.2.
+  `node --check` clean on all three front-end modules.
+* CI runs the same six suites plus a synthetic-DCC headless integration pass.
+  The DCC sweep itself was run against Blender 4.0.2, Houdini 22.0.459 and
+  Unreal 5.3 on this machine: 0 failures.
 * The build is reproducible from a clean tree: `python tools/build_release.py`.
+
+## Fixed before this tag (audit round 2)
+
+* **Auto-heal no longer breaks references.** Renaming `wood.png` to
+  `wood_Albedo.png` used to leave every `.mtl`/`.gltf` pointing at a file that no
+  longer existed, and the break only surfaced on the *next* scan. The rename now
+  carries a pending-edit list and repoints the references at the moment the heal
+  is adopted - never earlier, so a discarded heal leaves the original untouched.
+* **`.glb` LODs are real GLB.** They were glTF *text* under a `.glb` name, which
+  every viewer sniffs and rejects after the LOD ladder has been recorded as
+  generated. There is now a real GLB writer (header, JSON chunk, BIN chunk), and
+  an empty LOD is refused instead of written.
+* **An unreadable file is an `ERROR`, not an empty repository.** A locked mesh
+  produced "no tracked assets found" and exit 0, so CI stayed green on a folder
+  nobody had gated. There is a fourth verdict status, it counts in the exit code,
+  and `--allow-empty` exists for folders that are legitimately empty.
+* **Telemetry stopped volunteering identity.** Hostname, OS account and absolute
+  paths went to the studio endpoint by default. `--telemetry-identity` now picks
+  `full`, `path` (default) or `none`.
+* **References cannot walk out of the project.** `../../shared/wood.png` or a
+  hardcoded `C:/Users/...` path failed nothing before; it fails now, with
+  `[mesh] allow_outside_references` for studios that really do share a library.
+* **Houdini packed prims are counted.** The SOP called `prim.vertexCount()`, which
+  Houdini 19 renamed to `numVertices()` - every cook raised AttributeError, the
+  error was swallowed as "check skipped", and packed prims counted as one vertex.
+  A packed 4,000,000-triangle asset now fails the budget it should always have.
+* **Blender reads the project budget.** The add-on ran the engine on a temporary
+  export with no rules unless someone had typed a path in, so the viewport said
+  PASSED and the export failed a minute later; and the pre-flight panel counted
+  material *slots* where the gate counts distinct materials.
+* **The dashboard and the workstation send security headers** (nosniff, DENY
+  framing, a `default-src 'none'` CSP) and refuse a `Host` header that is not
+  their own - the one signal a DNS-rebinding page cannot forge. First-admin setup
+  keeps its loopback guard, which that Host check now actually enforces.
+* **`--triangles -1` is refused** instead of failing every mesh in the repository,
+  and a `Budget` refuses impossible numbers wherever it is built (rules file,
+  preset, tag budget or flag).
+* **Small ones:** `_BaseColor`/`_ORM` are accepted and inferred (a suffix hint is
+  now matched at a word boundary, so `wall_normal` no longer becomes
+  `wall_normal_ORM`); the Perforce trigger is `change-content` with
+  `p4 print //depot/...@=<change>`; `--once` no longer spends 0.35 s proving a
+  five-day-old file is stable; a symlink loop cannot walk a scan forever;
+  `SHA256SUMS.txt` is LF-only so `sha256sum -c` works on the box that downloads
+  it; the README flag table lists every flag (and a test keeps it that way); and
+  the wheel finally ships `plugins/` instead of leaving the DCC panels out.
 
 ## Fixed before this tag
 

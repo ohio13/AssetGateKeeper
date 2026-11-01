@@ -63,6 +63,7 @@ import asset_gatekeeper as agk  # noqa: E402
 from enterprise import analytics as enterprise_analytics  # noqa: E402
 from enterprise.audit import NullLog, build_audit_log  # noqa: E402
 from enterprise.config import ConfigError as EnterpriseConfigError  # noqa: E402
+from server import netguard  # noqa: E402 - shared Host policy
 from enterprise.config import load_config  # noqa: E402
 from enterprise.store import (Store, StoreError, connection_is_sqlite,  # noqa: E402
                               is_dsn, open_store)
@@ -92,6 +93,28 @@ def audit_log():
 
 DEFAULT_HOST = "127.0.0.1"       # loopback by default: no accidental exposure
 DEFAULT_PORT = 8080
+
+#: Sent on every response. A dashboard that renders asset names and problem text
+#: from artists is exactly the kind of page that must not be framed, sniffed or
+#: allowed to phone home. Inline style/script stay allowed because the pages are
+#: built from Python strings with their own <style> and <script> blocks; every
+#: external origin is still refused, so an injected tag cannot load anything.
+SECURITY_HEADERS = (
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    # same-origin, not no-referrer: with no-referrer Chromium sends
+    # "Origin: null" on a same-origin form POST, which the CSRF check then
+    # refuses - that is what broke admin sign-in in every real browser. This
+    # still sends nothing to another origin.
+    ("Referrer-Policy", "same-origin"),
+    ("Content-Security-Policy",
+     "default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; "
+     "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+     "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'"),
+)
+
+#: Host names that always belong to this machine: see server/netguard.py, which
+#: both servers share (an IP literal, a loopback name or this box's own name).
 DEFAULT_DB = "asset_health.db"
 DEFAULT_TOKEN_ENV = "AUTH_TOKEN"
 RULES_ENV = "ASSET_GATEKEEPER_RULES"    # same name the workstation uses
@@ -103,6 +126,12 @@ ART_WORKSTATION_PORT = 8100
 ALLOW_ROOTS_ENV = "AGK_PROJECT_ROOTS"
 
 MAX_BODY_BYTES = 64 * 1024       # one verdict is ~1 KB; 64 KB is already generous
+
+# How much of a refused request body is read and discarded before the connection
+# is dropped instead. Draining is what stops an unread body from being parsed as
+# the next request; the cap is what stops a 4 GB Content-Length from tying up a
+# thread. Above it the connection is closed, which is unambiguous.
+DRAIN_HARD_CAP = 8 * 1024 * 1024
 WALL_OF_SHAME_LIMIT = 20
 BOTTLENECK_LIMIT = 8
 
@@ -126,8 +155,10 @@ CREATE TABLE IF NOT EXISTS verdicts (
     filesize    INTEGER NOT NULL DEFAULT -1,
     passed      INTEGER NOT NULL,              -- 0/1, SQLite has no bool
     metric      TEXT    NOT NULL DEFAULT '',
-    -- PASSED / HEALED / FAILED. A healed asset passed, but the studio still
-    -- wants a record that the file was rewritten on its way in.
+    -- PASSED / HEALED / FAILED / ERROR. A healed asset passed, but the studio
+    -- still wants a record that the file was rewritten on its way in. An ERROR
+    -- row means the file could not be read at all, which is not a verdict on the
+    -- art and must not be read as one.
     status      TEXT    NOT NULL DEFAULT 'PASSED',
     -- Tenant. NULL means "before tenancy existed" (or single-tenant mode).
     project_id  INTEGER REFERENCES projects(id) ON DELETE SET NULL
@@ -382,7 +413,7 @@ def _normalise(payload: dict) -> dict:
     # Trust an explicit status when it is one we know; otherwise derive it, so a
     # hand-written curl still produces a coherent row.
     status = pick("status", default=None)
-    if status not in ("PASSED", "HEALED", "FAILED"):
+    if status not in ("PASSED", "HEALED", "FAILED", "ERROR"):
         status = "HEALED" if (passed and modifications) else ("PASSED" if passed else "FAILED")
 
     return {
@@ -1109,7 +1140,7 @@ def audit_query(db_path: str | Path, statuses: tuple[str, ...],
         clauses.append("project_id = ?")
         params.append(int(project_id))
     where = ("WHERE " + " AND ".join(clauses)) if clauses else ""
-    sql = (f"SELECT id, filename, filepath, passed, hostname, received_at "
+    sql = (f"SELECT id, filename, filepath, passed, status, hostname, received_at "
            f"FROM verdicts {where} ORDER BY id DESC LIMIT ?")
     params.append(AUDIT_SCAN_LIMIT)
     try:
@@ -1156,12 +1187,14 @@ def render_audit_page(data: dict, *, title: str, status_filter: str,
 
     def row_html(entry: dict) -> str:
         state = "passed" if entry["passed"] else "failed"
+        # An unreadable file is not a failing asset: say ERROR where we can.
+        label = entry.get("status") if entry.get("status") == "ERROR" else state.upper()
         when = (entry.get("received_at") or "")[:19]
         return (
             f'<tr><td class="when">{_e(when)}</td>'
             f'<td class="file">{_e(entry.get("filename") or "")}'
             f'<div class="path">{_e((entry.get("filepath") or "")[:120])}</div></td>'
-            f'<td><span class="badge {state}">{state.upper()}</span></td>'
+            f'<td><span class="badge {state}">{_e(label)}</span></td>'
             f'<td class="act">{_send_button(entry)}</td></tr>')
 
     groups = "".join(
@@ -1742,7 +1775,7 @@ def render_planner(db_path: str | Path, project_id: int, project_name: str,
       <label for="max_triangles">Max triangles</label>
       <div class="row">
         <input id="max_triangles" name="max_triangles" type="range"
-               min="0" max="200000" step="500" value="{budget['max_triangles']}">
+               min="500" max="200000" step="500" value="{max(budget['max_triangles'], 500)}">
         <output id="max_triangles_out" for="max_triangles">{budget['max_triangles']:,}</output>
       </div>
       <div class="hint">Per mesh file. 50,000 is the shipped default.</div>
@@ -1854,17 +1887,63 @@ class Handler(BaseHTTPRequestHandler):
 
     # - plumbing - #
 
+    def handle_error(self, request, client_address) -> None:
+        """Stay quiet when a client simply went away mid-response.
+
+        A browser that navigates during a response raises ConnectionReset here;
+        printing a traceback for that made every page load look like a fault.
+        """
+        error = sys.exc_info()[1]
+        if isinstance(error, (ConnectionResetError, ConnectionAbortedError, BrokenPipeError)):
+            return
+        super().handle_error(request, client_address)
+
     def log_message(self, fmt: str, *args) -> None:  # noqa: A003 - stdlib hook
         if getattr(self.server, "quiet", False):
             return
         sys.stderr.write("%s  %s\n" % (datetime.now().strftime("%H:%M:%S"), fmt % args))
 
+    def _drain_request_body(self) -> None:
+        """Read and discard a form/JSON body we are about to refuse.
+
+        An unconsumed body stays in the socket buffer, and the next keep-alive
+        request on that connection starts by parsing it: a refused /admin/login
+        whose body was ``GET /api/summary`` came back as a 200 with the smuggled
+        request's data. Draining (or closing) is the whole fix.
+        """
+        if getattr(self, "_body_read", False) or self.command != "POST":
+            return
+        self._body_read = True
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            length = 0
+        if length <= 0:
+            return
+        if length > DRAIN_HARD_CAP:
+            # Too big to swallow politely: end the connection instead. Bodies just
+            # over the endpoint limit are still drained, so the client can read the
+            # 413 it was promised instead of seeing a reset mid-upload.
+            self.close_connection = True
+            return
+        remaining = length
+        while remaining > 0:
+            chunk = self.rfile.read(min(remaining, 65536))
+            if not chunk:
+                self.close_connection = True
+                return
+            remaining -= len(chunk)
+
     def _send(self, status: int, body: bytes, content_type: str,
               extra_headers: dict[str, str] | None = None) -> None:
+        if status >= 400:
+            self._drain_request_body()
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        for key, value in SECURITY_HEADERS:
+            self.send_header(key, value)
         for key, value in (extra_headers or {}).items():
             self.send_header(key, value)
         self.end_headers()
@@ -1950,7 +2029,16 @@ class Handler(BaseHTTPRequestHandler):
     # - routes - #
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib naming
+        if not self._host_allowed():
+            self._reject_host()
+            return
         path = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
+        if path == "/favicon.ico":
+            # Every browser asks for this. Answering 204 costs one branch and
+            # keeps the console clean, which is what the browser smoke test
+            # asserts on.
+            self._send(204, b"", "image/x-icon")
+            return
         # The admin surface has its own auth domain (accounts, sessions, roles),
         # so it is routed before the studio--token identity is resolved.
         if path == "/admin" or path.startswith("/admin/") or path.startswith("/static/"):
@@ -2242,26 +2330,51 @@ class Handler(BaseHTTPRequestHandler):
 
     def _send_document(self, status: int, content_type: str, body: str | bytes,
                        extra: list[tuple[str, str]] | None = None) -> None:
+        self._drain_request_body()
         payload = body.encode("utf-8") if isinstance(body, str) else body
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
-        self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("X-Frame-Options", "DENY")
-        self.send_header("Referrer-Policy", "same-origin")
+        for key, value in SECURITY_HEADERS:
+            self.send_header(key, value)
         for key, value in (extra or []):
             self.send_header(key, value)
         self.end_headers()
         self.wfile.write(payload)
 
     def _redirect(self, location: str, extra: list[tuple[str, str]] | None = None) -> None:
+        # A 303 is still a response the client will not re-send a body for, so
+        # the same drain applies: an unread form body becomes the next request.
+        self._drain_request_body()
         self.send_response(303)
         self.send_header("Location", location)
         self.send_header("Content-Length", "0")
+        for key, value in SECURITY_HEADERS:
+            self.send_header(key, value)
         for key, value in (extra or []):
             self.send_header(key, value)
         self.end_headers()
+
+    def _host_allowed(self) -> bool:
+        """Does the Host header name this server, by a name we recognise?
+
+        The policy lives in ``server.netguard`` because the workstation needs the
+        same answer. Round 2 allowed only loopback and the bind address, which
+        blacked out every studio that reaches the dashboard by LAN IP or by the
+        machine's own name - the guard is about names an attacker controls, not
+        about names we recognise.
+        """
+        return netguard.host_allowed(self.headers.get("Host", ""),
+                                     self.server.server_address[0],
+                                     getattr(self.server, "allow_hosts", ()))
+
+    def _reject_host(self) -> None:
+        self._json(403, {
+            "error": "unexpected Host header",
+            "detail": netguard.refusal_detail(self.headers.get("Host", "")),
+            "host": self.headers.get("Host", ""),
+        })
 
     def _active_project(self) -> Path | None:
         """The project the picker selected, if it still exists."""
@@ -2472,6 +2585,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "missing form data"})
             return
         form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        self._body_read = True
         username = (form.get("username") or [""])[0].strip()
         password = (form.get("password") or [""])[0]
         confirm = (form.get("confirm") or [""])[0]
@@ -2518,6 +2632,7 @@ class Handler(BaseHTTPRequestHandler):
             self._redirect("/admin/login?error=Missing+credentials")
             return
         form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        self._body_read = True
         username = (form.get("username") or [""])[0].strip()
         password = (form.get("password") or [""])[0]
         db_path = self.server.db_path
@@ -2847,6 +2962,11 @@ class Handler(BaseHTTPRequestHandler):
                          "results": results})
 
     def do_POST(self) -> None:  # noqa: N802 - stdlib naming
+        if not self._host_allowed():
+            # Before anything is read or created: this is the request shape a
+            # rebinding attack uses to reach a loopback-only service.
+            self._reject_host()
+            return
         path = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
         if path.startswith("/admin/"):
             self._admin_post(path)
@@ -2880,6 +3000,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(413, {"error": f"body must be between 0 and {MAX_BODY_BYTES} bytes"})
             return None
         raw = self.rfile.read(length)
+        self._body_read = True
         try:
             payload = json.loads(raw.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
@@ -3538,10 +3659,14 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
                  alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
                  rules_path: str | Path = "", rules_root: str | Path = "",
                  scan_root: str | Path = "", allow_roots: tuple[str, ...] = (),
-                 workstation_url: str = "", workstation_token: str = ""):
+                 workstation_url: str = "", workstation_token: str = "",
+                 allow_hosts: tuple[str, ...] = ()):
         self.db_path = str(db_path)
         self.auth_token = token          # the studio-wide admin token, optional
         self.quiet = quiet
+        # Host header allow-list. The bind address and the loopback names are
+        # always accepted; anything else must be named here (--allow-host).
+        self.allow_hosts = tuple(str(item).strip().lower() for item in allow_hosts if item)
         # Read-only config the /api/rules inspector reports on. Empty rules_path
         # means "discover rules.toml from rules_root", exactly like the gate does.
         self.rules_path = str(rules_path or "")
@@ -3600,12 +3725,13 @@ def build_server(host: str, port: int, db_path: str | Path,
                  allow_roots: tuple[str, ...] = (),
                  workstation_url: str = "",
                  workstation_token: str = "",
+                 allow_hosts: tuple[str, ...] = (),
                  audit=None) -> AssetHealthServer:
     if audit is not None:
         set_audit_log(audit)
     return AssetHealthServer((host, port), db_path, token, quiet, notifier, alert_cooldown,
                              rules_path, rules_root, scan_root, allow_roots,
-                             workstation_url, workstation_token)
+                             workstation_url, workstation_token, allow_hosts)
 
 
 def describe_rules(server: "AssetHealthServer") -> dict:
@@ -3778,6 +3904,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="folder the admin page may open as a project (repeatable; "
                              "default: the working directory). Also settable with "
                              f"${ALLOW_ROOTS_ENV}, separated by '{os.pathsep}'")
+    parser.add_argument("--allow-host", metavar="NAME", action="append", default=[],
+                        help="accept this Host header as well as the bind address and "
+                             "localhost (repeatable). Requests whose Host names something "
+                             "else are refused: that is what stops a DNS-rebinding page "
+                             "from driving the dashboard")
     parser.add_argument("--scan-root", metavar="PATH", default="",
                         help="folder 'Apply & Rescan' scans (default: the rules root)"
                              "; fixed at startup so the admin page can never point "
@@ -3969,7 +4100,13 @@ def main(argv: list[str] | None = None) -> int:
                                             allow_roots=tuple(args.allow_root) + tuple(
                                                 item for item in os.environ.get(
                                                     ALLOW_ROOTS_ENV, "").split(os.pathsep)
-                                                if item.strip())),
+                                                if item.strip()),
+                                            allow_hosts=tuple(args.allow_host),
+                                            # Both flags were parsed and then never
+                                            # passed on, so Send to Workstation only
+                                            # worked via agk-serve's .agk/ports.json.
+                                            workstation_url=args.workstation_url,
+                                            workstation_token=args.workstation_token),
             args.host, args.port, auto=args.port_auto, tries=args.port_tries,
             reserved=(ART_WORKSTATION_PORT,), report=_moved)
     except OSError as exc:

@@ -1,20 +1,24 @@
 #!/usr/bin/env python3
 r"""Perforce server-side submit trigger for AssetGatekeeper.
 
-Installed on the P4 server as a ``change-submit`` trigger, this runs *before* the
-submit is committed. If any asset in the changelist blows a budget, the trigger
-exits non-zero and P4V shows the reason straight to the artist — the file never
+Installed on the P4 server as a ``change-content`` trigger, this runs *after* the
+new content has been received into the depot but *before* the submit commits.
+The ``change-submit`` hook is too early: at that point the revisions exist only
+in a pending changelist and ``p4 print @=<change>`` has nothing to resolve.
+If any asset in the changelist blows a budget, the trigger
+exits non-zero and P4V shows the reason straight to the artist - the file never
 enters the depot.
 
 Server trigger line (``p4 triggers``), one line, tabs between fields::
 
-    AssetGatekeeper change-submit //depot/.../..."python C:\p4\hooks\p4_pre_submit.py %changelist% %user%"
+    AssetGatekeeper change-content //depot/.../..."python C:\p4\hooks\p4_pre_submit.py %changelist% %user%"
 
 Behaviour
     * only inspects ``add``/``edit``/``branch``/``move/add``/``integrate`` revs of
       .obj/.gltf/.glb/.png — deleted files have nothing to inspect;
-    * materialises each rev with ``p4 print -o`` into a temp folder and gates that
-      copy, so the check reflects the *submitted* content, not the shelf;
+    * materialises each rev with ``p4 print -q -o`` at ``@=<change>`` into a temp
+      folder and gates that copy, so the check reflects the *received* content,
+      not the shelf;
     * **never heals.** A trigger that rewrites files behind an artist's back is not
       a gate, it is a liability. ``--no-auto-heal`` is passed explicitly so a
       project rules.toml cannot switch it on either;
@@ -91,8 +95,13 @@ def changelist_files(changelist: str) -> list[tuple[str, str]]:
 
 
 def fetch_revision(changelist: str, depot_path: str, destination: Path) -> None:
-    """Stream a changelist rev out of the depot into ``destination``."""
-    p4("p4", "print", "-q", "-o", str(destination), f"{depot_path}@{changelist}")
+    """Stream a changelist rev out of the depot into ``destination``.
+
+    ``@=<change>`` selects the revision this change received. A plain
+    ``@<change>`` resolves against the change's *time* instead, which is empty in
+    a pending changelist and can pick a neighbouring revision on a busy server.
+    """
+    p4("p4", "print", "-q", "-o", str(destination), f"{depot_path}@={changelist}")
 
 
 def gatekeeper_command() -> list[str]:

@@ -16,7 +16,7 @@ Submit the trigger to the server's `triggers` table (one line, **tabs** between
 fields — `p4 triggers -i < triggers.txt`):
 
 ```
-AssetGatekeeper  change-submit  //depot/art/...  "python C:\p4\hooks\p4_pre_submit.py %changelist% %user%"
+AssetGatekeeper  change-content  //depot/art/...  "python C:\p4\hooks\p4_pre_submit.py %changelist% %user%"
 ```
 
 What it does, in order:

@@ -103,9 +103,15 @@ Reported as: `tag 'charcter' is not a known tag; closest match is 'character'`.
 ]
 ```
 
-One object per asset, stable keys. `status` is `PASSED`, `FAILED` or `HEALED`;
-`problems` is empty for a pass. Parsers should key off `status`, not `passed` -
-a healed asset is both.
+One object per asset, stable keys. `status` is `PASSED`, `FAILED`, `HEALED` or
+`ERROR`; `problems` is empty for a pass. Parsers should key off `status`, not
+`passed` - a healed asset is both.
+
+`ERROR` means the gate could not read the file at all (a locked handle, a
+permission the account does not have, a reparse point gone stale). It is not a
+verdict on the art, and it still fails the run: an asset nobody could inspect is
+an asset nobody can ship. A folder holding no tracked assets is also a failure
+unless `--allow-empty` says it is meant to be empty.
 
 ## Healing
 
@@ -119,6 +125,7 @@ a healed asset is both.
 | Flag | Effect |
 |---|---|
 | `--once` | gate everything, print, exit (no watcher) |
+| `--allow-empty` | with `--once`: exit 0 when the folder holds no tracked assets. Without it an empty folder fails the run, because a wrong path is the usual reason a scan finds nothing |
 | `--recursive` | include subfolders (the default for a folder target) |
 | `--exclude GLOB` | skip matching paths; repeatable |
 | `--follow-symlinks` | walk through symlinked folders (off by default) |
@@ -134,6 +141,22 @@ asset-gatekeeper assets --telemetry-url http://127.0.0.1:8080/api/telemetry
 Environment alternative: `ASSET_GATEKEEPER_SERVER_URL`. The token is appended by
 the client from `--telemetry-url`'s query string or the `AGK_TOKEN` environment
 variable; the payload is a Post to `/api/telemetry` with:
+
+### What the payload is allowed to say about the machine
+
+`--telemetry-identity` (or `[server] identity`, or
+`ASSET_GATEKEEPER_TELEMETRY_IDENTITY`) picks one of three levels:
+
+| Level | `hostname` / `username` | `path` |
+|---|---|---|
+| `full` | sent | absolute |
+| `path` (default) | empty | absolute |
+| `none` | empty | relative to the watch folder |
+
+The default is `path`: the dashboard's Send-to-Workstation bridge needs a real
+file, and the machine name and the OS account answer a question the tool has no
+business volunteering. `full` exists because some studios genuinely group by
+workstation.
 
 ```
 timestamp, received_at, hostname, username, os,

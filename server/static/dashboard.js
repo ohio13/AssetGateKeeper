@@ -9,6 +9,13 @@
 
 (() => {
   const LIMIT = 10;
+  // The dashboard hands its token to the page in the URL (that is how the SSE
+  // stream gets it). Every other request must carry it too: without this the
+  // button posted unauthenticated and the server answered 401 whenever the
+  // dashboard was started with --token. A header, not a query string, so it does
+  // not land in a proxy log.
+  const TOKEN = new URLSearchParams(location.search).get("token") || "";
+  const AUTH = TOKEN ? { Authorization: `Bearer ${TOKEN}` } : {};
   let inFlight = 0;
   let timer = 0;
 
@@ -52,7 +59,7 @@
     try {
       const response = await fetch("/api/send-to-workstation", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { "Content-Type": "application/json", ...AUTH },
         body: JSON.stringify({ verdicts: [verdictId] }),
       });
       const body = await response.json().catch(() => ({}));
