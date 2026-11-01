@@ -12,6 +12,9 @@
 
 *One file. Three dependencies. Zero excuses for a 214k-triangle hero asset.*
 
+**Docs:** [Quickstart](QUICKSTART.md) (5 minutes) &middot; [Manual](MANUAL.md)
+(every flag, every config key, solo vs team workflows)
+
 </div>
 
 ---
