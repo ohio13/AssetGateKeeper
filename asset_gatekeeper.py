@@ -1195,6 +1195,14 @@ class ServerSettings:
         )
 
 
+def _loads_with(module, body: str, origin: str) -> dict:
+    """Parse, turning a syntax error into a readable refusal, not a traceback."""
+    try:
+        return module.loads(body)
+    except Exception as exc:                       # json.JSONDecodeError, TOMLDecodeError
+        raise ConfigError(f"{origin}: {exc}") from exc
+
+
 def parse_rules_text(text: str, origin: str = "<remote>") -> dict:
     """Parse a rules payload: JSON first (every Python), TOML second (3.11+).
 
@@ -1206,13 +1214,19 @@ def parse_rules_text(text: str, origin: str = "<remote>") -> dict:
         raise ConfigError(f"{origin}: empty rules payload")
     try:
         if body.startswith("{"):
-            document = json.loads(body)
+            document = _loads_with(json, body, origin)
         elif tomllib is not None:
-            document = tomllib.loads(body)
+            document = _loads_with(tomllib, body, origin)
         else:
-            raise ConfigError(
-                f"{origin}: payload is not JSON and TOML needs Python 3.11+ (tomllib)"
-            )
+            # 3.9/3.10: tomli is a declared dependency now, so a plain pip install
+            # can read the same rules file. Missing it is still a clear refusal.
+            try:
+                import tomli
+            except ImportError as exc:
+                raise ConfigError(
+                    f"{origin}: TOML needs Python 3.11+ or 'pip install tomli'"
+                ) from exc
+            document = _loads_with(tomli, body, origin)
     except ConfigError:
         raise
     except (ValueError, TypeError) as exc:
@@ -1266,8 +1280,12 @@ def fetch_remote_rules(url: str, cache_path: Path, timeout: float = HTTP_TIMEOUT
         if cached is not None:
             LOG.warning("Central server offline; using cached rules profile (%s)", cache_path.name)
             return cached
-        LOG.warning("Central server offline and no cached rules profile; using local settings")
-        return None
+        # Fail closed. Falling back to the local 50k default would pass assets the
+        # central budget rejects, which is the worst possible answer from a gate.
+        raise ConfigError(
+            f"remote rules unreachable ({url}) and no cached profile at "
+            f"{cache_path.name}: refusing to validate against local defaults"
+        ) from exc
 
 
 @dataclass(frozen=True)
@@ -2191,6 +2209,7 @@ class Gatekeeper:
     """
 
     def __init__(self, budget: Budget, healer: Optional[object] = None,
+                 overrides: Optional[dict] = None,
                  tag_budgets: Optional[dict[str, Budget]] = None,
                  tag_mode: str = "suggest",
                  tag_similarity: float = DEFAULT_TAG_SIMILARITY,
@@ -2199,6 +2218,9 @@ class Gatekeeper:
         self.healer = healer
         self.tag_budgets = tag_budgets or {}
         self.tag_mode = tag_mode if tag_mode in TAG_MODES else "suggest"
+        # CLI flags, re-applied on top of any tag budget: the documented order
+        # is flags last, and a tag must not silently outrank an explicit flag.
+        self.overrides = dict(overrides or {})
         self.tag_similarity = tag_similarity
         self.tag_root = tag_root
         self._naming = build_naming_pattern(budget.texture_suffixes) if budget.enforce_texture_naming else None
@@ -2245,6 +2267,12 @@ class Gatekeeper:
         if self.tag_mode == "strict" and warning:
             # Do not apply a guess in strict mode; let the caller fail it.
             return self.budget, tag, warning
+        # CLI flags win over a tag budget (documented order: flags last).
+        if self.overrides:
+            try:
+                return replace(self.tag_budgets[tag], **self.overrides), tag, warning
+            except TypeError:
+                return self.tag_budgets[tag], tag, warning
         return self.tag_budgets[tag], tag, warning
 
     def _heal(self, path: Path, verdict: Verdict) -> Verdict:
@@ -3431,7 +3459,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if notifier is not None:
         LOG.info("toasts  on (%d/min)", notifier.max_per_minute)
 
-    gatekeeper = Gatekeeper(budget, healer=healer, tag_budgets=tag_budgets,
+    gatekeeper = Gatekeeper(budget, healer=healer, overrides=overrides,
+                            tag_budgets=tag_budgets,
                             tag_mode=tag_mode, tag_similarity=tag_similarity,
                             tag_root=watch_dir)
     reporter = Reporter(color=not args.no_color and not args.json, root=watch_dir,

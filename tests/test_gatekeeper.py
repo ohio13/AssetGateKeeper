@@ -454,9 +454,16 @@ expect("the fallback says so, in those words",
 empty_cfg = scratch / "remote_cold"
 empty_cfg.mkdir(exist_ok=True)
 with patch("urllib.request.urlopen", side_effect=urllib.error.URLError("offline")):
-    cold = agk.fetch_remote_rules("https://studio.example/rules.json",
-                                  empty_cfg / agk.RULES_CACHE_FILENAME)
-expect("offline with no cache degrades to local settings", cold is None)
+    try:
+        agk.fetch_remote_rules("https://studio.example/rules.json",
+                               empty_cfg / agk.RULES_CACHE_FILENAME)
+        expect("offline with no cache refuses instead of using looser defaults", False)
+    except agk.ConfigError as exc:
+        # Audited: falling back to local defaults let a studio's central budget be
+        # bypassed by unplugging a cable. A gate that cannot reach its policy must
+        # stop, not guess.
+        expect("offline with no cache refuses instead of using looser defaults",
+               "remote rules unreachable" in str(exc), str(exc)[:80])
 
 with patch("urllib.request.urlopen", return_value=FakeResponse(b'{"mesh": {"max_trian')):
     broken = agk.fetch_remote_rules("https://studio.example/rules.json", cache_file)
@@ -1190,7 +1197,13 @@ expect("the version is dynamic so it cannot drift",
 # The gate refuses to run without trimesh+Pillow, so they are honest hard
 # requirements; watchdog is a speed-up and must stay optional.
 expect("trimesh and pillow are declared as required",
-       'dependencies = ["trimesh>=4.0", "pillow>=9.0"]' in pyproject_text)
+       '"trimesh>=4.0"' in pyproject_text and '"pillow>=9.0"' in pyproject_text)
+# Audited: without tomli a plain pip install on 3.9/3.10 cannot read rules.toml
+# at all, so it is a hard requirement below 3.11 - and must not be installed on
+# 3.11+, where tomllib is in the standard library.
+expect("tomli is declared for interpreters older than 3.11",
+       '"tomli>=2.0; python_version < \'3.11\'"' in pyproject_text,
+       pyproject_text[:160])
 expect("watchdog is only an extra",
        'full = ["watchdog>=3.0"]' in pyproject_text
        and "watchdog" not in pyproject_text.split("[project.optional-dependencies]")[0])

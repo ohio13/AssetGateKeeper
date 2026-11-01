@@ -10,7 +10,7 @@
 
 Why a file of record instead of just starting processes: the whole point of a
 dashboard is that verdicts land in it. If the dashboard moved from 8080 to 8081
-because something else owned 8080, every artist's --telemetry--url still says
+because something else owned 8080, every artist's --telemetry-url still says
 8080, and the metrics become fiction. So `up` resolves the ports *first*, tells
 you exactly what it chose, writes them to ``.agk/ports.json``, and prints the
 gate command that matches - copy it, or point ASSET_GATEKEEPER_SERVER_URL at it.
@@ -238,7 +238,7 @@ def command_up(args: argparse.Namespace) -> int:
     if args.token:
         dashboard_args += ["--token", args.token]
     if args.webhook_url:
-        dashboard_args += ["--webhook--url", args.webhook_url]
+        dashboard_args += ["--webhook-url", args.webhook_url]
     if args.webhook_provider:
         dashboard_args += ["--webhook-provider", args.webhook_provider]
     # The project picker can only open folders on this list. The launcher seeds it
@@ -347,8 +347,8 @@ def gate_command(records: dict) -> str:
     """
     url = (records.get("dashboard") or {}).get("url")
     if not url:
-        return "asset-gatekeeper <folder> --once --telemetry--url <dashboard not started>"
-    return f"asset-gatekeeper <folder> --once --telemetry--url {url}/api/telemetry"
+        return "asset-gatekeeper <folder> --once --telemetry-url <dashboard not started>"
+    return f"asset-gatekeeper <folder> --once --telemetry-url {url}/api/telemetry"
 
 
 def say_portline(records: dict) -> None:
@@ -443,17 +443,17 @@ def build_parser() -> argparse.ArgumentParser:
     up = sub.add_parser("up", help="start both servers detached")
     up.add_argument("--host", default="127.0.0.1",
                     help="bind address (default 127.0.0.1; anything else needs --token)")
-    up.add_argument("--health--port", type=int, default=HEALTH_PORT, help="preferred port")
-    up.add_argument("--workstation--port", type=int, default=WORKSTATION_PORT,
+    up.add_argument("--health-port", type=int, default=HEALTH_PORT, help="preferred port")
+    up.add_argument("--workstation-port", type=int, default=WORKSTATION_PORT,
                     help="preferred port")
     up.add_argument("--rules", default="", help="rules.toml for both (default ./rules.toml)")
-    up.add_argument("--health--db", default="asset_health.db", help="dashboard database")
-    up.add_argument("--workstation--db", default="art_workstation.db")
-    up.add_argument("--workstation--data", default="workstation_data")
+    up.add_argument("--health-db", default="asset_health.db", help="dashboard database")
+    up.add_argument("--workstation-db", default="art_workstation.db")
+    up.add_argument("--workstation-data", default="workstation_data")
     up.add_argument("--token", default=os.environ.get("AUTH_TOKEN", ""),
                     help="bearer token for both (default $AUTH_TOKEN)")
     up.add_argument("--demo", action="store_true", help="seed the dashboard sample set")
-    up.add_argument("--webhook--url", default=os.environ.get("AGK_WEBHOOK_URL", ""),
+    up.add_argument("--webhook-url", default=os.environ.get("AGK_WEBHOOK_URL", ""),
                     metavar="URL",
                     help="Slack/Discord/Teams webhook for failure alerts (default "
                          "$AGK_WEBHOOK_URL); the dashboard sends one per project per 5 min")

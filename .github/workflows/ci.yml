@@ -63,7 +63,9 @@ jobs:
       - name: Server suite (203 assertions)
         run: python tests/test_server.py
 
-      # Accounts, sessions, CSRF, role enforcement, atomic rules writes, the\n      # audit trail and a streamed rescan - the parts a security review asks about.\n      - name: Admin suite (123 assertions)
+      # Accounts, sessions, CSRF, role enforcement, atomic rules writes, the
+      # audit trail and a streamed rescan - the parts a security review asks about.
+      - name: Admin suite (123 assertions)
         run: python tests/test_admin.py
 
       # No server, no IdP, no DCC: the enterprise suite fakes every
