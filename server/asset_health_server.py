@@ -2040,9 +2040,12 @@ class Handler(BaseHTTPRequestHandler):
                                " VALUES (?, ?, ?)", (str(target), target.name, _utc_now()))
             connection.execute("DELETE FROM project_roots WHERE path NOT IN "
                                "(SELECT path FROM project_roots ORDER BY last_used DESC LIMIT 20)")
-        record_audit(self.server.db_path, user, "project",
-                     str(previous) if previous else "", str(target), self._client_ip(),
-                     summary="project folder selected")
+        # Only a real switch is an event. Re-selecting the same folder wrote a
+        # no-op row (old == new), which is noise in a table people audit.
+        if previous != target:
+            record_audit(self.server.db_path, user, "project",
+                         str(previous) if previous else "", str(target), self._client_ip(),
+                         summary="project folder selected")
         rules_path = target / agk.RULES_FILENAME
         error = ""
         document: dict = {}
