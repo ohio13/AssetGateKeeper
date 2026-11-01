@@ -12,6 +12,31 @@ default, and the workstation copies uploaded bytes into its own folder.
 
 ---
 
+## 0. The no-terminal path
+
+```bat
+Rules.bat
+```
+
+That is the whole install-and-run for day-to-day use. It finds Python, starts the
+admin page and the review screen as detached background services on free ports,
+and opens your browser on the admin dashboard. Click it again to re-open the page;
+`agk-serve.bat down` stops everything.
+
+Then, in the browser: **Project** panel → point at your game folder → pick a
+platform preset → **Save & Run Audit**.
+
+To let the picker reach folders outside this repo, once:
+
+```bat
+setx AGK_PROJECT_ROOTS "D:\Projects;C:\Work\MyGame"
+```
+
+The rest of this page is the terminal path, for CI and for understanding what
+that double-click actually does.
+
+---
+
 ## 1. Install
 
 ### A. Wheel
@@ -229,11 +254,13 @@ asset-health --add-admin alice --admin-role director    :: password printed once
 asset-health --port 8080 --rules "…\rules.toml" --scan-root "…\Assets"
 ```
 
-Open <http://127.0.0.1:8080/admin>. Ten hardware presets (N64 … Modern PC) fill
-the form; **Apply** writes `rules.toml` atomically, **Apply & Rescan** then runs
-the gate over `--scan-root` in the background and streams each verdict into the
-page. Every change lands in an audit table (who, when, old → new) and in git.
-Directors and producers can write; artists can read.
+Open <http://127.0.0.1:8080/admin>. Point the **Project** panel at a game folder
+(only folders inside `--allow-root` / `AGK_PROJECT_ROOTS` are accepted), pick one
+of the ten hardware presets (N64 … Modern PC), adjust the character/prop budgets
+and categories, then **Save & Run Audit**: `rules.toml` is written atomically
+into that project folder, every changed key is recorded (who, when, old → new),
+and the gate scans the project in the background with verdicts streaming into the
+page. Directors and producers can write; artists can read.
 
 ---
 

@@ -70,6 +70,9 @@ RULES_ENV = "ASSET_GATEKEEPER_RULES"    # same name the workstation uses
 # Kept here only so --port-auto never walks onto the other service's port; the
 # workstation does not import this module, so the number is duplicated on purpose.
 ART_WORKSTATION_PORT = 8100
+# Semicolon-separated on Windows, colon on POSIX - os.pathsep handles both. The
+# launcher sets this so a studio can widen the project allow-list without a CLI.
+ALLOW_ROOTS_ENV = "AGK_PROJECT_ROOTS"
 
 MAX_BODY_BYTES = 64 * 1024       # one verdict is ~1 KB; 64 KB is already generous
 WALL_OF_SHAME_LIMIT = 20
@@ -165,6 +168,13 @@ CREATE TABLE IF NOT EXISTS rule_audit (
     source_ip  TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_rule_audit_when ON rule_audit(changed_at);
+
+-- Projects the admin page has opened, so the picker can offer them again.
+CREATE TABLE IF NOT EXISTS project_roots (
+    path      TEXT PRIMARY KEY,
+    label     TEXT NOT NULL DEFAULT '',
+    last_used TEXT NOT NULL
+);
 
 -- ---------------------------------------------------------------------------
 -- Multi-tenancy. One row per game project or outsource vendor: they share a
@@ -1636,11 +1646,50 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header(key, value)
         self.end_headers()
 
+    def _active_project(self) -> Path | None:
+        """The project the picker selected, if it still exists."""
+        try:
+            with open_db(self.server.db_path) as connection:
+                row = connection.execute(
+                    "SELECT value FROM meta WHERE key = 'project_root'").fetchone()
+        except sqlite3.Error:
+            return None
+        if not row or not str(row[0] or "").strip():
+            return None
+        path = Path(row[0])
+        return path if path.is_dir() else None
+
     def _rules_path(self) -> Path:
+        """rules.toml for the active project, else the configured location."""
+        project = self._active_project()
+        if project is not None:
+            return project / agk.RULES_FILENAME
         server = self.server
         if server.rules_path:
             return Path(server.rules_path)
         return Path(server.rules_root) / agk.RULES_FILENAME
+
+    def _scan_target(self) -> Path:
+        project = self._active_project()
+        return project if project is not None else Path(self.server.scan_root)
+
+    def _allowed_path(self, raw: str) -> Path | None:
+        """Resolve a user-supplied folder, but only inside an allowed root.
+
+        ``..`` in a path is exactly what this check exists for, so the comparison
+        is made on fully resolved paths, never on the string the client sent.
+        """
+        text = str(raw or "").strip().strip('"')
+        if not text:
+            return None
+        try:
+            candidate = Path(text).expanduser().resolve()
+        except (OSError, RuntimeError):
+            return None
+        for root in self.server.allow_roots:
+            if candidate == root or root in candidate.parents:
+                return candidate
+        return None
 
     def _serve_admin_static(self, name: str) -> None:
         if name not in ADMIN_STATIC:
@@ -1688,6 +1737,7 @@ class Handler(BaseHTTPRequestHandler):
                 document = agk.parse_rules(rules_path) if rules_path.is_file() else {}
             except agk.ConfigError as exc:
                 document, error = {}, str(exc)
+            project = self._active_project()
             self._json(200, {
                 "user": {"username": user["username"], "role": user["role"]},
                 "csrf": user["csrf"],
@@ -1695,7 +1745,10 @@ class Handler(BaseHTTPRequestHandler):
                 "rules_path": str(rules_path),
                 "rules_exists": rules_path.is_file(),
                 "rules_error": error,
-                "scan_root": server.scan_root,
+                "project": str(project) if project else "",
+                "allowed_roots": [str(root) for root in server.allow_roots],
+                "recent_projects": recent_projects(server.db_path),
+                "scan_root": str(self._scan_target()),
                 "document": document,
                 "presets": agk.preset_summary(),
                 "audit": list_audit(server.db_path, 25),
@@ -1706,6 +1759,16 @@ class Handler(BaseHTTPRequestHandler):
             if self._require_admin() is None:
                 return
             self._json(200, {"audit": list_audit(self.server.db_path, 200)})
+            return
+        if path == "/admin/api/projects":
+            if self._require_admin() is None:
+                return
+            project = self._active_project()
+            self._json(200, {
+                "active": str(project) if project else "",
+                "allowed_roots": [str(root) for root in self.server.allow_roots],
+                "recent": recent_projects(self.server.db_path),
+            })
             return
         if path == "/admin/api/scan/events":
             self._admin_events()
@@ -1840,13 +1903,18 @@ class Handler(BaseHTTPRequestHandler):
         except OSError as exc:
             self._json(500, {"error": f"cannot write {rules_path}: {exc}"})
             return
+        # The audit row names the file as well as the key: with more than one
+        # project open on the same dashboard, "mesh.max_triangles" alone is not
+        # enough to know which rules.toml moved.
+        note = str(payload.get("summary") or "").strip()
+        summary = f"{note} @ {rules_path}" if note else str(rules_path)
         for key, old_value, new_value in changes:
             record_audit(self.server.db_path, user, key, old_value, new_value,
-                         self._client_ip(), summary=payload.get("summary", ""))
+                         self._client_ip(), summary=summary)
         started = False
         if payload.get("action") == "rescan":
             started = self.server.scanner.start(
-                self.server.scan_root, rules_path,
+                str(self._scan_target()), rules_path,
                 f"http://127.0.0.1:{self.server.server_address[1]}/api/telemetry")
         self._json(200, {
             "ok": True,
@@ -1864,7 +1932,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(403, {"error": "missing or stale CSRF token; reload the page"})
             return
         started = self.server.scanner.start(
-            self.server.scan_root, self._rules_path(),
+            str(self._scan_target()), self._rules_path(),
             f"http://127.0.0.1:{self.server.server_address[1]}/api/telemetry")
         if not started:
             self._json(409, {"error": "a scan is already running",
@@ -1872,8 +1940,61 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(200, {"ok": True, "scan": self.server.scanner.snapshot()})
 
+    def _admin_project(self) -> None:
+        """Point this dashboard at a project folder (the whole zero-CLI picker)."""
+        user = self._require_admin(writer=True)
+        if user is None:
+            return
+        if not self._same_origin():
+            self._json(403, {"error": "cross-origin request refused"})
+            return
+        if not self._csrf_ok(user):
+            self._json(403, {"error": "missing or stale CSRF token; reload the page"})
+            return
+        payload = self._read_json()
+        if payload is None:
+            return
+        raw = str(payload.get("path") or "")
+        target = self._allowed_path(raw)
+        if target is None:
+            self._json(403, {
+                "error": "that folder is outside the allowed roots",
+                "detail": f"allowed: {', '.join(str(root) for root in self.server.allow_roots)}",
+                "path": raw,
+            })
+            return
+        if not target.is_dir():
+            self._json(400, {"error": f"not a folder: {target}"})
+            return
+        previous = self._active_project()
+        with _WRITE_LOCK, open_db(self.server.db_path) as connection:
+            connection.execute("INSERT OR REPLACE INTO meta (key, value) VALUES "
+                               "('project_root', ?)", (str(target),))
+            connection.execute("INSERT OR REPLACE INTO project_roots (path, label, last_used)"
+                               " VALUES (?, ?, ?)", (str(target), target.name, _utc_now()))
+            connection.execute("DELETE FROM project_roots WHERE path NOT IN "
+                               "(SELECT path FROM project_roots ORDER BY last_used DESC LIMIT 20)")
+        record_audit(self.server.db_path, user, "project",
+                     str(previous) if previous else "", str(target), self._client_ip(),
+                     summary="project folder selected")
+        rules_path = target / agk.RULES_FILENAME
+        error = ""
+        document: dict = {}
+        try:
+            if rules_path.is_file():
+                document = agk.parse_rules(rules_path)
+        except agk.ConfigError as exc:
+            error = str(exc)
+        self._json(200, {"ok": True, "project": str(target),
+                         "rules_path": str(rules_path),
+                         "rules_exists": rules_path.is_file(),
+                         "rules_error": error, "document": document,
+                         "recent": recent_projects(self.server.db_path)})
+
     def _admin_post(self, path: str) -> None:
-        if path == "/admin/login":
+        if path == "/admin/api/project":
+            self._admin_project()
+        elif path == "/admin/login":
             self._admin_login()
         elif path == "/admin/api/logout":
             user = self._require_admin()
@@ -2191,8 +2312,20 @@ def record_audit(db_path: str | Path, user: dict, target: str, old_value: object
 def list_audit(db_path: str | Path, limit: int = 100) -> list[dict]:
     with open_db(db_path) as connection:
         rows = connection.execute(
-            "SELECT changed_at, username, role, target, old_value, new_value"
+            "SELECT changed_at, username, role, target, summary, old_value, new_value"
             "  FROM rule_audit ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    return [dict(row) for row in rows]
+
+
+def recent_projects(db_path: str | Path, limit: int = 10) -> list[dict]:
+    """Folders the picker has been pointed at, newest first."""
+    try:
+        with open_db(db_path) as connection:
+            rows = connection.execute(
+                "SELECT path, label, last_used FROM project_roots"
+                " ORDER BY last_used DESC LIMIT ?", (int(limit),)).fetchall()
+    except sqlite3.Error:
+        return []
     return [dict(row) for row in rows]
 
 
@@ -2455,7 +2588,7 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
                  quiet: bool = False, notifier: "Notifier | None" = None,
                  alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
                  rules_path: str | Path = "", rules_root: str | Path = "",
-                 scan_root: str | Path = ""):
+                 scan_root: str | Path = "", allow_roots: tuple[str, ...] = ()):
         self.db_path = str(db_path)
         self.auth_token = token          # the studio-wide admin token, optional
         self.quiet = quiet
@@ -2472,6 +2605,14 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
         # into the verdict feed, plus per-IP login throttling.
         self.scan_broadcaster = Broadcaster()
         self.scan_root = str(scan_root or Path.cwd())
+        # Where the admin page may point the tool at. A dashboard that can write
+        # rules.toml into *any* directory an admin types is an arbitrary-file-write
+        # primitive, so the allow-list is the whole guard rail: everything else in
+        # this feature is convenience.
+        roots = [Path(item).expanduser().resolve() for item in allow_roots if str(item).strip()]
+        if not roots:
+            roots = [Path.cwd().resolve()]
+        self.allow_roots: tuple[Path, ...] = tuple(roots)
         self.scanner = ScanRunner(self.scan_broadcaster)
         self._login_lock = threading.Lock()
         self._login_failures: dict[str, list[float]] = {}
@@ -2487,9 +2628,10 @@ def build_server(host: str, port: int, db_path: str | Path,
                  notifier: "Notifier | None" = None,
                  alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
                  rules_path: str | Path = "", rules_root: str | Path = "",
-                 scan_root: str | Path = "") -> AssetHealthServer:
+                 scan_root: str | Path = "",
+                 allow_roots: tuple[str, ...] = ()) -> AssetHealthServer:
     return AssetHealthServer((host, port), db_path, token, quiet, notifier, alert_cooldown,
-                             rules_path, rules_root, scan_root)
+                             rules_path, rules_root, scan_root, allow_roots)
 
 
 def describe_rules(server: "AssetHealthServer") -> dict:
@@ -2644,6 +2786,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-seed", action="store_true",
                         help="accepted for old scripts; demo data is off unless --demo is given")
     parser.add_argument("--quiet", action="store_true", help="only log errors")
+    parser.add_argument("--allow-root", metavar="PATH", action="append", default=[],
+                        help="folder the admin page may open as a project (repeatable; "
+                             "default: the working directory). Also settable with "
+                             f"${ALLOW_ROOTS_ENV}, separated by '{os.pathsep}'")
     parser.add_argument("--scan-root", metavar="PATH", default="",
                         help="folder 'Apply & Rescan' scans (default: the rules root)"
                              "; fixed at startup so the admin page can never point "
@@ -2807,7 +2953,11 @@ def main(argv: list[str] | None = None) -> int:
             lambda host, port: build_server(host, port, db_path, args.token, args.quiet,
                                             notifier, alert_cooldown,
                                             rules_path=args.rules, rules_root=Path.cwd(),
-                                            scan_root=args.scan_root or Path.cwd()),
+                                            scan_root=args.scan_root or Path.cwd(),
+                                            allow_roots=tuple(args.allow_root) + tuple(
+                                                item for item in os.environ.get(
+                                                    ALLOW_ROOTS_ENV, "").split(os.pathsep)
+                                                if item.strip())),
             args.host, args.port, auto=args.port_auto, tries=args.port_tries,
             reserved=(ART_WORKSTATION_PORT,), report=_moved)
     except OSError as exc:

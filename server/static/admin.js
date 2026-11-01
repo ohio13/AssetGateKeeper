@@ -20,6 +20,56 @@ const state = {
   stream: null,
 };
 
+/* ------------------------------------------------------------------- project */
+
+function setProjectStatus(info) {
+  const parts = [];
+  parts.push(`rules.toml: ${info.rules_path}`);
+  parts.push(info.rules_exists ? "found" : "will be created on save");
+  $("project-status").textContent = parts.join(" — ");
+  $("project-status").style.color = info.rules_error ? "var(--bad)" : "var(--muted)";
+}
+
+function renderRecent(rows) {
+  const host = $("recent");
+  host.innerHTML = "";
+  for (const row of rows || []) {
+    const chip = document.createElement("button");
+    chip.type = "button";
+    chip.className = "small ghost";
+    chip.textContent = row.label || row.path;
+    chip.title = row.path;
+    chip.addEventListener("click", () => {
+      $("project-path").value = row.path;
+      useProject();
+    });
+    host.appendChild(chip);
+  }
+  if (!(rows || []).length) host.innerHTML = `<span class="help">none yet</span>`;
+}
+
+async function useProject() {
+  const path = $("project-path").value.trim();
+  if (!path) { notice("Type or pick a folder first.", "warn"); return; }
+  $("project-use").disabled = true;
+  try {
+    const info = await api("/admin/api/project", { method: "POST", json: { path } });
+    $("where").textContent = info.rules_path;
+    setProjectStatus(info);
+    state.document = info.document || {};
+    fillForm(state.document);
+    renderRecent(info.recent);
+    notice(info.rules_exists
+      ? `Project set: ${info.project} — existing rules.toml loaded.`
+      : `Project set: ${info.project} — no rules.toml yet; Save will create one.`,
+      "ok");
+  } catch (error) {
+    notice(`That folder cannot be used: ${error.message}`, "err");
+  } finally {
+    $("project-use").disabled = false;
+  }
+}
+
 /* ------------------------------------------------------------------ helpers */
 
 function notice(message, kind = "ok") {
@@ -206,6 +256,7 @@ async function saveWithRescan(rescan) {
       notes ? "warn" : "ok");
     await loadState(false);
     if (result.scan && result.scan.started) watchScan();
+    else if (rescan) notice("A scan was already running; it was left alone.", "warn");
   } catch (error) {
     notice(`Could not apply: ${error.message}`, "err");
   } finally {
@@ -278,6 +329,10 @@ async function loadState(firstTime = true) {
   $("who").textContent = `${data.user.username} · ${data.user.role}`;
   $("where").textContent = data.rules_path;
   $("scan-root").textContent = data.scan_root;
+  $("project-path").value = data.project || data.scan_root || "";
+  setProjectStatus({ rules_path: data.rules_path, rules_exists: data.rules_exists,
+                     rules_error: data.rules_error });
+  renderRecent(data.recent_projects);
 
   if (firstTime) {
     const select = $("preset");
@@ -287,6 +342,20 @@ async function loadState(firstTime = true) {
       option.textContent = `${preset.label} — ${preset.character_triangles.toLocaleString()} char`;
       select.appendChild(option);
     }
+    $("project-use").addEventListener("click", useProject);
+    $("project-path").addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); useProject(); }
+    });
+    const allowed = $("allowed-roots");
+    for (const root of data.allowed_roots || []) {
+      const option = document.createElement("option");
+      option.value = root;
+      option.textContent = root;
+      allowed.appendChild(option);
+    }
+    allowed.addEventListener("change", (event) => {
+      if (event.target.value) $("project-path").value = event.target.value;
+    });
     $("preset").addEventListener("change", (event) => applyPreset(event.target.value));
     $("save").addEventListener("click", () => saveWithRescan(false));
     $("apply-scan").addEventListener("click", () => saveWithRescan(true));

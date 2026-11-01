@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-774%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-791%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -899,7 +899,7 @@ python tests/test_server.py
 # 3. the workstation UI - 120 assertions (LOD, collision, notes, rules panel)
 python tests/test_workstation.py
 
-# 4. the admin surface - 67 assertions (accounts, roles, CSRF, audit, rescan)
+# 4. the admin surface - 84 assertions (accounts, roles, CSRF, audit, rescan)
 python tests/test_admin.py
 python tests/test_workstation.py
 

@@ -90,10 +90,12 @@ class Session:
         return json.loads(self.get("/admin/api/state")[1])
 
 
-def start(db: Path, rules: Path, assets: Path | None = None) -> tuple:
+def start(db: Path, rules: Path, assets: Path | None = None,
+          allow: tuple[str, ...] = ()) -> tuple:
     server = ahs.build_server("127.0.0.1", 0, db, quiet=True, rules_path=str(rules),
                               rules_root=str(rules.parent),
-                              scan_root=str(assets or rules.parent))
+                              scan_root=str(assets or rules.parent),
+                              allow_roots=allow)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     return server, f"http://127.0.0.1:{server.server_address[1]}"
 
@@ -144,7 +146,7 @@ ahs.init_db(db)
 password = ahs.create_admin_user(db, "alice", "director")
 ahs.create_admin_user(db, "bob", "artist")
 
-server, base = start(db, rules, assets)
+server, base = start(db, rules, assets, allow=(str(WORK),))
 anon = Session(base)
 status, body = anon.get("/admin")
 expect("an anonymous visitor lands on the sign-in page", status == 200 and b"Sign in" in body)
@@ -312,7 +314,77 @@ anon.post("/admin/api/logout", csrf=csrf)
 expect("the session is gone after sign out", anon.get("/admin/api/state")[0] == 401)
 
 # --------------------------------------------------------------------------- #
-print("10. the page and its script agree")
+print("10. the project picker")
+# The picker is the only feature that lets a browser name a filesystem path, so
+# the allow-list is the assertion that matters most in this file.
+# (Section 9 signed out, so sign back in as the director.)
+anon.form("/admin/login", {"username": "alice", "password": password})
+csrf = anon.state()["csrf"]
+project_dir = WORK / "terminus"
+(project_dir / "assets").mkdir(parents=True, exist_ok=True)
+(project_dir / "assets" / "grunt.obj").write_text(
+    "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+
+status, _ = anon.post("/admin/api/project", {"path": str(WORK.parent / "elsewhere")},
+                      csrf=csrf)
+expect("a folder outside the allow-list is refused", status == 403, str(status))
+status, _ = anon.post("/admin/api/project", {"path": str(project_dir / ".." / "..")},
+                      csrf=csrf)
+expect("a .. traversal is refused", status == 403, str(status))
+status, body = anon.post("/admin/api/project", {"path": ""}, csrf=csrf)
+expect("an empty path is refused", status in (400, 403), str(status))
+status, body = anon.post("/admin/api/project", {"path": str(project_dir)}, csrf=csrf)
+info = json.loads(body)
+expect("a folder on the allow-list is accepted", status == 200 and info["ok"], body[:160])
+expect("it resolves the path rather than trusting the string",
+       Path(info["project"]) == project_dir.resolve(), info.get("project"))
+expect("it says where rules.toml will live",
+       info["rules_path"] == str(project_dir.resolve() / "rules.toml"), info.get("rules_path"))
+expect("there is no rules file yet", info["rules_exists"] is False)
+expect("switching project is audited",
+       any(row["target"] == "project" and row["new_value"].endswith("terminus")
+           for row in anon.state()["audit"]), "no project audit row")
+
+status, body = anon.post("/admin/api/apply", {"document": document, "action": "save"},
+                         csrf=csrf)
+result = json.loads(body)
+expect("Save & Run Audit writes into the chosen project", status == 200 and
+       Path(result["path"]) == project_dir.resolve() / "rules.toml", body[:200])
+expect("rules.toml appeared in that folder",
+       (project_dir / "rules.toml").is_file())
+expect("the file is what the form said",
+       agk.parse_rules(project_dir / "rules.toml")["mesh"]["max_triangles"] == 1200)
+expect("the audit row names the file, not just the key",
+       any(str(project_dir / "rules.toml") in (row.get("summary") or "")
+           for row in anon.state()["audit"]))
+
+state = anon.state()
+expect("the scan root follows the project",
+       Path(state["scan_root"]) == project_dir.resolve(), state.get("scan_root"))
+expect("the picker gets the allow-list", bool(state["allowed_roots"]))
+expect("the picker gets recent projects",
+       any(Path(row["path"]) == project_dir.resolve() for row in state["recent_projects"]),
+       str(state.get("recent_projects")))
+
+status, body = anon.post("/admin/api/apply", {"document": document, "action": "rescan"},
+                         csrf=csrf)
+result = json.loads(body)
+expect("the audit runs over the chosen project",
+       status == 200 and result["scan"]["started"] and
+       Path(result["scan"]["root"]) == project_dir.resolve(),
+       str(result.get("scan", {}).get("root")))
+deadline = time.time() + 120
+snapshot = result["scan"]
+while time.time() < deadline:
+    snapshot = anon.state()["scan"]
+    if snapshot["status"] != "running":
+        break
+    time.sleep(0.4)
+expect("it audited the project's own assets", snapshot["totals"]["total"] >= 1,
+       json.dumps(snapshot["totals"]))
+
+# --------------------------------------------------------------------------- #
+print("11. the page and its script agree")
 # A single renamed id is a blank admin page in a browser and nothing at all in
 # pyflakes - the same failure mode that once blanked the workstation viewer.
 import re  # noqa: PLC0415 - local to this section

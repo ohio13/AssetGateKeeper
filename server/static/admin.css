@@ -60,6 +60,10 @@ td.num, th.num { text-align: right; }
 .audit .new { color: var(--good); }
 .audit .who-col { color: var(--muted); }
 
+.chips { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.chips button { max-width: 280px; overflow: hidden; text-overflow: ellipsis;
+  white-space: nowrap; }
+
 .notice { border: 1px solid; border-radius: 9px; padding: 11px 14px; font-size: 13px; }
 .notice.ok { color: var(--good); border-color: #1d4034; background: #10231c; }
 .notice.err { color: var(--bad); border-color: #4a2020; background: #241314; }

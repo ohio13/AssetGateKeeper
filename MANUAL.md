@@ -131,7 +131,26 @@ and a gate people switch off.
 
 ## 3. Install and verify
 
-### A. From a wheel (recommended for a single machine)
+### A. Double-click (recommended for the whole studio)
+
+Install once, then never open a terminal again:
+
+```bat
+Rules.bat
+```
+
+It finds Python, starts the admin page **and** the 3D review screen as detached
+background services (auto port fallback, logs in `.agk\logs`), and opens your
+browser on the admin dashboard. Running it again while they are up just re-opens
+the page. `agk-serve.bat down` stops them.
+
+To let the project picker reach folders outside this repo, set once:
+
+```bat
+setx AGK_PROJECT_ROOTS "D:\Projects;C:\Work\MyGame"
+```
+
+### B. From a wheel (for one machine, with a terminal)
 
 ```bat
 python -m venv .venv
@@ -143,7 +162,7 @@ asset-gatekeeper --version
 Gives you four commands: `asset-gatekeeper`, `asset-health`,
 `art-workstation`, `art-workstation-upload`.
 
-### B. From a checkout (recommended for a team, CI and hooks)
+### C. From a checkout (for a team, CI and hooks)
 
 ```bat
 git clone <repo> && cd asset-gatekeeper
@@ -155,7 +174,7 @@ python tests\test_gatekeeper.py && python tests\test_server.py && python tests\t
 
 Expected: `FAILURES: none` from each (664 assertions total).
 
-### C. Verify the machine
+### D. Verify the machine
 
 ```bat
 asset-gatekeeper --doctor
@@ -169,7 +188,7 @@ code `1` means a real problem; a busy port is only a warning.
 > On Windows, `python` is often 2.7 or a stub. Use `py -3` or the venv's
 > `Scripts\python.exe` everywhere.
 
-### D. Let the wizard write a starter config
+### E. Let the wizard write a starter config
 
 ```bat
 asset-gatekeeper "D:\Project\Assets" --init
@@ -623,6 +642,33 @@ The planner edits a per-project budget row. The **admin page** edits the real
 `rules.toml` — the same file the gate reads, in plain text, so the change shows
 up in `git log` like any other commit.
 
+#### Picking the project folder
+
+The first panel on `/admin` is **Project**. Type or paste a path, or pick from
+the allow-list dropdown / recent chips, then **Use this folder**. From that point
+on every save writes `<project>\rules.toml` and every audit scans that folder.
+
+There is no folder browser, because a web page cannot enumerate your disks, and
+more importantly **the browser must not be able to name any path it likes**: a
+dashboard that writes `rules.toml` wherever it is told is an arbitrary-file-write
+primitive. So the page can only open folders inside the roots fixed at launch:
+
+```bat
+asset-health ... --allow-root "D:\Projects" --allow-root "C:\Work"
+:: or, for the double-click workflow:
+setx AGK_PROJECT_ROOTS "D:\Projects;C:\Work"
+```
+
+Paths are resolved before comparison (`..` and symlinks are not a way around the
+list), the chosen folder is remembered in `project_roots` for the recent chips,
+and every switch is written to the audit trail as `project: old → new`.
+
+Both buttons say exactly what they do:
+
+- **Save only** — validate, write, stop.
+- **Save & Run Audit** — validate, write into the project, audit each changed
+  key, then scan the project and stream verdicts into the page.
+
 ```bat
 asset-health --add-admin alice --admin-role director   :: prints the password ONCE
 asset-health --list-admins
@@ -639,13 +685,9 @@ Then <http://127.0.0.1:8080/admin>.
 | `artist` | yes | no — read-only, and told why |
 
 **The page never edits while you type.** Sliders that rescan on every keystroke
-are a way to make a shared machine unusable, so both actions are explicit:
+are a way to make a shared machine unusable, so both actions are explicit.
 
-- **Apply (save only)** — validate, write, stop.
-- **Apply & Rescan** — validate, write, then run the gate once over
-  `--scan-root` in the background and stream every verdict into the page.
-
-On apply the server:
+On save the server:
 
 1. merges your form over the current file, **keeping sections the form does not
    show** (`[filters]`, `[platforms]`, `[server]`, `[healer]` survive an apply);
@@ -656,7 +698,8 @@ On apply the server:
    old file or the new one, never half of each;
 4. records one audit row per changed key — timestamp, user, role, the dotted key
    (`tags.boss.max_triangles`), and both old and new values;
-5. only then starts the scan, one at a time (a second request gets `409`).
+5. only then starts the scan, one at a time (a second request gets `409`), over
+the active project folder and posting telemetry back to the port that ran it.
 
 **Platform presets.** The dropdown offers ten hardware targets — N64, PS1,
 Nintendo DS, GameCube, Xbox, PS2, 3DS, Wii, PS3 and Modern PC — plus the legacy

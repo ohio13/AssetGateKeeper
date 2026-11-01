@@ -223,6 +223,7 @@ def command_up(args: argparse.Namespace) -> int:
         for key in ("dashboard", "workstation"):
             say(f"  {key:<12} {current[key]['url']}")
         say_portline(current)
+        open_ui(args, current)          # a second double-click still opens the page
         return 0
 
     say(f"Starting servers as {python_exe()}")
@@ -236,6 +237,11 @@ def command_up(args: argparse.Namespace) -> int:
     dashboard_args = ["--db", str(Path(args.health_db).expanduser())]
     if args.token:
         dashboard_args += ["--token", args.token]
+    # The project picker can only open folders on this list. The launcher seeds it
+    # with the repo and $AGK_PROJECT_ROOTS, so a studio widens it once in the .bat
+    # or the environment - never from the browser.
+    for root in project_roots(args):
+        dashboard_args += ["--allow-root", str(root)]
     if args.demo:
         dashboard_args.append("--demo")
     if args.host not in ("127.0.0.1", "localhost"):
@@ -277,11 +283,40 @@ def command_up(args: argparse.Namespace) -> int:
     write_ports(started)
     say()
     say_portline(started)
-    if args.open:
-        webbrowser.open(f"{records['dashboard']['url']}/dashboard")
-        if args.open == "both":
-            webbrowser.open(f"{records['workstation']['url']}/viewer")
+    open_ui(args, records)
     return 0
+
+
+def project_roots(args: argparse.Namespace) -> list[Path]:
+    """Folders the picker may open: --allow-root, $AGK_PROJECT_ROOTS, then the repo.
+
+    Trailing separators are stripped because a batch file that passes
+    ``"C:\\path\\"`` has already let the backslash escape its own closing quote - a
+    caller can hand us a mangled string, so normalise what arrives.
+    """
+    roots: list[Path] = [Path(os.path.normpath(str(item))).expanduser()
+                         for item in (args.allow_root or []) if str(item).strip()]
+    roots += [Path(os.path.normpath(item.strip())).expanduser()
+              for item in os.environ.get("AGK_PROJECT_ROOTS", "").split(os.pathsep)
+              if item.strip()]
+    if not roots:
+        roots = [REPO_ROOT]
+    return roots
+
+
+def open_ui(args: argparse.Namespace, records: dict) -> None:
+    """Open what was asked for. /admin is the front door: it is where the work is."""
+    dashboard = (records.get("dashboard") or {}).get("url")
+    if not dashboard or not args.open:
+        return
+    if args.open in ("admin", "both"):
+        webbrowser.open(f"{dashboard}/admin")
+    if args.open == "dashboard":
+        webbrowser.open(f"{dashboard}/dashboard")
+    if args.open == "both":
+        workstation = (records.get("workstation") or {}).get("url")
+        if workstation:
+            webbrowser.open(f"{workstation}/viewer")
 
 
 def gate_command(records: dict) -> str:
@@ -398,8 +433,13 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--token", default=os.environ.get("AUTH_TOKEN", ""),
                     help="bearer token for both (default $AUTH_TOKEN)")
     up.add_argument("--demo", action="store_true", help="seed the dashboard sample set")
-    up.add_argument("--open", nargs="?", const="dashboard", choices=("dashboard", "both"),
-                    help="open the dashboard (or 'both') in a browser")
+    up.add_argument("--open", nargs="?", const="admin",
+                    choices=("admin", "dashboard", "both"),
+                    help="open the admin page (default), the metrics dashboard, or "
+                         "'both' = admin + review screen")
+    up.add_argument("--allow-root", action="append", default=[], metavar="PATH",
+                    help="folder the project picker may open (repeatable; also "
+                         "$AGK_PROJECT_ROOTS; default: this repo)")
 
     down = sub.add_parser("down", help="stop what this tool started")
     down.set_defaults(func=command_down)

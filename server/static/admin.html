@@ -25,6 +25,30 @@
   <div class="notice" id="banner" hidden></div>
 
   <section class="panel">
+    <h2>Project</h2>
+    <p class="help">
+      Point the tool at a game project folder. This page can only open folders on
+      the allow-list, which whoever started the dashboard fixed at launch
+      (<code>--allow-root</code> or <code>AGK_PROJECT_ROOTS</code>) — the browser
+      cannot widen it.
+    </p>
+    <div class="row">
+      <label style="flex:1 1 320px">Project folder
+        <input id="project-path" placeholder="D:\Projects\MyGame" autocomplete="off">
+      </label>
+      <label>Allowed folder
+        <select id="allowed-roots"><option value="">— choose —</option></select>
+      </label>
+      <button type="button" id="project-use" class="primary">Use this folder</button>
+    </div>
+    <div class="row" id="recent-row">
+      <span class="help">Recent:</span>
+      <span id="recent" class="chips"></span>
+    </div>
+    <p class="help" id="project-status">Loading…</p>
+  </section>
+
+  <section class="panel">
     <h2>Platform target</h2>
     <p class="help">
       A preset fills the numbers below from a known hardware budget. Nothing is
@@ -88,8 +112,8 @@
 
   <section class="panel actions-panel">
     <div class="row">
-      <button type="button" id="save" class="ghost">Apply (save only)</button>
-      <button type="button" id="apply-scan" class="primary">Apply &amp; Rescan</button>
+      <button type="button" id="save" class="ghost">Save only</button>
+      <button type="button" id="apply-scan" class="primary">Save &amp; Run Audit</button>
       <span class="help" id="dirty"></span>
     </div>
   </section>
