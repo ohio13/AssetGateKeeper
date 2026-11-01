@@ -2711,17 +2711,127 @@ def port_in_use_hint(port: int) -> str:
             f"      or just move: --port {spare}")
 
 
-def _bindable(host: str, port: int) -> bool:
-    """True if nothing else holds the port (we let it go again immediately)."""
+def is_addr_in_use(exc: BaseException) -> bool:
+    """Was this bind failure "somebody else has the port", or something worse?
+
+    Worth separating because the *only* safe reaction to a busy port is to move
+    to the next one. A missing interface (EADDRNOTAVAIL), a privilege problem on
+    a low port, or a malformed host must stay a hard error - walking forward
+    through ten ports would just bury the real message.
+
+    Windows reports a port held by another process as either WSAEADDRINUSE
+    (10048) or, maddeningly, WSAEACCES (10013, "access permissions"). Both are
+    treated as "try the next port", and a range excluded by Hyper-V simply
+    exhausts the retry budget and reports the original error.
+    """
+    import errno
+
+    numbers = {getattr(exc, "errno", None), getattr(exc, "winerror", None)}
+    busy = {errno.EADDRINUSE, 98, 48, 10048, 10013}
+    if numbers & busy:
+        return True
+    text = str(exc).lower()
+    return "in use" in text or "address already" in text or "access permissions" in text
+
+
+def port_is_busy(host: str, port: int) -> bool:
+    """Is somebody using this port right now?
+
+    Two probes, because either one alone lies somewhere:
+
+    * ``connect()`` - authoritative on Windows, where ``SO_REUSEADDR`` lets a
+      second socket bind a port another process is already *listening* on. A
+      bind test alone would call that port free and two servers would then fight
+      over the same port, silently.
+    * a bind with no ``SO_REUSEADDR`` - catches a listener that is not accepting
+      connections (still occupied) and is the only signal on POSIX for a socket
+      that is bound but not listening.
+    """
     import socket
 
+    address = ("127.0.0.1" if host in ("", "0.0.0.0", "::") else host, int(port))
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
-        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.settimeout(0.25)
+        if probe.connect_ex(address) == 0:
+            return True
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
         try:
-            probe.bind(("127.0.0.1" if host in ("", "0.0.0.0", "::") else host, port))
+            probe.bind(address)
         except OSError:
-            return False
-    return True
+            return True
+    return False
+
+
+def next_free_port(host: str, start: int, reserved: tuple[int, ...] = (),
+                   tries: int = 20) -> Optional[int]:
+    """First port at or after ``start`` that nobody is using.
+
+    A *pre-check*, for callers that must know the port before starting anything
+    (a launcher writing a URL file, the ``--port-auto`` loop). It is inherently
+    racy - another process can take the port between this call and the bind - so
+    callers still have to handle a bind failure.
+    """
+    for candidate in range(start, start + tries):
+        if candidate in reserved:
+            continue
+        if port_is_busy(host, candidate):
+            continue
+        return candidate
+    return None
+
+
+def bind_with_fallback(build, host: str, port: int, auto: bool = False,
+                       tries: int = 10, reserved: tuple[int, ...] = (),
+                       report=None):
+    """Build a server on ``port``, optionally walking forward when it is busy.
+
+    Returns ``(server, port)``. Re-raises the original ``OSError`` when ``auto``
+    is off, when the failure is not "port busy", or when the budget is spent -
+    a caller that asked for the default port and did not ask for fallback must
+    still get an honest failure.
+
+    ``report(old_port, new_port, exc)`` is called once per hop so the CLI can
+    say what happened; silence here would be the dangerous part, because a
+    client configured with ``--telemetry-url http://host:8080/...`` would keep
+    posting to whatever now owns 8080.
+    """
+    import errno
+
+    attempt = int(port)
+    last: Optional[BaseException] = None
+    hops = 0
+    while True:
+        # Pre-check, because on Windows a bind onto an occupied port does not
+        # necessarily raise - and a second server silently sharing a port is
+        # worse than an error message.
+        if auto and port_is_busy(host, attempt):
+            last = OSError(errno.EADDRINUSE, f"port {attempt} is in use")
+            if hops >= tries:
+                raise last
+            spare = next_free_port(host, attempt + 1, reserved)
+            if spare is None:
+                raise last
+            hops += 1
+            if report is not None:
+                report(attempt, spare, last)
+            attempt = spare
+            continue
+        try:
+            return build(host, attempt), attempt
+        except OSError as exc:
+            last = exc
+            if not auto or not is_addr_in_use(exc) or hops >= tries:
+                raise
+            spare = next_free_port(host, attempt + 1, reserved)
+            if spare is None:
+                raise last from None
+            hops += 1
+            if report is not None:
+                report(attempt, spare, exc)
+            attempt = spare
+
+
+
 
 
 def run_doctor(target: Optional[Path], args: argparse.Namespace,
@@ -2805,7 +2915,7 @@ def run_doctor(target: Optional[Path], args: argparse.Namespace,
 
     say("")
     for port, who in ((8080, "AssetHealth"), (8100, "Art Workstation")):
-        if _bindable("127.0.0.1", port):
+        if not port_is_busy("127.0.0.1", port):
             line("ok", f"port {port}", "free")
         else:
             line("warn", f"port {port}", f"in use (would block {who})",

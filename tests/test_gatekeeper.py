@@ -1546,5 +1546,103 @@ expect("--version is in the parser",
        agk.build_parser().parse_args(["--doctor"]).doctor is True)
 
 print()
+print("21. port fallback and the service launcher")
+import socket  # noqa: E402 - local to this section on purpose
+
+# A port that is genuinely held, for the length of this section only.
+held = socket.socket()
+held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+held.bind(("127.0.0.1", 0))
+held.listen(5)
+busy_port = held.getsockname()[1]
+
+
+def _bind_and_listen(host, port):
+    """Stand-in for build_server on a *free* port."""
+    sock = socket.socket()
+    sock.bind((host, port))
+    sock.listen(5)
+    return sock
+
+
+def _refuse_busy(host, port):
+    """Stand-in for a server that sees EADDRINUSE (Linux, or exclusive Windows)."""
+    if port == busy_port:
+        raise OSError(10048, "only one usage of each socket address")
+    return _bind_and_listen(host, port)
+
+
+expect("a real EADDRINUSE is recognised as a busy port",
+       agk.is_addr_in_use(OSError(98, "Address already in use")))
+expect("Windows reports this two different ways",
+       agk.is_addr_in_use(OSError(10048, "only one usage")) and
+       agk.is_addr_in_use(OSError(10013, "an attempt was made to access a socket")))
+expect("a missing interface is not a busy port",
+       not agk.is_addr_in_use(OSError(99, "Cannot assign requested address")))
+expect("a port with a listener counts as busy", agk.port_is_busy("127.0.0.1", busy_port))
+expect("next_free_port walks past the busy port",
+       agk.next_free_port("127.0.0.1", busy_port) > busy_port)
+expect("next_free_port never lands on a reserved port",
+       agk.next_free_port("127.0.0.1", busy_port + 1, reserved=(busy_port + 1,)) >= busy_port + 2)
+
+# Default behaviour must stay a hard failure: silently moving the dashboard is
+# how a studio ends up posting verdicts to the wrong port.
+try:
+    agk.bind_with_fallback(_refuse_busy, "127.0.0.1", busy_port, auto=False)
+    raised_without_auto = False
+except OSError:
+    raised_without_auto = True
+expect("without --port-auto a busy port still fails honestly", raised_without_auto)
+
+hops = []
+moved_server, moved_port = agk.bind_with_fallback(
+    _refuse_busy, "127.0.0.1", busy_port, auto=True,
+    report=lambda old, new, exc: hops.append((old, new)))
+expect("--port-auto moves to a free port", moved_port > busy_port, str(moved_port))
+expect("it reports one hop, from the requested port",
+       len(hops) == 1 and hops[0][0] == busy_port, str(hops))
+moved_server.close()
+
+# The important case on Windows: the OS *would* let this bind succeed (the port
+# is listening, but SO_REUSEADDR permits a second bind). It must move anyway, or
+# two servers end up sharing a port. The pre-check is what guarantees that.
+windows_hops = []
+precheck_server, precheck_port = agk.bind_with_fallback(
+    _bind_and_listen, "127.0.0.1", busy_port, auto=True,
+    report=lambda old, new, exc: windows_hops.append((old, new)))
+expect("a busy port is detected before binding, not after",
+       precheck_port > busy_port, str(precheck_port))
+expect("the pre-check reports the same single hop", len(windows_hops) == 1, str(windows_hops))
+precheck_server.close()
+held.close()
+
+# The launcher's probe must not be fooled by a listening socket (Windows
+# SO_REUSEADDR would happily "bind" a port someone is already serving).
+import tools.agk_serve as serve  # noqa: E402
+squatter = socket.socket()
+squatter.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+squatter.bind(("127.0.0.1", 0))
+squatter.listen(5)
+taken = squatter.getsockname()[1]
+expect("the launcher sees a listening port as busy",
+       serve.port_is_free("127.0.0.1", taken) is False)
+expect("the launcher sees a closed port as free",
+       serve.port_is_free("127.0.0.1", taken + 1) is True)
+squatter.close()
+
+state_dir = DROP.parent / "scratch" / "serve_state"
+state_dir.mkdir(parents=True, exist_ok=True)
+serve.STATE_DIR = state_dir
+serve.PORTS_FILE = state_dir / "ports.json"
+serve.write_ports({"dashboard": {"url": "http://127.0.0.1:8123", "port": 8123, "pid": 1},
+                   "workstation": {"url": "http://127.0.0.1:8124", "port": 8124, "pid": 2}})
+records = serve.read_ports()
+expect("the launcher records the ports it chose", records["dashboard"]["port"] == 8123)
+expect("the gate command follows the recorded port, not the default",
+       "8123/api/telemetry" in serve.gate_command(records), serve.gate_command(records))
+expect("the workstation port is not in the telemetry URL",
+       "8124" not in serve.gate_command(records))
+expect("a missing record reads as empty", serve.read_ports().get("nope") is None)
+
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

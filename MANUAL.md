@@ -565,6 +565,9 @@ path, so the tool and the UI can never disagree.
 asset-health --port 8080 --rules "D:\Project\Assets\rules.toml"
 ```
 
+Or let `agk-serve.bat up` start this and the workstation together on free ports
+([§15](#15-operations)); `--port-auto` moves instead of failing.
+
 Open <http://127.0.0.1:8080/>. Loopback-only by default: exposing a review
 screen on the studio LAN is an explicit act (`--host 0.0.0.0`), not a default.
 
@@ -620,6 +623,10 @@ banner. `--no-seed` is still accepted for old scripts.
 ```bat
 art-workstation --port 8100 --rules "D:\Project\Assets\rules.toml"
 ```
+
+Or `agk-serve.bat up`, which starts both services and opens the dashboard
+([§15](#15-operations)). `--port-auto` moves to the next free port instead of
+failing.
 
 Open <http://127.0.0.1:8100/viewer>.
 
@@ -808,9 +815,67 @@ screen. That is the whole training.
 | AssetHealth | 8080 | loopback only unless `--host 0.0.0.0` |
 | Art Workstation | 8100 | same |
 
-A busy port prints the exact command to find and stop the owner, and suggests a
-spare. Servers are foreground processes: **close the window / Ctrl+C to stop**.
-The `start_*.bat` launchers do the same thing with a browser open.
+### One command for both services (recommended)
+
+```bat
+agk-serve.bat up          :: start both, detached, print the URLs
+agk-serve.bat up --open   :: ...and open the dashboard
+agk-serve.bat status      :: running? which port? which pid?
+agk-serve.bat urls        :: URLs + the exact gate command
+agk-serve.bat logs        :: recent server output
+agk-serve.bat down        :: stop both
+```
+
+(or `python tools/agk_serve.py up`). No windows to keep alive: the servers run
+**detached** with their output in `.agk/logs/`, and `up` is idempotent — if they
+are already healthy it says so and exits 0.
+
+The part that matters: `up` resolves the ports **first**, writes them to
+`.agk/ports.json`, and prints the gate command that actually matches them
+(`… --telemetry-url http://127.0.0.1:8081/api/telemetry`). If you prefer to run
+the servers yourself, that file is still the record of where they are.
+
+`down` refuses to kill a pid whose command line is not one of our servers: a
+stale `ports.json` from a previous boot must never take out an unrelated process
+that has since inherited the pid.
+
+### Automatic port fallback
+
+Both servers accept:
+
+```bat
+asset-health --port-auto            :: 8080 busy -> 8081 -> 8082 … (prints which)
+art-workstation --port-auto --port-tries 20
+```
+
+It is **off by default**, on purpose, and here is the honest reasoning:
+
+- **The dangerous failure is silent and it is about telemetry, not binding.**
+  If the dashboard moves to 8081 while every artist's `--telemetry-url` still
+  says 8080, verdicts land wherever 8080 now points — a stale server, another
+  project, or nowhere. A startup error is annoying for ten seconds; wrong
+  metrics are wrong for a milestone. So the *default* is an error plus the
+  commands to fix the port, and the launcher is the path that moves ports
+  **and tells every consumer the new URL**.
+- On a successful move the server prints `note: port 8080 is busy, using 8081`,
+  and reprints the telemetry URL for this run.
+- Fallback only walks forward on a *busy port*. A missing interface, a privilege
+  error or a malformed host stays a hard failure — walking ten ports would bury
+  the real message.
+- It never takes the other service's default port: the dashboard skips 8100 and
+  the workstation skips 8080.
+- On Windows, a port held by another listener can report `WinError 10013
+  "access permissions"` rather than 10048, and — worse — `SO_REUSEADDR` can let
+  a second bind *succeed* on a port someone is already serving. That is why the
+  check is a `connect()` probe **before** binding, not a try/except after it.
+- A range excluded by Hyper-V/WinNAT will simply exhaust the retry budget and
+  report the original error.
+
+**When not to use it:** CI, VCS hooks, or any script that hardcodes a URL. There,
+a deterministic failure is the correct outcome — let it fail and pin the port.
+
+A busy port otherwise prints the exact command to find and stop the owner, and
+suggests a spare that is neither busy nor the other service's port.
 
 ### Data and backup
 
@@ -914,6 +979,8 @@ MANUAL.md                      this file
 server/asset_health_server.py  dashboard, telemetry ingest, alerts, planner, /api/rules
 server/art_workstation_server.py  viewer, uploads, LODs, collision, notes, reports
 server/static/                 viewer.html, viewer.js, app.css (no frameworks)
+tools/agk_serve.py             up/down/status/urls/logs for both services
+agk-serve.bat                  one-click wrapper for the above
 
 engine/lod_manager.py          vertex-clustering decimator (inspection-grade)
 plugins/{blender,houdini,maya,unreal}/   DCC hooks

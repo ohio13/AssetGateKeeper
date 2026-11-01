@@ -167,6 +167,17 @@ byte-identical. glTF geometry is never rewritten.
 
 ## 5. The dashboard (AssetHealth)
 
+**Shortcut for both services at once:**
+
+```bat
+agk-serve.bat up --open     :: dashboard + review screen, detached, free ports
+agk-serve.bat status        :: what is running, on which port
+agk-serve.bat down          :: stop both
+```
+
+It picks free ports, records them in `.agk/ports.json`, and prints the gate
+command that matches them. Run the servers individually if you prefer:
+
 ```bat
 asset-health --port 8080 --rules "D:\Projects\MyGame\Assets\rules.toml"
 ```
@@ -262,7 +273,7 @@ CI: `.github/workflows/asset_gatekeeper.yml` is a drop-in PR gate, and
 |---|---|
 | `error: cannot bind 127.0.0.1:8080: … in use` | a previous run is still alive: find the pid on that port and stop it |
 | dashboard numbers look pre-filled | it was started with `--demo`; that is labelled in a banner — use a fresh `--db` |
-| `error: cannot bind …` | another process owns the port; the message prints the exact command to find and stop it |
+| `error: cannot bind …` | another process owns the port; the message prints the command to find/stop it. Use `--port-auto` to move instead, or `agk-serve.bat up` which moves **and** reports the new URL |
 | not sure the install works | `asset-gatekeeper --doctor` checks python, trimesh, Pillow, `rules.toml` and the ports |
 | `/viewer` is blank / tabs do nothing | open the browser console; a syntax error in `viewer.js` blanks the whole module |
 | `unknown key` / exit 2 | `rules.toml` has a typo. Compare against `asset_gatekeeper.example.toml` |

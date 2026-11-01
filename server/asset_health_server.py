@@ -66,6 +66,9 @@ DEFAULT_PORT = 8080
 DEFAULT_DB = "asset_health.db"
 DEFAULT_TOKEN_ENV = "AUTH_TOKEN"
 RULES_ENV = "ASSET_GATEKEEPER_RULES"    # same name the workstation uses
+# Kept here only so --port-auto never walks onto the other service's port; the
+# workstation does not import this module, so the number is duplicated on purpose.
+ART_WORKSTATION_PORT = 8100
 
 MAX_BODY_BYTES = 64 * 1024       # one verdict is ~1 KB; 64 KB is already generous
 WALL_OF_SHAME_LIMIT = 20
@@ -1848,6 +1851,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"interface to bind (default {DEFAULT_HOST}; 0.0.0.0 exposes it)")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
                         help=f"port to listen on (default {DEFAULT_PORT})")
+    parser.add_argument("--port-auto", action="store_true",
+                        help="if the port is busy, move to the next free one instead of "
+                             "failing (prints what it chose; keep telemetry URLs in step)")
+    parser.add_argument("--port-tries", type=int, default=10, metavar="N",
+                        help="how many ports --port-auto may walk past (default 10)")
     parser.add_argument("--db", default=os.environ.get("ASSET_HEALTH_DB", DEFAULT_DB),
                         help=f"SQLite file (default {DEFAULT_DB}, or $ASSET_HEALTH_DB)")
     parser.add_argument("--token", default=os.environ.get(DEFAULT_TOKEN_ENV, ""),
@@ -1978,13 +1986,22 @@ def main(argv: list[str] | None = None) -> int:
     webhook_url, webhook_provider, alert_cooldown = resolve_webhook(args)
     notifier = Notifier(webhook_url, webhook_provider) if webhook_url else None
 
+    def _moved(old: int, new: int, exc: BaseException) -> None:
+        print(f"note: port {old} is busy ({exc.__class__.__name__}), using {new}",
+              file=sys.stderr)
+
     try:
-        httpd = build_server(args.host, args.port, db_path, args.token, args.quiet,
-                             notifier, alert_cooldown,
-                             rules_path=args.rules, rules_root=Path.cwd())
+        httpd, bound_port = agk.bind_with_fallback(
+            lambda host, port: build_server(host, port, db_path, args.token, args.quiet,
+                                            notifier, alert_cooldown,
+                                            rules_path=args.rules, rules_root=Path.cwd()),
+            args.host, args.port, auto=args.port_auto, tries=args.port_tries,
+            reserved=(ART_WORKSTATION_PORT,), report=_moved)
     except OSError as exc:
         print(f"error: cannot bind {args.host}:{args.port}: {exc}", file=sys.stderr)
         print(agk.port_in_use_hint(args.port), file=sys.stderr)
+        if not args.port_auto:
+            print("      or let it move by itself: --port-auto", file=sys.stderr)
         return 2
 
     host, port = httpd.server_address[0], httpd.server_address[1]
@@ -1994,6 +2011,8 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  database   {db_path.resolve()}")
     print("  ingest     POST /api/telemetry")
     print(f"  rules      GET /api/rules  ({(Path(args.rules).resolve() if args.rules else Path.cwd() / agk.RULES_FILENAME)})")
+    print(f"  telemetry  asset-gatekeeper <folder> --once --telemetry-url "
+          f"http://{shown}:{port}/api/telemetry")
     if projects:
         print(f"  projects   {len(projects)} registered - a project token is required")
         for row in projects:

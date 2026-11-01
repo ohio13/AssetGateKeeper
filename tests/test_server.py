@@ -759,6 +759,10 @@ sse_server.server_close()
 print("14. CLI wiring")
 parser = ahs.build_parser()
 options = parser.parse_args(["--port", "9999", "--db", "x.db", "--token", "t", "--no-seed"])
+port_options = parser.parse_args(["--port-auto", "--port-tries", "4"])
+expect("the CLI can ask for automatic port fallback",
+       port_options.port_auto is True and port_options.port_tries == 4)
+expect("fallback is off unless asked for", parser.parse_args([]).port_auto is False)
 expect("CLI accepts host/port/db/token/no-seed",
        (options.port, options.db, options.token, options.no_seed) == (9999, "x.db", "t", True))
 expect("defaults are loopback-only", (ahs.DEFAULT_HOST, ahs.DEFAULT_PORT) == ("127.0.0.1", 8080))

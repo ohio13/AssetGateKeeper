@@ -36,3 +36,5 @@ dist/
 build/
 *.egg-info/
 
+.agk/
+

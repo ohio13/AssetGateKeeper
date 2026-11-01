@@ -73,6 +73,9 @@ DEFAULT_PORT = 8100
 STATIC_DIR = HERE / "static"
 TOKEN_ENV = "AUTH_TOKEN"
 RULES_ENV = "ASSET_GATEKEEPER_RULES"    # same name the health server uses
+# So --port-auto never walks onto the dashboard's port (duplicated by design:
+# this module must stay importable without the dashboard present).
+ASSET_HEALTH_PORT = 8080
 
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
 MAX_JSON_BYTES = 1024 * 1024
@@ -1349,6 +1352,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"interface to bind (default {DEFAULT_HOST})")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT,
                         help=f"port (default {DEFAULT_PORT})")
+    parser.add_argument("--port-auto", action="store_true",
+                        help="if the port is busy, move to the next free one instead of "
+                             "failing (prints what it chose)")
+    parser.add_argument("--port-tries", type=int, default=10, metavar="N",
+                        help="how many ports --port-auto may walk past (default 10)")
     parser.add_argument("--db", default=os.environ.get("WORKSTATION_DB", DEFAULT_DB),
                         help=f"SQLite file (default {DEFAULT_DB})")
     parser.add_argument("--data", default=os.environ.get("WORKSTATION_DATA", DEFAULT_DATA),
@@ -1378,12 +1386,22 @@ def main(argv: list[str] | None = None) -> int:
         print(f"warning: {STATIC_DIR / 'viewer.html'} is missing; /viewer will 404",
               file=sys.stderr)
 
+    def _moved(old: int, new: int, exc: BaseException) -> None:
+        print(f"note: port {old} is busy ({exc.__class__.__name__}), using {new}",
+              file=sys.stderr)
+
     try:
-        httpd = build_server(args.host, args.port, db_path, data_dir, args.token, args.quiet,
-                             rules_path=args.rules, rules_root=Path.cwd())
+        httpd, bound_port = agk.bind_with_fallback(
+            lambda host, port: build_server(host, port, db_path, data_dir, args.token,
+                                            args.quiet, rules_path=args.rules,
+                                            rules_root=Path.cwd()),
+            args.host, args.port, auto=args.port_auto, tries=args.port_tries,
+            reserved=(ASSET_HEALTH_PORT,), report=_moved)
     except OSError as exc:
         print(f"error: cannot bind {args.host}:{args.port}: {exc}", file=sys.stderr)
         print(agk.port_in_use_hint(args.port), file=sys.stderr)
+        if not args.port_auto:
+            print("      or let it move by itself: --port-auto", file=sys.stderr)
         return 2
 
     host, port = httpd.server_address[0], httpd.server_address[1]

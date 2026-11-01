@@ -501,6 +501,10 @@ export_server.server_close()
 print("10. CLI wiring")
 options = aws.build_parser().parse_args(["--port", "9999", "--db", "x.db",
                                          "--data", "y", "--token", "t"])
+ws_port_options = aws.build_parser().parse_args(["--port-auto"])
+expect("the workstation CLI can ask for port fallback", ws_port_options.port_auto is True)
+expect("the workstation does not fall back by default",
+       aws.build_parser().parse_args([]).port_auto is False)
 expect("CLI accepts the storage and auth flags",
        (options.port, options.db, options.data, options.token) == (9999, "x.db", "y", "t"))
 expect("defaults are loopback and unauthenticated",
