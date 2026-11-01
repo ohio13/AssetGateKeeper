@@ -29,3 +29,10 @@ art_workstation.db
 art_workstation.db-wal
 art_workstation.db-shm
 workstation_data/
+
+dist/
+*.whl
+
+build/
+*.egg-info/
+

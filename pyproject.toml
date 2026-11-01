@@ -38,6 +38,13 @@ dev = ["pyflakes>=3.0"]
 
 [project.scripts]
 asset-gatekeeper = "asset_gatekeeper:main"
+# The web UIs ship in the same distribution: one install gives an artist the
+# gate, the metrics dashboard and the 3D review screen.
+asset-health = "server.asset_health_server:main"
+art-workstation = "server.art_workstation_server:main"
+# Uploads a folder of .glb/.gltf/.obj into a running workstation: the review
+# screen only takes one dropped file at a time, which is no way to load a project.
+art-workstation-upload = "tools.upload_assets:main"
 
 [project.urls]
 Homepage = "https://github.com/ohio13/asset-gatekeeper"
@@ -47,6 +54,18 @@ Issues = "https://github.com/ohio13/asset-gatekeeper/issues"
 # Both modules ship: the gate loads healer.py by path from its own directory, so
 # they must stay side by side in site-packages too.
 py-modules = ["asset_gatekeeper", "healer", "notifier"]
+
+[tool.setuptools.packages.find]
+# server/ and engine/ are packages so that the dashboard, the workstation and the
+# LOD decimator travel with the wheel. They keep their folder names, which is what
+# the servers' own HERE/REPO_ROOT path bootstrapping already assumes.
+include = ["server*", "engine*", "tools*"]
+namespaces = false
+
+[tool.setuptools.package-data]
+# Without the static folder the workstation serves a 404 at /viewer and the
+# dashboard renders unstyled, so this is not optional decoration.
+server = ["static/*"]
 
 [tool.setuptools.dynamic]
 version = { attr = "asset_gatekeeper.__version__" }

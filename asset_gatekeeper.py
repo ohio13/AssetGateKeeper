@@ -2761,6 +2761,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--telemetry-url", metavar="URL", default=None,
                         help="POST every verdict to this endpoint (or set "
                              f"{SERVER_ENV_URL})")
+    parser.add_argument("--version", action="version",
+                        version=f"asset-gatekeeper {__version__}",
+                        help="print the version and exit (pipelines log this)")
     parser.add_argument("--once", action="store_true", help="scan existing files and exit")
     parser.add_argument("--recursive", action="store_true", help="include subfolders")
     parser.add_argument("--json", action="store_true",
