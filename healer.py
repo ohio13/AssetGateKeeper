@@ -27,6 +27,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import tempfile
 from dataclasses import dataclass
@@ -44,7 +45,11 @@ LOG = logging.getLogger("assetgatekeeper.healer")
 # rename), so the watcher must ignore them. Keep in sync with IGNORED_PREFIXES.
 STAGING_PREFIX = ".agk-heal-"
 
-TEXTURE_MODES = ("pad", "resize")
+# "resize" keeps UVs exactly: the content is resampled to the new canvas, so
+# u,v still address the same texel. "pad" only replicates a border, which
+# leaves the content occupying a smaller fraction of the image - about 2.3%
+# on a 1000->1024 pad - so it is opt-in and documented as UV-shifting.
+TEXTURE_MODES = ("resize", "pad")
 HEALABLE_MESH_SUFFIXES = {".obj"}
 
 
@@ -242,7 +247,7 @@ class Healer:
     """
 
     def __init__(self, budget, *, textures: bool = True, meshes: bool = True,
-                 texture_mode: str = "pad") -> None:
+                 texture_mode: str = "resize") -> None:
         if texture_mode not in TEXTURE_MODES:
             raise HealError(f"texture_mode must be one of {', '.join(TEXTURE_MODES)}, "
                             f"got {texture_mode!r}")
@@ -269,6 +274,46 @@ class Healer:
 
     # -- internals ---------------------------------------------------------- #
 
+    def _stage_obj_sidecars(self, source: Path, staging_root: Path) -> list[str]:
+        """Copy the .mtl and the textures it names next to the staged .obj.
+
+        A Blender or Houdini .obj names its material library with ``mtllib``.
+        Verifying the staged copy without that file made every real export fail
+        the reference check, so the heal was silently thrown away - the feature
+        never worked outside synthetic fixtures.
+        """
+        staged: list[str] = []
+        try:
+            body = source.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            return staged
+        for match in re.finditer(r"^\s*mtllib\s+(.+?)\s*$", body, re.MULTILINE):
+            name = match.group(1).strip().strip('"')
+            mtl = source.parent / name
+            if not mtl.is_file():
+                continue
+            target = staging_root / mtl.name
+            try:
+                shutil.copy2(mtl, target)
+            except OSError:
+                continue
+            staged.append(mtl.name)
+            # Textures the .mtl points at, relative to itself.
+            try:
+                mtl_body = mtl.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for ref in re.finditer(r"^\s*map_\w+\s+(.+?)\s*$", mtl_body, re.MULTILINE):
+                texture = (mtl.parent / ref.group(1).strip().strip('"')).name
+                candidate = mtl.parent / texture
+                if candidate.is_file() and not (staging_root / texture).exists():
+                    try:
+                        shutil.copy2(candidate, staging_root / texture)
+                        staged.append(texture)
+                    except OSError:
+                        pass
+        return staged
+
     def _heal_into(self, staging_root: Path, path: Path, checker) -> Optional[HealResult]:
         staged = staging_root / path.name
         try:
@@ -279,6 +324,12 @@ class Healer:
 
         modifications: list[str] = []
         suffix = path.suffix.lower()
+
+        if suffix == ".obj":
+            staged_refs = self._stage_obj_sidecars(path, staging_root)
+            if staged_refs:
+                LOG.debug("healing: staged %s alongside %s",
+                          ", ".join(staged_refs), path.name)
 
         if suffix == ".png" and self.textures:
             # Name first: the rename decides the final filename, and every later

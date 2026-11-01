@@ -24,7 +24,7 @@ HOOK_NAME = "pre-commit"
 
 
 def git(*args: str, cwd: str | None = None) -> str:
-    completed = subprocess.run(["git", *args], capture_output=True, text=True,
+    completed = subprocess.run(["git", "-c", "core.quotepath=off", *args], capture_output=True, text=True,
                                encoding="utf-8", errors="replace", cwd=cwd)
     if completed.returncode != 0:
         raise RuntimeError(f"git {' '.join(args)} failed: {completed.stderr.strip()[:300]}")
