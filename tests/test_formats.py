@@ -406,6 +406,25 @@ outcome = ue_import(["good.fbx"], {})
 expect("an unconfigured gate blocks gated files instead of waving them through",
        outcome[0] == "blocked" and "not configured" in outcome[1][0], outcome)
 
+# Verified in UE 5.3.2: an editor started by another DCC inherits its PYTHONHOME,
+# and the gate's own interpreter then died "SRE module mismatch" on every file.
+bogus_home = WORK / "someone_elses_python"
+bogus_home.mkdir()
+outcome = ue_import(["good.fbx"], {**configured, "PYTHONHOME": str(bogus_home)})
+expect("an inherited PYTHONHOME (editor launched by another DCC) does not block a good FBX",
+       outcome[0] == "imported", outcome)
+child = ig.child_environment({"PYTHONHOME": "x", "PYTHONPATH": os.pathsep.join(
+    [str(Path(sys.prefix) / "Lib"), str(WORK / "studio_site")])})
+expect("the gate's environment drops PYTHONHOME and the host's own PYTHONPATH, keeps the studio's",
+       "PYTHONHOME" not in child and child.get("PYTHONPATH") == str(WORK / "studio_site"), child)
+
+fake_unreal.StaticMesh = type("StaticMesh", (), {})
+import inspect  # noqa: E402
+import init_unreal  # noqa: E402
+expect("init_unreal's post-import handler takes OnAssetPostImport's (factory, created_object)",
+       list(inspect.signature(init_unreal._on_post_import).parameters) == ["factory", "created_object"],
+       str(inspect.signature(init_unreal._on_post_import)))
+
 print("10. Hooks and tools know the new formats")
 sys.path.insert(0, str(ROOT / "vcs_hooks"))
 import git_pre_commit  # noqa: E402

@@ -28,6 +28,21 @@ several verdicts are deliberately stricter and some pipelines will turn red.
   folder or inside a binary `.fbx`/`.glb`.
 * Unreal's `import_with_gatekeeper()` fails closed instead of importing what it
   could not check.
+* **Plugins tested in the real editors** (Houdini 22.0.459, Unreal 5.3.2), which
+  found three bugs the stubs could not:
+  * Houdini SOP counted open polylines (hair guides, Line SOP) as faces: 100
+    guides of 1,000 points read as 99,800 triangles and 100 "degenerate" prims.
+    Open curves are now skipped.
+  * Houdini SOP's verdict now posts a yellow **warning badge** (`addWarning`)
+    instead of a blue info message that was easy to miss.
+  * Unreal `init_unreal.py`: the post-import check never bound in UE 5.3
+    ("expected 2, got 5" arguments), so drag-and-drop imports were never checked
+    while the log still said "import guard active". Fixed, and the log now says
+    "NOT active" if the bind ever fails again.
+  * Unreal `import_gatekeeper.py`: an editor launched from another DCC (or a
+    pipeline launcher) inherited its `PYTHONHOME`, and every gated import -
+    good assets included - failed "SRE module mismatch". The gate's interpreter
+    now gets a cleaned environment.
 
 ---
 

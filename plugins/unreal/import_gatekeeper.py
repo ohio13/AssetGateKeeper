@@ -31,6 +31,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 
 import unreal
 
@@ -77,6 +78,48 @@ def _engine_command(path):
     return command
 
 
+#: Variables that point a child interpreter at *some other* Python install.
+#: Inherited by the gate's interpreter (a different version), they make it load
+#: the wrong standard library and die before measuring anything.
+_INHERITED_PYTHON_VARS = ("PYTHONHOME", "PYTHONEXECUTABLE", "PYTHONSTARTUP",
+                          "__PYVENV_LAUNCHER__")
+
+
+def _under(path, roots):
+    try:
+        candidate = os.path.normcase(os.path.abspath(path))
+    except (TypeError, ValueError):
+        return False
+    return any(candidate == root or candidate.startswith(root + os.sep) for root in roots)
+
+
+def child_environment(environ=None):
+    """The environment for the gate's own interpreter.
+
+    The gate runs in the studio's Python (``ASSETGATEKEEPER_PYTHON``). Whatever
+    launched the editor - a pipeline launcher, another DCC - may have left
+    PYTHONHOME pointing at *its* Python. Verified in UE 5.3.2 with the editor
+    started from Houdini 22: the inherited ``PYTHONHOME=<houdini>/python313`` made
+    every gated import fail with ``AssertionError: SRE module mismatch`` (a 3.11
+    interpreter loading a 3.13 standard library), so good assets were blocked
+    along with bad ones. Interpreter variables and PYTHONPATH entries inside
+    Unreal's own Python install are dropped; the studio's own PYTHONPATH entries
+    (site-packages with trimesh, say) are kept.
+    """
+    env = dict(os.environ if environ is None else environ)
+    for key in _INHERITED_PYTHON_VARS:
+        env.pop(key, None)
+    roots = {os.path.normcase(os.path.abspath(root))
+             for root in (sys.prefix, sys.base_prefix, sys.exec_prefix) if root}
+    kept = [entry for entry in env.get("PYTHONPATH", "").split(os.pathsep)
+            if entry and not _under(entry, roots)]
+    if kept:
+        env["PYTHONPATH"] = os.pathsep.join(kept)
+    else:
+        env.pop("PYTHONPATH", None)
+    return env
+
+
 def engine_problems(path):
     """Run the CLI engine against one source file and return its problems.
 
@@ -91,7 +134,8 @@ def engine_problems(path):
         return [f"{name}: {command}"]
     try:
         completed = subprocess.run(command, capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace", timeout=180)
+                                   encoding="utf-8", errors="replace", timeout=180,
+                                   env=child_environment())
     except (OSError, subprocess.SubprocessError) as error:
         unreal.log_error(f"[AssetGatekeeper] engine failed to run: {error}")
         return [f"{name}: the gate could not run ({error})"]

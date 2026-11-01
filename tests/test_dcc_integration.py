@@ -393,6 +393,39 @@ def check_sop_counting() -> None:
     expect("a curve is never reported as degenerate",
            module.degenerate_prim_count(curve) == 0,
            str(module.degenerate_prim_count(curve)))
+    class OpenPolyline(ModernPrim):
+        """A Line SOP / hair guide: prim type Polygon, but not closed."""
+
+        def isClosed(self):
+            return False
+
+    class ClosedPolygon(ModernPrim):
+        def isClosed(self):
+            return True
+
+    guides = FakeGeometry([OpenPolyline("Polygon", vertices=1000) for _ in range(100)])
+    expect("an open polyline (hair guide) is not counted as triangles",
+           module.triangle_count(guides) == 0, str(module.triangle_count(guides)))
+    expect("an open polyline is never reported as degenerate",
+           module.degenerate_prim_count(guides) == 0,
+           str(module.degenerate_prim_count(guides)))
+    expect("a closed polygon with isClosed() still counts",
+           module.triangle_count(FakeGeometry([ClosedPolygon("Polygon")])) == 2)
+
+    class FakeNode:
+        def __init__(self, methods):
+            self.posted = []
+            for name in methods:
+                setattr(self, name, lambda text, name=name: self.posted.append((name, text)))
+
+    for methods, wanted in ((("addWarning", "addMessage", "setWarning"), "addWarning"),
+                            (("addMessage", "setWarning"), "setWarning"),
+                            (("addMessage",), "addMessage")):
+        node = FakeNode(methods)
+        module.flag(node, ["over budget"])
+        expect(f"flag() posts with {wanted} when the node offers {', '.join(methods)}",
+               bool(node.posted) and node.posted[0][0] == wanted, str(node.posted))
+
     class FakePoint:
         def __init__(self, xyz):
             self._xyz = xyz

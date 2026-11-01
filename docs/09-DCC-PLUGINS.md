@@ -294,6 +294,14 @@ failure. Set `--require` on a machine where a missing DCC is a real problem.
 Verified on this machine: Blender 4.0.2, Houdini 22.0.459 and Unreal 5.3 all
 pass headless (34 assertions, 0 skips, ~20 s in `--deep` mode).
 
+The plugins have also been run inside the interactive editors (1 Nov 2026):
+Houdini 22.0.459 - the SOP on a box, a 300x300 grid, ten packed copies and 100
+open curves (12 / 178,802 / 196,020 / 0 triangles, warning badge on the two
+over budget); Unreal 5.3.2 - `import_with_gatekeeper()` on good, 240k-triangle,
+5-material, textured and unconfigured imports, plus a drag-and-drop style import
+reaching `init_unreal.py`'s post-import warning. Unreal's own triangle counts
+(768, 240,000) match the gate's FBX reader.
+
 ---
 
 ## DCC troubleshooting, by symptom
@@ -305,6 +313,8 @@ pass headless (34 assertions, 0 skips, ~20 s in `--deep` mode).
 | Max prints `python` is not defined | you are in the MAXScript listener | `python.ExecuteFile @"..."` |
 | Houdini gate always fails with no verdict | `PYTHONHOME` leak (see above) | set `AGK_PYTHON`; the hook already strips the variables |
 | Unreal reports no Python module | Python Editor Script Plugin disabled | enable it and restart the editor |
+| Unreal blocks every import, "SRE module mismatch" | editor inherited another Python's `PYTHONHOME` (launched from a DCC or launcher) | fixed in 1.1.0 - the gate cleans its child environment; update `import_gatekeeper.py` |
+| Unreal log says "import guard NOT active" | `on_asset_post_import` could not bind (engine signature changed) | drag-and-drop is unchecked; use `import_with_gatekeeper()` and report the engine version |
 | Unreal headless run hangs | editor waiting for a project or a splash | pass a `.uproject`, `-unattended -nopause -nosplash -NullRHI` |
 | Panel numbers differ from the gate | panel reads the scene, gate reads the export | that is expected; check the export settings, not the panel |
 

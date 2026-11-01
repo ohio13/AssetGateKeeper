@@ -138,12 +138,14 @@ def _on_pre_import(factory, class_name, parent, name, flags) -> None:
     unreal.log(f"[AssetGatekeeper] import starting: {class_name} '{name}'")
 
 
-def _on_post_import(factory, class_name, parent, name, flags) -> None:
-    try:
-        package = f"{parent.get_path_name()}/{name}" if parent else str(name)
-        asset = unreal.EditorAssetLibrary.load_asset(package)
-    except Exception:  # pragma: no cover
-        return
+def _on_post_import(factory, created_object) -> None:
+    """OnAssetPostImport passes (factory, created_object) - two arguments.
+
+    This handler used to take the pre-import delegate's five, and UE 5.3.2
+    refused to bind it ("Callable has the incorrect number of arguments
+    (expected 2, got 5)") - so the drag-and-drop warning never fired at all.
+    """
+    asset = created_object
     if asset is None or not isinstance(asset, unreal.StaticMesh):
         return
 
@@ -166,6 +168,7 @@ def register_hooks() -> bool:
         return False
 
     subsystem = subsystem_getter(subsystem_class)
+    bound = []
     for event_name, handler in (("on_asset_pre_import", _on_pre_import),
                                 ("on_asset_post_import", _on_post_import)):
         event = getattr(subsystem, event_name, None)
@@ -174,12 +177,20 @@ def register_hooks() -> bool:
             continue
         try:
             event.add_callable(handler)
+            bound.append(event_name)
         except Exception as error:  # pragma: no cover - delegate signature drift
             unreal.log_warning(f"[AssetGatekeeper] could not bind {event_name}: {error}")
 
     _state["registered"] = True
-    unreal.log("[AssetGatekeeper] import guard active")
-    return True
+    _state["bound"] = bound
+    if "on_asset_post_import" in bound:
+        unreal.log("[AssetGatekeeper] import guard active")
+    else:
+        # The post-import check *is* the guard; saying "active" without it is
+        # how a failed bind went unnoticed.
+        unreal.log_error("[AssetGatekeeper] import guard NOT active: the post-import "
+                         "check could not be bound; imported assets are not checked")
+    return bool(bound)
 
 
 register_hooks()

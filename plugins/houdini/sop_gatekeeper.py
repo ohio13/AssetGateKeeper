@@ -121,6 +121,21 @@ def _vertex_count(prim) -> int:
     return 0
 
 
+def _is_closed(prim) -> bool:
+    """Open polylines (a Line SOP, hair guides, curve tools) are prims of type
+    Polygon too - only a *closed* one is a face. Counting ``vertices - 2`` on an
+    open 1,000-point guide invented 998 triangles per strand: verified in
+    Houdini 22, where 100 guides read as 99,800 triangles and 100 "degenerate"
+    faces."""
+    closed = getattr(prim, "isClosed", None)
+    if not callable(closed):
+        return True
+    try:
+        return bool(closed())
+    except Exception:                                  # pragma: no cover - version
+        return True
+
+
 def _embedded_geometry(prim):
     """The geometry inside a packed prim, or None when it cannot be opened."""
     getter = getattr(prim, "getEmbeddedGeometry", None)
@@ -161,7 +176,7 @@ def triangle_count(geometry, sample_cap: int = 2_000_000,
             elif uncounted is not None:
                 uncounted.append(prim)
             continue
-        if kind in POLYGON_PRIM_TYPES:
+        if kind in POLYGON_PRIM_TYPES and _is_closed(prim):
             total += max(0, _vertex_count(prim) - 2)
     return total
 
@@ -180,8 +195,8 @@ def degenerate_prim_count(geometry, epsilon: float = 1e-9) -> int:
             if embedded is not None:
                 count += degenerate_prim_count(embedded, epsilon)
             continue
-        if kind not in POLYGON_PRIM_TYPES:
-            continue                      # a two-point curve is not degenerate
+        if kind not in POLYGON_PRIM_TYPES or not _is_closed(prim):
+            continue                      # an open curve is not a face, degenerate or not
         points = prim.points()
         if len(points) < 3:
             count += 1
@@ -244,23 +259,18 @@ def flag(node, problems: list[str]) -> None:
 
     message = "AssetGatekeeper: " + " | ".join(problems)
 
-    # Preferred: a dedicated node message, when the build exposes it.
-    add_message = getattr(node, "addMessage", None)
-    if callable(add_message):
-        try:
-            add_message(message)
-            return
-        except Exception:  # pragma: no cover - version dependent
-            pass
-
-    # Documented equivalent: a node warning badge + cook log entry.
-    set_warning = getattr(node, "setWarning", None)
-    if callable(set_warning):
-        try:
-            set_warning(message)
-            return
-        except Exception:  # pragma: no cover
-            pass
+    # A *warning* badge (yellow) first: that is what the network view makes an
+    # artist notice. addMessage only posts a blue info note, which is how the
+    # SOP behaved in Houdini 22 - flagged, and easy to miss. Never addError:
+    # a gate that breaks the cook is worse than no gate.
+    for method in ("addWarning", "setWarning", "addMessage"):
+        post = getattr(node, method, None)
+        if callable(post):
+            try:
+                post(message)
+                return
+            except Exception:  # pragma: no cover - version dependent
+                continue
 
     print(f"[AssetGatekeeper] {message}")  # last resort
 
