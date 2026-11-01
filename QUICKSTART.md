@@ -207,8 +207,15 @@ content — adjust to your frame budget.
   see the tooltips; the checkerbox flags (power-of-two, PBR albedo range,
   texture naming, reference checks, degenerate triangles) match the platform's
   era.
-- **Categories**: the table lists the tags the file already has; *Add category*
-  appends one (name + polygon budget).
+- **Categories**: the table lists the `[tags.*]` entries the file already has;
+  *Add category* appends one (name + polygon budget).
+
+  **The name is the folder or the filename prefix, and nothing else** — type
+  `actors`, not `[actors.*]`. Anything under an `actors\` folder, or named
+  `Actor_grunt.glb`, then matches it. `[tags.actors]` is the TOML header the page
+  writes for you; brackets and wildcards are not part of the name and are refused
+  with the plain name it thinks you meant. `character` and `prop` are ordinary
+  categories too — the preset just creates them for you.
 - **Target** is read-only: the preset is a *formula that fills the numbers*. The
   file stores the numbers, not the preset's name — so a later hand-edit to a
   budget is never silently overridden on the next run.

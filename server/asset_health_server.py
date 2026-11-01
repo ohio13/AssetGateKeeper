@@ -2445,9 +2445,32 @@ def merge_rules_document(existing: dict, submitted: dict) -> dict:
     return merged
 
 
+#: A category is matched against a folder name or the first token of a filename,
+#: so it can only be a plain word. `[actors.*]` looks like TOML but is neither a
+#: valid table name nor something the matcher could ever hit.
+TAG_NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _-]{0,63}$")
+
+
+def validate_tag_names(document: dict) -> None:
+    tags = document.get("tags") or {}
+    if not isinstance(tags, dict):
+        raise agk.ConfigError("[tags] must be a table of tables")
+    for name in tags:
+        if TAG_NAME_PATTERN.match(str(name)):
+            continue
+        cleaned = re.sub(r"[^A-Za-z0-9 _-]", "", str(name)).strip()
+        raise agk.ConfigError(
+            f"category name {name!r} is not usable. A category is the folder name or "
+            f"the filename prefix itself, so type just the word"
+            + (f" (did you mean '{cleaned}'?)" if cleaned else "")
+            + ". The [tags.<name>] table is written for you; brackets and wildcards "
+              "are not part of the name.")
+
+
 def validate_rules_document(document: dict) -> None:
     """Refuse a document the gate would refuse, before it reaches the disk."""
     agk.Budget.from_mapping(document)              # unknown keys, bad numbers
+    validate_tag_names(document)                   # a category must be matchable
     agk.build_tag_budgets(document)                # [tags.*] tables
     named = str(document.get("platform") or "").strip()
     if named:

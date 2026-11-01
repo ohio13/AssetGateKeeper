@@ -59,6 +59,16 @@ async function useProject() {
     state.document = info.document || {};
     fillForm(state.document);
     renderRecent(info.recent);
+    // The form now describes *that* file, not a preset. Leaving the dropdown on
+    // "Nintendo 64" while the numbers show 50,000 is how a director saves a
+    // budget they did not intend.
+    $("preset").value = "";
+    state.presetName = "";
+    $("target").value = info.rules_exists ? "from rules.toml" : "— no rules.toml yet —";
+    $("preset-notes").textContent = info.rules_exists
+      ? "Numbers loaded from the project's rules.toml."
+      : "No rules.toml here yet — pick a preset or type the numbers, then Save.";
+    $("scan-root").textContent = info.project;
     notice(info.rules_exists
       ? `Project set: ${info.project} — existing rules.toml loaded.`
       : `Project set: ${info.project} — no rules.toml yet; Save will create one.`,
@@ -139,8 +149,14 @@ function budgetDocument() {
 function collectTags() {
   const tags = {};
   for (const row of $("tags").querySelectorAll("tr")) {
-    const name = row.querySelector("input[data-kind=name]").value.trim();
-    const tris = Number(row.querySelector("input[data-kind=tris]").value || 0);
+    // The "no categories yet" row is a <tr> too, and it has no inputs. Reading
+    // .value from the null it returns is what broke Save on a project without
+    // any [tags.*] entries, so skip any row that is not an editable one.
+    const nameInput = row.querySelector("input[data-kind=name]");
+    const trisInput = row.querySelector("input[data-kind=tris]");
+    if (!nameInput || !trisInput) continue;
+    const name = nameInput.value.trim();
+    const tris = Number(trisInput.value || 0);
     if (!name || !tris) continue;
     tags[name] = { max_triangles: tris };
   }
@@ -152,7 +168,9 @@ function renderTags(tags) {
   body.innerHTML = "";
   const entries = Object.entries(tags || {});
   if (!entries.length) {
-    body.innerHTML = `<tr><td colspan="3" class="sub">No categories — every asset uses the project default.</td></tr>`;
+    body.innerHTML = `<tr class="empty-row"><td colspan="3" class="sub">`
+      + `No categories — every asset uses the project default. Add one below `
+      + `(the folder or filename prefix, e.g. <code>actors</code>).</td></tr>`;
     return;
   }
   for (const [name, budget] of entries) {

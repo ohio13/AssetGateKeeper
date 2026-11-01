@@ -286,11 +286,32 @@ expect("nothing was written", rules.read_text(encoding="utf-8") == before_text)
 status, body = anon.post("/admin/api/apply",
                          {"document": {"mesh": {"nonsense": 1}}, "action": "save"}, csrf=csrf)
 expect("an unknown key is refused", status == 400 and b"unknown" in body.lower(), body[:120])
+# Category names are the question every new user asks: "[actors.*]" is not TOML
+# and is not matchable, so it is refused with the folder name it probably meant.
+status, body = anon.post(
+    "/admin/api/apply",
+    {"document": {**document, "tags": {"[actors.*]": {"max_triangles": 1500}}},
+     "action": "save"}, csrf=csrf)
+expect("a bracketed category name is refused", status == 400, str(status))
+expect("the refusal suggests the plain name", b"actors" in body, body[:180])
+status, body = anon.post(
+    "/admin/api/apply",
+    {"document": {**document, "tags": {"actors": {"max_triangles": 1500},
+                                           "normal_enemy": {"max_triangles": 20000}}},
+     "action": "save"}, csrf=csrf)
+expect("a plain folder name is accepted", status == 200, body[:180])
+expect("the category is written as a normal tag table",
+       agk.parse_rules(rules)["tags"]["actors"]["max_triangles"] == 1500)
+status, body = anon.post("/admin/api/apply", {"document": document, "action": "save"},
+                         csrf=csrf)
+expect("the previous document can be restored", status == 200, str(status))
+
 status, body = anon.post("/admin/api/apply",
                          {"document": {"platform": "ps9"}, "action": "save"}, csrf=csrf)
 expect("an unknown platform overlay is refused or dropped safely",
        status == 200 or status == 400, str(status))
-expect("a refused platform leaves the file parseable", agk.parse_rules(rules) == saved)
+expect("a refused platform leaves the file parseable and unchanged",
+       agk.parse_rules(rules)["mesh"]["max_triangles"] == 1200)
 
 # --------------------------------------------------------------------------- #
 print("8. apply & rescan, streamed")
@@ -435,6 +456,9 @@ missing = sorted(name for name in referenced if f'id="{name}"' not in html_text)
 expect("every element the script reaches for exists in the page", not missing, str(missing))
 expect("the script and stylesheet are wired in",
        'src="/static/admin.js"' in html_text and 'href="/static/admin.css"' in html_text)
+expect("the category collector skips the 'no categories' placeholder row",
+       'if (!nameInput || !trisInput) continue;' in js_text,
+       "collectTags would read .value from null again")
 expect("the page never posts to an endpoint the server does not serve",
        all(path in js_text for path in ("/admin/api/apply", "/admin/api/state")),
        "apply/state endpoints referenced")

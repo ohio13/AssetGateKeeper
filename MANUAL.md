@@ -405,6 +405,25 @@ character. So `[tags.normal_enemy]`, `Normal Enemy/` and `Normal-Enemy/` are one
 category. (The dashboard and the rules panel show the normalised form, because
 that is the string the matcher compares against.)
 
+### Naming a category
+
+A category is **the folder name or the filename prefix itself**, never a pattern:
+
+| You want to gate | Type in *Add category* | Becomes | Matches |
+|---|---|---|---|
+| `Assets\Actors\*` | `actors` | `[tags.actors]` | the `actors` folder, or `Actors_x.glb` |
+| `Assets\Enemies\Normal\*` | `normal_enemy` | `[tags.normal_enemy]` | `normal_enemy` / `Normal Enemy` / `Normal-Enemy` |
+| one specific mesh | `w01`, with the mesh named `W01_room.glb` | `[tags.w01]` | that prefix only |
+
+`[actors.*]`, `actors/*`, `*.glb` and other pattern syntax are **not** valid: the
+matcher compares whole names. Brackets belong to the TOML header
+(`[tags.actors]`), which the admin page writes for you - you supply `actors`. A
+tag that cannot match anything would be a silent hole in the gate, so the page
+refuses one and suggests the plain name.
+
+Names are normalised (lowercase; `_`, `-` and space are one character), so
+`normal_enemy`, `Normal-Enemy` and `Normal Enemy` are the same category.
+
 ### Typos are not forgiven silently
 
 `tagging.mode`:
