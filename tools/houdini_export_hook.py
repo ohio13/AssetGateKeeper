@@ -53,6 +53,24 @@ def _inside_houdini() -> bool:
         return False
 
 
+def clean_subprocess_env(extra: dict | None = None) -> dict:
+    """Environment for the gate subprocess.
+
+    A DCC owns its interpreter. Houdini (like Maya and Blender) exports PYTHONHOME
+    and PYTHONPATH into every child process, so launching a *different* Python -
+    the studio's AGK_PYTHON - inherits the DCC's standard library and dies with
+    "SRE module mismatch" before reaching argparse. Dropping those three variables
+    is what makes the shell-out portable across DCCs.
+    """
+    env = dict(os.environ)
+    for leaked in ("PYTHONHOME", "PYTHONPATH", "PYTHONSTARTUP", "PYTHONEXECUTABLE"):
+        env.pop(leaked, None)
+    env["PYTHONIOENCODING"] = "utf-8"
+    env.update(extra or {})
+    return env
+
+
+
 def python_for_gate() -> str:
     """The interpreter that can actually run the gate (has trimesh + Pillow)."""
     override = os.environ.get("AGK_PYTHON")
@@ -94,7 +112,8 @@ def verify_file(path: str | Path, extra_args: list[str] | None = None,
                "--no-auto-heal", *(extra_args or [])]
     try:
         completed = subprocess.run(command, capture_output=True, text=True,
-                                   timeout=timeout, encoding="utf-8", errors="replace")
+                                   timeout=timeout, encoding="utf-8",
+                                   errors="replace", env=clean_subprocess_env())
     except subprocess.TimeoutExpired:
         return {"path": str(target), "returncode": 124,
                 "output": f"gate timed out after {timeout:g}s", "verdict": None}

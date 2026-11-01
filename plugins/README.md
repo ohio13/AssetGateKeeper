@@ -24,6 +24,21 @@ and answer before anything is exported. All four share one decision engine,
 | 3ds Max | `max/max_preflight.py` | `python.ExecuteFile` then `show()` |
 | Unreal | `unreal/unreal_preflight.py` | `run_and_log()` (Output Log) or `show()` |
 
+### Headless entry points (for CI and the integration suite)
+
+These run the same engine without a UI, and are what
+`tests/test_dcc_integration.py` drives:
+
+| Host | File | Invocation |
+| :--- | :--- | :--- |
+| Blender | `blender/preflight_blender.py` | `blender --background --python plugins/blender/preflight_blender.py -- --fixture x.obj --preset retro --out r.json` |
+| Houdini | `houdini/preflight_houdini.py` | `hython plugins/houdini/preflight_houdini.py --out r.json --preset retro a.obj b.obj` |
+| Unreal | `unreal/preflight_unreal.py` | `UnrealEditor-Cmd.exe P.uproject -run=pythonscript -script=... -unattended -NullRHI` (config via `AGK_PROBE_*`) |
+
+Each writes JSON and exits 0/1/2 (pass / budget failure / harness error).
+Process exit codes are authoritative except in Unreal, where the editor
+reports its own status and the verdict lives in the JSON.
+
 They report the geometry and material numbers, the budget they were judged
 against, and a fuzzy tag suggestion (`SUGGESTED character  (rename the folder)`)
 so a misspelled department folder is caught in the viewport, not at submit.

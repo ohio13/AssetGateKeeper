@@ -909,6 +909,10 @@ python tests/test_enterprise.py
 # 6. the server on both backends - 59 assertions, one driver double
 python tests/test_analytics.py
 
+# 7. DCC sweep - local only, NOT part of CI: needs Blender/Houdini/Unreal
+#    installed. Runs each in headless mode with a hard 15s timeout.
+python tests/test_dcc_integration.py
+
 # 5. real exporter -> real file -> real verdict (headless Blender / Unreal)
 python tests/run_headless_integration.py
 ```
@@ -930,6 +934,7 @@ tests/
   test_workstation.py            135 assertions: storage, LODs, collision export, notes, refs, SSE, report
   test_enterprise.py             218 assertions: config, RBAC, OIDC/SAML, store, remote, pre-flight, migrations, audit, failover
   test_analytics.py               59 assertions: storage seam, /analytics, SQLite vs PostgreSQL parity
+  test_dcc_integration.py         45 assertions: Blender/Houdini/Unreal headless, timeout-guarded
   run_headless_integration.py    drives headless DCC exports through the gate
 enterprise/                     optional: PostgreSQL, SSO, RBAC, VCS, remote
   config.py store.py            typed config, pooled PostgreSQL adapter
