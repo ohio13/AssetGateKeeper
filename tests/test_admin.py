@@ -475,6 +475,70 @@ expect("the page never posts to an endpoint the server does not serve",
        all(path in js_text for path in ("/admin/api/apply", "/admin/api/state")),
        "apply/state endpoints referenced")
 
+# --------------------------------------------------------------------------- #
+print("12. send to workstation")
+import art_workstation_server as aws  # noqa: PLC0415 - only this section needs it
+
+ws_db, ws_data = WORK / "bridge-ws.db", WORK / "bridge-ws-data"
+aws.init_db(ws_db)
+ws_server = aws.build_server("127.0.0.1", 0, ws_db, ws_data, quiet=True)
+threading.Thread(target=ws_server.serve_forever, daemon=True).start()
+ws_base = f"http://127.0.0.1:{ws_server.server_address[1]}"
+
+bridge_db = WORK / "bridge.db"
+ahs.init_db(bridge_db)
+gate_asset = WORK / "hero.obj"
+# A real triangle: the workstation validates geometry on ingest, so a
+# stub file is refused with a 422 (which is correct, and worth keeping).
+gate_asset.write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+bridge_server = ahs.build_server("127.0.0.1", 0, bridge_db, quiet=True,
+                                 rules_path=str(WORK / "bridge-rules.toml"),
+                                 rules_root=str(WORK), scan_root=str(WORK),
+                                 allow_roots=(str(WORK),), workstation_url=ws_base)
+threading.Thread(target=bridge_server.serve_forever, daemon=True).start()
+bridge = Session(f"http://127.0.0.1:{bridge_server.server_address[1]}")
+
+status, body = bridge.post("/api/telemetry", {
+    "filename": gate_asset.name, "path": str(gate_asset), "passed": False,
+    "status": "FAILED", "problems": ["triangle budget exceeded: 1,900 > 1,500",
+                                     "degenerate faces: 3"]})
+expect("the dashboard ingests a verdict", status == 201, body[:120])
+verdict_id = json.loads(body)["id"]
+
+expect("the dashboard offers the action per row",
+       "Send to Workstation" in ahs.render_dashboard(bridge_db))
+status, body = bridge.post("/api/send-to-workstation", {"verdicts": [verdict_id]})
+result = json.loads(body)
+expect("the bridge sends one asset", status == 200 and result["sent"] == 1, body[:200])
+expect("and names the new workstation asset",
+       isinstance(result["results"][0].get("asset_id"), int), body[:200])
+
+listing = json.loads(urllib.request.urlopen(f"{ws_base}/api/assets", timeout=5).read())
+item = next(row for row in listing["assets"] if row["filename"] == gate_asset.name)
+expect("the pass/fail status travelled", item["verdict_status"] == "failed", str(item)[:160])
+expect("the exact rule violation travelled",
+       "triangle budget exceeded" in item["verdict_problems"], item["verdict_problems"][:120])
+expect("the provenance is labelled", item["source"] == "assethealth", item["source"])
+
+status, body = bridge.post("/api/send-to-workstation", {"verdicts": [verdict_id] * 11})
+expect("a batch of eleven is refused", status == 400 and b"10" in body, body[:140])
+status, body = bridge.post("/api/send-to-workstation", {"verdicts": []})
+expect("an empty batch is refused", status == 400, str(status))
+
+missing_asset = WORK / "ghost.obj"
+status, body = bridge.post("/api/telemetry", {
+    "filename": missing_asset.name, "path": str(missing_asset), "passed": True,
+    "status": "PASSED", "problems": []})
+ghost_id = json.loads(body)["id"]
+status, body = bridge.post("/api/send-to-workstation", {"verdicts": [ghost_id]})
+result = json.loads(body)
+expect("a row whose file has gone fails on its own",
+       result["sent"] == 0 and "not reachable" in result["results"][0]["error"], body[:200])
+
+bridge_server.shutdown()
+bridge_server.server_close()
+ws_server.shutdown()
+ws_server.server_close()
 server.shutdown()
 server.server_close()
 shutil.rmtree(WORK, ignore_errors=True)

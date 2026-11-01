@@ -2432,7 +2432,12 @@ def build_telemetry_payload(verdict: Verdict, root: Optional[Path] = None) -> di
         "platform": platform.platform(),
         "python": platform.python_version(),
         "name": path.name,
-        "path": relative,
+        # Absolute: the dashboard hands this straight to the workstation when a
+        # reviewer clicks "Send to Workstation", so a bare relative name is not
+        # enough. The relative form is kept for display and grouping.
+        "path": (str((root / path).resolve())
+                 if root is not None and not Path(path).is_absolute() else str(path)),
+        "relative_path": relative,
         "size_bytes": size_bytes,
         "passed": verdict.passed,
         # PASSED / HEALED / FAILED: a healed asset passed, but the studio still

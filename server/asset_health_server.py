@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-r"""AssetHealth Server — the receiving end of the AssetGatekeeper ecosystem.
+r"""AssetHealth Server ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the receiving end of the AssetGatekeeper ecosystem.
 
 A single stdlib-only file: ``http.server`` + ``sqlite3`` + ``json``. No Flask, no
 ORM, no JS build step. Drop it next to the gatekeeper, run it, open the dashboard.
@@ -17,7 +17,7 @@ Routes
 Auth
     Set ``AUTH_TOKEN`` (or ``--token``) and every request must carry
     ``Authorization: Bearer <token>``. Unset means "trust the network", which is
-    fine for 127.0.0.1 and not fine for anything else — the server says so on boot.
+    fine for 127.0.0.1 and not fine for anything else ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the server says so on boot.
 
 Exit codes: 0 normal shutdown, 2 startup/config problem.
 """
@@ -361,7 +361,7 @@ def hash_token(token: str) -> str:
 
 
 def create_project(db_path: str | Path, name: str, token: str | None = None) -> tuple[int, str]:
-    """Add a project. Returns (id, token) — the token is shown once and hashed.
+    """Add a project. Returns (id, token) ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the token is shown once and hashed.
 
     Only the hash is stored: a metrics database that leaks is bad, a metrics
     database that also leaks every vendor's token is a breach.
@@ -444,7 +444,7 @@ def budget_for_project(db_path: str | Path, project_id: int | None) -> dict:
 
 
 def budget_document(budget: dict) -> dict:
-    """The saved budget as a rules document — exactly what `--remote-rules` eats.
+    """The saved budget as a rules document ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â exactly what `--remote-rules` eats.
 
     Same shape as rules.toml, so a client never has to learn a second format and
     the gate's own parser validates it on the way in.
@@ -594,6 +594,7 @@ def wall_of_shame(db_path: str | Path, limit: int = WALL_OF_SHAME_LIMIT,
             "username": row["username"],
             "hostname": row["hostname"],
             "filename": row["filename"],
+            "filepath": row["filepath"],
             "metric": row["metric"],
             "reasons": [line for line in (row["reasons"] or "").split("\n") if line],
         }
@@ -631,7 +632,7 @@ def classify(problem: str) -> str:
 
 def bottlenecks(db_path: str | Path, limit: int = BOTTLENECK_LIMIT,
                 project_id: int | None = None) -> list[tuple[str, int]]:
-    """Which rule is broken most often — the ranking that decides next sprint."""
+    """Which rule is broken most often ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the ranking that decides next sprint."""
     with open_db(db_path) as connection:
         if project_id is None:
             rows = connection.execute("SELECT message FROM problems").fetchall()
@@ -715,7 +716,7 @@ def alert_text(payload: dict, budget: dict,
     reasons = "; ".join(p for p in payload.get("problems", []) if isinstance(p, str)) or "unknown"
     details = ", ".join(f"{label} {int(value):,} vs {limit:,} ({ratio:.1f}x)"
                         for label, value, limit, ratio in overshoot)
-    return (f"🔴 CRITICAL PIPELINE ALERT: User {payload.get('username') or 'unknown'} on "
+    return (f"ÃƒÂ°Ã…Â¸Ã¢â‚¬ÂÃ‚Â´ CRITICAL PIPELINE ALERT: User {payload.get('username') or 'unknown'} on "
             f"{payload.get('hostname') or 'unknown'} failed validation for "
             f"{payload.get('name') or payload.get('filename') or 'unknown'}. "
             f"Reasons: {reasons}. Over budget: {details}")
@@ -811,9 +812,9 @@ class Broadcaster:
 class Notifier:
     """Fire-and-forget webhook POSTs. Same three rules as the gate's telemetry.
 
-    1. Never raise — a dead webhook must not fail an ingest.
-    2. Never block — `submit()` enqueues; one daemon thread owns the sockets.
-    3. Never grow without bound — a capped queue drops and counts.
+    1. Never raise ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a dead webhook must not fail an ingest.
+    2. Never block ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â `submit()` enqueues; one daemon thread owns the sockets.
+    3. Never grow without bound ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â a capped queue drops and counts.
     """
 
     def __init__(self, url: str, provider: str = "slack", timeout: float = 2.0,
@@ -867,7 +868,7 @@ class Notifier:
         """Wait for the queue to drain without shutting the worker down.
 
         Used at shutdown and by tests that assert on what was delivered. Never
-        called on the ingest path — that path must not wait for a network.
+        called on the ingest path ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â that path must not wait for a network.
         """
         deadline = time.time() + timeout
         while time.time() < deadline:
@@ -989,6 +990,20 @@ button.secondary { background: transparent; color: var(--text); border: 1px soli
 MAX_REFRESH_SECONDS = 3600
 
 
+def _send_button(entry: dict) -> str:
+    """The one-click hand-off to the Art Workstation, for a single row.
+
+    Only rows with a recorded path can be sent: a verdict from a machine whose
+    files are not reachable here would produce a broken import, and guessing a
+    path is exactly the kind of silent wrongness this tool avoids.
+    """
+    if not entry.get("filepath"):
+        return '<span class="sub">no path recorded</span>'
+    name = _e(entry.get("filename") or "asset")
+    return (f'<button class="send" data-verdict="{int(entry["id"])}"'
+            f' title="Ingest only {name} into the Art Workstation">'
+            f"Send to Workstation</button>")
+
 def render_dashboard(db_path: str | Path, project_id: int | None = None,
                      project_name: str | None = None, warn: str = "",
                      refresh: int = 0) -> str:
@@ -1024,17 +1039,35 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
                 f"<td class=\"who mono\">{_e(entry['timestamp'][:19].replace('T', ' '))}</td>"
                 f"<td class=\"name\">{_e(entry['filename'])}<div class=\"who\">{who}{host}</div></td>"
                 f"<td class=\"why\">{reasons}</td>"
+                   f"<td class=\"act\">{_send_button(entry)}</td>"
                 "</tr>"
             )
         shame_html = (
             "<div class=\"panel\"><table><thead><tr>"
             "<th style=\"width:150px\">When</th><th style=\"width:290px\">Asset</th>"
-            "<th>Why it failed</th></tr></thead><tbody>"
+            "<th>Why it failed</th><th style=\"width:170px\">Action</th></tr></thead><tbody>"
             + "".join(shame_rows)
             + "</tbody></table></div>"
         )
     else:
         shame_html = "<div class=\"panel\"><div class=\"empty\">Nothing has failed yet. Enjoy it.</div></div>"
+
+    # Passed assets get the same hand-off: a clean gate is not the same thing as a
+    # model that looks right, and reviewers keep asking to see the ones that
+    # "passed" suspiciously cheaply.
+    passed_rows = []
+    for entry in recent_passed(db_path, 12, project_id):
+        passed_rows.append(
+            "<tr>"
+            f"<td>{_e((entry.get('received_at') or '')[:16])}</td>"
+            f"<td>{_e(entry.get('filename') or '')}</td>"
+            f"<td class=\"act\">{_send_button(entry)}</td>"
+            "</tr>")
+    passed_html = (
+        '<div class="panel"><h2>Recently passed - worth a look anyway</h2>'
+        '<table><thead><tr><th style="width:150px">When</th><th>Asset</th>'
+        '<th style="width:170px">Action</th></tr></thead><tbody>'
+        + "".join(passed_rows) + "</tbody></table></div>") if passed_rows else ""
 
     if tops:
         peak = max(count for _, count in tops) or 1
@@ -1061,7 +1094,7 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 {auto_refresh}
-<title>AssetHealth — studio pipeline dashboard</title>
+<title>AssetHealth ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â studio pipeline dashboard</title>
 <style>{CSS}</style>
 </head>
 <body>
@@ -1091,8 +1124,9 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
     <div class="card"><div class="k">Workstations</div><div class="v">{stats['hosts']:,}</div></div>
   </div>
 
-  <h2>Wall of shame — last {min(len(shame), WALL_OF_SHAME_LIMIT)} failures</h2>
+  <h2>Wall of shame ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â last {min(len(shame), WALL_OF_SHAME_LIMIT)} failures</h2>
   {shame_html}
+{passed_html}
 
   <h2>Top bottlenecks</h2>
   {tops_html}
@@ -1107,7 +1141,7 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
 </div>
 <script>
 /* Live updates over Server-Sent Events. The page is a server-rendered snapshot,
- * so the cheapest correct reaction to "something changed" is a reload — but we
+ * so the cheapest correct reaction to "something changed" is a reload ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â but we
  * only reload when the tab is visible, and never more than once every 3 s, so a
  * 300-asset sweep cannot lock the browser in a refresh loop. */
 (function () {{
@@ -1132,17 +1166,18 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
   source.addEventListener("verdict", function (event) {{
     var data = JSON.parse(event.data);
     pending += 1;
-    mark("live · " + pending + " new since load · last: " + data.status + " " + (data.name || ""));
+    mark("live Ãƒâ€šÃ‚Â· " + pending + " new since load Ãƒâ€šÃ‚Â· last: " + data.status + " " + (data.name || ""));
     scheduleReload();
   }});
   source.addEventListener("budget", function () {{
-    mark("live · budget published, reloading");
+    mark("live Ãƒâ€šÃ‚Â· budget published, reloading");
     scheduleReload();
   }});
-  source.onopen = function () {{ mark(pending ? live.textContent : "live · connected"); }};
-  source.onerror = function () {{ mark("live · reconnecting…"); }};
+  source.onopen = function () {{ mark(pending ? live.textContent : "live Ãƒâ€šÃ‚Â· connected"); }};
+  source.onerror = function () {{ mark("live Ãƒâ€šÃ‚Â· reconnectingÃƒÂ¢Ã¢â€šÂ¬Ã‚Â¦"); }};
 }})();
 </script>
+  <script src="/static/dashboard.js" defer></script>
 </body>
 </html>
 """
@@ -1152,14 +1187,14 @@ def render_error_page(status: int, headline: str, detail: str) -> str:
     """A refusal that explains itself, without leaking the project list."""
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
-<title>AssetHealth — {status}</title><style>{CSS}</style></head>
+<title>AssetHealth ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â {status}</title><style>{CSS}</style></head>
 <body><div class="wrap">
   <header><h1>AssetHealth</h1><span class="sub">{status}</span></header>
   <div class="panel" style="margin-top:24px"><div class="empty" style="color:var(--bad)">
     <strong>{_e(headline)}</strong>
   </div></div>
   <div class="sub" style="margin-top:16px">{_e(detail)}</div>
-</div></body></html>"""
+</body></html>"""
 
 
 def render_planner(db_path: str | Path, project_id: int, project_name: str,
@@ -1170,14 +1205,14 @@ def render_planner(db_path: str | Path, project_id: int, project_name: str,
         f'<option value="{row["id"]}"{" selected" if row["id"] == project_id else ""}>'
         f'{_e(row["name"])}</option>' for row in projects)
     updated = budget.get("updated_at") or "never"
-    updated_by = budget.get("updated_by") or "—"
+    updated_by = budget.get("updated_by") or "ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â"
 
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>AssetHealth — budget planner</title>
+<title>AssetHealth ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â budget planner</title>
 <style>{CSS}{PLANNER_CSS}</style>
 </head>
 <body>
@@ -2082,10 +2117,127 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._json(404, {"error": "not found", "path": path})
 
+    # ------------------------------------------------------ workstation bridge
+    def _workstation_url(self) -> str:
+        """Where to POST an asset: explicit flag, else the running one.
+
+        The launcher writes .agk/ports.json, so the dashboard can find the
+        workstation it was started beside without being told the port up front
+        (it may have moved for port fallback, and then the flag would be stale).
+        """
+        explicit = (getattr(self.server, "workstation_url", "") or "").strip()
+        if explicit:
+            return explicit.rstrip("/")
+        candidates = []
+        ports = os.environ.get(PORTS_FILE_ENV, "")
+        if ports:
+            candidates.append(Path(ports))
+        candidates.append(Path.cwd() / ".agk" / "ports.json")
+        for candidate in candidates:
+            try:
+                data = json.loads(candidate.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            url = ((data.get("workstation") or {}).get("url") or "").strip()
+            if url:
+                return url.rstrip("/")
+        return ""
+
+    def _asset_tags(self, source: Path) -> list[str]:
+        """The live categories this file falls into, in the gate's own order."""
+        try:
+            rules = self._rules_path()
+            document = agk.parse_rules(rules) if rules.is_file() else {}
+            known = {agk.normalise_tag(name): name for name in (document.get("tags") or {})}
+        except (agk.ConfigError, OSError):
+            return []
+        if not known:
+            return []
+        matched: list[str] = []
+        for candidate in agk.tag_candidates(source, Path(self.server.scan_root)):
+            name = known.get(agk.normalise_tag(candidate))
+            if name and name not in matched:
+                matched.append(name)
+        return matched[:3]
+
+    def _send_to_workstation(self, identity: dict) -> None:
+        if identity.get("role") == "denied":
+            self._json(401, {"error": "a token is required to use this dashboard"})
+            return
+        payload = self._read_json()
+        if payload is None:
+            return
+        ids = payload.get("verdicts")
+        if not isinstance(ids, list) or not ids:
+            self._json(400, {"error": "send a list of verdict ids"})
+            return
+        if len(ids) > MAX_SEND_BATCH:
+            self._json(400, {"error": f"at most {MAX_SEND_BATCH} assets at a time "
+                                      f"(asked for {len(ids)})"})
+            return
+        base = self._workstation_url()
+        if not base:
+            self._json(400, {"error": "no Art Workstation to send to: start it "
+                                      "(agk-serve.bat up) or pass --workstation-url"})
+            return
+        results = []
+        for raw in ids[:MAX_SEND_BATCH]:
+            try:
+                verdict_id = int(raw)
+            except (TypeError, ValueError):
+                results.append({"ok": False, "id": raw, "error": "not a verdict id"})
+                continue
+            with open_db(self.server.db_path) as connection:
+                row = connection.execute(
+                    "SELECT id, filename, filepath, passed FROM verdicts WHERE id = ?",
+                    (verdict_id,)).fetchone()
+                reasons = [item[0] for item in connection.execute(
+                    "SELECT message FROM problems WHERE verdict_id = ? ORDER BY id",
+                    (verdict_id,))]
+            if row is None:
+                results.append({"ok": False, "id": verdict_id, "error": "unknown verdict"})
+                continue
+            source = Path(row["filepath"] or "")
+            if not source.is_file():
+                results.append({"ok": False, "id": verdict_id, "name": row["filename"],
+                                "error": f"that file is not reachable here: {source}"})
+                continue
+            tags = self._asset_tags(source)
+            query = urllib.parse.urlencode({
+                "filename": source.name,
+                "verdict": "passed" if row["passed"] else "failed",
+                "problems": "\n".join(reasons),
+                "tags": ", ".join(tags),
+                "source": "assethealth",
+                "verdict_id": verdict_id,
+            })
+            request = urllib.request.Request(f"{base}/api/assets?{query}",
+                                             data=source.read_bytes(), method="POST")
+            if self.server.workstation_token:
+                request.add_header("Authorization", f"Bearer {self.server.workstation_token}")
+            try:
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    body = json.loads(response.read() or b"{}")
+                results.append({"ok": True, "id": verdict_id, "name": source.name,
+                                "asset_id": body.get("id"), "tags": tags})
+            except urllib.error.HTTPError as exc:
+                detail = exc.read()[:160].decode("utf-8", "replace")
+                results.append({"ok": False, "id": verdict_id, "name": source.name,
+                                "error": f"the workstation said {exc.code}: {detail}"})
+            except OSError as exc:
+                results.append({"ok": False, "id": verdict_id, "name": source.name,
+                                "error": str(exc)})
+        sent = sum(1 for item in results if item["ok"])
+        self._json(200, {"requested": len(ids), "sent": sent, "limit": MAX_SEND_BATCH,
+                         "results": results})
+
     def do_POST(self) -> None:  # noqa: N802 - stdlib naming
         path = urllib.parse.urlsplit(self.path).path.rstrip("/") or "/"
         if path.startswith("/admin/"):
             self._admin_post(path)
+            return
+        if path == "/api/send-to-workstation":
+            self._send_to_workstation(self._identify())
             return
         if path not in ("/api/telemetry", "/api/save-budget"):
             self._json(404, {"error": "not found", "path": path})
@@ -2164,7 +2316,7 @@ class Handler(BaseHTTPRequestHandler):
         """Push a webhook when a failure blows a budget by more than 50%.
 
         Throttled per scope so a nightly sweep failing 300 assets sends one
-        message, not 300. The asset still lands in the database either way — the
+        message, not 300. The asset still lands in the database either way ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â the
         dashboard is the complete record, the webhook is the poke.
         """
         notifier = getattr(self.server, "notifier", None)
@@ -2245,7 +2397,7 @@ SESSION_TTL = 12 * 3600.0
 LOGIN_MAX_FAILURES = 5
 LOGIN_WINDOW = 300.0
 STATIC_DIR = HERE / "static"
-ADMIN_STATIC = frozenset({"admin.html", "admin.js", "admin.css"})
+ADMIN_STATIC = frozenset({"admin.html", "admin.js", "admin.css", "dashboard.js"})
 
 
 def _b64(raw: bytes) -> str:
@@ -2393,6 +2545,28 @@ def list_audit(db_path: str | Path, limit: int = 100) -> list[dict]:
         rows = connection.execute(
             "SELECT changed_at, username, role, target, summary, old_value, new_value"
             "  FROM rule_audit ORDER BY id DESC LIMIT ?", (int(limit),)).fetchall()
+    return [dict(row) for row in rows]
+
+
+#: The bridge is for reviewing one asset at a time. Ten is the ceiling enforced
+#: here (not just in the page) so a stuck button cannot queue the workstation.
+MAX_SEND_BATCH = 10
+PORTS_FILE_ENV = "AGK_PORTS_FILE"
+
+
+def recent_passed(db_path: str | Path, limit: int = 12,
+                  project_id: int | None = None) -> list[dict]:
+    """Passed assets are worth reviewing too - a clean gate does not mean it looks
+    right - so the dashboard offers the same one-click hand-off for them."""
+    where = "WHERE passed = 1" + (" AND project_id = ?" if project_id is not None else "")
+    params: list[object] = [limit] if project_id is None else [int(project_id), limit]
+    try:
+        with open_db(db_path) as connection:
+            rows = connection.execute(
+                f"SELECT id, filename, filepath, hostname, received_at FROM verdicts "
+                f"{where} ORDER BY id DESC LIMIT ?", params).fetchall()
+    except sqlite3.Error:
+        return []
     return [dict(row) for row in rows]
 
 
@@ -2672,7 +2846,7 @@ code{background:#0b0f16;border:1px solid var(--line);border-radius:4px;padding:1
   <button type="submit">Create account and sign in</button>
   <p class="hint">Only the PBKDF2 hash is stored. Everyone else is added later with
   <code>asset-health --add-admin &lt;name&gt; --admin-role producer</code>.</p>
-</form></body></html>"""
+</body></html>"""
 
 
 LOGIN_PAGE = """<!DOCTYPE html>
@@ -2707,7 +2881,7 @@ background:var(--accent);color:#0b1020;font:inherit;font-weight:600;cursor:point
   <button type="submit">Sign in</button>
   <p class="hint">Accounts are created by whoever administers this dashboard:
   <code>asset-health --add-admin &lt;name&gt; --role director</code></p>
-</form></body></html>"""
+</body></html>"""
 
 
 def render_login_page(message: str = "", username: str = "",
@@ -2737,7 +2911,8 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
                  quiet: bool = False, notifier: "Notifier | None" = None,
                  alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
                  rules_path: str | Path = "", rules_root: str | Path = "",
-                 scan_root: str | Path = "", allow_roots: tuple[str, ...] = ()):
+                 scan_root: str | Path = "", allow_roots: tuple[str, ...] = (),
+                 workstation_url: str = "", workstation_token: str = ""):
         self.db_path = str(db_path)
         self.auth_token = token          # the studio-wide admin token, optional
         self.quiet = quiet
@@ -2754,6 +2929,10 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
         # into the verdict feed, plus per-IP login throttling.
         self.scan_broadcaster = Broadcaster()
         self.scan_root = str(scan_root or Path.cwd())
+        # The bridge posts files server-to-server, so the browser never needs
+        # CORS or the workstation token.
+        self.workstation_url = str(workstation_url or "")
+        self.workstation_token = str(workstation_token or "")
         # Where the admin page may point the tool at. A dashboard that can write
         # rules.toml into *any* directory an admin types is an arbitrary-file-write
         # primitive, so the allow-list is the whole guard rail: everything else in
@@ -2792,9 +2971,12 @@ def build_server(host: str, port: int, db_path: str | Path,
                  alert_cooldown: float = DEFAULT_ALERT_COOLDOWN,
                  rules_path: str | Path = "", rules_root: str | Path = "",
                  scan_root: str | Path = "",
-                 allow_roots: tuple[str, ...] = ()) -> AssetHealthServer:
+                 allow_roots: tuple[str, ...] = (),
+                 workstation_url: str = "",
+                 workstation_token: str = "") -> AssetHealthServer:
     return AssetHealthServer((host, port), db_path, token, quiet, notifier, alert_cooldown,
-                             rules_path, rules_root, scan_root, allow_roots)
+                             rules_path, rules_root, scan_root, allow_roots,
+                             workstation_url, workstation_token)
 
 
 def describe_rules(server: "AssetHealthServer") -> dict:
@@ -2816,7 +2998,7 @@ def describe_rules(server: "AssetHealthServer") -> dict:
 
 
 # --------------------------------------------------------------------------- #
-# Seed data — so the dashboard is not an empty page on first run
+# Seed data ÃƒÂ¢Ã¢â€šÂ¬Ã¢â‚¬Â so the dashboard is not an empty page on first run
 # --------------------------------------------------------------------------- #
 
 _SEED: tuple[tuple[str, str, str, str, str, int, int, str, list[str]], ...] = (
@@ -2943,6 +3125,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help=f"SQLite file (default {DEFAULT_DB}, or $ASSET_HEALTH_DB)")
     parser.add_argument("--token", default=os.environ.get(DEFAULT_TOKEN_ENV, ""),
                         help=f"require 'Authorization: Bearer <token>' (default ${DEFAULT_TOKEN_ENV})")
+    parser.add_argument("--workstation-url", metavar="URL",
+                        default=os.environ.get("AGK_WORKSTATION_URL", ""),
+                        help="Art Workstation base URL used by 'Send to Workstation' "
+                             "(default: the running one recorded in .agk/ports.json, "
+                             "or $AGK_WORKSTATION_URL)")
+    parser.add_argument("--workstation-token", metavar="TOKEN",
+                        default=os.environ.get("AGK_WORKSTATION_TOKEN", ""),
+                        help="token for that workstation, when it runs with AUTH_TOKEN")
     parser.add_argument("--demo", action="store_true",
                         help="fill a brand-new database with the bundled demo verdicts "
                              "(716 passed / 64 failed) so the dashboard is not empty")

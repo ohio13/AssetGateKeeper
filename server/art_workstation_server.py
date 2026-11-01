@@ -107,7 +107,13 @@ CREATE TABLE IF NOT EXISTS assets (
     vertex_count   INTEGER NOT NULL,
     material_slots INTEGER NOT NULL,
     uploader       TEXT    NOT NULL DEFAULT '',
-    uploaded_at    TEXT    NOT NULL
+    uploaded_at    TEXT    NOT NULL,
+    -- Provenance from AssetHealth's "Send to Workstation": what the gate said
+    -- about this exact file, and which categories applied when it was sent.
+    verdict_status   TEXT NOT NULL DEFAULT '',
+    verdict_problems TEXT NOT NULL DEFAULT '',
+    verdict_tags     TEXT NOT NULL DEFAULT '',
+    source           TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS lod_versions (
@@ -217,6 +223,13 @@ def init_db(db_path: str | Path) -> None:
     with open_db(db_path) as connection:
         connection.execute("PRAGMA journal_mode = WAL")
         connection.executescript(SCHEMA)
+        # A review library outlives the code that created it: add the bridge
+        # columns in place rather than asking anyone to drop their database.
+        have = {row["name"] for row in connection.execute("PRAGMA table_info(assets)")}
+        for column in ("verdict_status", "verdict_problems", "verdict_tags", "source"):
+            if column not in have:
+                connection.execute(
+                    f"ALTER TABLE assets ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
 
 
 # --------------------------------------------------------------------------- #
@@ -535,7 +548,7 @@ def get_collision(db_path: str | Path, asset_id: int) -> dict | None:
 # --------------------------------------------------------------------------- #
 
 def create_asset(db_path: str | Path, data_dir: Path, filename: str, payload: bytes,
-                 uploader: str = "") -> dict:
+                 uploader: str = "", provenance: dict | None = None) -> dict:
     """Store an uploaded file, measure it, and seed its bounding-box collision."""
     name = safe_filename(filename)
     suffix = Path(name).suffix.lower()
@@ -547,11 +560,15 @@ def create_asset(db_path: str | Path, data_dir: Path, filename: str, payload: by
         raise WorkstationError("empty upload", 400)
 
     with _WRITE_LOCK, open_db(db_path) as connection:
+        extra = provenance or {}
         cursor = connection.execute(
             "INSERT INTO assets (filename, file_path, filesize, triangle_count,"
-            " vertex_count, material_slots, uploader, uploaded_at)"
-            " VALUES (?, '', ?, 0, 0, 0, ?, ?)",
-            (name, len(payload), uploader, utc_now()))
+            " vertex_count, material_slots, uploader, uploaded_at,"
+            " verdict_status, verdict_problems, verdict_tags, source)"
+            " VALUES (?, '', ?, 0, 0, 0, ?, ?, ?, ?, ?, ?)",
+            (name, len(payload), uploader, utc_now(),
+             str(extra.get("verdict", "")), str(extra.get("problems", "")),
+             str(extra.get("tags", "")), str(extra.get("source", ""))))
         asset_id = int(cursor.lastrowid or 0)
 
     assets_dir, _ = asset_paths(data_dir)
@@ -1195,8 +1212,18 @@ class Handler(BaseHTTPRequestHandler):
                             or self.headers.get("X-Filename", ""))
                 if not filename:
                     raise WorkstationError("filename is required (query or X-Filename)", 400)
+                # Provenance arrives from AssetHealth's bridge: what the gate said
+                # about this file and which categories applied when it was sent.
+                query = self._query()
+                provenance = {
+                    "verdict": (query.get("verdict", [""])[0] or "").strip(),
+                    "problems": (query.get("problems", [""])[0] or "").strip(),
+                    "tags": (query.get("tags", [""])[0] or "").strip(),
+                    "source": (query.get("source", [""])[0] or "").strip(),
+                }
                 asset = create_asset(server.db_path, Path(server.data_dir), filename, raw,
-                                     uploader=self._query().get("uploader", [""])[0])
+                                     uploader=query.get("uploader", [""])[0],
+                                     provenance=provenance)
                 self._publish("asset", asset["id"])
                 self._json(201, asset)
                 return

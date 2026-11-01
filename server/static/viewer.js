@@ -318,13 +318,25 @@ async function refreshAssets() {
     return;
   }
   list.innerHTML = "";
-  state.assets.forEach((asset) => {
+  const wanted = state.filter || "all";
+  const visible = state.assets.filter((asset) => wanted === "all"
+    ? true
+    : wanted === "attention" ? asset.verdict_status === "failed"
+      : asset.verdict_status === "passed");
+  visible.forEach((asset) => {
     const element = document.createElement("div");
     element.className = "asset" + (state.asset && state.asset.id === asset.id ? " active" : "");
     element.dataset.id = asset.id;
+    element.dataset.verdict = asset.verdict_status || "";
     const heavy = asset.triangle_count > 50000 ? ' <span class="bad">!</span>' : "";
+    // Straight from AssetHealth: reviewers should never have to open the
+    // dashboard in another tab to know what they are looking at.
+    const verdict = asset.verdict_status === "failed"
+      ? '<span class="verdict failed" title="AssetHealth: failed">FAILED</span>'
+      : asset.verdict_status === "passed"
+        ? '<span class="verdict passed" title="AssetHealth: passed">PASSED</span>' : "";
     element.innerHTML =
-      `<div class="name">${escapeHtml(asset.filename)}</div>`
+      `<div class="name">${verdict}${escapeHtml(asset.filename)}</div>`
       + `<div class="meta">${fmt(asset.triangle_count)} tris · `
       + `${fmt(asset.vertex_count)} verts · ${asset.material_slots} mat${heavy}</div>`
       + `<div class="meta">${asset.lod_count} LOD · ${asset.note_count} note`
@@ -866,6 +878,54 @@ $("rules-refresh").addEventListener("click", () => loadRules(true));
 /* `#rules` opens the tab directly, so a lead can paste a link that lands on the
  * budgets instead of the asset list. `?tab=rules` does the same and survives the
  * tools that strip a fragment (headless capture, some chat clients). */
+/* ------------------------------- gate verdicts, carried over from AssetHealth */
+state.filter = state.filter || "all";
+
+function applyVerdictFilter() {
+  const wanted = state.filter;
+  for (const row of $("asset-list").querySelectorAll(".asset")) {
+    const verdict = row.dataset.verdict || "";
+    row.hidden = !(wanted === "all"
+      || (wanted === "attention" && verdict === "failed")
+      || (wanted === "passed" && verdict === "passed"));
+  }
+}
+
+for (const button of document.querySelectorAll("button.filter")) {
+  button.addEventListener("click", () => {
+    for (const other of document.querySelectorAll("button.filter")) {
+      other.classList.toggle("is-active", other === button);
+    }
+    state.filter = button.dataset.filter || "all";
+    applyVerdictFilter();
+  });
+}
+// Rows are re-rendered after every upload, so re-apply rather than wiring each one.
+new MutationObserver(applyVerdictFilter).observe($("asset-list"), { childList: true });
+
+function showVerdict(assetId) {
+  const body = $("verdict-body");
+  const asset = (state.assets || []).find((item) => String(item.id) === String(assetId));
+  if (!asset || !asset.verdict_status) {
+    body.innerHTML = '<div class="empty">No gate verdict on this asset. '
+      + 'Ones sent from the AssetHealth dashboard carry one.</div>';
+    return;
+  }
+  const problems = String(asset.verdict_problems || "").split("\n").filter(Boolean);
+  body.innerHTML =
+    `<div class="verdict-line ${escapeHtml(asset.verdict_status)}">`
+    + `${escapeHtml(asset.verdict_status.toUpperCase())}</div>`
+    + (problems.length
+      ? `<ul class="verdict-problems">${problems.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`
+      : '<div class="sub">No rule was broken.</div>')
+    + (asset.verdict_tags ? `<div class="verdict-tags">Category: ${escapeHtml(asset.verdict_tags)}</div>` : "")
+    + (asset.source ? `<div class="verdict-source">sent from ${escapeHtml(asset.source)}</div>` : "");
+}
+
+document.addEventListener("click", (event) => {
+  const row = event.target.closest && event.target.closest(".asset");
+  if (row && row.dataset.id) showVerdict(row.dataset.id);
+});
 const requestedTab = (new URLSearchParams(window.location.search).get("tab")
   || window.location.hash || "").replace(/^#/, "").toLowerCase();
 if (requestedTab === "rules" || requestedTab === "budgets") {

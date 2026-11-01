@@ -126,10 +126,10 @@ for name in ("empty_Albedo.png", "empty.obj", "truncated_Albedo.png"):
     expect(f"{name} fails with a reason", not verdict.passed and verdict.reason, verdict.tag)
 
 print("8. Unicode folder + filenames")
-uni = scratch / "导出_assets"
+uni = scratch / "å¯¼å‡º_assets"
 uni.mkdir(exist_ok=True)
-shutil.copy(DROP / "crate_4mtl.obj", uni / "墙体.obj")
-shutil.copy(DROP / "bark_Albedo.png", uni / "树皮_Albedo.png")
+shutil.copy(DROP / "crate_4mtl.obj", uni / "å¢™ä½“.obj")
+shutil.copy(DROP / "bark_Albedo.png", uni / "æ ‘çš®_Albedo.png")
 for path in sorted(uni.iterdir()):
     verdict = gate.check(path)
     print(f"     {verdict.path.name}: {verdict.tag} {verdict.metric}")
@@ -328,8 +328,11 @@ required = {"schema", "timestamp", "hostname", "username", "platform", "python",
             "name", "path", "size_bytes", "passed", "metric", "stats", "problems"}
 expect("payload carries every required field", required <= set(payload), str(sorted(payload)))
 expect("payload names the asset", payload["name"] == "boss_statue.gltf")
-expect("payload path is relative to the watch folder",
-       payload["path"] == "boss_statue.gltf" and ":" not in payload["path"])
+expect("payload carries an absolute path for the dashboard bridge",
+       Path(payload["path"]).is_absolute() and Path(payload["path"]).name == "boss_statue.gltf",
+       payload["path"])
+expect("and keeps the relative form for display",
+       payload["relative_path"] == "boss_statue.gltf", str(payload.get("relative_path")))
 expect("payload includes file size", payload["size_bytes"] > 0, str(payload["size_bytes"]))
 expect("payload includes structured stats", payload["stats"].get("triangles") == 72_500,
        str(payload["stats"]))
@@ -1202,7 +1205,7 @@ if wiz_root.exists():
 
 # The wizard, driven by an injected `ask` so it needs no stdin.
 # With the folder supplied, the prompts are: triangles, materials, texture edge,
-# platform, auto-heal — in that order.
+# platform, auto-heal â€” in that order.
 answers = ["15000", "2", "1024", "", "y"]
 asked = []
 

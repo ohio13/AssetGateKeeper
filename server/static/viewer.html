@@ -44,6 +44,11 @@
 
     <div class="tabpane" id="pane-assets" role="tabpanel" aria-labelledby="tab-assets">
       <h2>Asset library</h2>
+      <div class="filters" role="group" aria-label="Filter by gate verdict">
+        <button type="button" class="filter is-active" data-filter="all">All</button>
+        <button type="button" class="filter" data-filter="attention">Needs attention</button>
+        <button type="button" class="filter" data-filter="passed">Passed</button>
+      </div>
       <div id="asset-list" class="list">
         <div class="empty">Nothing uploaded yet.<br>Drop a .obj / .gltf / .glb anywhere.</div>
       </div>
@@ -93,6 +98,12 @@
     </div>
 
     <div class="readout" id="readout"></div>
+  </section>
+
+  <!-- ---------------------------------------------------------------- verdict -->
+  <section class="panel inspector" id="verdict-panel">
+    <h2>Gate verdict</h2>
+    <div id="verdict-body"><div class="empty">No asset selected.</div></div>
   </section>
 
   <!-- ------------------------------------------------------------- collision -->

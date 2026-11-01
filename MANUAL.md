@@ -931,6 +931,27 @@ asset-health --add-admin alice --admin-role director    :: once; password shown 
 Every change is written atomically to `rules.toml`, committed like any other
 file, and appended to the audit trail with old and new values.
 
+### Sending a single asset to the review screen
+
+Every row in the dashboard's failure list - and in "Recently passed" - carries a
+**Send to Workstation** button. It ingests *that one file* (not the folder), with
+its verdict, the exact rule violations and the categories that applied, and the
+review screen shows them as a badge, a "Gate verdict" panel and a status filter.
+
+How it is wired matters if you plan to run the two services apart:
+
+* The dashboard posts the bytes **server-to-server** to the workstation. The
+  browser never talks to the other origin, so there is no CORS surface and no
+  workstation token in the page.
+* It finds the workstation through `--workstation-url`, `$AGK_WORKSTATION_URL`, or
+  the `.agk/ports.json` the launcher writes (so port fallback cannot point it at a
+  stale port).
+* **Ten assets is the ceiling**, enforced in the server, not just the page: a
+  stuck click cannot queue the review machine. The bulk uploader CLI keeps its own
+  escape for deliberate folder loads.
+* A verdict whose file is no longer reachable fails on its own with a message -
+  it never half-imports a batch.
+
 **Weekly review**
 
 Dashboard → wall of shame (who/what is repeatedly failing) → bottlenecks (which
