@@ -1718,7 +1718,9 @@ class Handler(BaseHTTPRequestHandler):
             message = (error.get("error") or [""])[0]
             username = (error.get("u") or [""])[0]
             self._send_document(200, "text/html; charset=utf-8",
-                                render_login_page(message, username))
+                                render_login_page(message, username,
+                                                  first_run=admin_account_count(
+                                                      self.server.db_path) == 0))
             return
         user = self._admin_user()
         if path in ("/admin", "/admin/index.html"):
@@ -1822,6 +1824,70 @@ class Handler(BaseHTTPRequestHandler):
         server = self.server
         with server._login_lock:
             server._login_failures.setdefault(self._client_ip(), []).append(time.time())
+
+    def _is_loopback(self) -> bool:
+        address = (self.client_address[0] if self.client_address else "") or ""
+        return address in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
+
+    def _admin_bootstrap(self) -> None:
+        """Create the first director account from the browser.
+
+        A zero-CLI install cannot require a terminal for its first step, so an
+        empty user table turns the sign-in page into a setup page. Three guards:
+        it only works while there are no accounts, only from loopback, and it
+        always creates a *director* - whoever sets up the box is accountable.
+        """
+        if not self._same_origin():
+            self._json(403, {"error": "cross-origin request refused"})
+            return
+        if admin_account_count(self.server.db_path) > 0:
+            self._json(403, {"error": "an account already exists; sign in instead"})
+            return
+        if not self._is_loopback():
+            self._json(403, {"error": "first-run setup is only allowed from this machine",
+                             "detail": "open http://127.0.0.1:<port>/admin locally"})
+            return
+        if self._login_throttled():
+            self._json(429, {"error": "too many attempts; wait a few minutes"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > MAX_BODY_BYTES:
+            self._json(400, {"error": "missing form data"})
+            return
+        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        username = (form.get("username") or [""])[0].strip()
+        password = (form.get("password") or [""])[0]
+        confirm = (form.get("confirm") or [""])[0]
+        if not username or len(username) > 64:
+            self._redirect("/admin/login?error=Choose+a+username")
+            return
+        if len(password) < 10:
+            self._note_login_failure()
+            self._redirect("/admin/login?error=Use+at+least+10+characters&u="
+                           + urllib.parse.quote(username))
+            return
+        if password != confirm:
+            self._note_login_failure()
+            self._redirect("/admin/login?error=Passwords+do+not+match&u="
+                           + urllib.parse.quote(username))
+            return
+        try:
+            create_admin_user(self.server.db_path, username, "director", password,
+                              created_by="first-run setup")
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        record_audit(self.server.db_path, {"id": None, "username": username,
+                                          "role": "director"},
+                     "account", "", f"{username} (director)", self._client_ip(),
+                     summary="first-run setup created the first director")
+        with open_db(self.server.db_path) as connection:
+            row = connection.execute(
+                "SELECT id, role FROM admin_users WHERE username = ?", (username,)).fetchone()
+        token, _csrf = create_session(self.server.db_path, int(row["id"]), self._client_ip())
+        cookie = (f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; "
+                  f"Max-Age={int(SESSION_TTL)}")
+        self._redirect("/admin", [("Set-Cookie", cookie)])
 
     def _admin_login(self) -> None:
         if not self._same_origin():
@@ -1994,6 +2060,8 @@ class Handler(BaseHTTPRequestHandler):
     def _admin_post(self, path: str) -> None:
         if path == "/admin/api/project":
             self._admin_project()
+        elif path == "/admin/api/bootstrap":
+            self._admin_bootstrap()
         elif path == "/admin/login":
             self._admin_login()
         elif path == "/admin/api/logout":
@@ -2256,6 +2324,14 @@ def set_admin_password(db_path: str | Path, username: str,
         connection.execute("DELETE FROM admin_sessions WHERE user_id IN "
                            "(SELECT id FROM admin_users WHERE username = ?)", (username,))
     return password
+
+
+def admin_account_count(db_path: str | Path) -> int:
+    try:
+        with open_db(db_path) as connection:
+            return int(connection.execute("SELECT COUNT(*) FROM admin_users").fetchone()[0])
+    except sqlite3.Error:
+        return 0
 
 
 def create_session(db_path: str | Path, user_id: int, ip: str = "") -> tuple[str, str]:
@@ -2533,6 +2609,46 @@ class ScanRunner:
                     "at": self.finished_at})
 
 
+BOOTSTRAP_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Create the first account - AssetGatekeeper</title>
+<style>
+:root{--bg:#0d1016;--panel:#161b24;--line:#262f3d;--text:#e6e9ef;--muted:#8b94a7;
+--accent:#7aa2f7;--bad:#ff6b6b;--good:#3ecf8e}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);
+color:var(--text);font:14px/1.55 ui-sans-serif,"Segoe UI",Roboto,Arial,sans-serif}
+form{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+padding:26px 26px 22px;width:min(390px,92vw)}
+h1{font-size:15px;margin:0 0 4px}
+p.sub{color:var(--muted);font-size:12px;margin:0 0 16px}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:12px}
+input{width:100%;margin-top:5px;background:#1d2431;border:1px solid var(--line);
+color:var(--text);border-radius:7px;padding:9px 10px;font:inherit}
+input:focus{outline:2px solid var(--accent);outline-offset:1px}
+button{width:100%;margin-top:6px;padding:10px;border-radius:8px;border:1px solid var(--accent);
+background:var(--accent);color:#0b1020;font:inherit;font-weight:600;cursor:pointer}
+.err{color:var(--bad);font-size:12.5px;margin:0 0 12px}
+.hint{color:var(--muted);font-size:11.5px;margin-top:14px;line-height:1.5}
+code{background:#0b0f16;border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+</style></head><body>
+<form method="post" action="/admin/api/bootstrap" autocomplete="on">
+  <h1>Create the first account</h1>
+  <p class="sub">This dashboard has no accounts yet. The first one is a
+  <strong>director</strong>, and it can be created from this machine only.</p>
+  <p class="err">{{message}}</p>
+  <label>Username<input name="username" value="{{username}}" autofocus required></label>
+  <label>Password (at least 10 characters)
+    <input name="password" type="password" required minlength="10"></label>
+  <label>Confirm password<input name="confirm" type="password" required
+    minlength="10"></label>
+  <button type="submit">Create account and sign in</button>
+  <p class="hint">Only the PBKDF2 hash is stored. Everyone else is added later with
+  <code>asset-health --add-admin &lt;name&gt; --admin-role producer</code>.</p>
+</form></body></html>"""
+
+
 LOGIN_PAGE = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -2568,9 +2684,16 @@ background:var(--accent);color:#0b1020;font:inherit;font-weight:600;cursor:point
 </form></body></html>"""
 
 
-def render_login_page(message: str = "", username: str = "") -> str:
-    return (LOGIN_PAGE.replace("{{message}}", html.escape(message))
-                     .replace("{{username}}", html.escape(username)))
+def render_login_page(message: str = "", username: str = "",
+                      first_run: bool = False) -> str:
+    """Sign-in form, or the first-run setup form when no account exists yet.
+
+    A zero-CLI install cannot ask for a terminal to create its first user, so the
+    empty state is the setup page. It disappears as soon as one account exists.
+    """
+    template = BOOTSTRAP_PAGE if first_run else LOGIN_PAGE
+    return (template.replace("{{message}}", html.escape(message))
+                    .replace("{{username}}", html.escape(username)))
 
 
 class AssetHealthServer(socketserver.ThreadingTCPServer):

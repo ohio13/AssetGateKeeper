@@ -1,325 +1,445 @@
-# Quickstart: gate a real project
+# AssetGatekeeper — Setup manual
 
-Two ways in. Both are the same code; pick one.
+You are installing three things that share one config file:
 
-| | Use it when | You get |
+| Piece | What it is | Opened in |
 |---|---|---|
-| **A. Wheel** (`pip install`) | you want the gate, the dashboard and the review screen on your PATH | `asset-gatekeeper`, `asset-health`, `art-workstation`, `art-workstation-upload` |
-| **B. From a checkout** | you want the VCS hooks, the CI templates, the tests and the demo | the above, run as `python asset_gatekeeper.py …` |
+| **Admin page** | pick the project, choose a platform budget, save it, run an audit | `http://127.0.0.1:8080/admin` |
+| **AssetHealth** | pass rate, wall of shame, bottlenecks, history | `http://127.0.0.1:8080/` |
+| **Art Workstation** | 3D review: LODs, collision, notes, reports | `http://127.0.0.1:8100/viewer` |
 
-Nothing here edits your assets. The gate only reads them, auto-healing is off by
-default, and the workstation copies uploaded bytes into its own folder.
+`asset-gatekeeper` (the command-line gate) is installed too — the web pages are a
+front end for exactly the same checks.
+
+**Two ways to work.** §2–§8 is the no-terminal path: double-click, click, done.
+§9–§10 is the terminal path, for CI, VCS hooks and scripted runs. Everything in
+§10 is also what the double-click does under the hood.
+
+Total time: about ten minutes, most of it installing Python.
 
 ---
 
-## 0. The no-terminal path
+## 1. Before you start
+
+| Need | Detail |
+|---|---|
+| Windows 10/11 | macOS/Linux work too, via the terminal path (§9) |
+| **Python 3.9 or newer** | python.org installer, and tick **"Add python.exe to PATH"** |
+| Disk | a few MB, plus whatever the workstation stores if you upload assets |
+| Admin rights | not needed |
+
+Check Python once, in any terminal:
 
 ```bat
-Rules.bat
+py -3 --version
 ```
 
-That is the whole install-and-run for day-to-day use. It finds Python, starts the
-admin page and the review screen as detached background services on free ports,
-and opens your browser on the admin dashboard. Click it again to re-open the page;
-`agk-serve.bat down` stops everything.
+Update to something like `Python 3.11.x`. If the command is not found, reinstall
+Python and tick the PATH box — nothing else in this manual can work without it.
 
-Then, in the browser: **Project** panel → point at your game folder → pick a
-platform preset → **Save & Run Audit**.
+> On Windows, `python` alone is often a 2.7 stub or a Store alias. Use `py -3`
+> everywhere, or the venv's `Scripts\python.exe`.
 
-To let the picker reach folders outside this repo, once:
+---
+
+## 2. Install
+
+### A. From the release zip (recommended)
+
+1. Unzip `asset-gatekeeper-1.0.0.zip` to a stable place, e.g.
+   `C:\Tools\asset-gatekeeper`. Avoid a folder that syncs while it runs
+   (OneDrive/GDrive) — the databases live in there.
+2. Create a private environment so the two required packages don't touch your
+   system Python:
+
+   ```bat
+   cd C:\Tools\asset-gatekeeper
+   py -3 -m venv .venv
+   .venv\Scripts\python.exe -m pip install trimesh pillow
+   ```
+
+   `Rules.bat` prefers `.venv` automatically when it exists.
+3. Optional, if you want the `asset-gatekeeper` command on your PATH:
+
+   ```bat
+   .venv\Scripts\python.exe -m pip install dist\asset_gatekeeper-1.0.0-py3-none-any.whl
+   ```
+
+That is the whole install. There is no service to register, no installer, no
+registry key.
+
+### B. From the wheel only (CI, servers, or a developer)
+
+```bat
+py -3 -m venv .venv
+.venv\Scripts\activate
+pip install asset_gatekeeper-1.0.0-py3-none-any.whl
+```
+
+Gives you five console scripts and both web UIs:
+
+| Command | What |
+|---|---|
+| `asset-gatekeeper` | the gate |
+| `asset-health` | the dashboard / admin server |
+| `art-workstation` | the 3D review server |
+| `art-workstation-upload` | bulk-upload a folder into the review screen |
+| `agk-serve` | start/stop/status both services at once |
+
+`trimesh` and `Pillow` are installed as dependencies. They are the only two
+third-party packages in the system.
+
+---
+
+## 3. First run: double-click `Rules.bat`
+
+In the install folder, double-click **`Rules.bat`**.
+
+It does this, in order:
+
+1. finds an interpreter (`.venv`, then `py -3`);
+2. checks `trimesh` and `Pillow` are importable, and if not tells you the exact
+   `pip install` line;
+3. starts **both** servers as detached background processes — free ports are
+   chosen automatically (8080/8100, else the next free one), output goes to
+   `.agk\logs\`, the chosen ports to `.agk\ports.json`;
+4. opens your browser on the admin page;
+5. prints the URLs, the ready-to-paste gate command, and how to stop everything.
+
+Two console windows do **not** open, and you do not have to keep any window
+alive. The console window `Rules.bat` itself opened can be closed; the services
+keep running.
+
+| I want to… | Do |
+|---|---|
+| re-open the page later | double-click `Rules.bat` again (it reuses the running services) |
+| stop everything | `agk-serve.bat down` |
+| see if they are running | `agk-serve.bat status` |
+| read the server output | `agk-serve.bat logs --tail 60` |
+| start with the review screen too | `agk-serve.bat up --open both` |
+
+### Create the first account
+
+On a brand-new install the browser lands on **"Create the first account"** —
+because a fresh dashboard has no users, and a zero-CLI install should not need a
+terminal for its first step.
+
+- The first account is always a **director** (whoever sets up the box is
+  accountable for the budgets).
+- Password: **at least 10 characters**; only a PBKDF2-SHA256 hash (120,000
+  rounds, per-user salt) is stored, so it cannot be recovered — write it down.
+- Setup works **only from this machine** (loopback), and only while no account
+  exists. Once you have signed in, the page never appears again.
+
+Later accounts (producers, other directors) are added with one command:
+
+```bat
+agk-serve.bat down
+.venv\Scripts\python.exe server\asset_health_server.py --add-admin sam --admin-role producer
+agk-serve.bat up
+```
+
+The password is printed once. `--admin-role artist` gives a read-only account.
+
+---
+
+## 4. Point it at your project
+
+The admin page can write `rules.toml` into a project folder — so it can only
+open folders you allow **at launch**. Set this once:
 
 ```bat
 setx AGK_PROJECT_ROOTS "D:\Projects;C:\Work\MyGame"
 ```
 
-The rest of this page is the terminal path, for CI and for understanding what
-that double-click actually does.
+(`;`-separated. On macOS/Linux use `:` and `export`.) The install folder is
+always allowed. Alternatively pass them at launch:
+`Rules.bat --allow-root "D:\Projects"`.
+
+Close and re-open `Rules.bat` after `setx` so the new environment is picked up.
+
+Then, in the page:
+
+1. **Project** panel → type or paste the folder, or pick from the dropdown /
+   recent chips;
+2. press **Use this folder**.
+
+What you get:
+
+- the page shows `rules.toml: <folder>\rules.toml — found` (an existing file is
+  loaded into the form) or `— will be created on save`;
+- from then on, saves write into **that** folder and audits scan **that** folder;
+- the choice is remembered in the recent chips and recorded in the audit trail.
+
+If you get **"that folder is outside the allowed roots"**, the page is telling
+you the truth: add the folder (or one of its parents) to `AGK_PROJECT_ROOTS`.
+A `..` in a path is not a way around it — paths are resolved before they are
+compared.
 
 ---
 
-## 1. Install
+## 5. Choose the budget
 
-### A. Wheel
+Pick a platform target from the **Preset** dropdown. The form fills with that
+machine's starting numbers; nothing is saved until you press a button.
+
+| Preset | Character polys | Prop polys | Texture edge | Material slots | POT | PBR |
+|---|---|---|---|---|---|---|
+| N64 | 1,200 | 400 | 64 | 2 | yes | no |
+| PS1 | 1,100 | 350 | 256 | 1 | yes | no |
+| Nintendo DS | 900 | 300 | 128 | 2 | yes | no |
+| GameCube | 6,000 | 2,000 | 512 | 4 | yes | no |
+| Xbox (2001) | 9,000 | 3,000 | 1,024 | 4 | yes | no |
+| PS2 | 5,000 | 1,800 | 256 | 3 | yes | no |
+| 3DS | 3,000 | 1,200 | 256 | 2 | yes | no |
+| Wii | 5,000 | 2,000 | 512 | 3 | yes | no |
+| PS3 | 20,000 | 8,000 | 1,024 | 4 | no | no |
+| Modern PC | 120,000 | 30,000 | 4,096 | 8 | no | yes |
+
+These are defensible starting points for each machine, not measurements of your
+content — adjust to your frame budget.
+
+- **Character / Prop polygons** become real categories
+  (`[tags.character]` / `[tags.prop]`). Anything under a `Boss\` folder or
+  named `Boss_x.glb` is matched that way, so "characters are bigger than props"
+  is enforced per asset, not just documented.
+- **Max texture edge**, **Material slots**, **UV channels**, **Bone influences**:
+  see the tooltips; the checkerbox flags (power-of-two, PBR albedo range,
+  texture naming, reference checks, degenerate triangles) match the platform's
+  era.
+- **Categories**: the table lists the tags the file already has; *Add category*
+  appends one (name + polygon budget).
+- **Target** is read-only: the preset is a *formula that fills the numbers*. The
+  file stores the numbers, not the preset's name — so a later hand-edit to a
+  budget is never silently overridden on the next run.
+
+The same catalogue is available without a browser:
 
 ```bat
-python -m venv .venv
-.venv\Scripts\activate
-pip install dist\asset_gatekeeper-1.0.0-py3-none-any.whl
-asset-gatekeeper --version
+.venv\Scripts\asset-gatekeeper --list-presets
 ```
-
-`trimesh` and `Pillow` are pulled in automatically — they are genuinely required
-(the mesh profiling and texture lookups cannot be faked). Everything else, both
-web UIs included, is standard library only.
-
-### B. From a checkout
-
-```bat
-python -m venv .venv
-.venv\Scripts\activate
-pip install trimesh pillow
-python asset_gatekeeper.py --version
-```
-
-Run the tests once to prove the install is sane:
-
-```bat
-python tests\test_gatekeeper.py
-python tests\test_server.py
-python tests\test_workstation.py
-```
-
-Expected: `FAILURES: none` from each (327 / 191 / 118 assertions).
-
-> On Windows `python` is often Python 2.7 or a launcher stub. Use `py -3` (or the
-> `.venv\Scripts\python.exe` path) everywhere below if `python --version` is not 3.9+.
 
 ---
 
-## 2. Look before you configure
+## 6. Save & Run Audit
 
-Point it at the real folder. This is read-only and takes seconds per hundred files:
+Two buttons, both explicit (the page never rescans while you type):
 
-```bat
-asset-gatekeeper "D:\Projects\MyGame\Assets" --recursive --once
-```
-
-One line per asset, every violation on that line, and an exit code you can trust:
-
-```
-FAILED  Monsters/Boss/statue.gltf  72,500 tris / 4 mat
-        72,500 triangles exceeds the 50,000 budget (+22,500); 4 material slots exceeds the 3 slot budget (draw calls)
-PASSED  Props/crate.glb  1,204 tris / 1 mat
-2 asset(s): 1 passed, 1 failed        (exit code 1)
-```
-
-Budget in force is printed at startup, including where it came from. If the
-defaults are wrong for you, that is step 3.
-
-Useful early flags:
-
-| Flag | Why |
+| Button | What happens |
 |---|---|
-| `--exclude "preview_*"` | review renders and 4x paint sources are not shipped assets |
-| `--recursive` | without it you only scan the top level |
-| `--once` | scan and exit; drop it for watch mode |
-| `--json` | one JSON object per asset, for your own tooling |
+| **Save only** | validate → atomically write `rules.toml` into the project |
+| **Save & Run Audit** | the above, then scan the project and stream the verdicts in |
+
+On save the server:
+
+1. **validates first** — unknown keys, bad numbers, or a platform name with no
+   matching `[platforms.<name>]` table are refused *before* anything touches the
+   disk (a broken `rules.toml` stops the whole gate, so it must never be written);
+2. **writes atomically** — temp file + `fsync` + rename, so the gate, CI and your
+   editor only ever see the old file or the new one;
+3. **keeps sections the form does not show** (`[filters]`, `[platforms]`,
+   `[server]`, `[healer]`) — an apply never deletes your hand-written config;
+4. **records one audit row per changed key** — timestamp, user, role, the dotted
+   key (`tags.boss.max_triangles`), and both old and new values, plus the file;
+5. **starts one background scan** over the project, posting telemetry back to the
+   dashboard that launched it.
+
+The **Scan** panel fills live: `PASS`/`FAIL` per asset, running counts, and a
+final `done: 466 passed, 0 failed` line. One scan at a time — a second request
+gets "a scan is already running" instead of competing for CPU.
+
+Everything you saved is plain text and belongs in version control:
+
+```bat
+cd D:\Projects\MyGame
+git add rules.toml && git commit -m "N64 budgets: 1200 char / 400 prop"
+```
 
 ---
 
-## 3. Write the budget for your project
+## 7. Who may change what
 
-```bat
-asset-gatekeeper "D:\Projects\MyGame\Assets" --init
-```
+| Role | Read the rules | Change budgets | Typical holder |
+|---|---|---|---|
+| `director` | yes | yes | you, the first account |
+| `producer` | yes | yes | production |
+| `artist` | yes | **no** — and the page says why | the team |
 
-An interactive wizard: five questions, each with a default, and each answer can
-also be passed as a flag (`--triangles 15000 --max-texture 1024 --max-materials 4
---platform mobile`) so a CI script never sits waiting on stdin. It writes a
-`rules.toml` next to the assets. Edit it — this is the one file the whole pipeline
-reads:
+Sessions last 12 hours (`HttpOnly; SameSite=Strict` cookies). Every change is in
+the **Audit trail** panel and in `git log`; both survive restarts, the audit table
+is the short version.
 
-```toml
-# rules.toml
-platform = "mobile"                # applies [platforms.mobile] on top of the base
-
-[mesh]
-max_triangles     = 15000
-max_material_slots = 4
-max_uv_channels    = 2
-max_bone_influences = 4
-
-[texture]
-max_edge        = 1024
-power_of_two    = true
-naming          = false            # off unless your engine demands suffixes
-
-[tagging]
-mode = "suggest"                   # auto | suggest | strict
-
-[tags.boss]
-max_triangles      = 60000
-max_material_slots = 8
-
-[tags.environment_rock]
-max_triangles   = 3000
-max_texture_edge = 512
-
-[filters]
-exclude = ["preview_*", "*_src4x.png", "*_c.png"]
-
-[platforms.mobile]
-max_texture_edge = 512
-```
-
-How it resolves, highest first:
-
-```
-CLI flag  >  central/remote rules  >  [platforms.<name>]  >  rules.toml  >  built-in defaults
-```
-
-Unknown keys are a hard error (exit 2) on purpose: a typo that silently greps to
-nothing makes a gate look like it works while enforcing defaults.
-
-`[tags.*]` matches by folder or filename prefix (`Monsters_Boss_01.gltf` → the
-`boss` tag). `tagging.mode` decides what happens on a near-miss: `suggest`
-(default) binds and warns, `auto` binds and logs, `strict` refuses to guess and
-fails the asset — which is what you want once naming has settled.
+Security, stated plainly: this is authentication for a **local** dashboard. If
+you ever bind it to the network (`--host 0.0.0.0`), put TLS in front of it —
+roles cannot protect a password sent in clear text.
 
 ---
 
-## 4. Watch mode while people are working
+## 8. The other two surfaces
+
+**AssetHealth** — `http://127.0.0.1:8080/`: pass rate, wall of shame, which rule
+everybody is failing, and history. `/?refresh=5` makes it a wallboard.
+
+Optional Slack/Discord/Teams alerts — set the webhook once, then restart:
 
 ```bat
-asset-gatekeeper "D:\Projects\MyGame\Assets" --recursive --notify
+setx AGK_WEBHOOK_URL "https://hooks.slack.com/services/…"
+:: then close Rules.bat's window and double-click it again
+agk-serve.bat status
 ```
 
-Events queue; one worker waits for a file to stop changing (350 ms quiet, plus a
-grace for zero-byte temp files) and only then inspects it. Failing assets raise a
-native toast.
+`Rules.bat` and `agk-serve.bat up` both read `AGK_WEBHOOK_URL` (or `--webhook-url`
+/ `--webhook-provider slack|discord|teams`). Only *critical* failures alert, and
+at most one message per project per 5 minutes — a nightly sweep that breaks a
+hundred files is one notification, not a hundred.
 
-Auto-healing exists but is **opt-in** and verified before it ships:
+**Art Workstation** — `http://127.0.0.1:8100/viewer`: drag a `.glb`/`.obj`/`.gltf`
+onto the page, or load a folder:
 
 ```bat
-asset-gatekeeper "…\Assets" --recursive --auto-heal
+.venv\Scripts\art-workstation-upload "D:\Projects\MyGame\assets" --recursive --skip-uploaded
 ```
 
-The repair is staged beside the asset as `.agk-heal-*`, re-inspected with the same
-budget, and adopted only if it then passes — otherwise your original stays
-byte-identical. glTF geometry is never rewritten.
+Per asset: textured / geometry / wireframe / collision views, LODs, a collision
+proxy you can export as `.obj`, per-material roughness, notes with categories,
+and the **📋 Rules & Budgets** tab showing the same numbers the gate enforces.
+Uploads are *copied* into `workstation_data\` — your source art is never touched.
 
 ---
 
-## 5. The dashboard (AssetHealth)
+## 9. The terminal path
 
-**Shortcut for both services at once:**
+For CI, VCS hooks, or when you want to see exactly what a button does.
 
-```bat
-agk-serve.bat up --open     :: dashboard + review screen, detached, free ports
-agk-serve.bat status        :: what is running, on which port
-agk-serve.bat down          :: stop both
-```
-
-It picks free ports, records them in `.agk/ports.json`, and prints the gate
-command that matches them. Run the servers individually if you prefer:
+### One scan, read-only
 
 ```bat
-asset-health --port 8080 --rules "D:\Projects\MyGame\Assets\rules.toml"
+.venv\Scripts\asset-gatekeeper "D:\Projects\MyGame\assets" --recursive --once
 ```
 
-Open <http://127.0.0.1:8080/> — `/dashboard` is the table view,
-`/budget-planner` edits budgets, `/api/rules` serves the read-only inspector.
+One line per asset, every violation on it, exit code `0` pass / `1` fail / `2` bad
+setup. Add `--json` for machine output.
 
-**Demo data is opt-in.** A new database starts empty, which is what a real project
-wants. Add `--demo` if you want the bundled sample set (14 verdicts — 13 assets
-plus one healed row) to see what a populated dashboard looks like — and when you
-do, the page says so in a red banner:
-
-> **14 verdicts on this page are demo data** — the bundled sample set, not your assets.
+### Write a starter config by hand
 
 ```bat
-asset-health --no-seed --db mygame_health.db --rules "…\rules.toml"   :: empty, real only
-asset-health --demo  --db demo_health.db                              :: sample data
+.venv\Scripts\asset-gatekeeper "D:\Projects\MyGame\Assets" --init
 ```
 
-`--no-seed` is kept so old scripts keep working; it is only needed if you also pass
-`--demo`.
+Five questions with defaults; every answer is also a flag (`--triangles`,
+`--max-texture`, `--max-materials`, `--platform`), plus `--yes` for scripts.
 
-Now point the gate at it, on every run:
+### Watch mode while people work
 
 ```bat
-asset-gatekeeper "…\Assets" --recursive --once --telemetry-url http://127.0.0.1:8080/api/telemetry
+.venv\Scripts\asset-gatekeeper "…\Assets" --recursive --notify
 ```
 
-Or set it once per shell so nobody has to remember the flag:
+New and changed files are inspected after they settle; failures raise a toast.
+
+### Feed the dashboard
 
 ```bat
-set ASSET_GATEKEEPER_SERVER_URL=http://127.0.0.1:8080/api/telemetry
+.venv\Scripts\asset-gatekeeper "…\Assets" --recursive --once ^
+    --telemetry-url http://127.0.0.1:8080/api/telemetry
 ```
 
-For a real studio, give the project its own tenant — the command prints a token
-exactly once, and only its hash is stored:
+or set it once per machine: `setx ASSET_GATEKEEPER_SERVER_URL http://127.0.0.1:8080/api/telemetry`.
 
-```bat
-asset-health --db mygame_health.db --add-project "MyGame"
-set ASSET_GATEKEEPER_TOKEN=<the token it printed>
-```
-
-A `project_id` in a request body can never redirect a write; the token decides.
-
-### Changing budgets from the browser
-
-```bat
-asset-health --add-admin alice --admin-role director    :: password printed once
-asset-health --port 8080 --rules "…\rules.toml" --scan-root "…\Assets"
-```
-
-Open <http://127.0.0.1:8080/admin>. Point the **Project** panel at a game folder
-(only folders inside `--allow-root` / `AGK_PROJECT_ROOTS` are accepted), pick one
-of the ten hardware presets (N64 … Modern PC), adjust the character/prop budgets
-and categories, then **Save & Run Audit**: `rules.toml` is written atomically
-into that project folder, every changed key is recorded (who, when, old → new),
-and the gate scans the project in the background with verdicts streaming into the
-page. Directors and producers can write; artists can read.
-
----
-
-## 6. The 3D review screen (Art Workstation)
-
-```bat
-art-workstation --port 8100 --rules "D:\Projects\MyGame\Assets\rules.toml"
-```
-
-Open <http://127.0.0.1:8100/viewer>. The **📋 Rules & Budgets** tab shows the
-budget in force (platform, tag mode, per-tag limits) straight from `rules.toml`.
-Drag a `.glb` / `.obj` / `.gltf` anywhere onto the page, or load a whole folder:
-
-```bat
-art-workstation-upload "D:\Projects\MyGame\Assets" --recursive --skip-uploaded
-```
-
-Per asset you get textured / geometry / wireframe views, a collision proxy
-(box, sphere or hull, exportable as `.obj`), LOD levels, material overrides,
-review notes and an HTML report. LODs are inspection-grade on purpose: they drop
-UVs and materials, so do not ship them.
-
-Both servers are loopback-only by default and have no login until you pass
-`--token` or create a project. That is deliberate: a review screen on the studio
-LAN is a leak, so exposing it is an explicit act.
-
----
-
-## 7. Put it in front of the repo
-
-Gate every commit, so bad assets never land:
+### Block bad commits
 
 ```bat
 copy vcs_hooks\git_pre_commit.py .git\hooks\pre-commit
 ```
 
-Perforce: add `vcs_hooks\p4_pre_submit.py` as a submit trigger; it passes
-`--no-auto-heal` and fails closed. Hooks always disable healing — a hook that
-rewrites binaries during a commit is a support ticket waiting to happen.
+Perforce users: `vcs_hooks\p4_pre_submit.py` as a submit trigger. Hooks always
+pass `--no-auto-heal` and fail closed.
 
-CI: `.github/workflows/asset_gatekeeper.yml` is a drop-in PR gate, and
-`asset_gatekeeper.yml` is the reusable template. Keep the exit code; do not
-`|| true` it.
+### CI
+
+`.github/workflows/asset_gatekeeper.yml` is a drop-in PR gate. Keep the exit code;
+never `|| true` it.
 
 ---
 
-## 8. When something is wrong
+## 10. Verify the install
 
-| Symptom | Cause |
+```bat
+.venv\Scripts\asset-gatekeeper --doctor
+```
+
+Checks Python, `trimesh`, `Pillow`, optional `watchdog`, the target folder, the
+`rules.toml` it would actually use (printing the parsed budget and categories),
+and whether 8080/8100 are free — every failing line shows the fix. Exit code `1`
+means a real problem; a busy port is only a warning.
+
+Run the project's own tests if you want proof the checkout is healthy:
+
+```bat
+.venv\Scripts\python.exe tests\test_gatekeeper.py
+.venv\Scripts\python.exe tests\test_admin.py
+```
+
+Each prints `ok` per assertion and `FAILURES: none` at the end (801 assertions in
+total across four suites).
+
+---
+
+## 11. Everyday operations
+
+| Task | Command |
 |---|---|
-| `error: cannot bind 127.0.0.1:8080: … in use` | a previous run is still alive: find the pid on that port and stop it |
-| dashboard numbers look pre-filled | it was started with `--demo`; that is labelled in a banner — use a fresh `--db` |
-| `error: cannot bind …` | another process owns the port; the message prints the command to find/stop it. Use `--port-auto` to move instead, or `agk-serve.bat up` which moves **and** reports the new URL |
-| not sure the install works | `asset-gatekeeper --doctor` checks python, trimesh, Pillow, `rules.toml` and the ports |
-| `/viewer` is blank / tabs do nothing | open the browser console; a syntax error in `viewer.js` blanks the whole module |
-| `unknown key` / exit 2 | `rules.toml` has a typo. Compare against `asset_gatekeeper.example.toml` |
-| an asset "passes" that should not | check the `budget` line the gate prints first: it names the file it used |
-| non-ASCII filenames crash a script of yours | reconfigure stdout/stderr to UTF-8; the tools already do |
+| start / re-open | `Rules.bat` |
+| stop | `agk-serve.bat down` |
+| status | `agk-serve.bat status` |
+| URLs + gate command | `agk-serve.bat urls` |
+| tail the logs | `agk-serve.bat logs --tail 60` |
+| start without a browser | `agk-serve.bat up` |
+| different ports | `agk-serve.bat up --health-port 9000 --workstation-port 9100` |
 
-Everything is read-only with respect to your source art. The only writes are the
-SQLite databases, the workstation's own storage folder, and — with `--auto-heal`
-explicitly on — a verified replacement beside the asset.
+### Where things live
+
+| What | Where |
+|---|---|
+| budgets the gate enforces | `<project>\rules.toml` (plain text, in your git) |
+| verdict history | `asset_health.db` in the install folder |
+| accounts, sessions, audit trail | same database |
+| review library, notes, LODs | `art_workstation.db` + `workstation_data\` |
+| logs, chosen ports, pids | `.agk\logs\`, `.agk\ports.json` |
+| venv | `.venv\` |
+
+Back up by copying the `.db` files while the services are stopped. Deleting
+`.agk\` is always safe — it is regenerated on the next start.
+
+---
+
+## 12. Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| `Rules.bat` closes instantly | Python not on PATH, or `trimesh`/`Pillow` missing — run it from `cmd` once; it prints which, with the exact fix |
+| "Python was not found" | reinstall Python and tick **Add python.exe to PATH**, then `py -3 --version` |
+| `trimesh`/`Pillow` missing | `.venv\Scripts\python.exe -m pip install trimesh pillow` |
+| browser opens a dead page | the services took longer than the browser; wait 2 s and refresh, or run `agk-serve.bat status` |
+| `cannot bind … in use` | another process owns the port; the message prints the find/stop commands. `--port-auto` moves instead of failing |
+| "that folder is outside the allowed roots" | add it to `AGK_PROJECT_ROOTS` and restart (`setx` needs a new console) |
+| page says "sign in" and I have no password | the account exists but the password is lost. Stop the services and create another: `.venv\Scripts\python.exe server\asset_health_server.py --add-admin <name> --admin-role director` (or `asset-health …` if the wheel is installed) |
+| admin page is blank | a JS error blanks the module: open the browser console (F12). `tests\test_admin.py` checks every element id the script uses exists |
+| saves say "no changes" | the form already matches the file — or you are editing a different project than you think; check the `rules.toml:` line under the picker |
+| a budget I set has no effect | precedence: CLI flag > remote rules > `[platforms.*]` > `rules.toml` > defaults. `--doctor` shows what is in force |
+| PowerShell blocks a script | `Set-ExecutionPolicy -Scope Process RemoteSigned` in that window (the `.bat` files are unaffected) |
+| OneDrive keeps locking the database | move the install folder out of a synced directory |
+
+---
+
+## 13. Uninstall
+
+Nothing was installed system-wide, so removal is deletion:
+
+```bat
+agk-serve.bat down
+```
+
+then delete the folder (or keep it and delete only `.agk\`, `*.db`,
+`workstation_data\`, `.venv\` to reset state while keeping the tool). Project
+`rules.toml` files stay where you put them — they are yours, and they are in git.

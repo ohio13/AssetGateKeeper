@@ -127,7 +127,46 @@ expect("to_toml writes a table per section", "[mesh]" in text and "[tags.boss]" 
 expect("to_toml output parses back", agk.parse_rules_text(text)["tags"]["boss"]["max_triangles"] == 900)
 
 # --------------------------------------------------------------------------- #
-print("1. the admin page is closed by default")
+print("1. first run happens in the browser, not a terminal")
+# A fresh dashboard has no accounts: the sign-in page becomes the setup page, so
+# a double-click install never needs a shell. Then it closes for good.
+fresh_db = WORK / "first-run.db"
+ahs.init_db(fresh_db)
+fresh_rules = WORK / "first-run-rules.toml"
+fresh_server, fresh_base = start(fresh_db, fresh_rules)
+first = Session(fresh_base)
+status, body = first.get("/admin/login")
+expect("an empty dashboard offers account setup",
+       status == 200 and b"Create the first account" in body, str(status))
+expect("the setup form posts to the bootstrap route", b"/admin/api/bootstrap" in body)
+expect("the sign-in form is not shown before setup", b'name="password"' in body)
+status, body = first.form("/admin/api/bootstrap",
+                          {"username": "ada", "password": "short", "confirm": "short"})
+expect("a short password is refused", b"10" in body, body[:80])
+status, body = first.form("/admin/api/bootstrap",
+                          {"username": "ada", "password": "long-enough-pw",
+                           "confirm": "different-pw1"})
+expect("a mismatched confirmation is refused", b"do not match" in body, body[:80])
+status, body = first.form("/admin/api/bootstrap",
+                          {"username": "ada", "password": "long-enough-pw",
+                           "confirm": "long-enough-pw"})
+expect("the first account is created and signed in", b"Rules" in body, str(status))
+first_state = first.state()
+expect("the first account is a director", first_state["user"]["role"] == "director")
+expect("bootstrap is audited", any(row["target"] == "account"
+                                   for row in first_state["audit"]))
+first.post("/admin/api/logout", csrf=first_state["csrf"])
+status, body = first.get("/admin/login")
+expect("the setup page is gone once an account exists",
+       b"Create the first account" not in body and b"Sign in" in body)
+status, _ = first.form("/admin/api/bootstrap",
+                       {"username": "mallory", "password": "another-pw-123",
+                        "confirm": "another-pw-123"})
+expect("bootstrap cannot be replayed to add another director", status == 403, str(status))
+fresh_server.shutdown()
+fresh_server.server_close()
+
+print("2. the admin page is closed by default")
 root = WORK / "project"
 root.mkdir(parents=True, exist_ok=True)
 rules = root / "rules.toml"
@@ -154,7 +193,7 @@ expect("/admin/api/state is 401 without a session", anon.get("/admin/api/state")
 expect("the preset dropdown data is not public", anon.get("/admin/api/state")[0] == 401)
 
 # --------------------------------------------------------------------------- #
-print("2. signing in")
+print("3. signing in")
 status, body = anon.form("/admin/login", {"username": "alice", "password": "nope"})
 expect("a wrong password does not sign in", b"Invalid credentials" in body)
 status, body = anon.form("/admin/login", {"username": "alice", "password": password})
@@ -172,7 +211,7 @@ expect("every preset carries character and prop budgets",
 csrf = state["csrf"]
 
 # --------------------------------------------------------------------------- #
-print("3. CSRF and role enforcement")
+print("4. CSRF and role enforcement")
 document = {
     "mesh": {"max_triangles": 1200, "max_material_slots": 2},
     "texture": {"max_edge": 64, "power_of_two": True},
@@ -197,7 +236,7 @@ expect("an artist cannot change rules", status == 403, str(status))
 expect("the refusal names who can", b"director or producer" in body, body[:120])
 
 # --------------------------------------------------------------------------- #
-print("4. a director applies a preset")
+print("5. a director applies a preset")
 anon.form("/admin/login", {"username": "alice", "password": password})
 state = anon.state()
 csrf = state["csrf"]
@@ -224,7 +263,7 @@ expect("the gate accepts the written file",
        agk.Budget.from_mapping(saved).max_triangles == 1200)
 
 # --------------------------------------------------------------------------- #
-print("5. the audit trail")
+print("6. the audit trail")
 audit = anon.state()["audit"]
 expect("every changed key is recorded", len(audit) == len(result["changed"]),
        f"{len(audit)} rows vs {len(result['changed'])} changes")
@@ -237,7 +276,7 @@ expect("old and new values are both kept",
 expect("the row is timestamped", bool(entry["changed_at"]))
 
 # --------------------------------------------------------------------------- #
-print("6. a refused document never reaches the disk")
+print("7. a refused document never reaches the disk")
 before_text = rules.read_text(encoding="utf-8")
 status, body = anon.post("/admin/api/apply",
                          {"document": {"mesh": {"max_triangles": "lots"}}, "action": "save"},
@@ -254,7 +293,7 @@ expect("an unknown platform overlay is refused or dropped safely",
 expect("a refused platform leaves the file parseable", agk.parse_rules(rules) == saved)
 
 # --------------------------------------------------------------------------- #
-print("7. apply & rescan, streamed")
+print("8. apply & rescan, streamed")
 status, body = anon.post("/admin/api/apply", {"document": document, "action": "rescan"}, csrf=csrf)
 result = json.loads(body)
 expect("apply with rescan starts a scan", status == 200 and result["scan"]["started"], body[:200])
@@ -273,7 +312,7 @@ expect("the asset passed under a 1,200 triangle budget",
 expect("events are buffered for a late subscriber", len(server.scanner.recent()) >= 2)
 
 # --------------------------------------------------------------------------- #
-print("8. static files are an allow-list")
+print("9. static files are an allow-list")
 expect("admin.js is served",
        anon.get("/static/admin.js")[1].count(b"budgetDocument") >= 1)
 expect("admin.css is served", anon.get("/static/admin.css")[0] == 200)
@@ -282,7 +321,7 @@ expect("path traversal is refused",
 expect("an arbitrary file is 404", anon.get("/static/secrets.txt")[0] == 404)
 
 # --------------------------------------------------------------------------- #
-print("9. signing out and session hygiene")
+print("10. signing out and session hygiene")
 # Read the raw Set-Cookie header instead of trusting the jar: the flags are the
 # security property, and a cookie jar happily hides them.
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -314,7 +353,7 @@ anon.post("/admin/api/logout", csrf=csrf)
 expect("the session is gone after sign out", anon.get("/admin/api/state")[0] == 401)
 
 # --------------------------------------------------------------------------- #
-print("10. the project picker")
+print("11. the project picker")
 # The picker is the only feature that lets a browser name a filesystem path, so
 # the allow-list is the assertion that matters most in this file.
 # (Section 9 signed out, so sign back in as the director.)
@@ -384,7 +423,7 @@ expect("it audited the project's own assets", snapshot["totals"]["total"] >= 1,
        json.dumps(snapshot["totals"]))
 
 # --------------------------------------------------------------------------- #
-print("11. the page and its script agree")
+print("12. the page and its script agree")
 # A single renamed id is a blank admin page in a browser and nothing at all in
 # pyflakes - the same failure mode that once blanked the workstation viewer.
 import re  # noqa: PLC0415 - local to this section

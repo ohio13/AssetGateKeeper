@@ -237,6 +237,10 @@ def command_up(args: argparse.Namespace) -> int:
     dashboard_args = ["--db", str(Path(args.health_db).expanduser())]
     if args.token:
         dashboard_args += ["--token", args.token]
+    if args.webhook_url:
+        dashboard_args += ["--webhook-url", args.webhook_url]
+    if args.webhook_provider:
+        dashboard_args += ["--webhook-provider", args.webhook_provider]
     # The project picker can only open folders on this list. The launcher seeds it
     # with the repo and $AGK_PROJECT_ROOTS, so a studio widens it once in the .bat
     # or the environment - never from the browser.
@@ -433,6 +437,13 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--token", default=os.environ.get("AUTH_TOKEN", ""),
                     help="bearer token for both (default $AUTH_TOKEN)")
     up.add_argument("--demo", action="store_true", help="seed the dashboard sample set")
+    up.add_argument("--webhook-url", default=os.environ.get("AGK_WEBHOOK_URL", ""),
+                    metavar="URL",
+                    help="Slack/Discord/Teams webhook for failure alerts (default "
+                         "$AGK_WEBHOOK_URL); the dashboard sends one per project per 5 min")
+    up.add_argument("--webhook-provider", default="",
+                    choices=("", "slack", "discord", "teams"),
+                    help="override the envelope guessed from the URL")
     up.add_argument("--open", nargs="?", const="admin",
                     choices=("admin", "dashboard", "both"),
                     help="open the admin page (default), the metrics dashboard, or "
