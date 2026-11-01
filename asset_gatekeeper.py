@@ -152,9 +152,11 @@ USER_AGENT = "AssetGatekeeper/1.0 (+https://github.com/ohio13/asset-gatekeeper)"
 
 LOG = logging.getLogger("assetgatekeeper")
 
-MESH_SUFFIXES = frozenset({".obj", ".gltf", ".glb"})
+MESH_SUFFIXES = frozenset({".obj", ".gltf", ".glb", ".fbx"})
 GLTF_SUFFIXES = frozenset({".gltf", ".glb"})
-TEXTURE_SUFFIXES = frozenset({".png"})
+TEXTURE_SUFFIXES = frozenset({".png", ".tga", ".jpg", ".jpeg"})
+#: The decoder format each texture extension must actually contain.
+TEXTURE_FORMATS = {".png": "PNG", ".tga": "TGA", ".jpg": "JPEG", ".jpeg": "JPEG"}
 TRACKED_SUFFIXES = MESH_SUFFIXES | TEXTURE_SUFFIXES
 
 # Partial writes and DCC scratch files that must never be inspected.
@@ -1528,7 +1530,8 @@ def load_healer(budget: Budget, settings: HealSettings, root: Optional[Path] = N
     spec.loader.exec_module(module)
     try:
         return module.Healer(budget, textures=settings.textures, meshes=settings.meshes,
-                             texture_mode=settings.texture_mode, root=root)
+                             texture_mode=settings.texture_mode, root=root,
+                             resolve_references=resolve_references)
     except module.HealError as exc:
         raise ConfigError(f"healer cannot start: {exc}") from exc
 
@@ -1686,6 +1689,365 @@ def _geometries(scene: object) -> list:
     return [scene]
 
 
+
+# --- #
+# FBX (binary, 7.1+): a small read-only parser, standard library + numpy only
+# --- #
+#
+# Why not an SDK: Autodesk's FBX SDK is a native install per platform and per
+# Python version, which is exactly what a gate that has to run on every artist
+# machine and every CI agent cannot depend on. The binary format is a plain tree
+# of records with typed (optionally zlib-compressed) properties; the handful of
+# facts the gate needs - polygon indices, vertex positions, UV layers, material
+# and skin connections, texture paths - are all directly in it.
+#
+# What is refused rather than guessed: ASCII FBX and files older than 7.1
+# (FBX 2011). Both get a message that says how to re-export.
+#
+# Hostile input is bounded: record offsets are checked against the file size,
+# nesting depth is capped, and every array is decompressed with an explicit
+# maximum output size, so a 1 KB file cannot ask for gigabytes.
+
+FBX_SUFFIXES = frozenset({".fbx"})
+_FBX_MAGIC = b"Kaydara FBX Binary  \x00"
+FBX_MAX_DEPTH = 64
+FBX_MAX_ARRAY_BYTES = 512 * 1024 * 1024      # one array
+FBX_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024  # all arrays in one file
+_FBX_ARRAY_TYPES = {ord("f"): ("f", 4), ord("d"): ("d", 8), ord("l"): ("q", 8),
+                    ord("i"): ("i", 4), ord("b"): ("b", 1)}
+
+
+class _FbxNode:
+    __slots__ = ("name", "props", "children")
+
+    def __init__(self, name: str, props: list, children: list) -> None:
+        self.name = name
+        self.props = props
+        self.children = children
+
+    def child(self, name: str) -> "Optional[_FbxNode]":
+        for node in self.children:
+            if node.name == name:
+                return node
+        return None
+
+    def all(self, name: str) -> "list[_FbxNode]":
+        return [node for node in self.children if node.name == name]
+
+
+def _fbx_array(raw: bytes, code: str):
+    if np is not None:
+        return np.frombuffer(raw, dtype="<" + {"f": "f4", "d": "f8", "q": "i8",
+                                               "i": "i4", "b": "i1"}[code])
+    values = array.array(code)
+    values.frombytes(raw)
+    if sys.byteorder != "little":                     # pragma: no cover
+        values.byteswap()
+    return values
+
+
+def parse_fbx_binary(data: bytes) -> "list[_FbxNode]":
+    """The top-level records of a binary FBX file. Raises AssetError when malformed."""
+    import zlib
+
+    if not data.startswith(_FBX_MAGIC):
+        head = data[:256].lstrip()
+        if head.startswith(b";") or b"FBXHeaderExtension" in head:
+            raise AssetError("ASCII FBX is not supported; export it as binary FBX "
+                             "(the default in Blender, Maya, 3ds Max and Houdini)")
+        raise AssetError("not an FBX file (missing the binary FBX header)")
+    if len(data) < 27:
+        raise AssetError("truncated FBX header")
+    version = struct.unpack_from("<I", data, 23)[0]
+    if version < 7100:
+        raise AssetError(f"FBX version {version} is too old to read (7.1 / FBX 2011 or "
+                         f"newer is needed); re-export with a current exporter")
+    wide = version >= 7500
+    header = struct.Struct("<QQQB" if wide else "<IIIB")
+    size = len(data)
+    budget = [FBX_MAX_TOTAL_BYTES]
+
+    def read_property(pos: int):
+        if pos >= size:
+            raise AssetError("truncated FBX property")
+        kind = data[pos]
+        pos += 1
+        try:
+            if kind == ord("Y"):
+                return struct.unpack_from("<h", data, pos)[0], pos + 2
+            if kind == ord("C"):
+                return bool(data[pos]), pos + 1
+            if kind == ord("I"):
+                return struct.unpack_from("<i", data, pos)[0], pos + 4
+            if kind == ord("F"):
+                return struct.unpack_from("<f", data, pos)[0], pos + 4
+            if kind == ord("D"):
+                return struct.unpack_from("<d", data, pos)[0], pos + 8
+            if kind == ord("L"):
+                return struct.unpack_from("<q", data, pos)[0], pos + 8
+            if kind in (ord("S"), ord("R")):
+                length = struct.unpack_from("<I", data, pos)[0]
+                pos += 4
+                if pos + length > size:
+                    raise AssetError("truncated FBX string")
+                raw = data[pos:pos + length]
+                return (raw.decode("utf-8", "replace") if kind == ord("S") else raw), pos + length
+            if kind in _FBX_ARRAY_TYPES:
+                code, width = _FBX_ARRAY_TYPES[kind]
+                count, encoding, stored = struct.unpack_from("<III", data, pos)
+                pos += 12
+                expected = count * width
+                if expected > FBX_MAX_ARRAY_BYTES or expected > budget[0]:
+                    raise AssetError(f"FBX array of {count:,} values is too large to inspect safely")
+                if pos + stored > size:
+                    raise AssetError("truncated FBX array")
+                raw = data[pos:pos + stored]
+                if encoding == 1:
+                    inflater = zlib.decompressobj()
+                    raw = inflater.decompress(raw, expected)
+                elif encoding != 0:
+                    raise AssetError(f"unknown FBX array encoding {encoding}")
+                if len(raw) != expected:
+                    raise AssetError("corrupt FBX array (wrong decoded length)")
+                budget[0] -= expected
+                return _fbx_array(raw, code), pos + stored
+        except struct.error as exc:
+            raise AssetError(f"truncated FBX property ({exc})") from exc
+        except zlib.error as exc:
+            raise AssetError(f"corrupt compressed FBX array ({exc})") from exc
+        raise AssetError(f"corrupt FBX (unknown property type {kind!r})")
+
+    def read_node(pos: int, depth: int):
+        if depth > FBX_MAX_DEPTH:
+            raise AssetError("FBX nesting is too deep to be a real export")
+        if pos + header.size > size:
+            raise AssetError("truncated FBX record")
+        end, count, _length, name_length = header.unpack_from(data, pos)
+        if end == 0:
+            return None, pos + header.size              # end-of-list sentinel
+        if end <= pos or end > size:
+            raise AssetError("corrupt FBX (record points outside the file)")
+        pos += header.size
+        name = data[pos:pos + name_length].decode("ascii", "replace")
+        pos += name_length
+        props = []
+        for _ in range(count):
+            value, pos = read_property(pos)
+            props.append(value)
+        children = []
+        while pos < end:
+            node, pos = read_node(pos, depth + 1)
+            if node is None:
+                break
+            children.append(node)
+        return _FbxNode(name, props, children), end
+
+    nodes: list[_FbxNode] = []
+    pos = 27
+    while pos + header.size <= size:
+        node, pos = read_node(pos, 0)
+        if node is None:
+            break
+        nodes.append(node)
+    return nodes
+
+
+@dataclass(frozen=True)
+class FbxSummary:
+    """The facts the gate reads from an FBX file, computed once per (path, mtime)."""
+
+    triangles: int
+    material_slots: int
+    uv_channels: int
+    max_influences: int
+    degenerate: int
+    #: (as written, candidate paths in preference order) per external texture
+    references: tuple
+
+
+def _fbx_id(node: _FbxNode) -> Optional[int]:
+    return node.props[0] if node.props and isinstance(node.props[0], int) else None
+
+
+def _fbx_class(node: _FbxNode) -> str:
+    return node.props[2] if len(node.props) > 2 and isinstance(node.props[2], str) else ""
+
+
+def _fbx_string(node: Optional[_FbxNode]) -> str:
+    if node is None or not node.props or not isinstance(node.props[0], str):
+        return ""
+    return node.props[0]
+
+
+def _fbx_polygons(indices):
+    """(corner vertex indices, polygon start offsets, polygon sizes) from PolygonVertexIndex.
+
+    FBX ends each polygon by storing its last index as ``-(index + 1)``.
+    """
+    raw = np.asarray(indices, dtype=np.int64)
+    if raw.size == 0:
+        return raw, raw, raw
+    ends = np.flatnonzero(raw < 0)
+    if ends.size == 0 or ends[-1] != raw.size - 1:
+        raise AssetError("corrupt FBX polygon list (last polygon is not terminated)")
+    corners = np.where(raw < 0, -raw - 1, raw)
+    starts = np.concatenate(([0], ends[:-1] + 1))
+    return corners, starts, ends - starts + 1
+
+
+@lru_cache(maxsize=8)
+def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float) -> FbxSummary:
+    if np is None:                                       # pragma: no cover
+        raise AssetError("numpy is not installed; FBX cannot be analysed")
+    try:
+        data = Path(path_string).read_bytes()
+    except OSError as exc:
+        raise AssetError(f"could not read FBX ({exc})") from exc
+    top = {node.name: node for node in parse_fbx_binary(data)}
+    objects = top.get("Objects")
+    if objects is None:
+        return FbxSummary(0, 0, 0, 0, 0, ())
+
+    geometries: dict = {}
+    models: set = set()
+    materials: set = set()
+    textures: dict = {}
+    videos: dict = {}
+    skins: set = set()
+    clusters: dict = {}
+    for node in objects.children:
+        node_id = _fbx_id(node)
+        kind = _fbx_class(node)
+        if node.name == "Geometry" and kind == "Mesh":
+            geometries[node_id] = node
+        elif node.name == "Model":
+            models.add(node_id)
+        elif node.name == "Material":
+            materials.add(node_id)
+        elif node.name == "Texture":
+            textures[node_id] = node
+        elif node.name == "Video":
+            videos[node_id] = node
+        elif node.name == "Deformer" and kind == "Skin":
+            skins.add(node_id)
+        elif node.name == "Deformer" and kind == "Cluster":
+            clusters[node_id] = node
+
+    # Connections: "OO" child -> parent object, "OP" child -> parent property.
+    parents: dict = {}
+    children_of: dict = {}
+    connections = top.get("Connections")
+    for link in (connections.all("C") if connections else []):
+        if len(link.props) < 3:
+            continue
+        child, parent = link.props[1], link.props[2]
+        parents.setdefault(child, set()).add(parent)
+        children_of.setdefault(parent, set()).add(child)
+
+    triangles = degenerate = uv_channels = max_influences = 0
+    for geometry_id, geometry in geometries.items():
+        index_node = geometry.child("PolygonVertexIndex")
+        vertex_node = geometry.child("Vertices")
+        if index_node is None or not index_node.props:
+            continue
+        corners, starts, sizes = _fbx_polygons(index_node.props[0])
+        fan = np.clip(sizes - 2, 0, None)
+        count = int(fan.sum())
+        triangles += count
+        uv_channels = max(uv_channels, len(geometry.all("LayerElementUV")))
+        if count and vertex_node is not None and vertex_node.props:
+            positions = np.asarray(vertex_node.props[0], dtype=np.float64)
+            if positions.size % 3:
+                raise AssetError("corrupt FBX vertex array (not a multiple of 3)")
+            positions = positions.reshape(-1, 3)
+            if corners.size and int(corners.max()) >= len(positions):
+                raise AssetError("corrupt FBX polygon list (index past the last vertex)")
+            # Fan triangulation, as engines do on import: (c0, ck, ck+1).
+            owner = np.repeat(np.arange(len(sizes)), fan)
+            first = np.repeat(np.cumsum(fan) - fan, fan)
+            step = np.arange(count) - first + 1
+            a = corners[starts[owner]]
+            b = corners[starts[owner] + step]
+            c = corners[starts[owner] + step + 1]
+            cross = np.cross(positions[b] - positions[a], positions[c] - positions[a])
+            areas = 0.5 * np.linalg.norm(cross, axis=1)
+            degenerate += int(np.count_nonzero(areas <= epsilon))
+        # Skin: Skin deformer -> this geometry; clusters -> that skin.
+        for skin_id in children_of.get(geometry_id, ()):
+            if skin_id not in skins:
+                continue
+            per_vertex: dict = {}
+            for cluster_id in children_of.get(skin_id, ()):
+                cluster = clusters.get(cluster_id)
+                if cluster is None:
+                    continue
+                indexes, weights = cluster.child("Indexes"), cluster.child("Weights")
+                if indexes is None or weights is None:
+                    continue
+                for index, weight in zip(np.asarray(indexes.props[0]).tolist(),
+                                         np.asarray(weights.props[0]).tolist()):
+                    if weight > 1e-4:
+                        per_vertex[index] = per_vertex.get(index, 0) + 1
+            if per_vertex:
+                max_influences = max(max_influences, max(per_vertex.values()))
+
+    # Materials that a mesh-bearing model actually uses.
+    mesh_models = {parent for geometry_id in geometries
+                   for parent in parents.get(geometry_id, ()) if parent in models}
+    used = {material for material in materials
+            if parents.get(material, set()) & mesh_models}
+    slots = len(used) if used else (1 if triangles else 0)
+
+    references = []
+    for texture_id, texture in textures.items():
+        relative = _fbx_string(texture.child("RelativeFilename"))
+        absolute = _fbx_string(texture.child("FileName"))
+        embedded = False
+        for video_id in children_of.get(texture_id, ()):
+            video = videos.get(video_id)
+            content = video.child("Content") if video is not None else None
+            if content is not None and content.props and isinstance(content.props[0], bytes) \
+                    and len(content.props[0]) > 0:
+                embedded = True
+        if embedded or not (relative or absolute):
+            continue
+        written = relative or absolute
+        references.append((written, tuple(item for item in (relative, absolute) if item)))
+    return FbxSummary(triangles, slots, uv_channels, max_influences, degenerate,
+                      tuple(references))
+
+
+def read_fbx(path: Path, epsilon: float = 1e-8) -> FbxSummary:
+    try:
+        modified = path.stat().st_mtime_ns
+    except OSError as exc:
+        raise AssetError(f"could not read FBX ({exc})") from exc
+    try:
+        return _read_fbx_cached(str(path), modified, float(epsilon))
+    except AssetError:
+        raise
+    except (ValueError, IndexError, TypeError, MemoryError) as exc:
+        raise AssetError(f"could not read FBX ({type(exc).__name__}: {exc})") from exc
+
+
+def _fbx_reference_target(path: Path, candidates: tuple) -> Path:
+    """Where an engine will look for an FBX texture: relative path, absolute path,
+    then the bare filename next to the FBX (Unreal and Unity both fall back to it)."""
+    base = path.parent
+    options = []
+    for candidate in candidates:
+        normalised = candidate.replace("\\", "/")
+        options.append(base / normalised)
+        options.append(base / normalised.rsplit("/", 1)[-1])
+    for option in options:
+        try:
+            if option.is_file():
+                return option
+        except OSError:
+            continue
+    return options[0] if options else base
+
+
 def _count_triangles_trimesh(path: Path) -> int:
     """Triangle count via trimesh. Handles single meshes and multi-mesh scenes."""
     total = 0
@@ -1754,7 +2116,9 @@ def _count_triangles_from_document(document: dict) -> int:
 
 
 def count_triangles(path: Path) -> int:
-    """Triangle count for .obj / .gltf / .glb (trimesh first, JSON fallback)."""
+    """Triangle count for .obj / .gltf / .glb (trimesh first, JSON fallback) and .fbx."""
+    if path.suffix.lower() in FBX_SUFFIXES:
+        return read_fbx(path).triangles
     if trimesh is not None:
         try:
             return _count_triangles_trimesh(path)
@@ -1800,6 +2164,8 @@ def count_material_slots(path: Path) -> int:
     primitives that point at the same glTF material index count as one slot.
     """
     suffix = path.suffix.lower()
+    if suffix in FBX_SUFFIXES:
+        return read_fbx(path).material_slots
 
     if suffix in GLTF_SUFFIXES:
         try:
@@ -1927,8 +2293,10 @@ def read_accessor(path: Path, document: dict, index: int) -> list[tuple]:
 
 
 def count_uv_channels(path: Path) -> int:
-    """Number of distinct texture-coordinate sets (TEXCOORD_n / OBJ vt)."""
+    """Number of distinct texture-coordinate sets (TEXCOORD_n / OBJ vt / FBX UV layers)."""
     suffix = path.suffix.lower()
+    if suffix in FBX_SUFFIXES:
+        return read_fbx(path).uv_channels
 
     if suffix in GLTF_SUFFIXES:
         try:
@@ -1964,6 +2332,8 @@ def max_bone_influences(path: Path, epsilon: float = 1e-4) -> int:
     second set (JOINTS_1/WEIGHTS_1). We sum non-zero weights across all sets -
     which is exactly what a mobile GPU cannot afford above four.
     """
+    if path.suffix.lower() in FBX_SUFFIXES:
+        return read_fbx(path).max_influences
     if path.suffix.lower() not in GLTF_SUFFIXES:
         return 0  # .obj has no skin data
 
@@ -1996,6 +2366,8 @@ def max_bone_influences(path: Path, epsilon: float = 1e-4) -> int:
 
 def count_degenerate_triangles(path: Path, epsilon: float = 1e-8) -> int:
     """Triangles whose area is ~zero (collinear or coincident corners)."""
+    if path.suffix.lower() in FBX_SUFFIXES:
+        return read_fbx(path, epsilon).degenerate
     if np is None:  # pragma: no cover - numpy ships with trimesh
         LOG.debug("numpy is unavailable; skipping degenerate geometry check")
         return 0
@@ -2015,20 +2387,26 @@ def count_degenerate_triangles(path: Path, epsilon: float = 1e-8) -> int:
 
 
 def measure_texture(path: Path) -> tuple[int, int]:
-    """Read a PNG's resolution from its header without decoding pixel data."""
+    """A texture's resolution, after proving the whole file decodes."""
     if Image is None:
         raise AssetError("Pillow is not installed; textures cannot be analysed")
     try:
         with Image.open(path) as image:
             width, height = image.size
             image_format = image.format
+            # Decode the pixels too. The header alone said a half-written PNG/JPG/TGA
+            # was a perfectly good 1024x1024 texture; decoding is what notices the
+            # missing second half ("image file is truncated").
+            image.load()
     except Image.DecompressionBombError as exc:  # pragma: no cover - extreme input
         raise AssetError(f"image dimensions are unsafe to inspect ({exc})") from exc
     except OSError as exc:
         raise AssetError(f"could not read image ({exc})") from exc
 
-    if image_format != "PNG":
-        raise AssetError(f"file has a .png extension but is actually {image_format}")
+    suffix = path.suffix.lower()
+    expected = TEXTURE_FORMATS.get(suffix, "PNG")
+    if image_format != expected:
+        raise AssetError(f"file has a {suffix or '.png'} extension but is actually {image_format}")
     return width, height
 
 
@@ -2109,6 +2487,12 @@ def collect_references(path: Path) -> list[str]:
     referenced *by* those .mtl files (one level, which is how OBJ works).
     """
     suffix = path.suffix.lower()
+    if suffix in FBX_SUFFIXES:
+        try:
+            return [written for written, _ in read_fbx(path).references]
+        except AssetError as exc:
+            LOG.debug("cannot read references from %s: %s", path.name, exc)
+            return []
     if suffix in (".gltf", ".glb"):
         try:
             return _gltf_external_uris(read_gltf_document(path))
@@ -2138,6 +2522,13 @@ def collect_references(path: Path) -> list[str]:
 def resolve_references(path: Path) -> list[tuple[str, Path]]:
     """[(as written, resolved absolute path)] for every external reference."""
     base = path.parent
+    if path.suffix.lower() in FBX_SUFFIXES:
+        try:
+            summary = read_fbx(path)
+        except AssetError:
+            return []
+        return [(written, _fbx_reference_target(path, candidates))
+                for written, candidates in summary.references]
     resolved = []
     for written in collect_references(path):
         # Normalise Windows-style separators coming out of a DCC.

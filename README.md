@@ -46,14 +46,20 @@ Two problems, one line, told to the artist *while they still have the export dia
 
 | Asset | Rule | Default | Why it matters |
 | :--- | :--- | :--- | :--- |
-| `.obj` `.gltf` `.glb` | Triangles | `50,000` | The classic budget overrun; also catches empty/truncated exports at `0` tris |
-| `.obj` `.gltf` `.glb` | Material slots | `3` | A draw-call proxy — 12 materials on one prop is 12 draw calls before it's even instanced |
-| `.png` | Max edge | `2,048 px` | VRAM and streaming pressure; 8192² is 64× the memory of 1024² |
-| `.png` | Power of two | on | Every mip-chain, every compressed texture format, every "why is this blurry" bug report |
-| `.png` | Naming suffix | `_Albedo` `_Normal` `_Roughness` | Assets named `final_final_diffuse_v2.png` are the ones that never get replaced |
-| `.gltf` `.glb` | Bone influences per vertex | `4` | Above four weights a vertex is undefined behaviour on mobile and web runtimes |
-| `.obj` `.gltf` `.glb` | UV channels | `4` | Extra TEXCOORD sets cost memory in every shader permutation; engines cap at 4–8 |
-| `.obj` `.gltf` `.glb` | Degenerate triangles | `0` | Zero-area faces poison Nanite clusters and ray-tracing BVHs, invisibly |
+| `.fbx` `.obj` `.gltf` `.glb` | Triangles | `50,000` | The classic budget overrun; also catches empty/truncated exports at `0` tris |
+| `.fbx` `.obj` `.gltf` `.glb` | Material slots | `3` | A draw-call proxy — 12 materials on one prop is 12 draw calls before it's even instanced |
+| `.png` `.tga` `.jpg` | Max edge | `2,048 px` | VRAM and streaming pressure; 8192² is 64× the memory of 1024² |
+| `.png` `.tga` `.jpg` | Power of two | on | Every mip-chain, every compressed texture format, every "why is this blurry" bug report |
+| `.png` `.tga` `.jpg` | Naming suffix | `_Albedo` `_Normal` `_Roughness` `_BaseColor` `_ORM` | Assets named `final_final_diffuse_v2.png` are the ones that never get replaced |
+| `.png` `.tga` `.jpg` | Whole file decodes | on | A half-written texture has a perfectly good header; only decoding it notices the missing half |
+| `.fbx` `.gltf` `.glb` | Bone influences per vertex | `4` | Above four weights a vertex is undefined behaviour on mobile and web runtimes |
+| `.fbx` `.obj` `.gltf` `.glb` | UV channels | `4` | Extra TEXCOORD sets cost memory in every shader permutation; engines cap at 4–8 |
+| `.fbx` `.obj` `.gltf` `.glb` | Degenerate triangles | `0` | Zero-area faces poison Nanite clusters and ray-tracing BVHs, invisibly |
+
+FBX is read directly (binary FBX 7.1+, the default from Blender, Maya, 3ds Max,
+Houdini and Unreal) - no Autodesk SDK. Its texture paths are checked the way an
+engine resolves them: the relative path, the stored absolute path, then the bare
+file name next to the `.fbx`; embedded textures are not external references.
 
 Everything is configurable per folder with a `rules.toml`, and every rule can be overridden or disabled from the command line.
 
@@ -1231,6 +1237,8 @@ not allowed to guess: an unparseable file is `UNKNOWN` with the error attached.
 ## Design limits (read before you file the bug)
 
 - **Triangles are topology, not render cost.** Instanced scenes are counted once per unique geometry. UV *channel* count, per-vertex bone influences and degenerate faces are measured (see `[mesh]` in `rules.toml`); draw calls, vertex counts and UV seams are not — yet.
+- **FBX: binary 7.1+ only.** ASCII FBX and pre-2011 files fail with "re-export as binary" rather than a guess. Blend shapes do not add triangles; shared meshes count once.
+- **Healing touches PNG only.** TGA/JPG are gated but never rewritten, and a texture that a binary `.fbx`/`.glb` points at is never renamed (those paths cannot be rewritten safely).
 - **Material slots are per file, not per object.** A merged export with three materials across forty objects reads as three slots. Correct for draw calls; not a per-object budget.
 - **Stability is a heuristic.** A file that pauses longer than the quiet window mid-write can still be inspected early. Prefer atomic writes (write to `.tmp`, then rename) in your exporter and this problem disappears entirely.
 - **Textures embedded inside a glTF** aren't inspected — only standalone `.png` files.

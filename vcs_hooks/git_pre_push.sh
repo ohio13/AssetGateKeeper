@@ -24,7 +24,7 @@
 # Exit codes: 0 allow the push, 1 block it, 2 the hook itself is misconfigured.
 set -u
 
-ASSET_EXTENSIONS=" obj gltf glb png "
+ASSET_EXTENSIONS=" obj gltf glb fbx png tga jpg jpeg "
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
   echo "AssetGatekeeper: not inside a git repository" >&2
@@ -77,7 +77,8 @@ fi
 assets=""
 while IFS= read -r path; do
   [ -n "${path}" ] || continue
-  ext=${path##*.}
+  # Case-insensitive: 3ds Max writes Crate.FBX, and that is still an FBX.
+  ext=$(printf '%s' "${path##*.}" | tr '[:upper:]' '[:lower:]')
   case "$ASSET_EXTENSIONS" in
     *" ${ext} "*) ;;
     *) continue ;;

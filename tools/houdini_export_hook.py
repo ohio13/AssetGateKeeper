@@ -38,7 +38,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-TRACKED = (".obj", ".gltf", ".glb", ".png")
+TRACKED = (".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg")
 GATEKEEPER = Path(__file__).resolve().parent.parent / "asset_gatekeeper.py"
 
 # Populated by install(): the gate's CLI prefix, resolved once.

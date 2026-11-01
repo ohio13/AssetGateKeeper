@@ -242,6 +242,15 @@ p.show()             # or a modal dialog
   the same numbers the Statistics panel shows;
 * `static_materials` slots (draw calls).
 
+### Blocking scripted imports (`import_gatekeeper.py`)
+
+`import_with_gatekeeper(tasks)` runs the gate on every task whose source is a
+format it measures (`.fbx`, `.obj`, `.gltf`, `.glb`, `.png`, `.tga`, `.jpg`) and
+imports nothing if any fails; other files (audio, `.uasset`, USD) import as
+before. It **fails closed**: an unset `ASSETGATEKEEPER_PYTHON`/`ASSETGATEKEEPER_HOME`,
+a missing engine, a crash or a missing source file blocks that file with the
+reason. (Before 1.1, `.fbx` sources got no verdict at all and imported unchecked.)
+
 It does not measure textures: Unreal resolves those through material instances
 and a texture may be shared by fifty assets, so a per-asset texture budget would
 be a different feature. State that to your artists rather than letting them

@@ -1,0 +1,95 @@
+{
+ "cube_subd3": {
+  "degenerate": 0,
+  "influences": 0,
+  "materials": 1,
+  "triangles": 768,
+  "uv": 1
+ },
+ "degenerate": {
+  "degenerate": 1,
+  "influences": 0,
+  "materials": 1,
+  "triangles": 2,
+  "uv": 0
+ },
+ "empty": {
+  "triangles": 0
+ },
+ "linked3": {
+  "degenerate": 0,
+  "influences": 0,
+  "materials": 1,
+  "note": "3 objects share one mesh",
+  "triangles": 320,
+  "uv": 1
+ },
+ "mats5": {
+  "degenerate": 0,
+  "influences": 0,
+  "materials": 5,
+  "triangles": 12,
+  "uv": 1
+ },
+ "ngon_quad": {
+  "degenerate": 0,
+  "influences": 0,
+  "materials": 1,
+  "triangles": 5,
+  "uv": 0
+ },
+ "shapekey": {
+  "degenerate": 0,
+  "influences": 0,
+  "materials": 1,
+  "triangles": 12,
+  "uv": 1
+ },
+ "skin4": {
+  "degenerate": 0,
+  "influences": 4,
+  "materials": 1,
+  "triangles": 2,
+  "uv": 1
+ },
+ "skin6": {
+  "degenerate": 0,
+  "influences": 6,
+  "materials": 1,
+  "triangles": 2,
+  "uv": 1
+ },
+ "tex_embedded": {
+  "degenerate": 0,
+  "embedded": true,
+  "influences": 0,
+  "materials": 1,
+  "texture": "tex_embedded_wood_Albedo.png",
+  "triangles": 12,
+  "uv": 1
+ },
+ "tex_missing": {
+  "degenerate": 0,
+  "influences": 0,
+  "materials": 1,
+  "texture": "tex_missing_wood_Albedo.png",
+  "texture_missing": true,
+  "triangles": 12,
+  "uv": 1
+ },
+ "tex_relative": {
+  "degenerate": 0,
+  "influences": 0,
+  "materials": 1,
+  "texture": "tex_relative_wood_Albedo.png",
+  "triangles": 12,
+  "uv": 1
+ },
+ "uv3": {
+  "degenerate": 0,
+  "influences": 0,
+  "materials": 1,
+  "triangles": 2,
+  "uv": 3
+ }
+}

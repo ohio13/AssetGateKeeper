@@ -94,7 +94,7 @@ switch a check off. A misspelled folder is reported with the name you probably
 meant, and it still applies the budget it resolved to, visibly.
 
 **Not a silent pass.** If it cannot measure a format (`.blend`, `.max`, `.ma`,
-`.fbx`), it says so, stores the asset as `unverified`, excludes it from triangle
+`.usd`), it says so, stores the asset as `unverified`, excludes it from triangle
 totals, and prints "not measured" rather than "0". A dashboard that reports 0
 triangles for a 4-million-triangle `.blend` is worse than no dashboard.
 

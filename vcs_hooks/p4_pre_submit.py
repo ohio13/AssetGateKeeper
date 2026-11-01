@@ -38,7 +38,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".png"}
+ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg"}
 # Actions that put bytes into the depot. "delete" and "move/delete" carry none.
 CONTENT_ACTIONS = {"add", "edit", "branch", "move/add", "integrate", "merge"}
 

@@ -19,7 +19,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".png"}
+ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg"}
 HOOK_NAME = "pre-commit"
 
 

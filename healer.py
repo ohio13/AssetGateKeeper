@@ -300,6 +300,28 @@ def rewrite_reference_names(text: str, renames: dict[str, str]) -> tuple[str, in
     return text, total
 
 
+#: Scene formats whose texture paths are not plain text the healer could rewrite.
+BINARY_REFERENCE_SUFFIXES = (".fbx", ".glb")
+
+
+def _file_contains(path: Path, needles: set) -> bool:
+    """Whether any needle occurs in the file, read in overlapping 1 MB windows."""
+    longest = max(len(needle) for needle in needles)
+    try:
+        with open(path, "rb") as handle:
+            tail = b""
+            while True:
+                chunk = handle.read(1 << 20)
+                if not chunk:
+                    return False
+                window = tail + chunk
+                if any(needle in window for needle in needles):
+                    return True
+                tail = window[-longest:]
+    except OSError:
+        return True                          # cannot read it: assume it might
+
+
 def _project_boundary(root: Path) -> Optional[Path]:
     """The folder to search for references outside ``root``, or None if none.
 
@@ -358,7 +380,8 @@ class Healer:
     """
 
     def __init__(self, budget, *, textures: bool = True, meshes: bool = True,
-                 texture_mode: str = "resize", root: Optional[Path] = None) -> None:
+                 texture_mode: str = "resize", root: Optional[Path] = None,
+                 resolve_references: Optional[Callable[[Path], list]] = None) -> None:
         if texture_mode not in TEXTURE_MODES:
             raise HealError(f"texture_mode must be one of {', '.join(TEXTURE_MODES)}, "
                             f"got {texture_mode!r}")
@@ -373,6 +396,10 @@ class Healer:
         # Shared/Textures - instead of only the texture's folder and its parent,
         # which missed most real layouts and broke the rename quietly.
         self.root = Path(root) if root else None
+        # The gate's own reference resolver (FBX and GLB included). With it, a
+        # binary scene only blocks a rename when it really points at *this*
+        # texture; without it, any byte match on the name does.
+        self.resolve_references = resolve_references
 
     # -- public ------------------------------------------------------------- #
 
@@ -499,11 +526,12 @@ class Healer:
         # it (gate watching Textures/, mesh in ../Meshes/) would be orphaned by
         # a heal that reports success. Refuse instead: the gate fails and locks.
         if reference_renames:
-            blocker = self._outside_reference(path)
+            blocker = self._binary_reference(path) or self._outside_reference(path)
             if blocker:
-                LOG.warning("healing: not renaming %s - %s; rename it in the DCC, or run "
-                            "the gate on the project root so every reference is updated",
-                            path.name, blocker)
+                advice = ("rename it in the DCC and re-export" if "binary" in blocker
+                          else "rename it in the DCC, or run the gate on the project root "
+                               "so every reference is updated")
+                LOG.warning("healing: not renaming %s - %s; %s", path.name, blocker, advice)
                 return None
 
         verdict = checker(staged)
@@ -532,6 +560,50 @@ class Healer:
         return healed, f"renamed {staged.name} -> {healed.name}"
 
     # -- references --------------------------------------------------------- #
+
+    def _binary_reference(self, texture: Path) -> str:
+        """A binary scene (.fbx / .glb) that names ``texture``, or "".
+
+        Those cannot be repointed by a text substitution - an FBX string is
+        length-prefixed, a GLB chunk is length-checked - so a rename would orphan
+        them. Searched across the watch root and the project boundary; a byte
+        match on the file name is enough to refuse (false positives only cost a
+        heal, a false negative costs a broken asset).
+        """
+        roots = [root for root in (self.root, _project_boundary(self.root.resolve())
+                                   if self.root is not None else None) if root is not None]
+        if not roots:
+            roots = [texture.parent, texture.parent.parent]
+        needles = {texture.name.encode("utf-8"), quote(texture.name).encode("utf-8")}
+        seen: set = set()
+        for top in roots:
+            for base, dirnames, filenames in os.walk(top, onerror=lambda _exc: None):
+                dirnames[:] = [d for d in dirnames if not d.startswith(STAGING_PREFIX)
+                               and d not in (".git", ".hg", ".svn", "__pycache__", "node_modules")]
+                if len(seen) > OUTSIDE_SCAN_MAX_DIRS * 4:
+                    return f"could not finish checking {top} for FBX/GLB references"
+                for filename in filenames:
+                    if not filename.lower().endswith(BINARY_REFERENCE_SUFFIXES):
+                        continue
+                    candidate = Path(base) / filename
+                    if candidate in seen:
+                        continue
+                    seen.add(candidate)
+                    if not _file_contains(candidate, needles):
+                        continue
+                    if self.resolve_references is not None:
+                        try:
+                            targets = [Path(target) for _, target in
+                                       self.resolve_references(candidate)]
+                            wanted = os.path.normcase(str(texture.resolve()))
+                            if not any(os.path.normcase(str(t.resolve())) == wanted
+                                       for t in targets):
+                                continue        # names a different file of the same name
+                        except Exception:       # unreadable scene: stay conservative
+                            pass
+                    return (f"{candidate.name} names it, and a binary "
+                            f"{candidate.suffix.lower()} cannot be repointed safely")
+        return ""
 
     def _outside_reference(self, texture: Path) -> str:
         """Why renaming ``texture`` would break a file outside the watch root, or "".

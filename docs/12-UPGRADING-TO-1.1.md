@@ -57,6 +57,15 @@ All of these are deliberate, and each one is a bug that used to pass:
 * **`--triangles -1`, `nan`, and empty suffix lists are refused** at parse time
   or on load, instead of quietly failing every asset or disabling a rule.
 
+* **FBX, TGA and JPG are now gated.** Folders full of `.fbx` that were silently
+  skipped are now measured against the same budgets - expect new failures there
+  first. Raise the budget per tag rather than excluding the format.
+* **A truncated texture fails.** PNG/JPG/TGA are decoded in full; a half-written
+  file used to pass on its header.
+* **Unreal's `import_with_gatekeeper()` blocks when the gate cannot run** (not
+  configured, engine missing, crash). Set `ASSETGATEKEEPER_PYTHON` and
+  `ASSETGATEKEEPER_HOME` on every editor machine that uses it.
+
 ## 4. Healing is safer, and refuses more
 
 A texture rename now repoints every `.mtl`/`.gltf` in the project that named the

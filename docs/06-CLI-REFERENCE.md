@@ -206,7 +206,7 @@ asset-gatekeeper --doctor
 
 * **No per-file overrides.** Overrides belong in rules, by tag, reviewed.
 * **No style opinions.** It measures cost, not quality.
-* **No silent format conversion.** `.blend`/`.max`/`.fbx` are reported as
+* **No silent format conversion.** `.blend`/`.max`/`.ma` are reported as
   `unverified`, never converted and never counted as zero triangles.
 * **No daemon.** It is a process you run; `agk-serve` is for the web surfaces.
 

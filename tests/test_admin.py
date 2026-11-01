@@ -415,7 +415,9 @@ expect("rules.toml appeared in that folder",
 expect("the file is what the form said",
        agk.parse_rules(project_dir / "rules.toml")["mesh"]["max_triangles"] == 1200)
 expect("the audit row names the file, not just the key",
-       any(str(project_dir / "rules.toml") in (row.get("summary") or "")
+       # Resolved: on Windows the temp dir is an 8.3 short path (RUNNER~1) while
+       # the server records the long one, so a plain substring never matched.
+       any(str(project_dir.resolve() / "rules.toml") in (row.get("summary") or "")
            for row in anon.state()["audit"]))
 
 # The launcher seeds the allow-list from both --allow-root and the environment,

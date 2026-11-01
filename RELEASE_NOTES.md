@@ -1,3 +1,36 @@
+# AssetGatekeeper v1.1.0
+
+**Released:** 2026-11-01  **Tag:** `v1.1.0`
+**Upgrading from 1.0:** read [docs/12-UPGRADING-TO-1.1.md](docs/12-UPGRADING-TO-1.1.md) first -
+several verdicts are deliberately stricter and some pipelines will turn red.
+
+## New
+
+* **FBX is measured.** Triangles, material slots, UV sets, bone influences,
+  degenerate faces and texture references, read straight from binary FBX
+  (7.1+) with no Autodesk SDK. Verified against Blender's own counts on 13
+  exported scenes (`tests/fixtures/fbx`); hostile files (truncated, decompression
+  bombs, 3,000-deep nesting) fail cleanly. ASCII and pre-2011 FBX are refused
+  with a re-export hint.
+* **TGA and JPG textures** get the same checks as PNG (size, power of two,
+  naming, PBR range, real format matches the extension).
+* **Textures are fully decoded.** A truncated PNG/JPG/TGA used to pass on its
+  header; it now fails. About 70 ms per 2048² texture.
+
+## Fixed
+
+* The three audit rounds of 1 November 2026: CLI overrides, the viewer, admin
+  sign-in in real browsers, request smuggling, the Host guard, heal repointing,
+  telemetry identity, the PostgreSQL backend (migrations, `--dsn`, restarts),
+  `--workstation-url`/`--workstation-token` (ignored since 1.0), remote rules
+  that are invalid vs unreachable (exit 2), telemetry failures shown once per run,
+  and heal refusing renames that would orphan a reference outside the watched
+  folder or inside a binary `.fbx`/`.glb`.
+* Unreal's `import_with_gatekeeper()` fails closed instead of importing what it
+  could not check.
+
+---
+
 # AssetGatekeeper v1.0.0 - The Indie / Small-Studio Edition
 
 **Released:** 2026-11-01
@@ -199,7 +232,7 @@ every artist's export is judged the same way from then on.
 
 ## Known limits, stated plainly
 
-* `.blend`, `.max`, `.ma`, `.fbx` and `.usd` cannot be triangle-counted here.
+* `.blend`, `.max`, `.ma` and `.usd` cannot be triangle-counted here (FBX can, from 1.1).
   They are stored, reviewable and excluded from budgets - export a `.glb`
   alongside if you want a number.
 * Vertex caps are read but not enforced; the rules inspector shows them as `-`
