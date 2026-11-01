@@ -52,7 +52,7 @@ jobs:
       - name: Generate fixtures
         run: python tests/gen_test_assets.py
 
-      - name: Gate suite (392 assertions)
+      - name: Gate suite (396 assertions)
         run: python tests/test_gatekeeper.py
 
       - name: Workstation suite (135 assertions)

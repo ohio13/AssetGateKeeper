@@ -1,0 +1,119 @@
+# AssetGatekeeper - default rules.toml
+# Indie / Small-Studio Edition, v1.0.0
+#
+# Copy this file next to the folder you export to, name it rules.toml, and the
+# gate picks it up automatically. Every key is optional: anything omitted keeps
+# the shipped default, so a project file only states what is different.
+#
+# Precedence: CLI flag > remote rules > [platforms.*] profile > this file > default
+#
+# asset_gatekeeper.example.toml is the fully annotated reference for every key.
+# This file is the small, ready-to-use starting point.
+
+# Active profile. Leave empty to use only the values below.
+# One of: "", "retro", "mobile", "pc"  (see [platforms.*] at the bottom)
+platform = ""
+
+# --------------------------------------------------------------------------- #
+# Geometry
+# --------------------------------------------------------------------------- #
+
+[mesh]
+# Hard cap on triangles per mesh file. 50k suits stylised indie characters and
+# props; a hero boss can live in a [tags.boss] table instead of raising this.
+max_triangles = 50000
+
+# Distinct materials one mesh may reference - a draw-call proxy, not a style rule.
+max_material_slots = 3
+
+# Broken .gltf/.obj references fail in every engine, so this is on by default.
+check_references = true
+
+# Skin weights per vertex. 4 is the mobile / web GPU limit.
+max_bone_influences = 4
+
+# Zero-area triangles make Nanite and ray tracing compute garbage.
+allow_degenerate = false
+
+# Review prompts, not failures: an offset pivot is often authored on purpose.
+audit_transforms = false
+require_indexed = false
+
+# --------------------------------------------------------------------------- #
+# Textures
+# --------------------------------------------------------------------------- #
+
+[texture]
+# Longest edge in pixels.
+max_edge = 2048
+
+# Older hardware and every mobile GPU want power-of-two sizes.
+power_of_two = true
+
+# Require one of the suffixes below. Studio conventions differ - if yours are
+# _BC / _N / _R, change the list rather than turning the check off.
+naming = true
+suffixes = ["_Albedo", "_Normal", "_Roughness"]
+
+# Albedo is a reflectance colour, not a painting: mean luminance outside this
+# band is almost always an authoring mistake.
+pbr = true
+pbr_floor = 0.02
+pbr_ceiling = 0.94
+pbr_suffixes = ["_Albedo", "_Diffuse"]
+
+# --------------------------------------------------------------------------- #
+# Platform profiles
+#
+# A profile is what the target can afford. It overrides [mesh]/[texture] above
+# and loses to an explicit CLI flag. Delete the ones you do not ship.
+# Budget numbers only - no profile can switch a check off.
+# --------------------------------------------------------------------------- #
+
+# 1990s console and handheld targets: tiny textures, one material, no skinning
+# beyond a single influence.
+[platforms.retro]
+max_triangles = 1500
+max_material_slots = 1
+max_texture_edge = 256
+max_bone_influences = 1
+max_uv_channels = 1
+
+# Phones and tablets: one material per mesh, 1k textures, four weights.
+[platforms.mobile]
+max_triangles = 15000
+max_material_slots = 2
+max_texture_edge = 1024
+max_bone_influences = 4
+
+# Desktop: uncompressed, non-power-of-two, PBR textures are all fine.
+[platforms.pc]
+max_triangles = 120000
+max_material_slots = 8
+max_texture_edge = 4096
+max_bone_influences = 8
+
+# --------------------------------------------------------------------------- #
+# Per-category budgets (optional)
+#
+# A tag is a folder name or a filename prefix - never a pattern. Type "boss",
+# not "[boss.*]". Precedence: filename prefix > full filename > nearest folder.
+#
+# [tags.boss]
+# max_triangles = 90000
+# max_material_slots = 4
+#
+# [tags.prop]
+# max_triangles = 8000
+# max_material_slots = 2
+
+# --------------------------------------------------------------------------- #
+# Healing is off unless you ask for it. A repaired file is adopted only if it
+# then verifies as passing under the same budget.
+# --------------------------------------------------------------------------- #
+
+[healer]
+enabled = false
+textures = true
+meshes = true
+texture_mode = "pad"

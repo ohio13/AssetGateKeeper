@@ -387,7 +387,7 @@ Run the project's own tests if you want proof the checkout is healthy:
 .venv\Scripts\python.exe tests\test_admin.py
 ```
 
-Each prints `ok` per assertion and `FAILURES: none` at the end (801 assertions in
+Each prints `ok` per assertion and `FAILURES: none` at the end (857 assertions in
 total across four suites).
 
 ---

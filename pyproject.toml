@@ -12,7 +12,7 @@ license = { text = "MIT" }
 authors = [{ name = "AssetGatekeeper contributors" }]
 keywords = ["gamedev", "pipeline", "technical-art", "assets", "ci", "linter"]
 classifiers = [
-  "Development Status :: 4 - Beta",
+  "Development Status :: 5 - Production/Stable",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
@@ -37,13 +37,12 @@ full = ["watchdog>=3.0"]
 dev = ["pyflakes>=3.0"]
 
 [project.scripts]
+# The two commands a studio actually types. Everything below them is optional.
 asset-gatekeeper = "asset_gatekeeper:main"
-# The web UIs ship in the same distribution: one install gives an artist the
-# gate, the metrics dashboard and the 3D review screen.
-asset-health = "server.asset_health_server:main"
 art-workstation = "server.art_workstation_server:main"
-# Uploads a folder of .glb/.gltf/.obj into a running workstation: the review
-# screen only takes one dropped file at a time, which is no way to load a project.
+# The rest of the surface: the metrics dashboard, the launcher that owns ports
+# and logs, and the bulk uploader that loads a folder of exports in one go.
+asset-health = "server.asset_health_server:main"
 art-workstation-upload = "tools.upload_assets:main"
 agk-serve = "tools.agk_serve:main"
 
@@ -54,6 +53,7 @@ Issues = "https://github.com/ohio13/asset-gatekeeper/issues"
 [tool.setuptools]
 # Both modules ship: the gate loads healer.py by path from its own directory, so
 # they must stay side by side in site-packages too.
+include-package-data = true
 py-modules = ["asset_gatekeeper", "healer", "notifier"]
 
 [tool.setuptools.packages.find]

@@ -6,7 +6,7 @@
 
 [![Python](https://img.shields.io/badge/python-3.11%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
-[![Tests](https://img.shields.io/badge/tests-853%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
+[![Tests](https://img.shields.io/badge/tests-857%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
 [![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
@@ -889,7 +889,7 @@ No changes are needed in the watcher, the reporter, or the queue. Rules are data
 Four layers, because unit tests, networks, browser UIs and DCC reality fail
 in different ways.
 ```bash
-# 1. rules, config, healing, VCS hooks, presets - 392 assertions, no network, no GPU
+# 1. rules, config, healing, VCS hooks, presets - 396 assertions, no network, no GPU
 python tests/gen_test_assets.py
 python tests/test_gatekeeper.py
 
@@ -915,11 +915,11 @@ pyproject.toml  setup.py         pip-installable (sset-gatekeeper command)
 ASSET_DIFF_ENGINE_SPEC.md        design for the next subsystem (not implemented)
 README.md  LICENSE  .gitignore  .gitattributes
 .github/workflows/
-  ci.yml                         every push/PR: lint + 392 assertions + integration
+  ci.yml                         every push/PR: lint + 396 assertions + integration
   dcc-nightly.yml                nightly Blender export through the real watcher
 tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
-  test_gatekeeper.py             392 assertions: rules, tags, healing, hooks, audits, packaging
+  test_gatekeeper.py             396 assertions: rules, tags, healing, hooks, audits, packaging
   test_server.py                 203 assertions: tenancy, ingest, alerts, throttle, SSE
   test_workstation.py            135 assertions: storage, LODs, collision export, notes, refs, SSE, report
   run_headless_integration.py    drives headless DCC exports through the gate

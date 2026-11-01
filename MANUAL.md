@@ -172,7 +172,7 @@ pip install trimesh pillow
 python tests\test_gatekeeper.py && python tests\test_server.py && python tests\test_workstation.py
 ```
 
-Expected: `FAILURES: none` from each (664 assertions total).
+Expected: `FAILURES: none` from each (857 assertions total).
 
 ### D. Verify the machine
 
@@ -1194,7 +1194,7 @@ engine/lod_manager.py          vertex-clustering decimator (inspection-grade)
 plugins/{blender,houdini,maya,unreal}/   DCC hooks
 vcs_hooks/                     git pre-commit, git pre-push, P4 submit trigger
 tools/                         upload_assets.py, agk.bat, upload.bat, houdini hook
-tests/                         664 assertions across three suites + headless integration
+tests/                         857 assertions across four suites + headless integration
 .github/workflows/             ci, drop-in PR gate, nightly DCC export
 demo/                          live_demo.py, blender_export_demo.py
 dropbox/                       deliberately broken fixtures (each fails exactly one rule)
