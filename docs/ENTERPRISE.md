@@ -92,6 +92,52 @@ agk-enterprise migrate --sqlite asset_health.db \
     --dsn postgresql://agk@db:5432/assets --init-schema
 ```
 
+### The dashboard runs on the same abstraction
+
+AssetHealth no longer opens SQLite itself. Every query goes through
+`enterprise.store.Store`, so the backend is a deployment decision:
+
+```bash
+asset-health --db postgresql://agk@db:5432/assets   # one server, every client
+asset-health --db metrics.db                        # unchanged, SQLite
+export AGK_DB_URL=postgresql://agk@db:5432/assets   # or this
+```
+
+* one `Store` per target, memoised: a pool per request would be a connection
+  storm;
+* SQLite still gets a fresh connection per unit of work, which is what keeps WAL
+  readers concurrent without sharing a handle across threads;
+* `INSERT ... RETURNING id` on PostgreSQL, `lastrowid` on SQLite, behind one
+  `insert_id()` helper so the row-creating handlers cannot drift;
+* rows come back as a wrapper that supports both `row["column"]` and `row[0]`,
+  because the dashboard was written against `sqlite3.Row` and a handful of
+  positional reads would otherwise fail only in production;
+* `sqlite3.Error` handlers now catch `(sqlite3.Error, StoreError)`, so a
+  PostgreSQL failure reports its reason instead of a bare 500.
+
+`init_db` creates the schema once per engine: the shipped SQLite script is
+translated (identity columns, dropped `COLLATE NOCASE`, foreign keys moved to a
+second pass, `--` comments stripped) and column probes use `information_schema`
+instead of `PRAGMA`.
+
+### The `/analytics` page
+
+```
+GET /analytics?since=90d&bucket=week[&project_id=N]   HTML
+GET /api/analytics?since=90d&bucket=week              the same numbers as JSON
+```
+
+The page renders the three trends the CLI reports: compliance per bucket (with
+healed assets counted once, and shown separately), polygon growth as average and
+peak with the ratio between them, and error clusters grouped by signature with
+first/last sighting. `since` accepts `7d`, `30d`, `90d`, `12m`, `3y`; `bucket`
+accepts `day`, `week`, `month`. Unknown values fall back to the defaults rather
+than erroring - a bookmark with a stale parameter should not show a stack trace.
+
+Empty sections explain themselves: a growth chart with no data says the verdicts
+carried no triangle metric, because an empty panel and "your assets are all
+zero triangles" look identical otherwise.
+
 The source is opened **read-only**, rows are copied in foreign-key order, and
 inserts are `ON CONFLICT DO NOTHING`, so re-running after a partial failure
 resumes instead of duplicating. Nothing is deleted from the SQLite file.
@@ -317,6 +363,13 @@ network and no external services):
   `print` and suffix-filtered `materialise`;
 * URL fetching with size cap and 404 handling, changelist validation, runner hub
   claim/report/401 over real sockets;
+* **the server running on both backends**: the same telemetry seeded into
+  SQLite and through the PostgreSQL adapter, then `analytics_report`,
+  `/api/analytics`, `/api/summary`, `/dashboard` and `/analytics` compared field
+  by field - identical. The PostgreSQL side uses a psycopg3-shaped driver double
+  that executes the *translated* SQL, fails loudly on any untranslated `?`,
+  surviving `INSERT OR REPLACE`, or inline `REFERENCES`, and records the DDL the
+  server sends so the two-pass foreign-key strategy is asserted;
 * the pre-flight core: budget errors, warnings, sorting, text rendering, fuzzy
   tag suggestion in strict and suggest modes;
 * the **Blender panel inside Blender 4.0.2 headless** - it imports, registers its
@@ -326,7 +379,9 @@ network and no external services):
 **Needs your infrastructure to verify** (the code paths exist and fail closed,
 but nothing here can exercise them end to end):
 
-* a real PostgreSQL server (`agk-enterprise doctor` reports the connection);
+* a real PostgreSQL server - the driver double proves the SQL we send and the
+  shape of the rows we read, not PostgreSQL's own semantics (`agk-enterprise
+  doctor` reports the connection);
 * a real IdP (Okta / Entra ID / ADFS) for the full redirect round-trip;
 * a real Perforce server (`p4 print` against a live depot);
 * Maya, 3ds Max and Unreal installs for the other three panels (their adapters

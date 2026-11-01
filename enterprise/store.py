@@ -69,7 +69,7 @@ _AUTOINCREMENT_RE = re.compile(r"INTEGER\s+PRIMARY\s+KEY\s+AUTOINCREMENT", re.IG
 _COLLATE_NOCASE_RE = re.compile(r"\s+COLLATE\s+NOCASE", re.IGNORECASE)
 _FK_COLUMN_RE = re.compile(
     r"(?P<column>[A-Za-z_][A-Za-z0-9_]*)\s+INTEGER\s+"
-    r"(?P<notnull>NOT\s+NULL\s+)?"
+    r"(?:PRIMARY\s+KEY\s+)?(?P<notnull>NOT\s+NULL\s+)?"
     r"REFERENCES\s+(?P<table>[A-Za-z_][A-Za-z0-9_]*)\s*\(\s*(?P<target>[A-Za-z_][A-Za-z0-9_]*)\s*\)"
     r"(?P<ondelete>\s+ON\s+DELETE\s+[A-Z ]+?)?(?=\s*,|\s*$)",
     re.IGNORECASE)
@@ -155,6 +155,9 @@ class SqlTranslator:
         creates: list[str] = []
         constraints: list[str] = []
         for statement in statements:
+            statement = _strip_comments(statement)
+            if not statement:
+                continue
             if "CREATE TABLE" in statement.upper():
                 creates.append(self._translate_create(statement, constraints))
             else:
@@ -193,6 +196,24 @@ class SqlTranslator:
                 columns.append(cleaned)
         prefix = head.strip()
         return f"{prefix} (\n    " + ",\n    ".join(columns) + "\n)"
+
+
+def _strip_comments(statement: str) -> str:
+    """Drop ``--`` comments, inline and full-line.
+
+    Nothing in a schema string contains a literal ``--`` (no default value
+    does), and leaving them in breaks both the split on commas and the split on
+    parentheses: the shipped schema has an inline `-- 0/1` and a paragraph of
+    prose ending in "(opt-in)" before a CREATE.
+    """
+    cleaned = []
+    for line in statement.splitlines():
+        marker = line.find("--")
+        if marker >= 0:
+            line = line[:marker]
+        if line.strip():
+            cleaned.append(line.rstrip())
+    return "\n".join(cleaned).strip()
 
 
 def _split_top_level(body: str) -> list[str]:
@@ -235,6 +256,43 @@ class Result:
         return iter(self._rows)
 
 
+class Row:
+    """A row that reads like ``sqlite3.Row`` *and* like a dict.
+
+    The dashboard was written against sqlite3.Row, which supports both
+    ``row["column"]`` and ``row[0]``. PostgreSQL's dict rows only support the
+    first, so a handful of positional reads would have raised only in
+    production. This wrapper keeps both working and costs one list per row.
+    """
+
+    __slots__ = ("_map", "_keys", "_values")
+
+    def __init__(self, values: dict[str, Any]) -> None:
+        self._map = dict(values)
+        self._keys = list(self._map)
+        self._values = [self._map[key] for key in self._keys]
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, int):
+            return self._values[key]
+        return self._map[key]
+
+    def keys(self) -> list[str]:
+        return list(self._keys)
+
+    def __iter__(self) -> Iterator[Any]:
+        return iter(self._values)
+
+    def __len__(self) -> int:
+        return len(self._values)
+
+    def __contains__(self, key: Any) -> bool:
+        return key in self._map
+
+    def __repr__(self) -> str:
+        return f"Row({self._map!r})"
+
+
 def _psycopg():
     try:
         import psycopg                  # noqa: PLC0415 - optional dependency
@@ -266,10 +324,10 @@ class PgConnection:
             cursor.execute(translated, params or ())
             if cursor.description is None:
                 return Result([], cursor.rowcount)
-            rows = cursor.fetchall()
+            rows = [Row(dict(row)) for row in cursor.fetchall()]
             lastrowid = None
             if rows and "id" in rows[0]:
-                lastrowid = rows[0].get("id")
+                lastrowid = rows[0]["id"]
             return Result(rows, cursor.rowcount, lastrowid)
         finally:
             cursor.close()
@@ -437,6 +495,38 @@ class Store:
 
     # -- convenience ------------------------------------------------------- #
 
+    @contextlib.contextmanager
+    def session(self):
+        """One short-lived unit of work, the way a request handler wants it.
+
+        SQLite gets a *fresh* connection per unit of work - cheap, and it keeps
+        WAL's reader concurrency without sharing a handle across threads (which
+        is what v1 did, and what the existing behaviour and tests expect).
+        PostgreSQL gets a pooled connection instead, because opening one per
+        request would defeat the pool. The caller cannot tell which it received.
+        """
+        if self._sqlite is not None:
+            connection = sqlite3.connect(self.target, timeout=10.0)
+            connection.row_factory = sqlite3.Row
+            try:
+                connection.execute("PRAGMA foreign_keys = ON")
+                connection.execute("PRAGMA busy_timeout = 5000")
+                yield connection
+                connection.commit()
+            except Exception:
+                with contextlib.suppress(Exception):
+                    connection.rollback()
+                raise
+            finally:
+                connection.close()
+            return
+        with self.connect() as connection:
+            yield connection
+
+    @property
+    def is_sqlite(self) -> bool:
+        return self._sqlite is not None
+
     def execute(self, sql: str, params: Sequence[Any] | dict | None = None) -> Any:
         with self.connect() as connection:
             if params is None:
@@ -472,6 +562,15 @@ class Store:
 def open_store(target: str | Path, config: Optional[DatabaseConfig] = None) -> Store:
     """Open SQLite or PostgreSQL from one string, no branching at the call site."""
     return Store(str(target), config)
+
+
+def is_dsn(target: str | Path) -> bool:
+    """Is this a connection URL rather than a file path?"""
+    return str(target).lower().startswith(("postgres://", "postgresql://"))
+
+
+def connection_is_sqlite(connection: Any) -> bool:
+    return isinstance(connection, sqlite3.Connection)
 
 
 def open_from_config(config: DatabaseConfig) -> Store:

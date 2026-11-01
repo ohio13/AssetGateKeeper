@@ -71,5 +71,10 @@ jobs:
       - name: Enterprise suite (148 assertions)
         run: python tests/test_enterprise.py
 
+      # The server's own queries, run twice: once on SQLite and once through
+      # the PostgreSQL adapter (driver double). The numbers must be equal.
+      - name: Analytics + storage parity (59 assertions)
+        run: python tests/test_analytics.py
+
       - name: Headless integration (synthetic exporter)
         run: python tests/run_headless_integration.py --synthetic

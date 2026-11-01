@@ -58,6 +58,17 @@ for _path in (str(HERE), str(REPO_ROOT)):
 # Ingest and the dashboard stay pure stdlib - agk has no side effects on import.
 import asset_gatekeeper as agk  # noqa: E402
 
+# Storage: one abstraction over SQLite (the default) and pooled PostgreSQL.
+# The call sites below are unchanged - they open a unit of work and close it.
+from enterprise import analytics as enterprise_analytics  # noqa: E402
+from enterprise.store import (Store, StoreError, connection_is_sqlite,  # noqa: E402
+                              is_dsn, open_store)
+
+#: Everything a storage call can raise on either engine. Handlers used to catch
+#: sqlite3.Error alone, so a PostgreSQL failure escaped as a bare 500 and the
+#: reason - the only part an operator can act on - was lost.
+STORAGE_ERRORS = (sqlite3.Error, StoreError)
+
 # --- #
 # Configuration
 # --- #
@@ -217,23 +228,69 @@ CREATE TABLE IF NOT EXISTS alerts_state (
 _WRITE_LOCK = threading.Lock()
 
 
+#: One Store per target, created once. A PostgreSQL pool per request would be a
+#: connection storm, and re-opening the SQLite file for every call buys nothing.
+_STORES: dict[str, Store] = {}
+_STORES_LOCK = threading.Lock()
+
+
+def store_for(db_path: str | Path) -> Store:
+    """The Store for this target - a SQLite path or a postgresql:// DSN."""
+    key = str(db_path)
+    with _STORES_LOCK:
+        store = _STORES.get(key)
+        if store is None:
+            store = open_store(key)
+            _STORES[key] = store
+        return store
+
+
+def close_stores() -> None:
+    """Close every pooled connection (explicit shutdown, and in tests)."""
+    with _STORES_LOCK:
+        for store in _STORES.values():
+            with contextlib.suppress(Exception):
+                store.close()
+        _STORES.clear()
+
+
 @contextlib.contextmanager
 def open_db(db_path: str | Path):
-    """One short-lived connection per unit of work, always closed.
+    """One short-lived unit of work, on SQLite or on pooled PostgreSQL.
 
-    SQLite connections are cheap; leaking them in a server that runs for weeks is
-    not. ``sqlite3.Connection`` used as a context manager commits but never
+    SQLite gets a fresh connection per unit of work - cheap, and it keeps WAL
+    readers concurrent without sharing a handle across threads. PostgreSQL gets a
+    pooled connection, because one connection per request would defeat the pool.
+    Neither leaks: ``sqlite3.Connection`` as a context manager commits but never
     closes, which is exactly the trap this wrapper exists to avoid.
     """
-    connection = sqlite3.connect(str(db_path), timeout=10.0)
-    connection.row_factory = sqlite3.Row
-    try:
-        connection.execute("PRAGMA foreign_keys = ON")
-        connection.execute("PRAGMA busy_timeout = 5000")
+    with store_for(db_path).session() as connection:
         yield connection
-        connection.commit()
-    finally:
-        connection.close()
+
+
+def insert_id(connection, sql: str, params: tuple) -> int:
+    """Insert one row and return its id, on either backend.
+
+    SQLite exposes ``lastrowid`` and PostgreSQL does not, so the same statement
+    gets a ``RETURNING id`` clause there. One helper means the row-creating
+    handlers cannot drift into two dialects.
+    """
+    if connection_is_sqlite(connection):
+        return int(connection.execute(sql, params).lastrowid or 0)
+    row = connection.execute(sql.rstrip().rstrip(";") + " RETURNING id",
+                             params).fetchone()
+    return int(row["id"]) if row else 0
+
+
+def table_columns(connection, table: str) -> set[str]:
+    """Column names without PRAGMA: PostgreSQL answers from information_schema."""
+    if connection_is_sqlite(connection):
+        return {row[1] for row in
+                connection.execute(f"PRAGMA table_info({table})").fetchall()}
+    rows = connection.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = ?",
+        (table,)).fetchall()
+    return {row["column_name"] for row in rows}
 
 
 def init_db(db_path: str | Path) -> None:
@@ -245,9 +302,10 @@ def init_db(db_path: str | Path) -> None:
     their metrics.
     """
     with open_db(db_path) as connection:
-        connection.execute("PRAGMA journal_mode = WAL")  # concurrent readers
+        if connection_is_sqlite(connection):
+            connection.execute("PRAGMA journal_mode = WAL")  # concurrent readers
         connection.executescript(SCHEMA)
-        columns = {row[1] for row in connection.execute("PRAGMA table_info(verdicts)").fetchall()}
+        columns = table_columns(connection, "verdicts")
         if "status" not in columns:
             connection.execute(
                 "ALTER TABLE verdicts ADD COLUMN status TEXT NOT NULL DEFAULT 'PASSED'")
@@ -332,7 +390,8 @@ def store_verdict(db_path: str | Path, payload: dict,
     """Insert one verdict plus its problems atomically. Returns the new row id."""
     row = _normalise(payload)
     with _WRITE_LOCK, open_db(db_path) as connection:
-        cursor = connection.execute(
+        verdict_id = insert_id(
+            connection,
             "INSERT INTO verdicts (timestamp, received_at, hostname, username, os,"
             " filename, filepath, filesize, passed, metric, status, project_id)"
             " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -340,7 +399,6 @@ def store_verdict(db_path: str | Path, payload: dict,
              row["os"], row["filename"], row["filepath"], row["filesize"],
              row["passed"], row["metric"], row["status"], project_id),
         )
-        verdict_id = int(cursor.lastrowid or 0)
         connection.executemany(
             "INSERT INTO problems (verdict_id, message) VALUES (?, ?)",
             [(verdict_id, message) for message in row["problems"]],
@@ -370,11 +428,11 @@ def create_project(db_path: str | Path, name: str, token: str | None = None) -> 
         raise ValueError("project name must not be empty")
     token = token or secrets.token_urlsafe(24)
     with _WRITE_LOCK, open_db(db_path) as connection:
-        cursor = connection.execute(
+        project_id = insert_id(
+            connection,
             "INSERT INTO projects (name, api_token, created_at) VALUES (?, ?, ?)",
             (name.strip(), hash_token(token), _utc_now()),
         )
-        project_id = int(cursor.lastrowid or 0)
     return project_id, token
 
 
@@ -1037,7 +1095,7 @@ def audit_query(db_path: str | Path, statuses: tuple[str, ...],
                     f"SELECT 1, COUNT(*) FROM verdicts {where} "
                     f"GROUP BY passed", params[:-1]):
                 counts[bool(label)] = int(passed)
-    except sqlite3.Error:
+    except STORAGE_ERRORS:
         return [], {True: 0, False: 0}
     return rows, counts
 
@@ -1178,6 +1236,251 @@ def _send_button(entry: dict) -> str:
             f' title="Ingest only {name} into the Art Workstation">'
             f"Send to Workstation</button>")
 
+# --- #
+# Analytics: the same numbers the CLI reports, rendered for a browser
+# --- #
+
+#: Windows a producer actually asks for. Deliberately short: "since 2019" is a
+#: data-warehouse question, not a dashboard one.
+ANALYTICS_WINDOWS = (("7d", "7 days"), ("30d", "30 days"), ("90d", "90 days"),
+                     ("12m", "12 months"), ("3y", "3 years"))
+ANALYTICS_BUCKETS = ("day", "week", "month")
+
+ANALYTICS_CSS = """
+:root { --bg:#0e1116; --panel:#151a21; --line:#232b36; --ink:#e6edf7; --muted:#8b97a8;
+        --accent:#7aa2f7; --good:#3ecf8e; --bad:#ff6b6b; --warn:#e0af68; }
+* { box-sizing:border-box; }
+body { margin:0; padding:28px 26px 60px; background:var(--bg); color:var(--ink);
+       font:14px/1.55 ui-sans-serif,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
+.wrap { max-width:1180px; margin:0 auto; }
+header { display:flex; align-items:baseline; gap:12px; }
+h1 { font-size:22px; margin:0; letter-spacing:-.01em; }
+h2 { font-size:12px; text-transform:uppercase; letter-spacing:.09em;
+     color:var(--muted); margin:26px 0 8px; }
+.sub { color:var(--muted); font-size:12px; }
+nav { display:flex; gap:14px; align-items:center; flex-wrap:wrap; margin:14px 0 4px; }
+nav a { color:var(--accent); text-decoration:none; font-size:13px; }
+nav a:hover { text-decoration:underline; }
+nav a.on { color:var(--ink); font-weight:600; }
+.chips { color:var(--muted); font-size:12px; }
+.cards { display:grid; grid-template-columns:repeat(4,1fr); gap:12px; margin-top:10px; }
+.card { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+        padding:12px 14px; }
+.card .k { color:var(--muted); font-size:11px; text-transform:uppercase;
+           letter-spacing:.06em; }
+.card .v { font-size:24px; font-variant-numeric:tabular-nums; margin-top:4px; }
+.accent { color:var(--accent); } .good { color:var(--good); } .bad { color:var(--bad); }
+.panel { background:var(--panel); border:1px solid var(--line); border-radius:10px;
+         padding:6px 14px 12px; margin-top:8px; overflow-x:auto; }
+table { width:100%; border-collapse:collapse; font-size:13px; }
+th { text-align:left; font-size:11px; text-transform:uppercase; letter-spacing:.06em;
+     color:var(--muted); border-bottom:1px solid var(--line); padding:8px 6px; }
+td { padding:7px 6px; border-bottom:1px solid var(--line); vertical-align:top;
+     font-variant-numeric:tabular-nums; }
+tr:last-child td { border-bottom:none; }
+.bar { height:8px; border-radius:4px; background:#1d2430; min-width:90px; }
+.bar > span { display:block; height:8px; border-radius:4px; background:var(--good); }
+.bar.warn > span { background:var(--warn); } .bar.bad > span { background:var(--bad); }
+.empty { color:var(--muted); padding:14px 4px; }
+.mono { font-family:ui-monospace,Consolas,monospace; font-size:12px; color:var(--muted); }
+.note { color:var(--muted); font-size:12px; margin:6px 2px; }
+footer { margin-top:32px; color:var(--muted); font-size:11px; }
+"""
+
+
+def analytics_report(db_path, project_id: int | None = None, since: str = "90d",
+                     bucket: str = "week") -> dict:
+    """One JSON document: compliance, growth and errors for the same window.
+
+    The three sections answer different questions and fail differently - an empty
+    error list is good news, an empty growth chart means the verdicts carried no
+    triangle count - so each carries its own reason string instead of a silent
+    zero.
+    """
+    store = store_for(db_path)
+    report: dict = {"window": {"since": since, "bucket": bucket,
+                               "project_id": project_id}}
+    try:
+        trend = enterprise_analytics.compliance_trend(
+            store, bucket=bucket, since=since, project_id=project_id)
+        report["compliance"] = trend.as_dict()
+        report["compliance"]["delta"] = trend.delta
+        report["summary"] = enterprise_analytics.compliance_summary(
+            store, since=since, project_id=project_id)
+    except Exception as exc:                      # a broken query is reported, not fatal
+        report["compliance"] = {"points": [], "note": f"unavailable: {exc}"}
+        report["summary"] = {}
+    try:
+        growth = enterprise_analytics.polygon_growth(
+            store, bucket=bucket, since=since, project_id=project_id)
+        report["growth"] = growth.as_dict()
+    except enterprise_analytics.AnalyticsError as exc:
+        report["growth"] = {"points": [], "note": str(exc)}
+    try:
+        clusters = enterprise_analytics.error_frequency(
+            store, since=since, project_id=project_id, limit=15)
+        report["errors"] = [cluster.as_dict() for cluster in clusters]
+    except Exception as exc:
+        report["errors"] = []
+        report["errors_note"] = f"unavailable: {exc}"
+    return report
+
+
+def _analytics_href(since: str, bucket: str, project_id: int | None) -> str:
+    params = {"since": since, "bucket": bucket}
+    if project_id:
+        params["project_id"] = str(project_id)
+    return "/analytics?" + urllib.parse.urlencode(params)
+
+
+def render_analytics_page(db_path, project_id: int | None = None,
+                          project_name: str = "", since: str = "90d",
+                          bucket: str = "week") -> str:
+    report = analytics_report(db_path, project_id, since, bucket)
+    summary = report.get("summary") or {}
+    points = report.get("compliance", {}).get("points", [])
+    growth = report.get("growth", {})
+    growth_points = growth.get("points", [])
+    clusters = report.get("errors", [])
+
+    scope = f"project: {_e(project_name)}" if project_name else "all projects"
+
+    window_links = "".join(
+        f'<a class="{"on" if key == since else ""}" '
+        f'href="{_analytics_href(key, bucket, project_id)}">{label}</a>'
+        for key, label in ANALYTICS_WINDOWS)
+    bucket_links = "".join(
+        f'<a class="{"on" if key == bucket else ""}" '
+        f'href="{_analytics_href(since, key, project_id)}">{key}</a>'
+        for key in ANALYTICS_BUCKETS)
+
+    compliance_value = summary.get("compliance")
+    compliance_text = (f"{compliance_value * 100:.1f}%" if compliance_value is not None
+                       else "-")
+    compliance_class = ("good" if (compliance_value or 0) >= 0.9
+                        else "accent" if (compliance_value or 0) >= 0.7 else "bad")
+    delta = summary.get("trend") or 0
+    delta_text = f"{delta * 100:+.1f} pts" if summary.get("buckets") else "-"
+
+    if points:
+        rows = []
+        for point in points:
+            share = point["compliance"] * 100
+            tone = "good" if share >= 90 else ("warn" if share >= 70 else "bad")
+            rows.append(
+                "<tr>"
+                f'<td class="mono">{_e(point["bucket"])}</td>'
+                f'<td>{point["total"]:,}</td>'
+                f'<td>{point["passed"]:,}</td>'
+                f'<td>{point["healed"]:,}</td>'
+                f'<td>{point["failed"]:,}</td>'
+                f'<td style="width:34%"><div class="bar {tone}"><span '
+                f'style="width:{share:.1f}%"></span></div></td>'
+                f"<td>{share:.1f}%</td>"
+                "</tr>")
+        compliance_html = (
+            '<div class="panel"><table><thead><tr><th>Bucket</th><th>Total</th>'
+            "<th>Passed</th><th>Healed</th><th>Failed</th><th>Compliance</th>"
+            "<th>Rate</th></tr></thead><tbody>" + "".join(rows) + "</tbody></table>"
+            '<div class="note">Healed assets count as passing once: the gate did '
+            "accept them, it just rewrote them on the way in.</div></div>")
+    else:
+        compliance_html = ('<div class="panel"><div class="empty">No verdicts in this '
+                           "window yet. Post one with <code>asset-gatekeeper "
+                           "&lt;folder&gt; --telemetry-url ...</code>.</div></div>")
+
+    if growth_points:
+        peak = max(point["peak_triangles"] for point in growth_points) or 1
+        rows = []
+        for point in growth_points:
+            width = point["average_triangles"] / peak * 100
+            rows.append(
+                "<tr>"
+                f'<td class="mono">{_e(point["bucket"])}</td>'
+                f'<td>{point["assets"]:,}</td>'
+                f'<td>{point["average_triangles"]:,}</td>'
+                f'<td>{point["peak_triangles"]:,}</td>'
+                f'<td>{point["total_triangles"]:,}</td>'
+                f'<td style="width:28%"><div class="bar accent"><span '
+                f'style="width:{width:.1f}%"></span></div></td>'
+                "</tr>")
+        growth_html = (
+            '<div class="panel"><table><thead><tr><th>Bucket</th><th>Assets</th>'
+            "<th>Average tris</th><th>Peak tris</th><th>Total tris</th>"
+            "<th>Average vs peak</th></tr></thead><tbody>" + "".join(rows)
+            + "</tbody></table>"
+            '<div class="note">A rising average with a flat asset count is a content '
+            "problem; a flat average with a rising count is a scope problem.</div></div>")
+    else:
+        note = growth.get("note", "no triangle counts in this window")
+        growth_html = (f'<div class="panel"><div class="empty">{_e(note)}</div>'
+                       '<div class="note">Growth needs the tris metric that every '
+                       "mesh verdict carries.</div></div>")
+
+    if clusters:
+        rows = []
+        for cluster in clusters:
+            rows.append(
+                "<tr>"
+                f'<td>{cluster["count"]:,}</td>'
+                f'<td class="mono">{_e(cluster["first_seen"][:10])} &rarr; '
+                f'{_e(cluster["last_seen"][:10])}</td>'
+                f'<td>{_e(cluster["example"])}</td>'
+                "</tr>")
+        errors_html = (
+            '<div class="panel"><table><thead><tr><th style="width:80px">Count</th>'
+            '<th style="width:190px">First seen &rarr; last seen</th>'
+            "<th>Signature example</th></tr></thead><tbody>" + "".join(rows)
+            + "</tbody></table>"
+            '<div class="note">Grouped by signature: numbers are folded out, so the '
+            "same mistake on fifty assets is one row.</div></div>")
+    else:
+        errors_html = ('<div class="panel"><div class="empty">No problems recorded '
+                       "in this window.</div></div>")
+
+    dashboard_href = "/dashboard" + (f"?project_id={project_id}" if project_id else "")
+    return f"""<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<title>AssetHealth - analytics</title>
+<style>{ANALYTICS_CSS}</style></head>
+<body><div class="wrap">
+  <header>
+    <h1>AssetHealth</h1>
+    <span class="sub">analytics &middot; {scope}</span>
+  </header>
+  <nav>
+    <a href="{dashboard_href}">&larr; Dashboard</a>
+    <a href="/budget-planner{('?project_id=' + str(project_id)) if project_id else ''}">Budget planner &rarr;</a>
+    <span class="chips">window</span> {window_links}
+    <span class="chips">bucket</span> {bucket_links}
+  </nav>
+
+  <h2>Compliance</h2>
+  <div class="cards">
+    <div class="card"><div class="k">Compliance</div>
+      <div class="v {compliance_class}">{compliance_text}</div></div>
+    <div class="card"><div class="k">Verdicts</div>
+      <div class="v accent">{summary.get('total', 0):,}</div></div>
+    <div class="card"><div class="k">Failed</div>
+      <div class="v bad">{summary.get('failed', 0):,}</div></div>
+    <div class="card"><div class="k">Trend</div>
+      <div class="v {"good" if delta >= 0 else "bad"}">{delta_text}</div></div>
+  </div>
+  {compliance_html}
+
+  <h2>Polygon growth</h2>
+  {growth_html}
+
+  <h2>Error clusters</h2>
+  {errors_html}
+
+  <footer>Generated {_e(_utc_now())} &middot; GET
+    <a href="/api/analytics?since={since}&amp;bucket={bucket}"
+       style="color:#7aa2f7">/api/analytics</a> for the same numbers as JSON.</footer>
+</div></body></html>"""
+
+
+
 def render_dashboard(db_path: str | Path, project_id: int | None = None,
                      project_name: str | None = None, warn: str = "",
                      refresh: int = 0) -> str:
@@ -1198,6 +1501,7 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
     generated = _utc_now()
     scope = f"project: {_e(project_name)}" if project_name else "all projects"
     planner_href = "/budget-planner" + (f"?project_id={project_id}" if project_id else "")
+    analytics_href = "/analytics" + (f"?project_id={project_id}" if project_id else "")
 
     rate = stats["pass_rate"]
     rate_class = "good" if rate >= 90 else ("accent" if rate >= 70 else "bad")
@@ -1281,6 +1585,7 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
   {demo_notice}
   {f'<div class="notice err" style="display:block">{_e(warn)}</div>' if warn else ''}
   <nav>
+    <a href="{analytics_href}">Analytics &rarr;</a>
     <a href="{planner_href}">Budget planner &rarr;</a>
     <span class="chips">tris &le; {budget['max_triangles']:,} &nbsp;|&nbsp;
       texture &le; {budget['max_texture_edge']}px &nbsp;|&nbsp;
@@ -1632,10 +1937,14 @@ class Handler(BaseHTTPRequestHandler):
                 # pages do not, so nothing is ever unreachable from the UI.
                 self._audit_view(path, urllib.parse.parse_qs(
                     urllib.parse.urlsplit(self.path).query))
+            elif path == "/analytics":
+                self._analytics_page(identity)
             elif path == "/budget-planner":
                 self._planner(identity)
             elif path == "/api/summary":
                 self._summary(identity)
+            elif path == "/api/analytics":
+                self._analytics_json(identity)
             elif path == "/api/rules":
                 self._rules(identity)
             elif path == "/api/events":
@@ -1644,6 +1953,65 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "not found", "path": path})
         except Exception as exc:  # a query error must not kill the handler thread
             self._json(500, {"error": "internal error", "detail": str(exc)})
+
+    def _analytics_page(self, identity: dict) -> None:
+        if identity["role"] == "denied":
+            self._forbid(401, "Unauthorised",
+                         "Send 'Authorization: Bearer <token>' or ?token=. "
+                         "Ask a pipeline engineer for your project's token.")
+            return
+        project_id, error = self._scope(identity)
+        if error == 400:
+            self._forbid(400, "project_id must be a number", "Try ?project_id=1")
+            return
+        if error == 403:
+            self._forbid(403, "That project is not yours",
+                         "This token is scoped to a single project.")
+            return
+        query = self._query()
+        since = query.get("since", ["90d"])[0]
+        bucket = query.get("bucket", ["week"])[0]
+        if since not in {key for key, _ in ANALYTICS_WINDOWS}:
+            since = "90d"
+        if bucket not in ANALYTICS_BUCKETS:
+            bucket = "week"
+        name = ""
+        if project_id is not None:
+            match = [p for p in list_projects(self.server.db_path)
+                     if p["id"] == project_id]
+            if not match:
+                self._forbid(404, "No such project",
+                             f"project_id={project_id} is not registered")
+                return
+            name = match[0]["name"]
+        try:
+            body = render_analytics_page(self.server.db_path, project_id, name,
+                                         since, bucket).encode("utf-8")
+        except Exception as exc:                  # a trend query must not kill the page
+            self._forbid(500, "Analytics unavailable", str(exc))
+            return
+        self._send(200, body, "text/html; charset=utf-8")
+
+    def _analytics_json(self, identity: dict) -> None:
+        if identity["role"] == "denied":
+            self._json(401, {"error": "unauthorised"})
+            return
+        project_id, error = self._scope(identity)
+        if error in (400, 403):
+            self._json(error, {"error": "bad project scope"})
+            return
+        if project_id is not None and not [p for p in list_projects(self.server.db_path)
+                                           if p["id"] == project_id]:
+            self._json(404, {"error": "no such project", "project_id": project_id})
+            return
+        query = self._query()
+        since = query.get("since", ["90d"])[0]
+        bucket = query.get("bucket", ["week"])[0]
+        if since not in {key for key, _ in ANALYTICS_WINDOWS}:
+            since = "90d"
+        if bucket not in ANALYTICS_BUCKETS:
+            bucket = "week"
+        self._json(200, analytics_report(self.server.db_path, project_id, since, bucket))
 
     def _dashboard(self, identity: dict) -> None:
         if identity["role"] == "denied":
@@ -1866,7 +2234,7 @@ class Handler(BaseHTTPRequestHandler):
             with open_db(self.server.db_path) as connection:
                 row = connection.execute(
                     "SELECT value FROM meta WHERE key = 'project_root'").fetchone()
-        except sqlite3.Error:
+        except STORAGE_ERRORS:
             return None
         if not row or not str(row[0] or "").strip():
             return None
@@ -2506,7 +2874,7 @@ class Handler(BaseHTTPRequestHandler):
         except ValueError as exc:   # shape problem: the client should fix it
             self._json(400, {"error": str(exc)})
             return
-        except sqlite3.Error as exc:
+        except STORAGE_ERRORS as exc:
             self._json(500, {"error": "database error", "detail": str(exc)})
             return
 
@@ -2697,7 +3065,7 @@ def admin_account_count(db_path: str | Path) -> int:
     try:
         with open_db(db_path) as connection:
             return int(connection.execute("SELECT COUNT(*) FROM admin_users").fetchone()[0])
-    except sqlite3.Error:
+    except STORAGE_ERRORS:
         return 0
 
 
@@ -2777,7 +3145,7 @@ def recent_passed(db_path: str | Path, limit: int = 12,
             rows = connection.execute(
                 f"SELECT id, filename, filepath, hostname, received_at FROM verdicts "
                 f"{where} ORDER BY id DESC LIMIT ?", params).fetchall()
-    except sqlite3.Error:
+    except STORAGE_ERRORS:
         return []
     return [dict(row) for row in rows]
 
@@ -2789,7 +3157,7 @@ def recent_projects(db_path: str | Path, limit: int = 10) -> list[dict]:
             rows = connection.execute(
                 "SELECT path, label, last_used FROM project_roots"
                 " ORDER BY last_used DESC LIMIT ?", (int(limit),)).fetchall()
-    except sqlite3.Error:
+    except STORAGE_ERRORS:
         return []
     return [dict(row) for row in rows]
 
@@ -3297,7 +3665,7 @@ def counts_zero(db_path: str | Path) -> bool:
     try:
         with open_db(db_path) as connection:
             return connection.execute("SELECT COUNT(*) FROM verdicts").fetchone()[0] == 0
-    except sqlite3.Error:
+    except STORAGE_ERRORS:
         return False
 
 
@@ -3307,7 +3675,7 @@ def demo_row_count(db_path: str | Path) -> int:
         with open_db(db_path) as connection:
             row = connection.execute(
                 "SELECT value FROM meta WHERE key = 'demo_rows'").fetchone()
-    except sqlite3.Error:
+    except STORAGE_ERRORS:
         return 0
     try:
         return int(row[0]) if row else 0
@@ -3333,8 +3701,11 @@ def build_parser() -> argparse.ArgumentParser:
                              "failing (prints what it chose; keep telemetry URLs in step)")
     parser.add_argument("--port-tries", type=int, default=10, metavar="N",
                         help="how many ports --port-auto may walk past (default 10)")
-    parser.add_argument("--db", default=os.environ.get("ASSET_HEALTH_DB", DEFAULT_DB),
-                        help=f"SQLite file (default {DEFAULT_DB}, or $ASSET_HEALTH_DB)")
+    parser.add_argument("--db",
+                        default=(os.environ.get("ASSET_HEALTH_DB")
+                                 or os.environ.get("AGK_DB_URL") or DEFAULT_DB),
+                        help=f"SQLite file or postgresql:// DSN "
+                             f"(default {DEFAULT_DB}, or $ASSET_HEALTH_DB / $AGK_DB_URL)")
     parser.add_argument("--token", default=os.environ.get(DEFAULT_TOKEN_ENV, ""),
                         help=f"require 'Authorization: Bearer <token>' (default ${DEFAULT_TOKEN_ENV})")
     parser.add_argument("--workstation-url", metavar="URL",
@@ -3443,13 +3814,18 @@ def resolve_webhook(args: argparse.Namespace) -> tuple[str, str, float]:
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    db_path = Path(args.db).expanduser()
-    if db_path.parent and not db_path.parent.exists():
-        print(f"error: database folder does not exist: {db_path.parent}", file=sys.stderr)
-        return 2
+    # A DSN selects PostgreSQL; anything else is a file path, exactly as before.
+    if is_dsn(args.db):
+        db_path: str | Path = args.db
+    else:
+        db_path = Path(args.db).expanduser()
+        if db_path.parent and not db_path.parent.exists():
+            print(f"error: database folder does not exist: {db_path.parent}",
+                  file=sys.stderr)
+            return 2
     try:
         init_db(db_path)
-    except sqlite3.Error as exc:
+    except STORAGE_ERRORS as exc:
         print(f"error: cannot initialise {db_path}: {exc}", file=sys.stderr)
         return 2
 
@@ -3503,7 +3879,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.demo and not args.no_seed:
         try:
             seeded = seed_if_first_launch(db_path)
-        except sqlite3.Error as exc:
+        except STORAGE_ERRORS as exc:
             print(f"warning: seeding skipped ({exc})", file=sys.stderr)
 
     webhook_url, webhook_provider, alert_cooldown = resolve_webhook(args)
@@ -3536,7 +3912,7 @@ def main(argv: list[str] | None = None) -> int:
     shown = "127.0.0.1" if host in ("0.0.0.0", "::") else host
     projects = list_projects(db_path)
     print(f"AssetHealth listening on http://{shown}:{port}/dashboard")
-    print(f"  database   {db_path.resolve()}")
+    print(f"  database   {db_path if isinstance(db_path, str) else db_path.resolve()}")
     print("  ingest     POST /api/telemetry")
     print(f"  rules      GET /api/rules  ({(Path(args.rules).resolve() if args.rules else Path.cwd() / agk.RULES_FILENAME)})")
     print(f"  telemetry  asset-gatekeeper <folder> --once --telemetry-url "
