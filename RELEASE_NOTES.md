@@ -74,6 +74,9 @@ several verdicts are deliberately stricter and some pipelines will turn red.
   but its own `{"event": ...}` envelope; the webhook sent a generic body to the
   HEC URL its own docs used. Syslog lines named no host (`-`); they now carry
   the machine name.
+* **3ds Max pre-flight (not yet run in Max):** unconverted primitives were
+  skipped (a 200k-triangle Sphere read as 0) and only Standard/Multi materials
+  counted (Physical Material, the default since Max 2017, read as 0).
 * **Maya install docs:** the documented `sys.path` pointed one folder too high;
   `import maya_preflight` failed.
 

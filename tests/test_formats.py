@@ -560,6 +560,58 @@ for name in broken:
 expect("a pre-2011 ASCII FBX gets the re-export hint",
        "too old" in " ".join(rows.get("ascii_old.fbx", {}).get("problems", [])))
 
+# 3ds Max pre-flight against a stand-in pymxs (no Max here: the developer's test plan
+# covers the real thing). Pins what is counted, not how Max reports it.
+class _MaxClass:
+    def __init__(self, name):
+        self.name = name
+
+
+class _MaxNode:
+    def __init__(self, cls, superclass, triangles, material=None):
+        self.cls, self.superclass, self.triangles, self.material = cls, superclass, triangles, material
+
+
+class _MaxSelection(list):
+    @property
+    def count(self):
+        return len(self)
+
+
+max_rt = types.SimpleNamespace()
+for _name in ("Sphere", "Box", "Editable_Poly", "Targetobject", "BoneGeometry", "Multimaterial",
+              "StandardMaterial", "Physical_Material", "Bitmaptexture", "GeometryClass", "Camera"):
+    setattr(max_rt, _name, _MaxClass(_name))
+max_rt.classOf = lambda item: getattr(item, "cls", None)
+max_rt.superClassOf = lambda item: getattr(item, "superclass", None)
+max_rt.getPolygonCount = lambda node: [node.triangles, node.triangles // 2]
+physical = types.SimpleNamespace(cls=max_rt.Physical_Material, name="rock_mat",
+                                 base_color_map=types.SimpleNamespace(
+                                     cls=max_rt.Bitmaptexture, filename="C:/maps/rock_Albedo.png",
+                                     name="rock", bitmap=types.SimpleNamespace(width=4096, height=4096)))
+multi = types.SimpleNamespace(cls=max_rt.Multimaterial, materialList=[
+    types.SimpleNamespace(cls=max_rt.StandardMaterial, name="a"), None,
+    types.SimpleNamespace(cls=max_rt.StandardMaterial, name="b")])
+max_rt.selection = _MaxSelection([
+    _MaxNode(max_rt.Sphere, max_rt.GeometryClass, 200_000, physical),     # unconverted primitive
+    _MaxNode(max_rt.Editable_Poly, max_rt.GeometryClass, 1_000, multi),
+    _MaxNode(max_rt.Targetobject, max_rt.GeometryClass, 12),             # a camera target
+    _MaxNode(max_rt.Camera, max_rt.Camera, 0),
+])
+max_rt.objects = list(max_rt.selection)
+fake_pymxs = types.ModuleType("pymxs")
+fake_pymxs.runtime = max_rt
+sys.modules["pymxs"] = fake_pymxs
+sys.path.insert(0, str(ROOT / "plugins" / "max"))
+import max_preflight  # noqa: E402
+max_triangles, _, max_materials, max_textures, _ = max_preflight.scene_facts()
+expect("Max: an unconverted primitive (Sphere) is measured, a camera target is not",
+       max_triangles == 201_000, max_triangles)
+expect("Max: Physical Material and Multi/Sub-Object slots are counted",
+       max_materials == 3, max_materials)
+expect("Max: a Physical Material's base colour map is found",
+       ("rock_Albedo.png", 4096, 4096) in max_textures, max_textures)
+
 print("10. Hooks and tools know the new formats")
 sys.path.insert(0, str(ROOT / "vcs_hooks"))
 import git_pre_commit  # noqa: E402

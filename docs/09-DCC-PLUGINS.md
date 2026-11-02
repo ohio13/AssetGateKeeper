@@ -158,9 +158,14 @@ purpose: no `.ms` rollouts to maintain, nothing to break across Max versions.
 
 ### What it measures
 
-* `getPolygonCount` triangles and vertices;
-* material slots from `Multimaterial` / `StandardMaterial`;
-* bitmap sizes from the bitmap nodes in the diffuse/bump/specular slots.
+* `getPolygonCount` triangles and vertices of every geometry node (primitives
+  included; camera targets and bones are skipped);
+* materials of any type (Physical, Standard, Arnold...), Multi/Sub-Object
+  expanded to its sub-materials;
+* bitmap sizes from Standard (diffuse/bump/specular) and Physical (base colour,
+  bump, roughness, metalness, normal) map slots.
+
+Not yet verified inside 3ds Max - see the test plan before relying on it.
 
 ---
 

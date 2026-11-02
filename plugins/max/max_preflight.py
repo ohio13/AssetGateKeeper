@@ -28,10 +28,38 @@ except ImportError:                                   # pragma: no cover
     import preflight_core as core                     # type: ignore[no-redef]
 
 
+def _not_render_geometry():
+    """Geometry-class helpers that are not meshes an engine receives."""
+    names = ("Targetobject", "BoneGeometry", "Biped_Object", "CATBone", "HubObject")
+    return tuple(cls for cls in (getattr(rt, name, None) for name in names) if cls is not None)
+
+
 def _selected_geometry():
+    """Every geometry node, whatever its class.
+
+    This used to keep only Editable_Poly / Editable_Mesh / PolyMeshObject, so an
+    unconverted primitive (a Sphere, a Box with no modifiers - classOf is Sphere)
+    was skipped and read as 0 triangles. getPolygonCount works on any geometry.
+    """
     selection = list(rt.selection) if rt.selection.count else list(rt.objects)
-    return [node for node in selection if rt.classOf(node) in
-            (rt.Editable_Poly, rt.Editable_Mesh, rt.PolyMeshObject)]
+    skip = _not_render_geometry()
+    return [node for node in selection
+            if rt.superClassOf(node) == rt.GeometryClass and rt.classOf(node) not in skip]
+
+
+#: Texture slots by material type: Standard (legacy) and Physical (the default
+#: material since 3ds Max 2017). Other types still count as a material.
+_MAP_SLOTS = ("diffuseMap", "bumpMap", "specularMap", "base_color_map", "bump_map",
+              "roughness_map", "metalness_map", "norm_map")
+
+
+def _leaf_materials(material):
+    """A Multimaterial's sub-materials, or the material itself."""
+    if material is None:
+        return []
+    if rt.classOf(material) == rt.Multimaterial:
+        return [slot for slot in material.materialList if slot is not None]
+    return [material]
 
 
 def scene_facts():
@@ -41,25 +69,22 @@ def scene_facts():
     for node in _selected_geometry():
         triangles += int(rt.getPolygonCount(node)[0] or 0)
         vertices += int(rt.getPolygonCount(node)[1] or 0)
-        material = node.material
-        if material is not None and rt.classOf(material) in (rt.Multimaterial, rt.StandardMaterial):
-            slots = material.materialList if rt.classOf(material) == rt.Multimaterial else [material]
-            for slot in slots:
-                if slot is None:
-                    continue
-                materials.add(str(slot.name))
-                for map_slot in ("diffuseMap", "bumpMap", "specularMap"):
-                    try:
-                        bitmap = getattr(slot, map_slot, None)
-                    except Exception:
-                        bitmap = None
-                    if bitmap is not None and rt.classOf(bitmap) == rt.Bitmaptexture:
-                        filename = str(bitmap.filename or "")
-                        size = bitmap.bitmap
-                        width = int(size.width) if size is not None else 0
-                        height = int(size.height) if size is not None else 0
-                        textures.append((os.path.basename(filename) or str(bitmap.name),
-                                         width, height))
+        # Any material type counts: only Standard/Multi used to, so Physical
+        # Material (the default since Max 2017) and Arnold read as 0 materials.
+        for slot in _leaf_materials(node.material):
+            materials.add(str(slot.name))
+            for map_slot in _MAP_SLOTS:
+                try:
+                    bitmap = getattr(slot, map_slot, None)
+                except Exception:
+                    bitmap = None
+                if bitmap is not None and rt.classOf(bitmap) == rt.Bitmaptexture:
+                    filename = str(bitmap.filename or "")
+                    size = bitmap.bitmap
+                    width = int(size.width) if size is not None else 0
+                    height = int(size.height) if size is not None else 0
+                    textures.append((os.path.basename(filename) or str(bitmap.name),
+                                     width, height))
     return triangles, vertices, len(materials), textures, degenerate
 
 
