@@ -625,6 +625,37 @@ completed = subprocess.run([sys.executable, "-c", probe, str(vendor_rules)],
 expect("without tomllib or tomli (DCC Pythons) rules.toml is read by the bundled tomli",
        completed.stdout.split() == ["agk_vendor.tomli", "1234"], completed.stdout + completed.stderr[-300:])
 
+# Maya: an empty initialShadingGroup left connected after per-face assignment is
+# not a material (verified in Maya 2027: 5 face materials read as 6).
+class _FakeMayaCmds:
+    members = {"agk_SG0": ["SM_mats.f[0:3]"], "agk_SG1": ["SM_mats.f[4:5]"], "initialShadingGroup": []}
+
+    def listConnections(self, node, type=None):
+        return list(self.members)
+
+    def sets(self, engine, query=True):
+        return self.members[engine]
+
+    def ls(self, items, long=False, objectsOnly=False, **kwargs):
+        items = [items] if isinstance(items, str) else items
+        return ["|SM_mats|SM_matsShape" if "SM_mats" in item else item for item in items]
+
+    def listRelatives(self, node, parent=False, fullPath=False, **kwargs):
+        return ["|SM_mats"]
+
+
+fake_maya = types.ModuleType("maya")
+fake_maya.cmds = _FakeMayaCmds()
+sys.modules["maya"] = fake_maya
+sys.modules["maya.cmds"] = fake_maya.cmds
+sys.path.insert(0, str(ROOT / "plugins" / "maya"))
+import gatekeeper_maya  # noqa: E402
+import maya_preflight  # noqa: E402
+expect("Maya shelf check: an empty, still-connected initialShadingGroup is not a material",
+       gatekeeper_maya.shading_engines_used("|SM_mats|SM_matsShape") == {"agk_SG0", "agk_SG1"})
+expect("Maya pre-flight: the same", sorted(maya_preflight._engines_used("|SM_mats|SM_matsShape"))
+       == ["agk_SG0", "agk_SG1"])
+
 print("10. Hooks and tools know the new formats")
 sys.path.insert(0, str(ROOT / "vcs_hooks"))
 import git_pre_commit  # noqa: E402

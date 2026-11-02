@@ -80,9 +80,13 @@ several verdicts are deliberately stricter and some pipelines will turn red.
   but its own `{"event": ...}` envelope; the webhook sent a generic body to the
   HEC URL its own docs used. Syslog lines named no host (`-`); they now carry
   the machine name.
-* **3ds Max pre-flight (not yet run in Max):** unconverted primitives were
-  skipped (a 200k-triangle Sphere read as 0) and only Standard/Multi materials
-  counted (Physical Material, the default since Max 2017, read as 0).
+* **3ds Max pre-flight:** unconverted primitives were skipped and only
+  Standard/Multi materials counted. Verified in 3ds Max 2027.2: the old plugin
+  read 0 triangles for every primitive (an unconverted 180,000-triangle plane
+  passed); the fixed one matches Max's own counts and counts Physical Material.
+* **Maya material slots:** both Maya tools counted every shading group connected
+  to a mesh, including the empty `initialShadingGroup` left behind by per-face
+  assignment. Verified in Maya 2027: 5 face materials read as 6.
 * **Maya install docs:** the documented `sys.path` pointed one folder too high;
   `import maya_preflight` failed.
 

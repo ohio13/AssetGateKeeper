@@ -113,13 +113,35 @@ def uv_channel_count(transform: str) -> int:
     return len(channels)
 
 
+def shading_engines_used(shape: str) -> set:
+    """Shading groups that hold this shape or some of its faces.
+
+    ``listConnections(shape, type="shadingEngine")`` also returns groups that
+    are connected but empty: after an artist assigns materials face by face,
+    ``initialShadingGroup`` stays connected with no faces. Verified in Maya
+    2027, a cube with 5 face-assigned materials read as 6 slots.
+    """
+    try:
+        candidates = set(cmds.listConnections(shape, type="shadingEngine") or [])
+    except (RuntimeError, TypeError, ValueError):
+        return set()
+    own = set(cmds.ls(shape, long=True) or [])
+    own.update(cmds.listRelatives(shape, parent=True, fullPath=True) or [])
+    used = set()
+    for engine in candidates:
+        members = cmds.sets(engine, query=True) or []
+        if not members:
+            continue
+        nodes = cmds.ls(members, objectsOnly=True, long=True) or []
+        if own.intersection(nodes):
+            used.add(engine)
+    return used
+
+
 def material_slots(transform: str) -> int:
     engines: set[str] = set()
     for shape in mesh_shapes(transform):
-        try:
-            engines.update(cmds.listConnections(shape, type="shadingEngine") or [])
-        except (RuntimeError, TypeError, ValueError):
-            continue
+        engines.update(shading_engines_used(shape))
     return len(engines)
 
 

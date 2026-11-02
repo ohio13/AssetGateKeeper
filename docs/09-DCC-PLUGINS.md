@@ -165,7 +165,7 @@ purpose: no `.ms` rollouts to maintain, nothing to break across Max versions.
 * bitmap sizes from Standard (diffuse/bump/specular) and Physical (base colour,
   bump, roughness, metalness, normal) map slots.
 
-Not yet verified inside 3ds Max - see the test plan before relying on it.
+Verified in 3ds Max 2027.2 (Python 3.13.9) through `3dsmaxbatch.exe`, Nov 2026.
 
 ---
 

@@ -41,6 +41,20 @@ def _mesh_transforms(selection):
     return shapes
 
 
+def _engines_used(shape):
+    """Shading groups holding this shape or its faces; an empty but still
+    connected initialShadingGroup (left behind by per-face assignment) is
+    not a material. Verified in Maya 2027: 5 face materials read as 6."""
+    own = set(cmds.ls(shape, long=True) or [])
+    own.update(cmds.listRelatives(shape, parent=True, fullPath=True) or [])
+    used = []
+    for engine in set(cmds.listConnections(shape, type="shadingEngine") or []):
+        members = cmds.sets(engine, query=True) or []
+        if members and own.intersection(cmds.ls(members, objectsOnly=True, long=True) or []):
+            used.append(engine)
+    return used
+
+
 def scene_facts(selection=None):
     selection = selection or (cmds.ls(selection=True) or cmds.ls(type="mesh"))
     shapes = _mesh_transforms(selection)
@@ -51,7 +65,7 @@ def scene_facts(selection=None):
         faces = cmds.polyEvaluate(shape, face=True) or 0
         triangles += cmds.polyEvaluate(shape, triangle=True) or faces * 2
         vertices += cmds.polyEvaluate(shape, vertex=True) or 0
-        for engine in cmds.listConnections(shape, type="shadingEngine") or []:
+        for engine in _engines_used(shape):
             for material in cmds.ls(cmds.listConnections(engine + ".surfaceShader"),
                                     materials=True) or []:
                 materials.add(material)
