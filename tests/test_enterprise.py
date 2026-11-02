@@ -257,11 +257,25 @@ expect_raises("an HMAC token cannot masquerade as RSA (algorithm confusion)",
               auth.AuthError,
               lambda: auth.decode_jwt(make_token({"sub": "u", "exp": now + 60}, alg="RS256"),
                                       hmac_secret=secret), "no public key")
-expect_raises("RS256 without the cryptography package fails closed with a fix",
-              auth.AuthError,
-              lambda: auth.decode_jwt(make_token({"sub": "u", "exp": now + 60}, alg="RS256"),
-                                      public_key_pem=b"-----BEGIN PUBLIC KEY-----\n-----END PUBLIC KEY-----\n"),
-              "cryptography")
+# Hide the package whether or not this machine has it: the check is about the
+# message a studio sees without it, and used to fail wherever it was installed.
+_hidden = {name: None for name in ("cryptography", "cryptography.exceptions",
+                                   "cryptography.hazmat", "cryptography.hazmat.primitives",
+                                   "cryptography.hazmat.primitives.asymmetric")}
+_saved = {name: sys.modules.get(name) for name in _hidden}
+sys.modules.update(_hidden)
+try:
+    expect_raises("RS256 without the cryptography package fails closed with a fix",
+                  auth.AuthError,
+                  lambda: auth.decode_jwt(make_token({"sub": "u", "exp": now + 60}, alg="RS256"),
+                                          public_key_pem=b"-----BEGIN PUBLIC KEY-----\n-----END PUBLIC KEY-----\n"),
+                  "cryptography")
+finally:
+    for _name, _module in _saved.items():
+        if _module is None:
+            sys.modules.pop(_name, None)
+        else:
+            sys.modules[_name] = _module
 
 oidc_config = econfig.OIDCConfig(issuer="https://idp", client_id="agk",
                                  allowed_domains=("studio.example",))

@@ -2,6 +2,7 @@
 import hashlib
 import importlib.util
 import json
+import re
 import logging
 import os
 import shutil
@@ -2347,6 +2348,32 @@ expect("--max-materials 5 lets the 4-slot mesh through",
 expect("--max-materials 1 fails it",
        any("FAILED" in line and "crate_4mtl.obj" in line
            for line in strict.splitlines()), strict[-300:])
+
+print("the certification runner")
+_cert_spec = importlib.util.spec_from_file_location("agk_certify", ROOT_MODULE_DIR / "tools" / "certify.py")
+certify = importlib.util.module_from_spec(_cert_spec)
+_cert_spec.loader.exec_module(certify)
+_cert_dir = scratch / "certify"
+_cert_dir.mkdir(exist_ok=True)
+(_cert_dir / "good.py").write_text("print('  ok   one')\nprint('FAILURES: none')\n", encoding="utf-8")
+(_cert_dir / "crash.py").write_text("print('  ok   one')\nraise SystemExit(0)\n", encoding="utf-8")
+(_cert_dir / "bad.py").write_text("print('  FAIL two')\nprint(\"FAILURES: ['two']\")\nraise SystemExit(1)\n",
+                                  encoding="utf-8")
+_good = certify.run_suite("good", str(_cert_dir / "good.py"), (), 60)
+_crash = certify.run_suite("crash", str(_cert_dir / "crash.py"), (), 60)
+_bad = certify.run_suite("bad", str(_cert_dir / "bad.py"), (), 60)
+expect("certify counts a clean suite as a pass", _good["ok"] and _good["passed"] == 1, str(_good))
+expect("... a suite that stops before its summary as a failure, even with exit 0",
+       not _crash["ok"], str(_crash))
+expect("... and a failing check as a failure, with its name", not _bad["ok"]
+       and _bad["failures"] == ["two"], str(_bad["failures"]))
+_report = certify.report([_good, _bad], _cert_dir, None)
+expect("the report says FAILED and lists the failure",
+       "**Result: FAILED**" in _report.read_text(encoding="utf-8")
+       and "* two" in _report.read_text(encoding="utf-8"))
+expect("no control characters in the README (a stray \\a once hid in it)",
+       not re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]",
+                     (ROOT_MODULE_DIR / "README.md").read_text(encoding="utf-8")))
 
 print("README and the CLI agree")
 readme = Path(__file__).resolve().parent.parent / "README.md"

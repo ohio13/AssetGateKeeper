@@ -61,3 +61,6 @@ htmlcov/
 Thumbs.db
 .idea/
 .vscode/
+
+# certification reports (tools/certify.py)
+certification/

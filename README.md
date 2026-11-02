@@ -943,54 +943,53 @@ No changes are needed in the watcher, the reporter, or the queue. Rules are data
 ## Testing
 
 Four layers, because unit tests, networks, browser UIs and DCC reality fail
-in different ways.
+in different ways. One command runs all of them and writes a dated report:
+
 ```bash
-# 1. rules, config, healing, VCS hooks, presets - 396 assertions, no network, no GPU
-python tests/gen_test_assets.py
-python tests/test_gatekeeper.py
-
-# 2. the servers - 203 assertions over real sockets, ephemeral ports
-python tests/test_server.py
-
-# 3. the workstation UI - 135 assertions (LOD, collision, notes, rules panel, unmeasured stats)
-python tests/test_workstation.py
-
-# 4. the admin surface - 123 assertions (accounts, roles, CSRF, audit, rescan)
-python tests/test_admin.py
-
-# 5. enterprise - 218 assertions, no server, no IdP, no DCC install
-#    (config, RBAC, tokens, SQL translation, remote validation, pre-flight)
-python tests/test_enterprise.py
-
-# 6. the server on both backends - 59 assertions, one driver double
-python tests/test_analytics.py
-
-# 7. DCC sweep - local only, NOT part of CI: needs Blender/Houdini/Unreal
-#    installed. Runs each in headless mode with a hard 15s timeout.
-python tests/test_dcc_integration.py
-
-# 5. real exporter -> real file -> real verdict (headless Blender / Unreal)
-python tests/run_headless_integration.py
+python tools/certify.py            # every suite CI runs; certification/<date>-<commit>.md
+python tools/certify.py --quick    # gate + workstation unit suites only
+python tools/certify.py --dcc      # also the local DCC sweep (Blender/Houdini/Unreal installed)
 ```
+
+Or one at a time (each ends with `FAILURES: none`):
+
+```bash
+python tests/gen_test_assets.py           # the fixture corpus, first
+python tests/test_gatekeeper.py           # rules, tags, healing, backups/undo, hooks, audits, CLI
+python tests/test_formats.py              # FBX, glTF, OBJ, textures, DCC plugin metadata
+python tests/test_server.py               # AssetHealth: ingest, tenants, alerts, planner, SSE
+python tests/test_admin.py                # accounts, roles, CSRF, audit, rescan
+python tests/test_enterprise.py           # config, RBAC, OIDC/SAML, SQL translation, migrations
+python tests/test_analytics.py            # trends on SQLite and (simulated) PostgreSQL
+python tests/test_workstation.py          # Art Workstation: storage, FBX, LODs, collision, heal
+python tests/test_viewer_browser.py       # the real viewer page in Chromium (needs playwright)
+python tests/run_headless_integration.py --synthetic   # a real export through the real gate
+python tests/test_dcc_integration.py      # local only: real Blender/Houdini/Unreal, headless
+```
+
+Check counts change with every release; `certify.py` prints the current ones.
 
 ```
 asset_gatekeeper.py              the tool (single file)
 healer.py                        opt-in repair engine (only loaded with --auto-heal)
 asset_gatekeeper.example.toml    rules.toml template
-pyproject.toml  setup.py         pip-installable (sset-gatekeeper command)
+pyproject.toml  setup.py         pip-installable (asset-gatekeeper command)
 ASSET_DIFF_ENGINE_SPEC.md        design for the next subsystem (not implemented)
 README.md  LICENSE  .gitignore  .gitattributes
 .github/workflows/
-  ci.yml                         every push/PR: lint + 396 assertions + integration
+  ci.yml                         every push/PR: lint, every suite on Ubuntu + Windows, Chromium
   dcc-nightly.yml                nightly Blender export through the real watcher
 tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
-  test_gatekeeper.py             396 assertions: rules, tags, healing, hooks, audits, packaging
-  test_server.py                 203 assertions: tenancy, ingest, alerts, throttle, SSE
-  test_workstation.py            135 assertions: storage, LODs, collision export, notes, refs, SSE, report
-  test_enterprise.py             218 assertions: config, RBAC, OIDC/SAML, store, remote, pre-flight, migrations, audit, failover
-  test_analytics.py               59 assertions: storage seam, /analytics, SQLite vs PostgreSQL parity
-  test_dcc_integration.py         45 assertions: Blender/Houdini/Unreal headless, timeout-guarded
+  test_gatekeeper.py             rules, tags, healing, backups/undo, hooks, audits, packaging
+  test_formats.py                FBX, glTF, OBJ, textures, DCC plugin metadata
+  test_server.py                 tenancy, ingest, alerts, throttle, SSE
+  test_admin.py                  accounts, roles, CSRF, audit, rescan
+  test_workstation.py            storage, FBX preview, LODs, collision, notes, heal, security
+  test_viewer_browser.py         the viewer page in Chromium (playwright)
+  test_enterprise.py             config, RBAC, OIDC/SAML, store, remote, pre-flight, migrations, audit, failover
+  test_analytics.py              storage seam, /analytics, SQLite vs PostgreSQL parity
+  test_dcc_integration.py        Blender/Houdini/Unreal headless, timeout-guarded (local only)
   run_headless_integration.py    drives headless DCC exports through the gate
 enterprise/                     optional: PostgreSQL, SSO, RBAC, VCS, remote
   config.py store.py            typed config, pooled PostgreSQL adapter
@@ -1001,7 +1000,7 @@ docs/ENTERPRISE.md              deployment and security guide
 server/
   asset_health_server.py         dashboard + planner + ingest, stdlib only
   art_workstation_server.py     3D viewer, LODs, collision, notes
-  static/                       viewer.html, viewer.js, app.css (Three.js from CDN)
+  static/                       viewer.html, viewer.js, app.css (Three.js r160 vendored)
 engine/
   lod_manager.py                vertex-cluster decimator (stdlib only)
   dashboard.png                  what /dashboard looks like (README)
