@@ -372,6 +372,20 @@ def check_sop_counting() -> None:
         def prims(self):
             return self._prims
 
+        def findPrimAttrib(self, name):
+            return None
+
+        def findVertexAttrib(self, name):
+            return None
+
+        def findPointAttrib(self, name):
+            return None
+
+        def pointAttribs(self):
+            return ()
+
+        vertexAttribs = primAttribs = pointAttribs
+
     quads = FakeGeometry([prim("Polygon") for _ in range(6)])
     print("\nSOP counting (no DCC needed)")
     expect("a quad is two triangles", module.triangle_count(quads) == 12,
@@ -411,6 +425,18 @@ def check_sop_counting() -> None:
            str(module.degenerate_prim_count(guides)))
     expect("a closed polygon with isClosed() still counts",
            module.triangle_count(FakeGeometry([ClosedPolygon("Polygon")])) == 2)
+
+    import types
+    budget = types.SimpleNamespace(max_triangles=50_000, max_material_slots=3,
+                                   max_uv_channels=4, allow_degenerate=True,
+                                   degenerate_epsilon=1e-9)
+    if True:
+        expect("a curves-only stream (hair guides) is not flagged as empty",
+               not any("empty" in p for p in module.analyse(guides, budget)),
+               str(module.analyse(guides, budget)))
+        expect("a stream with nothing in it is still flagged",
+               any("empty" in p for p in module.analyse(FakeGeometry([]), budget)),
+               str(module.analyse(FakeGeometry([]), budget)))
 
     class FakeNode:
         def __init__(self, methods):

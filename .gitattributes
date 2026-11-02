@@ -23,6 +23,9 @@
 *.glb    binary
 *.exr    binary
 *.zip    binary
+# ASCII FBX is text, but a fixture must stay byte-for-byte what the exporter wrote.
+*.fbx    binary
+*.tga    binary
 
 # Git's own housekeeping files.
 .gitattributes text eol=lf

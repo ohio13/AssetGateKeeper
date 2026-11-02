@@ -212,6 +212,18 @@ def degenerate_prim_count(geometry, epsilon: float = 1e-9) -> int:
     return count
 
 
+def _element_count(geometry) -> int:
+    total = 0
+    for accessor in ("prims", "points"):
+        getter = getattr(geometry, accessor, None)
+        if callable(getter):
+            try:
+                total += len(getter())
+            except Exception:                          # pragma: no cover
+                continue
+    return total
+
+
 def analyse(geometry, budget) -> list[str]:
     problems: list[str] = []
 
@@ -223,7 +235,11 @@ def analyse(geometry, budget) -> list[str]:
             f"{len(uncounted)} packed primitive(s) could not be expanded, so the "
             "triangle count is not trustworthy")
     if triangles == 0 and not uncounted:
-        problems.append("geometry contains no polygons (empty stream)")
+        # Curves (hair guides), particles and volumes are legitimate streams with
+        # no faces; warning on them taught artists to ignore the badge. Only a
+        # stream with nothing in it at all is worth flagging.
+        if _element_count(geometry) == 0:
+            problems.append("geometry is empty (no points or primitives)")
     elif triangles > budget.max_triangles:
         problems.append(f"{triangles:,} triangles exceeds the {budget.max_triangles:,} budget "
                         f"(+{triangles - budget.max_triangles:,})")

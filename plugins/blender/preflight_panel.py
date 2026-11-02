@@ -1,7 +1,10 @@
 """Blender pre-flight panel.
 
-Install: Edit > Preferences > Add-ons > Install... > this file. It appears in the
-3D Viewport sidebar (N panel) as "Asset Gatekeeper".
+Install: Edit > Preferences > Add-ons > Install... > this file, tick
+"AssetGatekeeper Pre-flight". It appears in the 3D Viewport sidebar (N panel) as
+"Asset Gatekeeper". Set ``ASSETGATEKEEPER_HOME`` to the AssetGatekeeper folder:
+an installed add-on is copied into Blender's add-ons folder, away from the
+engine it needs.
 
 It reads the *scene*, not an export: polygon and material counts come from the
 evaluated depsgraph, so a modifier stack, a subdivision surface or a geo-nodes
@@ -11,24 +14,48 @@ after the submit.
 """
 import os
 import sys
+import textwrap
 
 import bpy
 
-# Site-packages or the repository root: whichever holds the shared engine.
+# Without bl_info Blender copies the file on "Install..." and then never lists
+# it, so there is nothing to tick (verified in Blender 4.0.2).
+bl_info = {
+    "name": "AssetGatekeeper Pre-flight",
+    "author": "AssetGatekeeper contributors",
+    "version": (1, 1, 0),
+    "blender": (3, 6, 0),
+    "location": "View3D > Sidebar > Asset Gatekeeper",
+    "description": "Live triangle/material/texture budget for the selection, before export",
+    "category": "Pipeline",
+}
+
+ENV_HOME = "ASSETGATEKEEPER_HOME"
+
+# The repository (running from a checkout) or ASSETGATEKEEPER_HOME (installed:
+# Blender copies the add-on into its own folder, where the engine is not). The
+# installed copy used to fail on enable with "No module named 'preflight_core'".
 _HERE = os.path.dirname(os.path.abspath(__file__))
-for _candidate in (_HERE,
-                   os.path.dirname(_HERE),
-                   os.path.dirname(os.path.dirname(_HERE))):
+_candidates = [_HERE, os.path.dirname(_HERE), os.path.dirname(os.path.dirname(_HERE))]
+if os.environ.get(ENV_HOME):
+    _candidates.insert(0, os.environ[ENV_HOME])
+for _candidate in _candidates:
     if os.path.isdir(os.path.join(_candidate, "plugins")) or \
             os.path.isfile(os.path.join(_candidate, "asset_gatekeeper.py")):
         if _candidate not in sys.path:
             sys.path.insert(0, _candidate)
         break
 
+core = None
+_IMPORT_PROBLEM = ""
 try:
     from plugins import preflight_core as core
 except ImportError:                                   # pragma: no cover - addon path
-    import preflight_core as core                     # type: ignore[no-redef]
+    try:
+        import preflight_core as core                 # type: ignore[no-redef]
+    except ImportError as _exc:
+        _IMPORT_PROBLEM = (f"AssetGatekeeper not found ({_exc}). Set {ENV_HOME} to the "
+                           "AssetGatekeeper folder and restart Blender.")
 
 
 def scene_facts():
@@ -53,12 +80,10 @@ def scene_facts():
         evaluated = obj.evaluated_get(depsgraph)
         mesh = evaluated.to_mesh()
         try:
-            triangles += len(mesh.loop_triangles) or sum(
-                max(0, len(poly.vertices) - 2) for poly in mesh.polygons)
+            count = len(mesh.polygons)
+            triangles += len(mesh.loop_triangles) or (len(mesh.loops) - 2 * count)
             vertices += len(mesh.vertices)
-            for polygon in mesh.polygons:
-                if polygon.area <= 1e-9:
-                    degenerate += 1
+            degenerate += _zero_area_polygons(mesh, count)
         finally:
             evaluated.to_mesh_clear()
         for slot in obj.material_slots:
@@ -76,6 +101,21 @@ def scene_facts():
                 seen.add(image.name)
                 textures.append((image.name, image.size[0], image.size[1]))
     return triangles, vertices, len(material_names), textures, degenerate
+
+
+def _zero_area_polygons(mesh, count) -> int:
+    """Zero-area faces, read in one call (a Python loop over 80k faces took
+    seconds and ran on every sidebar redraw)."""
+    if not count:
+        return 0
+    try:
+        import numpy as np
+
+        areas = np.empty(count, dtype=np.float32)
+        mesh.polygons.foreach_get("area", areas)
+        return int(np.count_nonzero(areas <= 1e-9))
+    except ImportError:                                # pragma: no cover
+        return sum(1 for polygon in mesh.polygons if polygon.area <= 1e-9)
 
 
 def _asset_folder():
@@ -104,6 +144,32 @@ def run_preflight(rules_path=None, preset=None):
     return report
 
 
+# The sidebar redraws on every mouse move over it. Measuring there re-evaluated
+# the whole selection each time; now it is measured when the scene changes.
+_cache = {"report": None, "stale": True}
+
+
+def _mark_stale(*_args) -> None:
+    _cache["stale"] = True
+
+
+def cached_report():
+    if _cache["stale"] or _cache["report"] is None:
+        _cache["report"] = run_preflight()
+        _cache["stale"] = False
+    return _cache["report"]
+
+
+def _wrapped(layout, text, context, icon="NONE", alert=False):
+    region = getattr(context, "region", None)
+    width = getattr(region, "width", 300) or 300
+    per_line = max(14, int(max(60.0, width - 60.0) / 7.0))
+    for index, line in enumerate(textwrap.wrap(text, per_line) or [""]):
+        row = layout.row()
+        row.alert = alert
+        row.label(text=line, icon=icon if index == 0 else "BLANK1")
+
+
 class AGK_OT_preflight(bpy.types.Operator):
     """Check the selection against the studio budget"""
     bl_idname = "agk.preflight"
@@ -111,7 +177,11 @@ class AGK_OT_preflight(bpy.types.Operator):
     bl_options = {"REGISTER"}
 
     def execute(self, context):
-        report = run_preflight()
+        if core is None:
+            self.report({"ERROR"}, _IMPORT_PROBLEM)
+            return {"CANCELLED"}
+        _mark_stale()
+        report = cached_report()
         for line in report.as_text().splitlines():
             self.report({"INFO"}, line)
         return {"FINISHED"}
@@ -125,20 +195,22 @@ class AGK_PT_preflight(bpy.types.Panel):
 
     def draw(self, context):
         layout = self.layout
-        report = run_preflight()
+        if core is None:
+            _wrapped(layout, _IMPORT_PROBLEM, context, icon="ERROR", alert=True)
+            return
+        report = cached_report()
         box = layout.box()
-        box.label(text=report.headline(),
-                  icon="CHECKMARK" if report.ok else "ERROR")
+        _wrapped(box, report.headline(), context,
+                 icon="CHECKMARK" if report.ok else "ERROR", alert=not report.ok)
         if report.triangles is not None:
-            box.label(text=f"{report.triangles:,} tris   "
-                           f"{report.materials or 0} materials")
+            _wrapped(box, f"{report.triangles:,} tris   {report.materials or 0} materials",
+                     context)
         if report.budget_summary:
-            box.label(text=report.budget_summary)
+            _wrapped(box, report.budget_summary, context)
         for finding in report.sorted_findings()[:6]:
-            row = box.row()
-            row.alert = finding.severity == "error"
-            row.label(text=finding.message[:64],
-                      icon="ERROR" if finding.severity == "error" else "INFO")
+            _wrapped(box, finding.message, context,
+                     icon="ERROR" if finding.severity == "error" else "INFO",
+                     alert=finding.severity == "error")
         layout.operator("agk.preflight", icon="PLAY")
 
 
@@ -148,9 +220,14 @@ CLASSES = (AGK_OT_preflight, AGK_PT_preflight)
 def register():
     for cls in CLASSES:
         bpy.utils.register_class(cls)
+    if _mark_stale not in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.append(_mark_stale)
+    _mark_stale()
 
 
 def unregister():
+    if _mark_stale in bpy.app.handlers.depsgraph_update_post:
+        bpy.app.handlers.depsgraph_update_post.remove(_mark_stale)
     for cls in reversed(CLASSES):
         bpy.utils.unregister_class(cls)
 

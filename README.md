@@ -56,8 +56,10 @@ Two problems, one line, told to the artist *while they still have the export dia
 | `.fbx` `.obj` `.gltf` `.glb` | UV channels | `4` | Extra TEXCOORD sets cost memory in every shader permutation; engines cap at 4–8 |
 | `.fbx` `.obj` `.gltf` `.glb` | Degenerate triangles | `0` | Zero-area faces poison Nanite clusters and ray-tracing BVHs, invisibly |
 
-FBX is read directly (binary FBX 7.1+, the default from Blender, Maya, 3ds Max,
-Houdini and Unreal) - no Autodesk SDK. Its texture paths are checked the way an
+FBX is read directly (binary or ASCII FBX 7.1+, from Blender, Maya, 3ds Max,
+Houdini and Unreal) - no Autodesk SDK. It counts what an engine imports: Unreal
+collision meshes (`UCX_`, `UBX_`, `USP_`, `UCP_`) and LOD1+ of an LOD group are
+left out. Its texture paths are checked the way an
 engine resolves them: the relative path, the stored absolute path, then the bare
 file name next to the `.fbx`; embedded textures are not external references.
 
@@ -1237,7 +1239,7 @@ not allowed to guess: an unparseable file is `UNKNOWN` with the error attached.
 ## Design limits (read before you file the bug)
 
 - **Triangles are topology, not render cost.** Instanced scenes are counted once per unique geometry. UV *channel* count, per-vertex bone influences and degenerate faces are measured (see `[mesh]` in `rules.toml`); draw calls, vertex counts and UV seams are not — yet.
-- **FBX: binary 7.1+ only.** ASCII FBX and pre-2011 files fail with "re-export as binary" rather than a guess. Blend shapes do not add triangles; shared meshes count once.
+- **FBX: 7.1+ (binary or ASCII).** Pre-2011 files fail with a re-export hint rather than a guess. Blend shapes do not add triangles; shared meshes count once; collision meshes and LOD1+ are not counted.
 - **Healing touches PNG only.** TGA/JPG are gated but never rewritten, and a texture that a binary `.fbx`/`.glb` points at is never renamed (those paths cannot be rewritten safely).
 - **Material slots are per file, not per object.** A merged export with three materials across forty objects reads as three slots. Correct for draw calls; not a per-object budget.
 - **Stability is a heuristic.** A file that pauses longer than the quiet window mid-write can still be inspected early. Prefer atomic writes (write to `.tmp`, then rename) in your exporter and this problem disappears entirely.

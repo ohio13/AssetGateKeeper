@@ -7,11 +7,19 @@ several verdicts are deliberately stricter and some pipelines will turn red.
 ## New
 
 * **FBX is measured.** Triangles, material slots, UV sets, bone influences,
-  degenerate faces and texture references, read straight from binary FBX
-  (7.1+) with no Autodesk SDK. Verified against Blender's own counts on 13
-  exported scenes (`tests/fixtures/fbx`); hostile files (truncated, decompression
-  bombs, 3,000-deep nesting) fail cleanly. ASCII and pre-2011 FBX are refused
-  with a re-export hint.
+  degenerate faces and texture references, read straight from binary **and
+  ASCII** FBX (7.1+) with no Autodesk SDK. Verified against Blender's own counts
+  on 13 exported scenes (`tests/fixtures/fbx`) and Unreal's on files Unreal
+  exported as FBX 7.1, 7.3 and 7.7, ASCII and binary (`tests/fixtures/fbx_ue`);
+  hostile files (truncated, decompression bombs, 3,000-deep nesting, broken
+  ASCII arrays) fail cleanly. Pre-2011 FBX is refused with a re-export hint.
+* **FBX counts what the engine imports.** Unreal collision hulls (`UCX_`,
+  `UBX_`, `USP_`, `UCP_`) are not render triangles, and only LOD0 of an LOD group
+  counts. Before this, Unreal's own export of a 768-triangle mesh read as 828.
+* **Unreal drag-and-drop imports are rejected, not just warned about.** An
+  over-budget mesh is moved to `/Game/_AssetGatekeeper_Rejected` (or deleted, or
+  left with a warning: `ASSETGATEKEEPER_UNREAL_ON_FAIL`). An asset other assets
+  already reference is never moved.
 * **TGA and JPG textures** get the same checks as PNG (size, power of two,
   naming, PBR range, real format matches the extension).
 * **Textures are fully decoded.** A truncated PNG/JPG/TGA used to pass on its
@@ -43,6 +51,22 @@ several verdicts are deliberately stricter and some pipelines will turn red.
     pipeline launcher) inherited its `PYTHONHOME`, and every gated import -
     good assets included - failed "SRE module mismatch". The gate's interpreter
     now gets a cleaned environment.
+* **Second real-editor round** (Houdini 22, Unreal 5.3.2, Blender 4.0.2):
+  * Unreal `init_unreal.py`: both import hooks stopped firing after the first
+    asset was deleted or moved, so drag-and-drop went unchecked within minutes.
+    The hooks are now held and re-attached by a watchdog if the engine drops them.
+  * Unreal `init_unreal.py` on an unconfigured machine logged "engine not found"
+    and then called every mesh, 240k triangles included, "within budget". It now
+    says "NOT checked" and tells the artist once, on screen.
+  * Blender `preflight_panel.py` could not be installed as documented: no
+    `bl_info` (never listed in Add-ons) and, once copied into Blender's add-ons
+    folder, "No module named 'preflight_core'". It now installs, finds the
+    engine through `ASSETGATEKEEPER_HOME`, and measures only when the scene
+    changes (a 159k-triangle selection took 0.86 s on every sidebar redraw).
+  * Blender `addon.py`: the same inherited-`PYTHONHOME` failure as Unreal; and
+    the sidebar cut every reason to "159,200 tri... (+109,200)". Text now wraps.
+  * Houdini SOP: a curves-only node (hair guides) no longer warns "no polygons";
+    only a stream with nothing in it does.
 
 ---
 

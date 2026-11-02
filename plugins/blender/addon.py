@@ -27,7 +27,7 @@ The engine script path defaults to `$ASSETGATEKEEPER_HOME/asset_gatekeeper.py`.
 bl_info = {
     "name": "AssetGatekeeper",
     "author": "AssetGatekeeper contributors",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar > AssetGatekeeper",
     "description": "Validate the active selection against the asset budget before exporting",
@@ -100,6 +100,39 @@ def effective_rules_path(settings) -> str:
     return settings.rules_path or default_rules_path() or project_rules_path()
 
 
+_INHERITED_PYTHON_VARS = ("PYTHONHOME", "PYTHONEXECUTABLE", "PYTHONSTARTUP",
+                          "__PYVENV_LAUNCHER__")
+
+
+def child_environment(environ=None) -> dict:
+    """The environment for the engine's interpreter.
+
+    Verified in Blender 4.0.2: with Blender started by another application that
+    had set PYTHONHOME (a pipeline launcher, or another DCC - here Houdini 22),
+    the engine's Python loaded that application's standard library and every
+    check failed with an engine traceback. Interpreter variables, and PYTHONPATH
+    entries inside Blender's own Python, are dropped; the studio's own
+    PYTHONPATH entries are kept.
+    """
+    env = dict(os.environ if environ is None else environ)
+    for key in _INHERITED_PYTHON_VARS:
+        env.pop(key, None)
+    roots = {os.path.normcase(os.path.abspath(root))
+             for root in (sys.prefix, sys.base_prefix, sys.exec_prefix) if root}
+
+    def inside(entry: str) -> bool:
+        candidate = os.path.normcase(os.path.abspath(entry))
+        return any(candidate == root or candidate.startswith(root + os.sep) for root in roots)
+
+    kept = [entry for entry in env.get("PYTHONPATH", "").split(os.pathsep)
+            if entry and not inside(entry)]
+    if kept:
+        env["PYTHONPATH"] = os.pathsep.join(kept)
+    else:
+        env.pop("PYTHONPATH", None)
+    return env
+
+
 def run_engine(asset_path: str, python_exe: str, engine_path: str,
                rules_path: str = "", timeout: float = 180.0) -> tuple[dict | None, str]:
     """Run the engine over one file and return (verdict dict, error text)."""
@@ -109,7 +142,8 @@ def run_engine(asset_path: str, python_exe: str, engine_path: str,
 
     try:
         completed = subprocess.run(command, capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace", timeout=timeout)
+                                   encoding="utf-8", errors="replace", timeout=timeout,
+                                   env=child_environment())
     except FileNotFoundError:
         return None, f"interpreter not found: {python_exe}"
     except subprocess.TimeoutExpired:
@@ -216,6 +250,31 @@ class AGK_OT_check_selection(bpy.types.Operator):
 # Panel
 # --------------------------------------------------------------------------- #
 
+def wrap_text(text: str, width_px: float, ui_scale: float = 1.0) -> list:
+    """Split a label into lines that fit the sidebar.
+
+    Blender labels never wrap; they are cut with "..." in the middle. In a
+    default-width sidebar (Blender 4.0.2) "159,200 triangles exceeds the 50,000
+    budget (+109,200)" showed as "159,200 tri... (+109,200)" - the reason was
+    the part that disappeared.
+    """
+    import textwrap
+
+    usable = max(60.0, width_px - 60.0 * ui_scale)   # icon, margins, panel border
+    per_line = max(14, int(usable / (7.0 * ui_scale)))
+    return textwrap.wrap(text, per_line) or [""]
+
+
+def _wrapped_label(layout, text: str, context, icon: str = "NONE", alert: bool = False) -> None:
+    region = getattr(context, "region", None)
+    width = getattr(region, "width", 300) or 300
+    scale = getattr(getattr(context.preferences, "system", None), "ui_scale", 1.0) or 1.0
+    for index, line in enumerate(wrap_text(text, width, scale)):
+        row = layout.row()
+        row.alert = alert
+        row.label(text=line, icon=icon if index == 0 else "BLANK1")
+
+
 class AGK_PT_panel(bpy.types.Panel):
     bl_label = "AssetGatekeeper"
     bl_space_type = "VIEW_3D"
@@ -241,31 +300,32 @@ class AGK_PT_panel(bpy.types.Panel):
                     row = box.row()
                     row.label(text="PASSED", icon="CHECKMARK")
                     if report.get("metric"):
-                        box.label(text=report["metric"])
+                        _wrapped_label(box, report["metric"], context)
                 else:
                     # `alert` is what tints a sub-layout red in Blender's theme.
                     column = box.column(align=True)
                     column.alert = True
                     column.label(text="FAILED", icon="CANCEL")
                     for problem in report.get("problems", []):
-                        sub = column.row()
-                        sub.alert = True
-                        sub.label(text=problem, icon="ERROR")
+                        _wrapped_label(column, problem, context, icon="ERROR", alert=True)
                     if report.get("metric"):
-                        box.label(text=f"measured: {report['metric']}")
+                        _wrapped_label(box, f"measured: {report['metric']}", context)
 
         column = layout.column(align=True)
         column.label(text="Engine")
-        column.prop(settings, "python_exe")
-        column.prop(settings, "engine_path")
-        column.prop(settings, "rules_path")
+        # Labels above the fields: beside them, the sidebar cut every one of
+        # them to "Engin..." (Blender 4.0.2, default width).
+        for prop, label in (("python_exe", "Engine python"), ("engine_path", "Engine script"),
+                            ("rules_path", "rules.toml")):
+            column.label(text=label)
+            column.prop(settings, prop, text="")
         active_rules = effective_rules_path(settings)
         if active_rules:
-            column.label(text="budget: " + os.path.basename(os.path.dirname(active_rules))
-                              + "/" + os.path.basename(active_rules), icon="FILE")
+            _wrapped_label(column, "budget: " + os.path.basename(os.path.dirname(active_rules))
+                           + "/" + os.path.basename(active_rules), context, icon="FILE")
         else:
-            column.label(text="budget: shipped defaults (no rules.toml found)",
-                         icon="INFO")
+            _wrapped_label(column, "budget: shipped defaults (no rules.toml found)",
+                           context, icon="INFO")
 
 
 CLASSES = (AGK_Settings, AGK_OT_check_selection, AGK_PT_panel)

@@ -49,10 +49,18 @@ the panel knows which folder was meant.
 
 ### Install the panel
 
-1. `Edit > Preferences > Add-ons > Install...`
-2. Choose `<AGK>/plugins/blender/preflight_panel.py`
-3. Tick **Asset Gatekeeper**
-4. The panel appears in the 3D Viewport sidebar (`N`) as **Asset Gatekeeper**
+1. Set the environment variable `ASSETGATEKEEPER_HOME` to the AssetGatekeeper
+   folder (Blender copies an installed add-on into its own folder, away from the
+   engine). Restart Blender after setting it.
+2. `Edit > Preferences > Add-ons > Install...`
+3. Choose `<AGK>/plugins/blender/preflight_panel.py`
+4. Tick **AssetGatekeeper Pre-flight**
+5. The panel appears in the 3D Viewport sidebar (`N`) as **Asset Gatekeeper**.
+   If it shows "AssetGatekeeper not found", step 1 is missing.
+
+(Verified in Blender 4.0.2, Nov 2026. `plugins/blender/addon.py` is the other
+panel: it exports the selection and runs the full gate on it - install it the
+same way, it appears as **AssetGatekeeper**.)
 
 The panel needs no restart and no build step. It reads:
 
@@ -242,6 +250,27 @@ p.show()             # or a modal dialog
   the same numbers the Statistics panel shows;
 * `static_materials` slots (draw calls).
 
+### Drag-and-drop imports (`init_unreal.py`)
+
+Put `init_unreal.py` in the project's `Content/Python` folder. It checks every
+StaticMesh after it is imported (triangles and material slots, LOD0) and, by
+default, **moves an over-budget mesh to `/Game/_AssetGatekeeper_Rejected`** on
+the next editor tick, with a dialog saying why. Python cannot cancel a native
+import, so this is reject-after-import; the mesh never stays where it was dropped.
+
+| `ASSETGATEKEEPER_UNREAL_ON_FAIL` | Over-budget drag-and-drop |
+| --- | --- |
+| `quarantine` (default) | moved to `/Game/_AssetGatekeeper_Rejected` |
+| `delete` | deleted |
+| `warn` | 1.0 behaviour: dialog only, the asset stays |
+
+A mesh that other assets already reference (a re-import over a placed mesh) is
+never moved or deleted; it gets the warning. The Output Log says
+`[AssetGatekeeper] import guard active` at startup, and
+`... within budget` / `rejecting ...` per import. On a machine where
+`ASSETGATEKEEPER_HOME` is not set it says `NOT checked` instead, and shows a
+dialog once.
+
 ### Blocking scripted imports (`import_gatekeeper.py`)
 
 `import_with_gatekeeper(tasks)` runs the gate on every task whose source is a
@@ -314,6 +343,8 @@ reaching `init_unreal.py`'s post-import warning. Unreal's own triangle counts
 | Houdini gate always fails with no verdict | `PYTHONHOME` leak (see above) | set `AGK_PYTHON`; the hook already strips the variables |
 | Unreal reports no Python module | Python Editor Script Plugin disabled | enable it and restart the editor |
 | Unreal blocks every import, "SRE module mismatch" | editor inherited another Python's `PYTHONHOME` (launched from a DCC or launcher) | fixed in 1.1.0 - the gate cleans its child environment; update `import_gatekeeper.py` |
+| Unreal log says "NOT checked (AssetGatekeeper is not configured...)" | `ASSETGATEKEEPER_HOME` not set for the editor | set it, restart the editor |
+| Unreal log says "import hooks had been dropped by the engine and were re-attached" | expected occasionally; the watchdog did its job | nothing; report it if it repeats every few seconds |
 | Unreal log says "import guard NOT active" | `on_asset_post_import` could not bind (engine signature changed) | drag-and-drop is unchecked; use `import_with_gatekeeper()` and report the engine version |
 | Unreal headless run hangs | editor waiting for a project or a splash | pass a `.uproject`, `-unattended -nopause -nosplash -NullRHI` |
 | Panel numbers differ from the gate | panel reads the scene, gate reads the export | that is expected; check the export settings, not the panel |

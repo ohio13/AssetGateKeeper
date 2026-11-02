@@ -1701,8 +1701,10 @@ def _geometries(scene: object) -> list:
 # facts the gate needs - polygon indices, vertex positions, UV layers, material
 # and skin connections, texture paths - are all directly in it.
 #
-# What is refused rather than guessed: ASCII FBX and files older than 7.1
-# (FBX 2011). Both get a message that says how to re-export.
+# ASCII FBX (7.1+) is read into the same record tree as binary, so every
+# measurement below is shared. What is refused rather than guessed: files older
+# than 7.1 (FBX 2011), whose geometry layout is different; they get a message
+# that says how to re-export.
 #
 # Hostile input is bounded: record offsets are checked against the file size,
 # nesting depth is capped, and every array is decompressed with an explicit
@@ -1751,10 +1753,8 @@ def parse_fbx_binary(data: bytes) -> "list[_FbxNode]":
     import zlib
 
     if not data.startswith(_FBX_MAGIC):
-        head = data[:256].lstrip()
-        if head.startswith(b";") or b"FBXHeaderExtension" in head:
-            raise AssetError("ASCII FBX is not supported; export it as binary FBX "
-                             "(the default in Blender, Maya, 3ds Max and Houdini)")
+        if _looks_like_ascii_fbx(data):
+            return parse_fbx_ascii(data)
         raise AssetError("not an FBX file (missing the binary FBX header)")
     if len(data) < 27:
         raise AssetError("truncated FBX header")
@@ -1852,6 +1852,168 @@ def parse_fbx_binary(data: bytes) -> "list[_FbxNode]":
     return nodes
 
 
+def _looks_like_ascii_fbx(data: bytes) -> bool:
+    head = data[:4096].lstrip(b"\xef\xbb\xbf \t\r\n")
+    return head.startswith(b";") or head.startswith(b"FBXHeaderExtension")
+
+
+# One token of ASCII FBX: a key ("Vertices:"), a string, a number, an array
+# length ("*24"), a brace, a comma, a newline, or a bare word (T, Y, W, ...).
+_FBX_ASCII_TOKEN = re.compile(
+    rb"""(?P<key>[A-Za-z_][A-Za-z0-9_|]*)[ \t]*:(?!:)"""
+    rb"""|(?P<string>"(?:[^"\\]|\\.)*")"""
+    rb"""|(?P<count>\*[0-9]+)"""
+    rb"""|(?P<number>[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)"""
+    rb"""|(?P<open>\{)|(?P<close>\})|(?P<comma>,)|(?P<newline>\n)"""
+    rb"""|(?P<comment>;[^\n]*)|(?P<space>[ \t\r]+)"""
+    rb"""|(?P<word>[A-Za-z_][A-Za-z0-9_]*)""")
+
+
+def parse_fbx_ascii(data: bytes) -> "list[_FbxNode]":
+    """The top-level records of an ASCII FBX file, as the binary parser returns them.
+
+    Arrays (``Vertices: *24 { a: ... }``) become the record's first property, as
+    in binary; their numbers are parsed in one pass (a 240k-triangle file has
+    millions of them). Same bounds as binary: depth, per-array and total size.
+    """
+    import base64
+
+    if np is None:                                       # pragma: no cover
+        raise AssetError("numpy is not installed; FBX cannot be analysed")
+    size = len(data)
+    budget = [FBX_MAX_TOTAL_BYTES]
+    position = [0]
+
+    def token():
+        while position[0] < size:
+            match = _FBX_ASCII_TOKEN.match(data, position[0])
+            if match is None:
+                snippet = data[position[0]:position[0] + 20]
+                raise AssetError(f"corrupt ASCII FBX near byte {position[0]:,} ({snippet!r})")
+            position[0] = match.end()
+            kind = match.lastgroup
+            if kind in ("space", "comment"):
+                continue
+            return kind, match.group(kind)
+        return "end", b""
+
+    def peek():
+        saved = position[0]
+        result = token()
+        position[0] = saved
+        return result
+
+    def value(kind, raw):
+        if kind == "string":
+            return raw[1:-1].decode("utf-8", "replace")
+        if kind == "number":
+            text = raw.decode("ascii")
+            if any(mark in text for mark in ".eE"):
+                return float(text)
+            return int(text)
+        return raw.decode("ascii", "replace")          # bare word: T, Y, W, ...
+
+    def read_array(count: int):
+        # "{" "a:" numbers "}" - the numbers are read in one go.
+        kind, _ = token()
+        if kind != "open":
+            raise AssetError("corrupt ASCII FBX array (missing '{')")
+        kind, raw = token()
+        while kind == "newline":
+            kind, raw = token()
+        if kind == "close":
+            return np.zeros(0)
+        if kind != "key" or raw.split(b":")[0].strip() != b"a":
+            raise AssetError("corrupt ASCII FBX array (missing 'a:')")
+        end = data.find(b"}", position[0])
+        if end < 0:
+            raise AssetError("truncated ASCII FBX array")
+        text = data[position[0]:end]
+        position[0] = end + 1
+        width = 8
+        if count * width > FBX_MAX_ARRAY_BYTES or count * width > budget[0]:
+            raise AssetError(f"FBX array of {count:,} values is too large to inspect safely")
+        budget[0] -= count * width
+        integral = not any(mark in text for mark in (b".", b"e", b"E"))
+        try:
+            values = np.array(text.replace(b"\n", b"").replace(b"\r", b"").split(b","),
+                              dtype=np.int64 if integral else np.float64) \
+                if text.strip() else np.zeros(0, dtype=np.int64)
+        except ValueError as exc:
+            raise AssetError(f"corrupt ASCII FBX array ({exc})") from exc
+        if values.size != count:
+            raise AssetError(f"corrupt ASCII FBX array ({values.size:,} values, header says {count:,})")
+        return values
+
+    def read_node(name: str, depth: int) -> _FbxNode:
+        if depth > FBX_MAX_DEPTH:
+            raise AssetError("FBX nesting is too deep to be a real export")
+        props: list = []
+        children: list = []
+        expect_value = True
+        while True:
+            kind, raw = peek()
+            if kind == "count" and expect_value:
+                token()
+                props.append(read_array(int(raw[1:])))
+                break
+            if kind in ("string", "number", "word") and expect_value:
+                token()
+                props.append(value(kind, raw))
+                expect_value = False
+                continue
+            if kind == "comma":
+                token()
+                expect_value = True
+                while peek()[0] == "newline":           # a list may continue on the next line
+                    token()
+                continue
+            break
+        if peek()[0] == "open":
+            token()
+            while True:
+                kind, raw = token()
+                if kind == "close":
+                    break
+                if kind == "end":
+                    raise AssetError("truncated ASCII FBX (unclosed '{')")
+                if kind in ("newline", "comma"):
+                    continue
+                if kind != "key":
+                    raise AssetError(f"corrupt ASCII FBX (unexpected {raw[:20]!r})")
+                children.append(read_node(raw.split(b":")[0].strip().decode("ascii"), depth + 1))
+        if name == "Content" and props and all(isinstance(item, str) for item in props):
+            # Embedded media: base64 text in ASCII, raw bytes in binary.
+            joined = "".join(props)
+            try:
+                props = [base64.b64decode(joined)] if joined else [b""]
+            except ValueError:
+                props = [joined.encode("utf-8", "replace")]
+        return _FbxNode(name, props, children)
+
+    nodes: list = []
+    while True:
+        kind, raw = token()
+        if kind == "end":
+            break
+        if kind in ("newline", "comma"):
+            continue
+        if kind != "key":
+            raise AssetError(f"corrupt ASCII FBX (unexpected {raw[:20]!r} at top level)")
+        nodes.append(read_node(raw.split(b":")[0].strip().decode("ascii"), 0))
+
+    header = next((node for node in nodes if node.name == "FBXHeaderExtension"), None)
+    version_node = header.child("FBXVersion") if header is not None else None
+    version = version_node.props[0] if version_node is not None and version_node.props else None
+    if not isinstance(version, int):
+        raise AssetError("ASCII FBX without a version (FBXHeaderExtension/FBXVersion); "
+                         "re-export it")
+    if version < 7100:
+        raise AssetError(f"FBX version {version} is too old to read (7.1 / FBX 2011 or "
+                         f"newer is needed); re-export with a current exporter")
+    return nodes
+
+
 @dataclass(frozen=True)
 class FbxSummary:
     """The facts the gate reads from an FBX file, computed once per (path, mtime)."""
@@ -1863,6 +2025,10 @@ class FbxSummary:
     degenerate: int
     #: (as written, candidate paths in preference order) per external texture
     references: tuple
+    #: UCX_/UBX_/USP_/UCP_ meshes: Unreal's collision convention, not rendered
+    collision_meshes: int = 0
+    #: meshes below LOD0 in an LOD group: not part of the LOD0 budget
+    lower_lod_meshes: int = 0
 
 
 def _fbx_id(node: _FbxNode) -> Optional[int]:
@@ -1877,6 +2043,21 @@ def _fbx_string(node: Optional[_FbxNode]) -> str:
     if node is None or not node.props or not isinstance(node.props[0], str):
         return ""
     return node.props[0]
+
+
+#: Unreal's collision-mesh prefixes (UCX convex, UBX box, USP sphere, UCP capsule).
+#: Engines import these as collision, never as render geometry.
+FBX_COLLISION_PREFIXES = ("ucx_", "ubx_", "usp_", "ucp_")
+
+
+def _fbx_object_name(node: _FbxNode) -> str:
+    """The object's own name: binary writes 'Name\\x00\\x01Class', ASCII 'Class::Name'."""
+    raw = node.props[1] if len(node.props) > 1 and isinstance(node.props[1], str) else ""
+    if "\x00\x01" in raw:
+        return raw.split("\x00\x01", 1)[0]
+    if "::" in raw:
+        return raw.split("::", 1)[1]
+    return raw
 
 
 def _fbx_polygons(indices):
@@ -1910,6 +2091,8 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float) -> FbxS
 
     geometries: dict = {}
     models: set = set()
+    model_names: dict = {}
+    lod_groups: list = []
     materials: set = set()
     textures: dict = {}
     videos: dict = {}
@@ -1922,6 +2105,9 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float) -> FbxS
             geometries[node_id] = node
         elif node.name == "Model":
             models.add(node_id)
+            model_names[node_id] = _fbx_object_name(node)
+            if kind == "LodGroup":
+                lod_groups.append(node_id)
         elif node.name == "Material":
             materials.add(node_id)
         elif node.name == "Texture":
@@ -1936,6 +2122,7 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float) -> FbxS
     # Connections: "OO" child -> parent object, "OP" child -> parent property.
     parents: dict = {}
     children_of: dict = {}
+    ordered_children: dict = {}
     connections = top.get("Connections")
     for link in (connections.all("C") if connections else []):
         if len(link.props) < 3:
@@ -1943,9 +2130,42 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float) -> FbxS
         child, parent = link.props[1], link.props[2]
         parents.setdefault(child, set()).add(parent)
         children_of.setdefault(parent, set()).add(child)
+        ordered_children.setdefault(parent, []).append(child)
+
+    # What an engine imports as LOD0 render geometry: not collision meshes, and
+    # not the LOD1+ children of an LOD group (exporters write them in LOD order).
+    def descendants(start) -> set:
+        found, stack = set(), [start]
+        while stack:
+            for item in children_of.get(stack.pop(), ()):
+                if item not in found:
+                    found.add(item)
+                    stack.append(item)
+        return found
+
+    collision_models = {model for model, name in model_names.items()
+                        if name.lower().startswith(FBX_COLLISION_PREFIXES)}
+    lower_lod: set = set()
+    for group in lod_groups:
+        # Unreal parents the UCX_ hull to the LOD group too; it is not a level.
+        levels = [item for item in ordered_children.get(group, [])
+                  if item in models and item not in collision_models]
+        for level in levels[1:]:
+            lower_lod.add(level)
+            lower_lod |= descendants(level)
+    collision_meshes = lower_lod_meshes = 0
+    rendered: dict = {}
+    for geometry_id, geometry in geometries.items():
+        owners = parents.get(geometry_id, set()) & models
+        if owners and owners <= collision_models:
+            collision_meshes += 1
+        elif owners and owners <= lower_lod:
+            lower_lod_meshes += 1
+        else:
+            rendered[geometry_id] = geometry
 
     triangles = degenerate = uv_channels = max_influences = 0
-    for geometry_id, geometry in geometries.items():
+    for geometry_id, geometry in rendered.items():
         index_node = geometry.child("PolygonVertexIndex")
         vertex_node = geometry.child("Vertices")
         if index_node is None or not index_node.props:
@@ -1992,7 +2212,7 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float) -> FbxS
                 max_influences = max(max_influences, max(per_vertex.values()))
 
     # Materials that a mesh-bearing model actually uses.
-    mesh_models = {parent for geometry_id in geometries
+    mesh_models = {parent for geometry_id in rendered
                    for parent in parents.get(geometry_id, ()) if parent in models}
     used = {material for material in materials
             if parents.get(material, set()) & mesh_models}
@@ -2014,7 +2234,7 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float) -> FbxS
         written = relative or absolute
         references.append((written, tuple(item for item in (relative, absolute) if item)))
     return FbxSummary(triangles, slots, uv_channels, max_influences, degenerate,
-                      tuple(references))
+                      tuple(references), collision_meshes, lower_lod_meshes)
 
 
 def read_fbx(path: Path, epsilon: float = 1e-8) -> FbxSummary:

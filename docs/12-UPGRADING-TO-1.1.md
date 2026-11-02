@@ -65,6 +65,14 @@ All of these are deliberate, and each one is a bug that used to pass:
 * **Unreal's `import_with_gatekeeper()` blocks when the gate cannot run** (not
   configured, engine missing, crash). Set `ASSETGATEKEEPER_PYTHON` and
   `ASSETGATEKEEPER_HOME` on every editor machine that uses it.
+* **Unreal drag-and-drop imports over budget are moved out** to
+  `/Game/_AssetGatekeeper_Rejected` (1.0 only warned). Set
+  `ASSETGATEKEEPER_UNREAL_ON_FAIL=warn` on a machine that must keep the 1.0
+  behaviour, or `delete` to discard instead of quarantining.
+* **FBX triangle counts can go down.** `UCX_`/`UBX_`/`USP_`/`UCP_` collision
+  meshes and LOD1+ of an LOD group are no longer counted, matching what Unreal
+  imports. An FBX that failed by a small margin may now pass.
+* **ASCII FBX is measured** instead of failing with "re-export as binary".
 
 ## 4. Healing is safer, and refuses more
 

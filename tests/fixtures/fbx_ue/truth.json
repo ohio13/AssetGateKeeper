@@ -1,0 +1,9 @@
+{
+ "_source": "Exported from Unreal Engine 5.3.2 (Autodesk FBX SDK) on 2026-11-02; counts are Unreal's own (StaticMesh.get_num_triangles / get_num_sections). Every file carries Unreal's UCX_ collision hull; the cube_lod files are an LOD group (LOD0 768, LOD1 384, LOD2 192 triangles).",
+ "mats5_ascii_7100.fbx": {"triangles": 12, "materials": 5, "collision": 1, "lower_lod": 0},
+ "mats5_ascii_7300.fbx": {"triangles": 12, "materials": 5, "collision": 1, "lower_lod": 0},
+ "mats5_ascii_7700.fbx": {"triangles": 12, "materials": 5, "collision": 1, "lower_lod": 0},
+ "mats5_binary.fbx": {"triangles": 12, "materials": 5, "collision": 1, "lower_lod": 0},
+ "cube_lod_binary.fbx": {"triangles": 768, "materials": 1, "collision": 1, "lower_lod": 2},
+ "cube_lod_ascii.fbx": {"triangles": 768, "materials": 1, "collision": 1, "lower_lod": 2}
+}

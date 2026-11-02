@@ -15,21 +15,32 @@ What it does
 3. **Source pre-check for scripted imports.** See ``import_gatekeeper.py`` in this
    folder — that path *does* block, before ``import_asset_tasks`` runs.
 
-Honest limitation
------------------
-Python cannot cancel Unreal's native drag-and-drop import. ``OnAssetPreImport`` is
-a notification, not a veto: the factory is already chosen when a Python delegate
-runs, and exceptions raised inside a delegate are swallowed by the engine. So this
-hook warns on drag-and-drop and the *blocking* path is
-``import_gatekeeper.import_with_gatekeeper()`` for scripted/automated imports.
+Drag-and-drop: rejected *after* import
+--------------------------------------
+Python cannot cancel Unreal's native drag-and-drop import: ``OnAssetPreImport`` is
+a notification, not a veto, and exceptions raised inside a delegate are swallowed
+by the engine. So the check runs on the imported asset, and what happens to an
+over-budget one is set by ``ASSETGATEKEEPER_UNREAL_ON_FAIL``:
 
-A hard block on drag-and-drop needs a C++ ``UFactory::FactoryCreateFile`` early-out;
-that is a plugin, not a Python script, and is out of scope here by design.
+``quarantine`` (default)  the asset is moved to ``/Game/_AssetGatekeeper_Rejected``
+                          on the next editor tick and the artist is told why. It
+                          never sits where the artist dropped it, and it can be
+                          moved back by hand if a lead waives the budget.
+``delete``                the asset is deleted on the next editor tick.
+``warn``                  1.0 behaviour: a warning, the asset stays.
+
+An asset that something already references (a re-import over a mesh that is
+placed in a level, say) is never moved or deleted - that would break the
+referencer - and gets the warning instead, naming the problem.
+Scripted/automated imports should still go through
+``import_gatekeeper.import_with_gatekeeper()``, which checks the source file
+before anything is imported.
 
 Configuration
 -------------
-``ASSETGATEKEEPER_HOME``   folder containing ``asset_gatekeeper.py``
-``ASSETGATEKEEPER_RULES``  explicit ``rules.toml``
+``ASSETGATEKEEPER_HOME``            folder containing ``asset_gatekeeper.py``
+``ASSETGATEKEEPER_RULES``           explicit ``rules.toml``
+``ASSETGATEKEEPER_UNREAL_ON_FAIL``  quarantine | delete | warn (default quarantine)
 """
 
 from __future__ import annotations
@@ -41,6 +52,9 @@ import unreal
 
 ENV_HOME = "ASSETGATEKEEPER_HOME"
 ENV_RULES = "ASSETGATEKEEPER_RULES"
+ENV_ON_FAIL = "ASSETGATEKEEPER_UNREAL_ON_FAIL"
+ON_FAIL_MODES = ("quarantine", "delete", "warn")
+QUARANTINE_FOLDER = "/Game/_AssetGatekeeper_Rejected"
 
 _state = {"registered": False}
 _budget = None
@@ -61,10 +75,14 @@ def load_budget():
     try:
         import asset_gatekeeper as engine
     except ImportError:
-        unreal.log_error(
-            "[AssetGatekeeper] engine not found - set ASSETGATEKEEPER_HOME to the "
-            "folder containing asset_gatekeeper.py"
-        )
+        if not _state.get("engine_missing_told"):
+            # Once per session, on screen: an unconfigured machine used to log
+            # this and then call every mesh "within budget" (UE 5.3.2), so a
+            # 240k-triangle import looked checked when it was not.
+            _state["engine_missing_told"] = True
+            notify("AssetGatekeeper is not configured on this machine",
+                   "Imported meshes are NOT being checked. Set ASSETGATEKEEPER_HOME "
+                   "to the folder containing asset_gatekeeper.py and restart the editor.")
         return None
 
     path = os.environ.get(ENV_RULES) or ""
@@ -138,6 +156,91 @@ def _on_pre_import(factory, class_name, parent, name, flags) -> None:
     unreal.log(f"[AssetGatekeeper] import starting: {class_name} '{name}'")
 
 
+def on_fail_mode() -> str:
+    mode = (os.environ.get(ENV_ON_FAIL) or "quarantine").strip().lower()
+    if mode not in ON_FAIL_MODES:
+        unreal.log_warning(f"[AssetGatekeeper] {ENV_ON_FAIL}={mode!r} is not one of "
+                           f"{', '.join(ON_FAIL_MODES)}; using quarantine")
+        return "quarantine"
+    return mode
+
+
+def _asset_path(asset) -> str:
+    """'/Game/Props/Rock' for the asset object (package path, no '.Rock')."""
+    library = unreal.EditorAssetLibrary
+    getter = getattr(library, "get_path_name_for_loaded_asset", None)
+    path = getter(asset) if callable(getter) else asset.get_path_name()
+    return path.split(".", 1)[0]
+
+
+def _referencers(path: str) -> list:
+    finder = getattr(unreal.EditorAssetLibrary, "find_package_referencers_for_asset", None)
+    if not callable(finder):
+        return []
+    try:
+        return [ref for ref in (finder(path, False) or []) if str(ref) != path]
+    except Exception:  # pragma: no cover - API drift
+        return []
+
+
+# Assets waiting to be moved/deleted. Doing it inside the import delegate would
+# pull the asset out from under the factory that is still finishing with it, so
+# the work happens on the next editor tick instead.
+_pending: list = []
+_tick = {"handle": None}
+
+
+def _process_pending(_delta_seconds=0.0) -> None:
+    handle, _tick["handle"] = _tick["handle"], None
+    if handle is not None:
+        try:
+            unreal.unregister_slate_post_tick_callback(handle)
+        except Exception:  # pragma: no cover
+            pass
+    work, _pending[:] = list(_pending), []
+    for path, mode, problems in work:
+        reject(path, mode, problems)
+
+
+def _schedule(path: str, mode: str, problems: list) -> None:
+    _pending.append((path, mode, problems))
+    register = getattr(unreal, "register_slate_post_tick_callback", None)
+    if not callable(register):           # no editor tick (commandlet): act now
+        _process_pending()
+        return
+    if _tick["handle"] is None:
+        _tick["handle"] = register(_process_pending)
+
+
+def reject(path: str, mode: str, problems: list) -> str:
+    """Quarantine or delete an imported asset; returns what was done."""
+    reasons = "\n".join(f"- {problem}" for problem in problems)
+    library = unreal.EditorAssetLibrary
+    referencers = _referencers(path)
+    if referencers:
+        notify("AssetGatekeeper: asset exceeds budget (left in place)",
+               f"{path}\n{reasons}\n\nNot moved: {len(referencers)} other asset(s) "
+               f"reference it. Revert the import in source control or fix the source.")
+        return "warned-referenced"
+    if mode == "delete":
+        done = library.delete_asset(path)
+        outcome = "deleted" if done else "delete-failed"
+        verb = "was deleted" if done else "could NOT be deleted"
+    else:
+        name = path.rsplit("/", 1)[-1]
+        target = f"{QUARANTINE_FOLDER}/{name}"
+        suffix = 1
+        while library.does_asset_exist(target):
+            suffix += 1
+            target = f"{QUARANTINE_FOLDER}/{name}_{suffix}"
+        done = library.rename_asset(path, target)
+        outcome = "quarantined" if done else "quarantine-failed"
+        verb = f"was moved to {target}" if done else "could NOT be moved"
+    notify("AssetGatekeeper: import rejected",
+           f"{path} {verb}.\n{reasons}")
+    return outcome
+
+
 def _on_post_import(factory, created_object) -> None:
     """OnAssetPostImport passes (factory, created_object) - two arguments.
 
@@ -149,37 +252,110 @@ def _on_post_import(factory, created_object) -> None:
     if asset is None or not isinstance(asset, unreal.StaticMesh):
         return
 
-    problems = check_static_mesh(asset, load_budget())
-    if problems:
+    budget = load_budget()
+    if budget is None:
+        unreal.log_error(f"[AssetGatekeeper] {asset.get_name()}: NOT checked "
+                         "(AssetGatekeeper is not configured on this machine)")
+        return
+    problems = check_static_mesh(asset, budget)
+    if not problems:
+        unreal.log(f"[AssetGatekeeper] {asset.get_name()}: within budget")
+        return
+    mode = on_fail_mode()
+    if mode == "warn":
         notify("AssetGatekeeper: asset exceeds budget",
                "\n".join(f"- {problem}" for problem in problems))
+        return
+    path = _asset_path(asset)
+    if path.startswith(QUARANTINE_FOLDER + "/"):
+        return                       # already rejected once; don't loop
+    unreal.log_warning(f"[AssetGatekeeper] rejecting {path} ({mode}): "
+                       + "; ".join(problems))
+    _schedule(path, mode, problems)
+
+
+HOOKS = (("on_asset_pre_import", "_on_pre_import"),
+         ("on_asset_post_import", "_on_post_import"))
+WATCHDOG_SECONDS = 2.0
+
+# Strong references to everything a binding is made of. Verified in UE 5.3.2
+# (two separate runs): with the subsystem and delegate wrappers left to go out
+# of scope, both hooks stopped firing after the first asset was deleted or
+# moved - so drag-and-drop went unchecked while the log still said "import
+# guard active". Holding these references fixed it (hooks kept firing through
+# a move and a delete). The cause inside the engine is not pinned down - an
+# explicit collect_garbage() did not reproduce it - so the watchdog below also
+# re-binds anything the engine drops, and says so in the log when it does.
+_keepalive: list = []
+_watch = {"handle": None, "last": 0.0, "rebinds": 0}
+
+
+def _subsystem():
+    getter = getattr(unreal, "get_editor_subsystem", None)
+    subsystem_class = getattr(unreal, "ImportSubsystem", None)
+    if not callable(getter) or subsystem_class is None:
+        return None
+    return getter(subsystem_class)
+
+
+def _is_bound(event, handler) -> bool:
+    contains = getattr(event, "contains_callable", None)
+    if not callable(contains):
+        return False
+    try:
+        return bool(contains(handler))
+    except Exception:  # pragma: no cover
+        return False
+
+
+def ensure_bound(_delta_seconds=0.0, force: bool = False) -> list:
+    """Bind any hook that is not bound (first call, or after a GC dropped it).
+
+    Returns the names that were (re)bound by this call.
+    """
+    import time
+
+    now = time.monotonic()
+    if not force and now - _watch["last"] < WATCHDOG_SECONDS:
+        return []
+    _watch["last"] = now
+    subsystem = _subsystem()
+    if subsystem is None:
+        return []
+    added = []
+    for event_name, handler_name in HOOKS:
+        handler = globals()[handler_name]
+        event = getattr(subsystem, event_name, None)
+        if event is None or _is_bound(event, handler):
+            continue
+        try:
+            adder = getattr(event, "add_callable_unique", None) or event.add_callable
+            adder(handler)
+            _keepalive.append((subsystem, event, handler))
+            added.append(event_name)
+        except Exception as error:  # pragma: no cover - delegate signature drift
+            unreal.log_warning(f"[AssetGatekeeper] could not bind {event_name}: {error}")
+    if added and _state["registered"]:
+        _watch["rebinds"] += 1
+        unreal.log_warning("[AssetGatekeeper] import hooks had been dropped by the "
+                           "engine and were re-attached: " + ", ".join(added))
+    return added
 
 
 def register_hooks() -> bool:
     if _state["registered"]:
         return True
 
-    subsystem_getter = getattr(unreal, "get_editor_subsystem", None)
-    subsystem_class = getattr(unreal, "ImportSubsystem", None)
-    if not callable(subsystem_getter) or subsystem_class is None:
+    if _subsystem() is None:
         unreal.log_warning(
             "[AssetGatekeeper] unreal.ImportSubsystem is unavailable in this build; "
             "use import_gatekeeper.import_with_gatekeeper() for scripted imports.")
         return False
 
-    subsystem = subsystem_getter(subsystem_class)
-    bound = []
-    for event_name, handler in (("on_asset_pre_import", _on_pre_import),
-                                ("on_asset_post_import", _on_post_import)):
-        event = getattr(subsystem, event_name, None)
-        if event is None:
-            unreal.log_warning(f"[AssetGatekeeper] {event_name} not exposed; skipped")
-            continue
-        try:
-            event.add_callable(handler)
-            bound.append(event_name)
-        except Exception as error:  # pragma: no cover - delegate signature drift
-            unreal.log_warning(f"[AssetGatekeeper] could not bind {event_name}: {error}")
+    bound = ensure_bound(force=True)
+    register = getattr(unreal, "register_slate_post_tick_callback", None)
+    if callable(register) and _watch["handle"] is None:
+        _watch["handle"] = register(ensure_bound)
 
     _state["registered"] = True
     _state["bound"] = bound

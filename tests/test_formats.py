@@ -204,8 +204,8 @@ for name in hostile:
     row = rows.get(name)
     expect(f"{name} is FAILED, not skipped or passed", row is not None and row["status"] == "FAILED",
            row and row["problems"])
-expect("ASCII FBX gets a re-export hint",
-       "binary FBX" in " ".join(rows.get("ascii.fbx", {}).get("problems", [])))
+expect("an ASCII FBX with no version fails with a re-export hint",
+       "re-export" in " ".join(rows.get("ascii.fbx", {}).get("problems", [])))
 expect("the decompression bomb is refused by size, not by running out of memory",
        "too large" in " ".join(rows.get("bomb.fbx", {}).get("problems", [])))
 
@@ -424,6 +424,141 @@ import init_unreal  # noqa: E402
 expect("init_unreal's post-import handler takes OnAssetPostImport's (factory, created_object)",
        list(inspect.signature(init_unreal._on_post_import).parameters) == ["factory", "created_object"],
        str(inspect.signature(init_unreal._on_post_import)))
+
+# Drag-and-drop rejection (verified in UE 5.3.2; these pin the logic without it).
+class _FakeLibrary:
+    def __init__(self, existing=(), referencers=None):
+        self.assets = set(existing)
+        self.referencers = referencers or {}
+        self.calls = []
+
+    def does_asset_exist(self, path):
+        return path in self.assets
+
+    def rename_asset(self, source, target):
+        self.calls.append(("rename", source, target))
+        self.assets.discard(source)
+        self.assets.add(target)
+        return True
+
+    def delete_asset(self, path):
+        self.calls.append(("delete", path))
+        self.assets.discard(path)
+        return True
+
+    def find_package_referencers_for_asset(self, path, load_assets=False):
+        return self.referencers.get(path, [])
+
+
+told = []
+init_unreal.notify = lambda title, message: told.append(f"{title}: {message}")
+library = _FakeLibrary({"/Game/Props/rock", "/Game/_AssetGatekeeper_Rejected/rock"})
+fake_unreal.EditorAssetLibrary = library
+with patch.dict(os.environ, {}, clear=False):
+    os.environ.pop("ASSETGATEKEEPER_UNREAL_ON_FAIL", None)
+    expect("drag-and-drop failures are quarantined by default", init_unreal.on_fail_mode() == "quarantine")
+    os.environ["ASSETGATEKEEPER_UNREAL_ON_FAIL"] = "Nuke"
+    expect("an unknown mode falls back to quarantine", init_unreal.on_fail_mode() == "quarantine")
+outcome = init_unreal.reject("/Game/Props/rock", "quarantine", ["240,000 triangles exceeds the 50,000 budget"])
+expect("quarantine moves the asset out, without overwriting an earlier reject",
+       outcome == "quarantined" and library.calls == [("rename", "/Game/Props/rock", "/Game/_AssetGatekeeper_Rejected/rock_2")],
+       library.calls)
+expect("the artist is told where it went and why",
+       told and "rock_2" in told[-1] and "240,000 triangles" in told[-1], told)
+library = _FakeLibrary({"/Game/Props/rock"}, {"/Game/Props/rock": ["/Game/Maps/Level01"]})
+fake_unreal.EditorAssetLibrary = library
+outcome = init_unreal.reject("/Game/Props/rock", "delete", ["5 material slots exceeds the 3 slot budget"])
+expect("an asset something references is never moved or deleted",
+       outcome == "warned-referenced" and library.calls == [], (outcome, library.calls))
+library = _FakeLibrary({"/Game/Props/crate"})
+fake_unreal.EditorAssetLibrary = library
+expect("delete mode deletes", init_unreal.reject("/Game/Props/crate", "delete", ["x"]) == "deleted"
+       and ("delete", "/Game/Props/crate") in library.calls, library.calls)
+
+
+class _FakeEvent:
+    def __init__(self):
+        self.handlers = []
+
+    def contains_callable(self, handler):
+        return handler in self.handlers
+
+    def add_callable_unique(self, handler):
+        if handler not in self.handlers:
+            self.handlers.append(handler)
+
+
+subsystem = types.SimpleNamespace(on_asset_pre_import=_FakeEvent(), on_asset_post_import=_FakeEvent())
+fake_unreal.ImportSubsystem = object
+fake_unreal.get_editor_subsystem = lambda cls: subsystem
+first = init_unreal.ensure_bound(force=True)
+subsystem.on_asset_post_import.handlers.clear()          # the engine drops a hook
+again = init_unreal.ensure_bound(force=True)
+expect("hooks that the engine drops are re-attached by the watchdog",
+       first == ["on_asset_pre_import", "on_asset_post_import"] and again == ["on_asset_post_import"],
+       (first, again))
+expect("a bound hook is not bound twice", init_unreal.ensure_bound(force=True) == [])
+
+# Blender add-on (verified in Blender 4.0.2; these pin the fixes without it).
+fake_bpy = types.ModuleType("bpy")
+fake_bpy.types = types.SimpleNamespace(PropertyGroup=object, Operator=object, Panel=object)
+fake_bpy.props = types.SimpleNamespace(StringProperty=lambda **kw: None,
+                                       PointerProperty=lambda **kw: None)
+fake_bpy.data = types.SimpleNamespace(filepath="")
+sys.modules["bpy"] = fake_bpy
+sys.path.insert(0, str(ROOT / "plugins" / "blender"))
+import addon as blender_addon  # noqa: E402
+lines = blender_addon.wrap_text("159,200 triangles exceeds the 50,000 budget (+109,200)", 190)
+expect("the Blender panel wraps a long reason instead of cutting it to '159,200 tri...'",
+       len(lines) > 1 and " ".join(lines) == "159,200 triangles exceeds the 50,000 budget (+109,200)", lines)
+child = blender_addon.child_environment({"PYTHONHOME": "C:/Houdini/python313", "PATH": "x"})
+expect("the Blender add-on drops an inherited PYTHONHOME before running the engine",
+       "PYTHONHOME" not in child and child.get("PATH") == "x", child)
+expect("the Blender add-on reports version 1.1.0", blender_addon.bl_info["version"] == (1, 1, 0))
+
+print("9b. ASCII FBX, collision meshes and LOD groups (files exported by Unreal 5.3.2)")
+UE_FIXTURES = ROOT / "tests" / "fixtures" / "fbx_ue"
+ue_truth = json.loads((UE_FIXTURES / "truth.json").read_text(encoding="utf-8"))
+for name, want in ue_truth.items():
+    if name.startswith("_"):
+        continue
+    summary = agk.read_fbx(UE_FIXTURES / name)
+    got = {"triangles": summary.triangles, "materials": summary.material_slots,
+           "collision": summary.collision_meshes, "lower_lod": summary.lower_lod_meshes}
+    expect(f"{name} matches Unreal ({want['triangles']} tris, {want['materials']} mat)", got == want,
+           f"got {got}")
+binary = agk.read_fbx(UE_FIXTURES / "cube_lod_binary.fbx")
+text = agk.read_fbx(UE_FIXTURES / "cube_lod_ascii.fbx")
+expect("ASCII and binary exports of the same mesh measure the same", binary == text, (binary, text))
+ascii_dir = WORK / "ascii_gate"
+ascii_dir.mkdir()
+shutil.copy(UE_FIXTURES / "mats5_ascii_7300.fbx", ascii_dir / "mats5_ascii.fbx")
+completed = run_gate(ascii_dir, "--once", "--json")
+rows = json_verdicts(completed)
+expect("the gate fails an ASCII FBX on its materials, not on its format",
+       "5 material slots" in " ".join(rows.get("mats5_ascii.fbx", {}).get("problems", [])),
+       rows.get("mats5_ascii.fbx"))
+original = (UE_FIXTURES / "mats5_ascii_7300.fbx").read_bytes()
+broken = {
+    "ascii_truncated.fbx": original[: len(original) // 2],
+    "ascii_short_array.fbx": original.replace(b"Vertices: *24", b"Vertices: *2400", 1),
+    "ascii_old.fbx": original.replace(b"FBXVersion: 7300", b"FBXVersion: 6100", 1),
+    "ascii_garbage.fbx": b"; FBX 7.3.0 project file\n" + bytes(range(256)) * 20,
+    "ascii_huge_count.fbx": original.replace(b"Vertices: *24", b"Vertices: *999999999999", 1),
+}
+broken_dir = WORK / "ascii_hostile"
+broken_dir.mkdir()
+for name, data in broken.items():
+    (broken_dir / name).write_bytes(data)
+completed = run_gate(broken_dir, "--once", "--json")
+rows = json_verdicts(completed)
+expect("no traceback on broken ASCII FBX", "Traceback" not in completed.stderr, completed.stderr[-400:])
+for name in broken:
+    row = rows.get(name)
+    expect(f"{name} is FAILED, not skipped or passed", row is not None and row["status"] == "FAILED",
+           row and row["problems"])
+expect("a pre-2011 ASCII FBX gets the re-export hint",
+       "too old" in " ".join(rows.get("ascii_old.fbx", {}).get("problems", [])))
 
 print("10. Hooks and tools know the new formats")
 sys.path.insert(0, str(ROOT / "vcs_hooks"))
