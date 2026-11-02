@@ -51,6 +51,9 @@ jobs:
     name: gate assets
     runs-on: ubuntu-latest
     timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write     # upload the SARIF annotations
 
     steps:
       - uses: actions/checkout@v4
@@ -96,13 +99,28 @@ jobs:
 
       - name: Gate every asset
         if: steps.target.outputs.found == 'true'
-        run: asset-gatekeeper "${{ steps.target.outputs.dir }}" --once --no-color
+        run: >-
+          asset-gatekeeper "${{ steps.target.outputs.dir }}" --once --no-color
+          --report junit:gate-junit.xml --report sarif:gate.sarif
+
+      # Each failing asset becomes an annotation on the pull request. Needs
+      # code scanning (public repos, or GitHub Advanced Security).
+      - name: Annotate the pull request
+        if: always() && steps.target.outputs.found == 'true' && hashFiles('gate.sarif') != ''
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: gate.sarif
+          category: asset-gatekeeper
 
       - name: Publish the audit summary
         if: always() && steps.target.outputs.found == 'true'
         uses: actions/upload-artifact@v4
         with:
           name: asset-audit
-          path: audit.txt
+          path: |
+            audit.txt
+            gate-junit.xml
+            gate.sarif
           retention-days: 7
           if-no-files-found: ignore

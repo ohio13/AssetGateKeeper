@@ -82,6 +82,16 @@ target, adjust the two or three knobs that matter (characters vs props, texture
 memory), and it prints the exact `rules.toml` block. It writes numbers, never a
 platform name, so a preset can never silently override a director's edit.
 
+Under the budget, **Exceptions** lists the project's waivers (path, what they
+allow, owner, reason, end date - amber in the last 14 days, red once expired)
+and adds or removes one. They are checked by the gate's own parser before they
+are stored, and served with the budget on `/api/rules`, so every
+`--remote-rules` client applies them (see
+[05 rules reference](05-RULES-REFERENCE.md#exceptions)). API:
+`POST /api/save-exception` with `{"project_id", "exception": {...}}`,
+`POST /api/remove-exception` with `{"project_id", "id"}`, same token as
+`/api/save-budget`.
+
 ### Admin console
 
 First visit bootstraps the first account (the page is only reachable while zero
@@ -107,19 +117,47 @@ art, it is counted as a failure so the run goes red, and the audit page shows it
 as `ERROR` rather than `FAILED` so nobody goes looking for a modelling problem
 that does not exist.
 
+A failure that blows a budget by **more than 50%** (80,000 triangles against a
+50,000 budget) posts to a Slack, Discord or Teams webhook. Milder failures and
+healed assets stay on the dashboard only.
+
+```
+python server/asset_health_server.py --webhook-url https://hooks.slack.com/services/...
+```
+
+The URL can also come from `SLACK_WEBHOOK_URL`, `DISCORD_WEBHOOK_URL` or
+`TEAMS_WEBHOOK_URL`, or a `[webhooks]` table (`url`, `provider`, `cooldown`) in
+`--webhooks-config`. `--alert-cooldown SECONDS` (default 300) stops a nightly
+sweep failing 300 assets from sending 300 messages.
+
+### Telling the artist
+
+With a `people.toml`, the alert mentions the person whose machine sent the
+failure, with a link that opens the asset in the Art Workstation:
+
 ```toml
-# rules.toml or the project settings
-[alerts]
-enabled = true
-cooldown_minutes = 30
+[people.lena]
+name = "Lena"
+chat = "U012ABCDEF"            # Slack member ID / Discord user ID / Teams email
+users = ["lwalker"]            # OS user names (sent with --telemetry-identity full)
+hosts = ["WS-ART-014"]         # machine names (sent by default)
 ```
 
-A new failure that repeats does not page anyone twice inside the cooldown. A
-webhook is available for Slack/Teams:
+```
+python server/asset_health_server.py --webhook-url ... --people people.toml \
+    --workstation-url http://review-pc:8100
+```
 
-```
-AGK_WEBHOOK_URL=https://hooks.slack.com/services/...
-```
+* The user name wins; the machine name is the fallback; nobody is guessed.
+* Slack and Discord get `<@ID>`; Teams gets an Adaptive Card with a real
+  mention (a plain Teams message cannot mention anyone).
+* The cooldown is per person, so one artist's broken batch does not silence
+  another's alert.
+* The link is `<workstation>/viewer?find=<path>`: the workstation opens the
+  newest version with that depot path or name. Use a `--workstation-url` the
+  artists can reach.
+* `--alert-digest 09:00` sends one message per person each day at that local
+  time instead of one per failure.
 
 ## Demo data
 

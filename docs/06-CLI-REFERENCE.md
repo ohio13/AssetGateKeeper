@@ -78,6 +78,7 @@ Reported as: `tag 'charcter' is not a known tag; closest match is 'character'`.
 | Flag | Effect |
 |---|---|
 | `--json` | machine-readable verdicts on stdout |
+| `--report junit:FILE` / `sarif:FILE` | with `--once` or one file, also write a JUnit or SARIF report for CI (repeatable; see [10](10-CI-AND-VERSION-CONTROL.md#reports-your-ci-server-shows-per-asset)) |
 | `--no-color` | plain text (CI logs, redirected output) |
 | `-v` | verbose |
 | `--init [--yes]` | write a commented starter `rules.toml` |
@@ -158,13 +159,13 @@ variable; the payload is a Post to `/api/telemetry` with:
 | Level | `hostname` / `username` | `path` |
 |---|---|---|
 | `full` | sent | absolute |
-| `path` (default) | empty | absolute |
+| `host` (default) | machine name only | absolute |
 | `none` | empty | relative to the watch folder |
 
-The default is `path`: the dashboard's Send-to-Workstation bridge needs a real
-file, and the machine name and the OS account answer a question the tool has no
-business volunteering. `full` exists because some studios genuinely group by
-workstation.
+The default is `host`: the dashboard's Send-to-Workstation bridge needs a real
+file, and per-machine dashboards (and AssetHealth's `people.toml` alerts) need
+the machine name. The OS account - the part that names a person - is only sent
+with `full`.
 
 ```
 timestamp, received_at, hostname, username, os,

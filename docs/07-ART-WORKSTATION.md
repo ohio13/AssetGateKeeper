@@ -326,7 +326,7 @@ versions: two `rock.obj` files in different folders are different assets.
   default budget, and says so; it is not a copy of the verdict that was sent.
   `GET /api/assets/<id>/report?download=1` saves it as a file instead.
 * **Download file** - the asset as uploaded, under its original name.
-* **Check for fixes** (on `.png` and `.obj` assets) asks the healer what it could
+* **Check for fixes** (on `.png`, `.tga`, `.jpg` and `.obj` assets) asks the healer what it could
   fix - a missing name suffix, a size that is not a power of two (resized, so UVs
   stay put), zero-area `.obj` faces - and which budget it checked against: the
   `rules.toml` the workstation was started with (`--rules`, or one in its working

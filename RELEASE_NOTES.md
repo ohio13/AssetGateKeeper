@@ -1,5 +1,24 @@
 # Since v1.1.1 (unreleased, on `main`)
 
+* **Studio rules (roadmap phase 2).**
+  * Expiring exceptions: `[[exceptions]]` in `rules.toml` (path, rule, allow,
+    reason, owner, expires) relax one rule for some paths until a date; the day
+    after, a still-failing asset says the exception expired. The budget planner
+    publishes them with the budget; the gate reports active / expired / ending
+    soon at start-up.
+  * `--report junit:FILE` / `sarif:FILE` for CI; the shipped GitHub workflow
+    uploads SARIF so failures are annotations on the pull request.
+  * AssetHealth alerts mention the artist: `--people people.toml` maps user and
+    machine names to Slack/Discord IDs or Teams emails (Teams gets an Adaptive
+    Card mention), with a per-person cooldown, a `?find=` link into the Art
+    Workstation, and `--alert-digest HH:MM` for one message a day.
+  * Healer: normal maps are renormalised after a resize; TGA heals like PNG;
+    JPG only with `[healer] jpg = true`.
+  * Fixed: a verdict that carried a note lost its ERROR status (reported as
+    FAILED); `--telemetry-identity` help and docs named a `path` mode that does
+    not exist (the default is `host`); docs/08 described an `[alerts]` table and
+    `AGK_WEBHOOK_URL` that never existed.
+
 * **Art Workstation review workflow (roadmap phase 1).**
   * Versions: the same name (or depot path) uploaded again becomes the next
     version; the inspector lists versions with what changed and can overlay or

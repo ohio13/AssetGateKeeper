@@ -901,7 +901,7 @@ import io as _io  # noqa: E402
 expect("the default texture mode is resize (pad shifts UVs)",
        agk.HealSettings().texture_mode == "resize", agk.HealSettings().texture_mode)
 expect("... and so is the healer's own default",
-       agk_healer.heal_texture_file.__defaults__ == ("resize",))
+       agk_healer.heal_texture_file.__defaults__[0] == "resize")
 
 
 def marker_png(path, size=(1000, 1000)):
@@ -1103,7 +1103,227 @@ expect("a heal that changes nothing says why (was silent at INFO)",
 code, out = gate_run(cli_heal, "--once", "--recursive", "--auto-heal")
 expect("--auto-heal says at startup what it may change, and who turned it on",
        "healing ON for every failing asset" in out and "turned on by --auto-heal" in out
-       and "resize non-power-of-two PNGs" in out and ".agk-backups" in out, out[:900])
+       and "resize non-power-of-two PNG/TGA textures" in out and ".agk-backups" in out, out[:900])
+
+print("14e. healing normal maps, TGA and JPG (G5)")
+import numpy as _np  # noqa: E402
+g5 = heal_root / "g5"
+g5.mkdir()
+
+
+def stripe_normals(path, size=(1000, 1000)):
+    """Vertical stripes of two normals 90 degrees apart: resampling averages them."""
+    width, height = size
+    a = _np.array([0.7071, 0.0, 0.7071])
+    b = _np.array([-0.7071, 0.0, 0.7071])
+    columns = _np.where((_np.arange(width) // 3) % 2 == 0, 0, 1)
+    rgb = _np.where(columns[None, :, None] == 0, a, b) * _np.ones((height, 1, 1))
+    image = Image.fromarray(_np.clip(_np.rint((rgb + 1) * 127.5), 0, 255).astype(_np.uint8), "RGB")
+    image.save(path)
+    return Path(path)
+
+
+def worst_length_error(path):
+    data = _np.asarray(Image.open(path).convert("RGB"), dtype=_np.float32) / 127.5 - 1.0
+    return float(_np.abs(_np.linalg.norm(data, axis=-1) - 1.0).max())
+
+
+_normal = stripe_normals(g5 / "wall_Normal.png")
+_g5_healer = agk.load_healer(heal_budget, agk.HealSettings(enabled=True), root=g5)
+_nv = agk.Gatekeeper(agk.Budget(pbr_check=False), healer=_g5_healer).check(_normal)
+expect("a resized normal map keeps every pixel a unit vector (+-1%)",
+       _nv.healed and "renormalised" in _nv.heal_notes[0] and worst_length_error(_normal) <= 0.01,
+       (_nv.heal_notes, worst_length_error(_normal)))
+_plain = stripe_normals(g5 / "plain.png")
+agk_healer.heal_texture_file(_plain, "resize", normal=False)
+expect("... where a plain resize leaves them short (the seam this fixes)",
+       worst_length_error(_plain) > 0.05, worst_length_error(_plain))
+_tga = g5 / "rock_Albedo.tga"
+marker_png(g5 / "tmp.png").rename(g5 / "tmp_marker.png")
+Image.open(g5 / "tmp_marker.png").save(_tga)
+_tga_before = digest(_tga)
+_tv = agk.Gatekeeper(heal_budget, healer=_g5_healer).check(_tga)
+expect("a TGA heals like a PNG", _tv.healed and Image.open(_tga).size == (1024, 1024)
+       and _tga.suffix == ".tga", _tv.heal_notes)
+expect("... and its undo restores the original bytes",
+       agk_healer.undo_heal(_tga).undone and digest(_tga) == _tga_before)
+_jpg = g5 / "sky_Albedo.jpg"
+Image.open(g5 / "tmp_marker.png").convert("RGB").save(_jpg, quality=95)
+_jpg_before = digest(_jpg)
+_jv = agk.Gatekeeper(heal_budget, healer=_g5_healer).check(_jpg)
+expect("JPEG is not healed unless jpg = true, and says why",
+       not _jv.passed and digest(_jpg) == _jpg_before and "jpg = true" in _g5_healer.last_refusal,
+       _g5_healer.last_refusal)
+_jpg_healer = agk.load_healer(heal_budget, agk.HealSettings(enabled=True, jpg=True), root=g5)
+_jv = agk.Gatekeeper(heal_budget, healer=_jpg_healer).check(_jpg)
+expect("with jpg = true it heals, and the note says it was re-saved",
+       _jv.healed and "re-saved as JPEG quality 95" in _jv.heal_notes[0]
+       and Image.open(_jpg).size == (1024, 1024), _jv.heal_notes)
+expect("[healer] jpg is read from the rules", agk.HealSettings.from_mapping({"jpg": True}).jpg is True)
+
+print("14c. expiring exceptions (G1)")
+from datetime import date as _date, timedelta as _timedelta  # noqa: E402
+ex_root = scratch / "exceptions"
+if ex_root.exists():
+    shutil.rmtree(ex_root)
+(ex_root / "Characters" / "Boss").mkdir(parents=True)
+(ex_root / "Props").mkdir()
+shutil.copy(DROP / "boss_statue.gltf", ex_root / "Characters" / "Boss" / "boss_statue.gltf")
+shutil.copy(DROP / "boss_statue.gltf", ex_root / "Props" / "statue_copy.gltf")
+_today = _date.today()
+_soon, _later, _past = _today + _timedelta(days=5), _today + _timedelta(days=60), _today - _timedelta(days=1)
+
+
+def ex_rules(expires, path="Characters/Boss/*", extra=""):
+    (ex_root / "rules.toml").write_text(
+        "[mesh]\nmax_triangles = 50000\nmax_material_slots = 8\n\n[[exceptions]]\n"
+        f'path = "{path}"\nrule = "max_triangles"\nallow = 80000\n'
+        'reason = "hero boss, art director sign-off"\nowner = "lena"\n'
+        f"expires = {expires.isoformat()}\n{extra}", encoding="utf-8")
+
+
+ex_rules(_later)
+_exs = agk.resolve_exceptions(ex_root, agk.build_parser().parse_args([str(ex_root)]))
+expect("[[exceptions]] load from rules.toml", len(_exs) == 1 and _exs[0].allow == 80000
+       and _exs[0].expires == _later, str(_exs))
+_ex_budget = agk.Budget(max_triangles=50000, max_material_slots=8)
+_boss = ex_root / "Characters" / "Boss" / "boss_statue.gltf"
+_copy = ex_root / "Props" / "statue_copy.gltf"
+_v = agk.Gatekeeper(_ex_budget, exceptions=_exs).check(_boss)
+expect("inside its dates, the exception lets the boss through, with a note",
+       _v.passed and any("exception: max_triangles = 80,000" in w and "lena" in w for w in _v.warnings),
+       (_v.reason, _v.warnings))
+_v = agk.Gatekeeper(_ex_budget, exceptions=_exs).check(_copy)
+expect("... and only the paths it names (the same mesh in Props still fails)", not _v.passed, _v.reason)
+_v = agk.Gatekeeper(_ex_budget, exceptions=_exs, today=_later + _timedelta(days=1)).check(_boss)
+expect("the day after it ends, the boss fails and says the exception expired",
+       not _v.passed and "expired on" in _v.reason and "80,000" in _v.reason, _v.reason)
+_v = agk.Gatekeeper(_ex_budget, exceptions=_exs, today=_later).check(_boss)
+expect("on its last day it still applies, and warns that it ends soon",
+       _v.passed and any("ends in 0 days" in w for w in _v.warnings), _v.warnings)
+_small = ex_root / "Characters" / "Boss" / "small.obj"
+shutil.copy(DROP / "crate_1mtl.obj", _small)
+shutil.copy(DROP / "crate_1mtl.mtl", ex_root / "Characters" / "Boss" / "crate_1mtl.mtl")
+_v = agk.Gatekeeper(_ex_budget, exceptions=_exs, today=_later + _timedelta(days=9)).check(_small)
+expect("an asset that fits the normal budget never mentions an expired exception",
+       _v.passed and "expired" not in _v.reason, _v.reason)
+_name_only = agk.parse_exceptions({"exceptions": [{
+    "path": "BOSS_statue.gltf", "rule": "max_triangles", "allow": 80000, "reason": "r",
+    "owner": "o", "expires": _later.isoformat()}]}, base=ex_root)
+expect("a bare file name matches that file in any folder, ignoring case",
+       agk.Gatekeeper(_ex_budget, exceptions=_name_only).check(_boss).passed
+       and not agk.Gatekeeper(_ex_budget, exceptions=_name_only).check(_copy).passed)
+for _bad, _why in (({"rule": "max_triangles", "allow": 1, "owner": "o", "expires": "2030-01-01",
+                     "path": "x"}, "reason"),
+                   ({"rule": "max_triangle", "allow": 1, "reason": "r", "owner": "o",
+                     "expires": "2030-01-01", "path": "x"}, "max_triangles"),
+                   ({"rule": "max_triangles", "allow": "lots", "reason": "r", "owner": "o",
+                     "expires": "2030-01-01", "path": "x"}, "whole number"),
+                   ({"rule": "require_power_of_two", "allow": 0, "reason": "r", "owner": "o",
+                     "expires": "2030-01-01", "path": "x"}, "true or false"),
+                   ({"rule": "max_triangles", "allow": 1, "reason": "r", "owner": "o",
+                     "expires": "next week", "path": "x"}, "date"),
+                   ({"rule": "max_triangles", "allow": 1, "reason": "r", "owner": "o",
+                     "expires": "2030-01-01", "path": "x", "approved": True}, "approved")):
+    try:
+        agk.parse_exceptions({"exceptions": [_bad]})
+        expect(f"a bad exception is refused ({_why})", False)
+    except agk.ConfigError as exc:
+        expect(f"a bad exception is refused ({_why})", _why in str(exc), str(exc))
+_remote = {"mesh": {"max_triangles": 50000, "max_material_slots": 8}, "exceptions": [{
+    "path": "Characters/Boss/*", "rule": "max_triangles", "allow": 80000, "reason": "r",
+    "owner": "o", "expires": _later.isoformat()}]}
+_rex = agk.resolve_exceptions(ex_root, agk.build_parser().parse_args([str(ex_root)]), _remote)
+expect("exceptions come through the remote rules too (dates as text)",
+       len(_rex) == 1 and _rex[0].expires == _later
+       and agk.Gatekeeper(_ex_budget, exceptions=_rex).check(_boss).passed)
+expect("the budget parser accepts a document with exceptions", agk.Budget.from_mapping(_remote).max_triangles == 50000)
+ex_rules(_soon)
+_cli = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(ex_root),
+                       "--once", "--recursive", "--no-color"],
+                      capture_output=True, text=True, encoding="utf-8", errors="replace")
+expect("a real run says how many exceptions apply and which end soon",
+       "except  1 active, 0 expired, 1 ending within 14 days" in _cli.stdout + _cli.stderr,
+       (_cli.stdout + _cli.stderr)[-500:])
+expect("... passes the boss with the note, and fails the copy",
+       "boss_statue.gltf" in _cli.stdout and "exception: max_triangles" in _cli.stdout
+       and "FAILED" in _cli.stdout and "statue_copy.gltf" in _cli.stdout, _cli.stdout[-600:])
+ex_rules(_past)
+_cli = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(_boss),
+                       "--rules", str(ex_root / "rules.toml"), "--no-color"],
+                      capture_output=True, text=True, encoding="utf-8", errors="replace")
+expect("one file with --rules (how the DCC plugins run it): paths are relative to the rules "
+       "file's folder, and an expired exception fails it",
+       _cli.returncode == 1 and "expired on" in _cli.stdout, _cli.stdout[-400:])
+(ex_root / "rules.toml").write_text('[[exceptions]]\npath = "x"\nrule = "max_triangles"\n',
+                                    encoding="utf-8")
+_cli = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(ex_root),
+                       "--once", "--no-color"], capture_output=True, text=True, encoding="utf-8",
+                      errors="replace")
+expect("an incomplete exception stops the run with exit 2 and names what is missing",
+       _cli.returncode == 2 and "needs allow, reason, owner, expires" in _cli.stdout + _cli.stderr,
+       (_cli.stdout + _cli.stderr)[-300:])
+_kept = agk.Gatekeeper(_ex_budget, exceptions=_name_only)
+_kept._inspect = lambda path: agk.Verdict(path, ("cannot be read",), unreadable=True)
+expect("check() keeps an ERROR an ERROR when it adds a note (was turned into FAILED)",
+       _kept.check(_boss).status == "ERROR", _kept.check(_boss).status)
+expect("an ERROR keeps being an ERROR when a note is added (was reported as FAILED)",
+       agk.Verdict(Path("x.obj"), ("e",), "", (), (), ("note",), True).status == "ERROR")
+
+print("14d. JUnit and SARIF reports for CI (G3)")
+import xml.etree.ElementTree as _ET  # noqa: E402
+rep_dir = scratch / "reports"
+if rep_dir.exists():
+    shutil.rmtree(rep_dir)
+(rep_dir / "Props").mkdir(parents=True)
+shutil.copy(DROP / "crate_1mtl.obj", rep_dir / "Props" / "crate_1mtl.obj")
+shutil.copy(DROP / "crate_1mtl.mtl", rep_dir / "Props" / "crate_1mtl.mtl")
+shutil.copy(DROP / "boss_statue.gltf", rep_dir / "Props" / "boss & <statue>.gltf")
+_run = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(rep_dir),
+                       "--once", "--recursive", "--no-color",
+                       "--report", f"junit:{rep_dir / 'out' / 'gate.xml'}",
+                       "--report", f"sarif:{rep_dir / 'out' / 'gate.sarif'}"],
+                      capture_output=True, text=True, encoding="utf-8", errors="replace")
+expect("--report writes both files on a --once run", _run.returncode == 1
+       and (rep_dir / "out" / "gate.xml").is_file() and (rep_dir / "out" / "gate.sarif").is_file(),
+       (_run.stdout + _run.stderr)[-300:])
+_junit = _ET.parse(rep_dir / "out" / "gate.xml").getroot()
+_cases = _junit.findall(".//testcase")
+expect("JUnit: well-formed XML, one test case per asset, even with & and < in a name",
+       len(_cases) == 2 and _junit.get("tests") == "2" and _junit.get("failures") == "1",
+       [c.get("name") for c in _cases])
+_failed = [c for c in _cases if c.find("failure") is not None]
+expect("... the failing asset is named by its path and carries the reason",
+       len(_failed) == 1 and _failed[0].get("name") == "Props/boss & <statue>.gltf"
+       and "triangles exceeds" in _failed[0].find("failure").get("message")
+       and _failed[0].get("classname") == "Props", _failed[0].attrib if _failed else None)
+_sarif = json.loads((rep_dir / "out" / "gate.sarif").read_text(encoding="utf-8"))
+_results = _sarif["runs"][0]["results"]
+expect("SARIF 2.1.0: one result per problem of each failing asset, with its path",
+       _sarif["version"] == "2.1.0" and _results
+       and all(r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "Props/boss & <statue>.gltf"
+               for r in _results) and all(r["ruleId"] == "agk/budget" for r in _results), _results[:1])
+expect("... and passing assets add nothing to it", len(_results) == len(
+    [c for c in _failed[0].find("failure").text.splitlines() if c]))
+_err = agk.Verdict(rep_dir / "locked.obj", ("cannot be read",), unreadable=True)
+_junit_err = _ET.fromstring(agk.junit_report([_err], rep_dir))
+expect("an unreadable asset is a JUnit error, not a failure",
+       _junit_err.get("errors") == "1" and _junit_err.find(".//error") is not None)
+_single = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"),
+                          str(rep_dir / "Props" / "crate_1mtl.obj"), "--no-color",
+                          "--report", f"junit:{rep_dir / 'one.xml'}"],
+                         capture_output=True, text=True, encoding="utf-8", errors="replace")
+expect("a single-file run writes a one-case report",
+       _single.returncode == 0 and len(_ET.parse(rep_dir / "one.xml").getroot().findall(".//testcase")) == 1)
+for _badarg in ("junit", "xml:out.xml", "junit:"):
+    try:
+        with _contextlib.redirect_stderr(_io.StringIO()):
+            agk.build_parser().parse_args([str(rep_dir), "--report", _badarg])
+        expect(f"--report {_badarg} is refused", False)
+    except SystemExit:
+        expect(f"--report {_badarg} is refused", True)
+expect("a plain run keeps no verdicts in memory (a watch runs for weeks)",
+       agk.Reporter(color=False).keep_verdicts is False)
 
 print("15. VCS hook integrations")
 

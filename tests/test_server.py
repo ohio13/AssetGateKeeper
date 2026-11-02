@@ -648,6 +648,88 @@ expect("healed and mild failures stay quiet",
 alert_server.shutdown()
 alert_server.server_close()
 
+# Tell the artist, not just the channel (G7)
+_people_file = WORK / "people.toml"
+_people_file.write_text(
+    '[people.lena]\nname = "Lena"\nchat = "U012LENA"\nusers = ["lwalker"]\nhosts = ["WS-ART-014"]\n'
+    '[people.omar]\nname = "Omar"\nchat = "omar@studio.example"\nusers = ["omar"]\n', encoding="utf-8")
+people = ahs.load_people(_people_file)
+expect("people.toml loads", [p.key for p in people] == ["lena", "omar"])
+expect("an alert is matched to the artist by user name first",
+       ahs.person_for(people, "OMAR", "ws-art-014").key == "omar")
+expect("... else by machine name, ignoring case", ahs.person_for(people, "", "ws-art-014").key == "lena")
+expect("... and nobody is guessed", ahs.person_for(people, "someone", "elsewhere") is None)
+for _bad, _why in (('[people.x]\nname = "X"\nusers = ["x"]\n', "chat"),
+                   ('[people.x]\nchat = "U1"\n', "users and/or hosts"),
+                   ('[people.x]\nchat = "U1"\nusers = ["x"]\nemail = "x"\n', "unknown key")):
+    _people_file.write_text(_bad, encoding="utf-8")
+    try:
+        ahs.load_people(_people_file)
+        expect(f"a bad person is refused ({_why})", False)
+    except ValueError as exc:
+        expect(f"a bad person is refused ({_why})", _why in str(exc), str(exc))
+expect("Slack and Discord mention by id", ahs.mention_for("slack", people[0]) == "<@U012LENA>"
+       and ahs.mention_for("discord", people[0]) == "<@U012LENA>")
+_teams = json.loads(ahs.webhook_body("teams", "<at>Omar</at> failed", people[1]))
+_entity = _teams["attachments"][0]["content"]["msteams"]["entities"][0]
+expect("Teams gets an Adaptive Card whose mention names the person (a MessageCard cannot)",
+       _entity["mentioned"] == {"id": "omar@studio.example", "name": "Omar"}
+       and _entity["text"] == "<at>Omar</at>")
+expect("without a person, Teams keeps the plain card", json.loads(ahs.webhook_body("teams", "x"))["@type"] == "MessageCard")
+
+g7_db = fresh_db("g7.db")
+g7_pid, g7_tok = ahs.create_project(g7_db, "People")
+ahs.save_budget(g7_db, g7_pid, {"max_triangles": 50_000, "max_material_slots": 3})
+g7_notifier = ahs.Notifier("https://hooks.example/T00/B00/g7", "slack")
+g7_server = ahs.build_server("127.0.0.1", 0, g7_db, quiet=True, notifier=g7_notifier,
+                             people=people, workstation_url="http://review-pc:8100")
+threading.Thread(target=g7_server.serve_forever, daemon=True).start()
+G7_AUTH = {"Authorization": f"Bearer {g7_tok}"}
+with patch("urllib.request.urlopen", side_effect=fake_post):
+    posted.clear()
+    request(g7_server.server_address[1], "/api/telemetry", method="POST", headers=G7_AUTH,
+            body=dict(heavy, username="lwalker", path="//depot/Art/huge.gltf"))
+    request(g7_server.server_address[1], "/api/telemetry", method="POST", headers=G7_AUTH,
+            body=dict(heavy, name="other.gltf", username="omar", hostname="ws-9"))
+    request(g7_server.server_address[1], "/api/telemetry", method="POST", headers=G7_AUTH,
+            body=dict(heavy, name="third.gltf", username="lwalker"))
+    g7_notifier.close(timeout=5.0)
+_texts = [item[1]["text"] for item in posted]
+expect("each artist is mentioned on their own failure", len(_texts) == 2
+       and _texts[0].startswith("<@U012LENA>") and _texts[1].startswith("<@omar@studio.example>"), _texts)
+expect("... with a link that opens it in the Art Workstation",
+       "http://review-pc:8100/viewer?find=%2F%2Fdepot%2FArt%2Fhuge.gltf" in _texts[0], _texts[0][-120:])
+expect("the cooldown is per person: Omar's alert was not swallowed by Lena's, her second one was",
+       not any("third.gltf" in text for text in _texts))
+g7_server.shutdown()
+g7_server.server_close()
+
+_digest_notifier = ahs.Notifier("https://hooks.example/T00/B00/digest", "slack")
+with patch("urllib.request.urlopen", side_effect=fake_post):
+    posted.clear()
+    sent = ahs.send_digest(g7_db, _digest_notifier, people, "2000-01-01", "http://review-pc:8100")
+    _digest_notifier.close(timeout=5.0)
+_digest = sorted(item[1]["text"] for item in posted)
+expect("the digest sends one message per person", sent == 2 and len(_digest) == 2, _digest)
+expect("... listing that person's failures with links",
+       any(text.startswith("<@U012LENA> - 2 assets failed") and "third.gltf" in text
+           and "viewer?find=" in text for text in _digest), _digest)
+expect("in digest mode, a failure sends nothing at once",
+       ahs.build_server("127.0.0.1", 0, g7_db, quiet=True, notifier=None,
+                        digest_at=(9, 0)).digest_at == (9, 0))
+_quiet = ahs.Notifier("https://hooks.example/T00/B00/quiet", "slack")
+_digest_server = ahs.build_server("127.0.0.1", 0, g7_db, quiet=True, notifier=_quiet,
+                                  people=people, digest_at=(9, 0))
+threading.Thread(target=_digest_server.serve_forever, daemon=True).start()
+with patch("urllib.request.urlopen", side_effect=fake_post):
+    posted.clear()
+    request(_digest_server.server_address[1], "/api/telemetry", method="POST", headers=G7_AUTH,
+            body=dict(heavy, name="later.gltf", username="lwalker"))
+    _quiet.flush(timeout=2.0)
+expect("... (nothing was posted)", posted == [], posted)
+_digest_server.shutdown()
+_digest_server.server_close()
+
 print("11. budget planner and remote--rules")
 plan_db = fresh_db("planner.db")
 plan_pid, plan_tok = ahs.create_project(plan_db, "Planner Game")
@@ -717,6 +799,40 @@ expect("the remote document parses through the real text path",
 
 status, _, _ = request(pport, f"/api/rules?project_id={plan_pid}")
 expect("the rules endpoint is not public", status == 401, str(status))
+
+# Expiring exceptions (G1): published with the budget, validated by the gate.
+from datetime import date as _date, timedelta as _td  # noqa: E402
+_until = (_date.today() + _td(days=40)).isoformat()
+_ex = {"path": "Characters/Boss/*", "rule": "max_triangles", "allow": 80000,
+       "reason": "hero boss", "owner": "lena", "expires": _until}
+status, body, _ = request(pport, "/api/save-exception", method="POST", headers=PLAN_AUTH,
+                          body={"project_id": plan_pid, "exception": _ex})
+saved_ex = json.loads(body)
+expect("an exception can be published", status == 200 and saved_ex["saved"]["allow"] == 80000, body[:200])
+status, body, _ = request(pport, "/api/save-exception", method="POST", headers=PLAN_AUTH,
+                          body={"project_id": plan_pid, "exception": {**_ex, "owner": ""}})
+expect("one without an owner is refused, by the gate's own rules",
+       status == 400 and b"owner" in body, body[:200])
+status, body, _ = request(pport, "/api/save-exception", method="POST",
+                          body={"project_id": plan_pid, "exception": _ex})
+expect("publishing an exception needs a token", status == 401, str(status))
+status, body, _ = request(pport, f"/api/rules?project_id={plan_pid}&token={plan_tok}")
+document = json.loads(body)
+expect("the rules artists download carry it", document.get("exceptions") == [_ex], document.get("exceptions"))
+_loaded = agk.parse_exceptions(document)
+expect("... and the gate loads it from there", len(_loaded) == 1 and _loaded[0].owner == "lena")
+status, body, _ = request(pport, f"/budget-planner?project_id={plan_pid}&token={plan_tok}")
+expect("the planner lists it, with its end date and a remove button",
+       "Characters/Boss/*" in body.decode() and _until in body.decode()
+       and "remove-exception" in body.decode())
+status, body, _ = request(pport, "/api/remove-exception", method="POST", headers=PLAN_AUTH,
+                          body={"project_id": plan_pid, "id": saved_ex["saved"]["id"]})
+expect("an exception can be removed", status == 200 and json.loads(body)["exceptions"] == [], body[:200])
+status, body, _ = request(pport, "/api/remove-exception", method="POST", headers=PLAN_AUTH,
+                          body={"project_id": plan_pid, "id": saved_ex["saved"]["id"]})
+expect("... once", status == 404, str(status))
+status, body, _ = request(pport, f"/api/rules?project_id={plan_pid}&token={plan_tok}")
+expect("and it leaves the published rules", "exceptions" not in json.loads(body))
 plan_server.shutdown()
 plan_server.server_close()
 

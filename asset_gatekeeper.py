@@ -88,7 +88,7 @@ import urllib.error
 import urllib.request
 import importlib.util
 from dataclasses import dataclass, replace
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional, Sequence
@@ -310,7 +310,8 @@ class Budget:
             raise ConfigError("the rules file must contain a table of settings")
         _reject_unknown(document, ("mesh", "texture", "server", "healer",
                                    "platforms", "platform", "tags", "tagging",
-                                   "preset", "notify", "filters"), "the rules file")
+                                   "preset", "notify", "filters", "exceptions"),
+                        "the rules file")
         filters = document.get("filters") or {}
         if not isinstance(filters, dict):
             raise ConfigError("[filters] must be a table")
@@ -889,6 +890,127 @@ def load_rules(path: Optional[Path]) -> Optional[tuple[Budget, Path]]:
         raise ConfigError(f"{path}: {exc}") from exc
     except (ValueError, OSError) as exc:  # malformed TOML/JSON, unreadable file
         raise ConfigError(f"{path}: {exc}") from exc
+
+
+# --- #
+# Expiring exceptions (G1): "this hero asset may use 80,000 triangles until
+# alpha", without loosening the rule for everyone.
+# --- #
+
+# The Budget fields an exception may relax, and the type its "allow" must be.
+EXCEPTION_RULES: dict[str, type] = {
+    "max_triangles": int, "max_texture_edge": int, "max_material_slots": int,
+    "max_bone_influences": int, "max_uv_channels": int,
+    "require_power_of_two": bool, "enforce_texture_naming": bool,
+    "allow_degenerate": bool, "check_references": bool, "pbr_check": bool,
+}
+EXCEPTION_WARN_DAYS = 14
+
+
+@dataclass(frozen=True)
+class BudgetException:
+    """One named, owned, dated relaxation of one rule for some paths."""
+
+    path: str
+    rule: str
+    allow: object
+    reason: str
+    owner: str
+    expires: date
+    base: Optional[Path] = None      # what ``path`` is relative to (the rules file's folder)
+
+    def matches(self, asset: Path) -> bool:
+        """Case-insensitive glob against the path below ``base`` (``*`` crosses folders),
+        or against the file name alone when the pattern has no folder in it."""
+        pattern = self.path.replace("\\", "/").lower().removeprefix("./").lstrip("/")
+        relative = asset.name
+        if self.base is not None:
+            try:
+                relative = asset.resolve().relative_to(self.base.resolve()).as_posix()
+            except (ValueError, OSError):
+                relative = asset.name
+        candidates = [relative.lower()]
+        if "/" not in pattern:
+            candidates.append(asset.name.lower())
+        return any(fnmatch.fnmatchcase(candidate, pattern) for candidate in candidates)
+
+    def active(self, today: date) -> bool:
+        return today <= self.expires
+
+    def label(self) -> str:
+        value = f"{self.allow:,}" if isinstance(self.allow, int) and not isinstance(self.allow, bool) \
+            else str(self.allow).lower()
+        return f"{self.rule} = {value} for {self.path}"
+
+
+def _read_date(value: object, where: str) -> date:
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    if isinstance(value, str):
+        try:
+            return date.fromisoformat(value.strip())
+        except ValueError:
+            pass
+    raise ConfigError(f"{where}.expires must be a date like 2026-12-01, got {value!r}")
+
+
+def parse_exceptions(document: Optional[dict], base: Optional[Path] = None,
+                     where: str = "[[exceptions]]") -> tuple[BudgetException, ...]:
+    """Validate every exception loudly: one without a reason, an owner or an end
+    date is how a temporary waiver becomes the real budget."""
+    if not document:
+        return ()
+    entries = document.get("exceptions", [])
+    if entries in (None, []):
+        return ()
+    if not isinstance(entries, list):
+        raise ConfigError(f"{where} must be a list of tables ([[exceptions]] in TOML)")
+    found = []
+    for index, entry in enumerate(entries, 1):
+        label = f"{where} #{index}"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{label} must be a table")
+        _reject_unknown(entry, ("path", "rule", "allow", "reason", "owner", "expires"), label)
+        missing = [key for key in ("path", "rule", "allow", "reason", "owner", "expires")
+                   if key not in entry or entry[key] in ("", None)]
+        if missing:
+            raise ConfigError(f"{label} needs {', '.join(missing)} (every exception says what, "
+                              "why, who owns it and when it ends)")
+        rule = str(entry["rule"]).strip()
+        if rule not in EXCEPTION_RULES:
+            raise ConfigError(f"{label}.rule must be one of {', '.join(sorted(EXCEPTION_RULES))}, "
+                              f"got {rule!r}")
+        kind = EXCEPTION_RULES[rule]
+        allow = entry["allow"]
+        if kind is int and (isinstance(allow, bool) or not isinstance(allow, int) or allow < 0):
+            raise ConfigError(f"{label}.allow must be a whole number for {rule}, got {allow!r}")
+        if kind is bool and not isinstance(allow, bool):
+            raise ConfigError(f"{label}.allow must be true or false for {rule}, got {allow!r}")
+        found.append(BudgetException(
+            path=str(entry["path"]).strip(), rule=rule, allow=allow,
+            reason=str(entry["reason"]).strip()[:300], owner=str(entry["owner"]).strip()[:80],
+            expires=_read_date(entry["expires"], label), base=base))
+    return tuple(found)
+
+
+def resolve_exceptions(root: Path, args: argparse.Namespace,
+                       remote_document: Optional[dict] = None) -> tuple[BudgetException, ...]:
+    """Exceptions from the same document the budget came from. Paths in a rules
+    file are relative to the folder holding it; remote ones to the watch folder."""
+    if remote_document is not None:
+        try:
+            return parse_exceptions(remote_document, base=root)
+        except ConfigError as exc:
+            raise ConfigError(f"remote rules: {exc}") from exc
+    rules_path = Path(args.rules).expanduser() if getattr(args, "rules", None) else root / RULES_FILENAME
+    if not rules_path.is_file():
+        return ()
+    try:
+        return parse_exceptions(parse_rules(rules_path), base=rules_path.parent.resolve())
+    except ConfigError as exc:
+        raise ConfigError(f"{rules_path}: {exc}") from exc
 
 
 def resolve_budget(root: Path, args: argparse.Namespace,
@@ -1480,24 +1602,28 @@ class HealSettings:
     meshes: bool = True         # zero-area faces, .obj only
     # resize keeps UVs exact; pad keeps every pixel but shifts UVs (opt-in)
     texture_mode: str = "resize"
+    # JPEG is re-saved (quality 95) when healed, which loses a little each time.
+    jpg: bool = False
 
     @classmethod
     def from_mapping(cls, table: dict, where: str = "[healer]") -> "HealSettings":
         if not isinstance(table, dict):
             raise ConfigError(f"{where} must be a table")
-        _reject_unknown(table, ("enabled", "textures", "meshes", "texture_mode"), where)
+        _reject_unknown(table, ("enabled", "textures", "meshes", "texture_mode", "jpg"), where)
         mode = _read_str(table, "texture_mode", where)
         if mode is not None and mode not in ("pad", "resize"):
             raise ConfigError(f"{where}.texture_mode must be 'pad' or 'resize', got {mode!r}")
         enabled = _read_bool(table, "enabled", where)
         textures = _read_bool(table, "textures", where)
         meshes = _read_bool(table, "meshes", where)
+        jpg = _read_bool(table, "jpg", where)
         defaults = cls()
         return cls(
             enabled=defaults.enabled if enabled is None else enabled,
             textures=defaults.textures if textures is None else textures,
             meshes=defaults.meshes if meshes is None else meshes,
             texture_mode=defaults.texture_mode if mode is None else mode,
+            jpg=defaults.jpg if jpg is None else jpg,
         )
 
 
@@ -1565,7 +1691,8 @@ def load_healer(budget: Budget, settings: HealSettings, root: Optional[Path] = N
     try:
         return module.Healer(budget, textures=settings.textures, meshes=settings.meshes,
                              texture_mode=settings.texture_mode, root=root,
-                             resolve_references=resolve_references, **options)
+                             resolve_references=resolve_references, jpg=settings.jpg,
+                             **options)
     except module.HealError as exc:
         raise ConfigError(f"healer cannot start: {exc}") from exc
 
@@ -1585,8 +1712,10 @@ def describe_auto_heal(watch_dir: Path, settings: HealSettings, args: argparse.N
         source = f"[healer] in {RULES_FILENAME}"
     changes = []
     if settings.textures:
-        changes.append("rename PNGs missing a suffix (and repoint the .mtl/.gltf naming them)")
-        changes.append(f"{settings.texture_mode} non-power-of-two PNGs"
+        kinds = "PNG/TGA" + ("/JPG" if settings.jpg else "")
+        changes.append(f"rename {kinds} textures missing a suffix (and repoint the "
+                       ".mtl/.gltf naming them)")
+        changes.append(f"{settings.texture_mode} non-power-of-two {kinds} textures"
                        + (" - pad shifts UVs" if settings.texture_mode == "pad" else ""))
     if settings.meshes:
         changes.append("strip zero-area faces from .obj")
@@ -3120,8 +3249,12 @@ class Gatekeeper:
                  tag_mode: str = "suggest",
                  tag_similarity: float = DEFAULT_TAG_SIMILARITY,
                  tag_root: Optional[Path] = None,
-                 root: Optional[Path] = None) -> None:
+                 root: Optional[Path] = None,
+                 exceptions: Sequence["BudgetException"] = (),
+                 today: Optional[date] = None) -> None:
         self.budget = budget
+        self.exceptions = tuple(exceptions)
+        self.today = today
         self.healer = healer
         self.tag_budgets = tag_budgets or {}
         self.tag_mode = tag_mode if tag_mode in TAG_MODES else "suggest"
@@ -3136,8 +3269,34 @@ class Gatekeeper:
         self.root = root if root is not None else tag_root
         self._naming = build_naming_pattern(budget.texture_suffixes) if budget.enforce_texture_naming else None
 
+    def _exceptions_for(self, path: Path, budget: Budget) -> tuple[Budget, list[str], list[str]]:
+        """Apply the active exceptions for this path; describe the expired ones."""
+        if not self.exceptions:
+            return budget, [], []
+        today = self.today or date.today()
+        notes: list[str] = []
+        expired: list[str] = []
+        changes: dict[str, object] = {}
+        for exception in self.exceptions:
+            if not exception.matches(path):
+                continue
+            if exception.active(today):
+                changes[exception.rule] = exception.allow
+                left = (exception.expires - today).days
+                soon = (f" - ends in {left} day{'s' if left != 1 else ''}"
+                        if left <= EXCEPTION_WARN_DAYS else "")
+                notes.append(f"exception: {exception.label()} until {exception.expires.isoformat()} "
+                             f"({exception.owner}: {exception.reason}){soon}")
+            else:
+                expired.append(f"the exception {exception.label()} ({exception.owner}) expired on "
+                               f"{exception.expires.isoformat()}")
+        if changes:
+            budget = replace(budget, **changes)
+        return budget, notes, expired
+
     def check(self, path: Path) -> Verdict:
         budget, tag, warning = self._budget_for(path)
+        budget, exception_notes, expired = self._exceptions_for(path, budget)
         previous = self.budget
         if budget is not previous:
             # One asset is inspected at a time (single worker thread), so a
@@ -3155,18 +3314,26 @@ class Gatekeeper:
             self._naming = (build_naming_pattern(previous.texture_suffixes)
                             if previous.enforce_texture_naming else None)
 
-        notes = list(verdict.warnings)
+        notes = list(verdict.warnings) + exception_notes
+        if expired and verdict.problems:
+            # Only when it fails: an asset that now fits the normal budget does
+            # not need its old waiver, expired or not.
+            verdict = Verdict(verdict.path, verdict.problems + tuple(expired), verdict.metric,
+                              verdict.stats, verdict.heal_notes, verdict.warnings,
+                              verdict.unreadable)
         if warning:
             if self.tag_mode == "strict":
                 # Strict mode turns a near miss into a failure, with the fix in
                 # the message: that is the whole point of not guessing politely.
                 problems = (warning + " (strict tag mode: rename the folder to match)",) + verdict.problems
                 return Verdict(verdict.path, problems, verdict.metric, verdict.stats,
-                               verdict.heal_notes, tuple(notes))
+                               verdict.heal_notes, tuple(notes), verdict.unreadable)
             notes.append(warning)
         if notes:
+            # unreadable rides along: an ERROR with a note attached is still an
+            # ERROR, not a FAILED budget.
             return Verdict(verdict.path, verdict.problems, verdict.metric, verdict.stats,
-                           verdict.heal_notes, tuple(notes))
+                           verdict.heal_notes, tuple(notes), verdict.unreadable)
         return verdict
 
     def _budget_for(self, path: Path) -> tuple[Budget, Optional[str], Optional[str]]:
@@ -3577,6 +3744,10 @@ class Reporter:
         self.notifier = notifier
         self.passed = 0
         self.failed = 0
+        # Kept only for --report (JUnit / SARIF): a watch that runs for weeks
+        # must not hold every verdict it ever printed.
+        self.keep_verdicts = False
+        self.verdicts: list[Verdict] = []
         self._lock = threading.Lock()
 
     @staticmethod
@@ -3605,6 +3776,9 @@ class Reporter:
         return str(path)
 
     def report(self, verdict: Verdict) -> None:
+        if self.keep_verdicts:
+            with self._lock:
+                self.verdicts.append(verdict)
         # Telemetry mirrors the local verdict; it never influences it.
         if self.telemetry is not None:
             self.telemetry.submit(verdict)
@@ -4247,6 +4421,103 @@ def _positive_int(text: str) -> int:
     return value
 
 
+# --- #
+# CI reports (G3): one entry per asset, in the formats build servers display
+# --- #
+
+REPORT_FORMATS = ("junit", "sarif")
+
+
+def _report_target(text: str) -> tuple[str, str]:
+    kind, sep, path = str(text).partition(":")
+    kind = kind.strip().lower()
+    if not sep or kind not in REPORT_FORMATS or not path.strip():
+        raise argparse.ArgumentTypeError(
+            f"use junit:<file> or sarif:<file>, got {text!r}")
+    return kind, path.strip()
+
+
+def _relative_name(path: Path, root: Optional[Path]) -> str:
+    if root is not None:
+        try:
+            return path.resolve().relative_to(root.resolve()).as_posix()
+        except (ValueError, OSError):
+            pass
+    return path.name
+
+
+def junit_report(verdicts: Sequence[Verdict], root: Optional[Path] = None) -> str:
+    """JUnit XML: one test case per asset. Jenkins, TeamCity, Horde, GitLab and
+    Azure DevOps all show these per test, so a failing asset is a red line with
+    its path, not a word in a build log."""
+    from xml.sax.saxutils import escape, quoteattr
+    failures = sum(1 for verdict in verdicts if not verdict.passed and not verdict.unreadable)
+    errors = sum(1 for verdict in verdicts if verdict.unreadable)
+    lines = ['<?xml version="1.0" encoding="UTF-8"?>',
+             f'<testsuites name="AssetGatekeeper" tests="{len(verdicts)}" failures="{failures}" '
+             f'errors="{errors}">',
+             f'  <testsuite name="asset budgets" tests="{len(verdicts)}" failures="{failures}" '
+             f'errors="{errors}" skipped="0">']
+    for verdict in verdicts:
+        name = _relative_name(verdict.path, root)
+        folder = name.rsplit("/", 1)[0] if "/" in name else "."
+        lines.append(f"    <testcase classname={quoteattr(folder)} name={quoteattr(name)}>")
+        body = "\n".join(verdict.problems)
+        if verdict.unreadable:
+            lines.append(f"      <error message={quoteattr(verdict.reason)}>{escape(body)}</error>")
+        elif not verdict.passed:
+            lines.append(f"      <failure message={quoteattr(verdict.reason)} "
+                         f"type=\"budget\">{escape(body)}</failure>")
+        notes = list(verdict.heal_notes) + list(verdict.warnings)
+        if verdict.metric or notes:
+            out = "\n".join(([verdict.metric] if verdict.metric else []) + notes)
+            lines.append(f"      <system-out>{escape(out)}</system-out>")
+        lines.append("    </testcase>")
+    lines += ["  </testsuite>", "</testsuites>", ""]
+    return "\n".join(lines)
+
+
+def sarif_report(verdicts: Sequence[Verdict], root: Optional[Path] = None) -> str:
+    """SARIF 2.1.0: GitHub code scanning shows each failing asset as an annotation
+    on the file in the pull request."""
+    results = []
+    for verdict in verdicts:
+        if verdict.passed:
+            continue
+        location = {"physicalLocation": {"artifactLocation": {
+            "uri": _relative_name(verdict.path, root), "uriBaseId": "%SRCROOT%"}}}
+        for problem in verdict.problems or ("could not be checked",):
+            results.append({
+                "ruleId": "agk/unreadable" if verdict.unreadable else "agk/budget",
+                "level": "error",
+                "message": {"text": problem},
+                "locations": [location]})
+    document = {
+        "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+        "version": "2.1.0",
+        "runs": [{
+            "tool": {"driver": {
+                "name": "AssetGatekeeper", "version": __version__,
+                "informationUri": "https://github.com/ohio13/AssetGateKeeper",
+                "rules": [
+                    {"id": "agk/budget", "name": "AssetBudget",
+                     "shortDescription": {"text": "Asset exceeds the project's budget"}},
+                    {"id": "agk/unreadable", "name": "AssetUnreadable",
+                     "shortDescription": {"text": "Asset could not be read"}}]}},
+            "results": results}]}
+    return json.dumps(document, indent=2) + "\n"
+
+
+def write_reports(targets: Sequence[tuple[str, str]], verdicts: Sequence[Verdict],
+                  root: Optional[Path]) -> None:
+    for kind, destination in targets:
+        text = junit_report(verdicts, root) if kind == "junit" else sarif_report(verdicts, root)
+        path = Path(destination).expanduser()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        LOG.info("report  %s written to %s (%d assets)", kind, path, len(verdicts))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="asset_gatekeeper",
@@ -4348,7 +4619,7 @@ def build_parser() -> argparse.ArgumentParser:
                         metavar="MODE",
                         help="what identifying detail telemetry carries (or set "
                              f"{SERVER_ENV_IDENTITY}): full (host, user, absolute path), "
-                             "path (absolute path only, the default), none (relative path)")
+                             "host (host and absolute path, the default), none (relative path)")
     parser.add_argument("--version", action="version",
                         version=f"asset-gatekeeper {__version__}",
                         help="print the version and exit (pipelines log this)")
@@ -4362,6 +4633,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="descend into symlinked/junctioned folders. Off by default: "
                              "a link re-counts the same tree and a self-link never ends. "
                              "Unreadable entries are always skipped, never fatal")
+    parser.add_argument("--report", action="append", type=_report_target, default=[],
+                        metavar="FORMAT:FILE",
+                        help="with --once or a single file: also write junit:gate.xml (Jenkins, "
+                             "TeamCity, Horde) or sarif:gate.sarif (GitHub code scanning); "
+                             "repeatable")
     parser.add_argument("--json", action="store_true",
                         help="one JSON object per file on stdout (used by the DCC plugins)")
     parser.add_argument("--no-color", action="store_true", help="disable ANSI colour")
@@ -4535,6 +4811,18 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOG.info("tags    %s  (%s matching, %.2f similarity)",
                  ", ".join(sorted(tag_budgets)), tag_mode, tag_similarity)
 
+    try:
+        exceptions = resolve_exceptions(watch_dir, args, remote_document)
+    except ConfigError as exc:
+        LOG.error("invalid exception: %s", exc)
+        return 2
+    if exceptions:
+        today = date.today()
+        live = [item for item in exceptions if item.active(today)]
+        soon = [item for item in live if (item.expires - today).days <= EXCEPTION_WARN_DAYS]
+        LOG.info("except  %d active, %d expired%s", len(live), len(exceptions) - len(live),
+                 f", {len(soon)} ending within {EXCEPTION_WARN_DAYS} days" if soon else "")
+
     # Toasts default on for a human watching a folder, off for CI and hooks:
     # a build agent has nobody to interrupt.
     notify_wanted = (args.notify if args.notify is not None
@@ -4556,9 +4844,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     gatekeeper = Gatekeeper(budget, healer=healer, overrides=overrides,
                             tag_budgets=tag_budgets,
                             tag_mode=tag_mode, tag_similarity=tag_similarity,
-                            tag_root=watch_dir)
+                            tag_root=watch_dir, exceptions=exceptions)
     reporter = Reporter(color=not args.no_color and not args.json, root=watch_dir,
                         json_mode=args.json, telemetry=telemetry, notifier=notifier)
+    reporter.keep_verdicts = bool(args.report)
 
     if root.is_file():
         if not is_candidate(root):
@@ -4567,6 +4856,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         verdict = gatekeeper.check(root)
         reporter.report(verdict)
         reporter.close()
+        if args.report:
+            write_reports(args.report, reporter.verdicts, watch_dir)
         if one_file and not verdict.healed and not verdict.passed:
             reason = getattr(healer, "last_refusal", "")
             if not any(note.startswith("--heal would:") for note in verdict.warnings):
@@ -4578,7 +4869,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         status = run_once(watch_dir, gatekeeper, reporter, args.recursive, budget.exclude,
                           follow_symlinks=getattr(args, "follow_symlinks", False),
                           allow_empty=getattr(args, "allow_empty", False))
+        if args.report:
+            write_reports(args.report, reporter.verdicts, watch_dir)
     else:
+        if args.report:
+            LOG.warning("--report is written by --once runs only; ignored while watching")
         status = run_watch(watch_dir, gatekeeper, reporter, args.recursive, budget.exclude)
     reporter.close()
     return status

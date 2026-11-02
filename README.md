@@ -414,8 +414,8 @@ What it will repair, and what it refuses to:
 
 | Problem | Healed? | How |
 | :--- | :--- | :--- |
-| `.png` not a power of two | yes | LANCZOS resize to the next power of two (UVs unchanged); `texture_mode = "pad"` pads instead, which keeps every pixel but shifts UVs |
-| `.png` missing a naming suffix | yes | rename with the inferred suffix (`_Albedo`/`_Normal`/`_Roughness`) |
+| `.png`/`.tga` not a power of two | yes | LANCZOS resize to the next power of two (UVs unchanged; normal maps renormalised); `texture_mode = "pad"` pads instead, which keeps every pixel but shifts UVs. `.jpg` only with `[healer] jpg = true` (it is re-saved at quality 95) |
+| `.png`/`.tga` missing a naming suffix | yes | rename with the inferred suffix (`_Albedo`/`_Normal`/`_Roughness`) |
 | `.obj` zero-area faces | yes | delete the degenerate faces, rewrite the file |
 | Triangle budget exceeded | **no** | decimation is not a safe transformation |
 | Texture resolution exceeded | **no** | that would throw away detail the artist chose |
@@ -881,7 +881,7 @@ python asset_gatekeeper.py [folder] [options]
 | `--preset NAME` | Apply a shipped platform preset (`--list-presets`); beats `rules.toml`, loses to an explicit numeric flag |
 | `--remote-rules URL` | Fetch the budget from a central endpoint, cached offline as `.rules.cache.json` |
 | `--telemetry-url URL` | POST every verdict to this endpoint (2 s timeout, never blocks) |
-| `--telemetry-identity MODE` | What telemetry carries: `full` (host, user, absolute path), `path` (absolute path only, the default), `none` (relative path) |
+| `--telemetry-identity MODE` | What telemetry carries: `full` (host, user, absolute path), `host` (host and absolute path, the default), `none` (relative path) |
 | `--triangles N` | Override the triangle budget |
 | `--max-texture EDGE` | Override the max texture edge, in pixels |
 | `--max-materials N` | Override the material-slot budget |
@@ -901,6 +901,7 @@ python asset_gatekeeper.py [folder] [options]
 | `--dry-run` | With `--heal`: say what would change, write nothing |
 | `--undo-heal` | Put back what the last heal of this file replaced |
 | `--list-heals` | List the heals recorded in a folder, newest first |
+| `--report FORMAT:FILE` | With `--once` or one file: also write `junit:gate.xml` (Jenkins, TeamCity, Horde) or `sarif:gate.sarif` (GitHub annotations); repeatable |
 | `--notify` / `--no-notify` | Native desktop toasts on failure/heal (on while watching, off in `--once`) |
 | `--notify-max N` | Maximum toasts per minute (default 6) |
 | `--allow-degenerate` | Permit zero-area triangles |

@@ -1177,7 +1177,7 @@ def add_sidecar(db_path: str | Path, data_dir: Path, asset_id: int, filename: st
 # --- #
 
 # What the healer can change: .png names and sizes, zero-area .obj faces.
-HEALABLE_SUFFIXES = (".png", ".obj")
+HEALABLE_SUFFIXES = (".png", ".tga", ".jpg", ".jpeg", ".obj")
 HEAL_PREFIX = "--heal would: "
 
 
@@ -1217,8 +1217,8 @@ def heal_asset(db_path: str | Path, data_dir: Path, asset_id: int, apply: bool,
     answer = {"asset_id": asset_id, "healable": False, "changes": [], "problems": [],
               "budget": label, "texture_mode": settings.texture_mode, "reason": ""}
     if suffix not in HEALABLE_SUFFIXES or asset.get("kind") == "broken":
-        answer["reason"] = ("the healer only fixes .png textures (name suffix, power of two) "
-                            "and .obj meshes (zero-area faces)")
+        answer["reason"] = ("the healer only fixes .png/.tga/.jpg textures (name suffix, power "
+                            "of two) and .obj meshes (zero-area faces)")
         if apply:
             raise WorkstationError(answer["reason"], 422)
         return answer

@@ -887,7 +887,7 @@ function buildMaterialControls() {
 
 /* - healing: a fixed copy, never the original */
 
-const HEALABLE = /\.(png|obj)$/i;
+const HEALABLE = /\.(png|tga|jpe?g|obj)$/i;
 
 function resetHeal() {
   const button = $("asset-heal");
@@ -1808,6 +1808,18 @@ animate();
       setTab("rules");
     } else {
       loadRules();        // fetch on load, as specified: the panel is pre-populated
+    }
+
+    // ?find=<depot path or file name>: the link an AssetHealth alert carries.
+    // The newest version whose depot path, or else whose name, matches.
+    const find = (params.get("find") || "").trim();
+    if (find && !params.get("asset")) {
+      const norm = (text) => String(text || "").replace(/\\/g, "/").toLowerCase();
+      const name = norm(find).split("/").pop();
+      const hit = (state.assets || []).find((item) => item.source_path && norm(item.source_path) === norm(find))
+        || (state.assets || []).find((item) => norm(item.filename) === name);
+      if (hit) await selectAsset(hit.id);
+      else $("status").textContent = `${find} is not in the workstation yet`;
     }
 
     // ?asset=<id> is a shareable review link: "look at asset 12, LOD2".

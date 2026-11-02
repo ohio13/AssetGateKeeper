@@ -67,7 +67,8 @@ just hides the check.
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `enabled` | bool | false | folder-wide healing; `--auto-heal` turns it on for one run. `--heal <file>` heals one file whatever this says |
-| `textures` | bool | true | `.png`: add a missing name suffix (and repoint what names it), make edges a power of two |
+| `textures` | bool | true | `.png` and `.tga`: add a missing name suffix (and repoint what names it), make edges a power of two. A texture named `_Normal` (or `_nrm`, `_n`) is renormalised after a resize, so every pixel stays a unit vector |
+| `jpg` | bool | false | also heal `.jpg`/`.jpeg`. Off by default: the healed file is re-saved (quality 95, no chroma subsampling), which loses a little detail every time |
 | `meshes` | bool | true | `.obj`: delete zero-area faces |
 | `texture_mode` | string | `"resize"` | how a non-power-of-two `.png` reaches the next power of two: `resize` resamples it (UVs unchanged); `pad` repeats the edge (every pixel kept, but UVs shift - a UV of 0.5 lands 2.3 % off on 1000 -> 1024) |
 
@@ -166,6 +167,38 @@ tag 'charcter' is not a known tag; closest match is 'character'
 This is why tags are folders and not `[tags.*]` glob patterns in the file: a
 pattern-based system cannot tell you the folder is misspelled, it just fails to
 match and silently applies the default.
+
+## [[exceptions]]
+
+A named, owned, dated waiver: "the boss may use 80,000 triangles until alpha",
+without loosening the rule for everyone.
+
+```toml
+[[exceptions]]
+path = "Characters/Boss/*"      # glob under the folder holding rules.toml; * crosses folders
+rule = "max_triangles"          # the setting it relaxes
+allow = 80000                   # the value it allows instead
+reason = "hero boss, art director sign-off"
+owner = "lena"
+expires = 2026-12-01            # the last day it applies
+```
+
+| Key | Meaning |
+|---|---|
+| `path` | case-insensitive glob relative to the folder holding `rules.toml` (the watch folder for remote rules); a bare file name (`boss.fbx`) matches that file in any folder |
+| `rule` | one of `max_triangles`, `max_texture_edge`, `max_material_slots`, `max_bone_influences`, `max_uv_channels`, `require_power_of_two`, `enforce_texture_naming`, `allow_degenerate`, `check_references`, `pbr_check` |
+| `allow` | a whole number for the counts, `true`/`false` for the switches |
+| `reason`, `owner`, `expires` | all required: a waiver nobody owns, with no end date, becomes the real budget |
+
+While it applies, the asset passes with the note *exception: max_triangles =
+80,000 for Characters/Boss/\* until 2026-12-01 (lena: ...)*, and in its last 14
+days the note says how many are left. The day after `expires` it no longer
+applies: if the asset still fails, the failure says the exception expired; if it
+now fits the normal budget, nothing is said. At start-up the gate prints how
+many exceptions apply, how many expired and how many end within 14 days. An
+incomplete or misspelt exception stops the run (exit 2) and names the missing
+key. The AssetHealth budget planner publishes exceptions with the project's
+budget, so `--remote-rules` clients get them too.
 
 ## Full example
 

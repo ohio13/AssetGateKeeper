@@ -54,6 +54,25 @@ Exit codes are the contract: `0` clean, `1` budget failure, `2` the gate could
 not run (bad rules, missing folder). Give code 2 a different colour in your
 dashboard; it usually means a bad merged `rules.toml`, not a bad asset.
 
+### Reports your CI server shows per asset
+
+```
+asset-gatekeeper Assets --once --recursive --report junit:gate.xml --report sarif:gate.sarif
+```
+
+* **JUnit** (`junit:<file>`): one test case per asset, named by its path, with
+  the failure reason as the message; an unreadable file is an *error*, not a
+  *failure*. Jenkins (JUnit plugin), TeamCity (XML report processing), Horde,
+  GitLab (`artifacts:reports:junit`) and Azure DevOps (Publish Test Results)
+  show each failing asset as its own red line.
+* **SARIF** (`sarif:<file>`): one result per problem of each failing asset. The
+  shipped GitHub workflow uploads it with `github/codeql-action/upload-sarif`,
+  so each failure is an annotation on the file in the pull request (needs code
+  scanning: public repositories, or GitHub Advanced Security).
+
+Reports are written by `--once` runs and single-file runs; a watch ignores the
+flag.
+
 ### Post the verdicts while you are there
 
 ```

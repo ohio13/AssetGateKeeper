@@ -43,7 +43,8 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import date, datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
 
@@ -251,6 +252,20 @@ CREATE TABLE IF NOT EXISTS projects (
 
 -- The published budget for a project. This is what /api/rules serves to
 -- `--remote-rules`, and what the alerting threshold is measured against.
+-- Expiring exceptions (G1), published with the project's budget.
+CREATE TABLE IF NOT EXISTS exceptions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    project_id INTEGER NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
+    path       TEXT    NOT NULL,
+    rule       TEXT    NOT NULL,
+    allow_json TEXT    NOT NULL,
+    reason     TEXT    NOT NULL,
+    owner      TEXT    NOT NULL,
+    expires    TEXT    NOT NULL,
+    created_at TEXT    NOT NULL,
+    created_by TEXT    NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS budgets (
     project_id         INTEGER PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
     max_triangles      INTEGER NOT NULL,
@@ -557,12 +572,61 @@ def budget_for_project(db_path: str | Path, project_id: int | None) -> dict:
     }
 
 
-def budget_document(budget: dict) -> dict:
+def list_exceptions(db_path: str | Path, project_id: int) -> list[dict]:
+    """A project's published exceptions, soonest to end first."""
+    with open_db(db_path) as connection:
+        rows = connection.execute(
+            "SELECT * FROM exceptions WHERE project_id = ? ORDER BY expires, id",
+            (project_id,)).fetchall()
+    return [{"id": row["id"], "path": row["path"], "rule": row["rule"],
+             "allow": json.loads(row["allow_json"]), "reason": row["reason"],
+             "owner": row["owner"], "expires": row["expires"],
+             "created_at": row["created_at"], "created_by": row["created_by"]}
+            for row in rows]
+
+
+def add_exception(db_path: str | Path, project_id: int, entry: dict, created_by: str = "") -> dict:
+    """Validate with the gate's own parser, so the dashboard can never publish an
+    exception the gate would refuse to load."""
+    if not isinstance(entry, dict):
+        raise ValueError("an exception must be an object")
+    fields = {key: entry.get(key) for key in ("path", "rule", "allow", "reason", "owner",
+                                               "expires")}
+    try:
+        parsed = agk.parse_exceptions({"exceptions": [fields]}, where="exception")[0]
+    except agk.ConfigError as exc:
+        raise ValueError(str(exc)) from exc
+    with open_db(db_path) as connection:
+        cursor = connection.execute(
+            "INSERT INTO exceptions (project_id, path, rule, allow_json, reason, owner, expires,"
+            " created_at, created_by) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (project_id, parsed.path, parsed.rule, json.dumps(parsed.allow), parsed.reason,
+             parsed.owner, parsed.expires.isoformat(), _utc_now(), str(created_by)[:80]))
+        new_id = cursor.lastrowid
+    return next(item for item in list_exceptions(db_path, project_id) if item["id"] == new_id)
+
+
+def remove_exception(db_path: str | Path, project_id: int, exception_id: int) -> bool:
+    with open_db(db_path) as connection:
+        return connection.execute("DELETE FROM exceptions WHERE id = ? AND project_id = ?",
+                                  (exception_id, project_id)).rowcount > 0
+
+
+def budget_document(budget: dict, exceptions: "list[dict] | tuple" = ()) -> dict:
     """The saved budget as a rules document - exactly what `--remote-rules` eats.
 
     Same shape as rules.toml, so a client never has to learn a second format and
     the gate's own parser validates it on the way in.
     """
+    document = _budget_tables(budget)
+    if exceptions:
+        document["exceptions"] = [
+            {key: item[key] for key in ("path", "rule", "allow", "reason", "owner", "expires")}
+            for item in exceptions]
+    return document
+
+
+def _budget_tables(budget: dict) -> dict:
     return {
         "mesh": {
             "max_triangles": int(budget["max_triangles"]),
@@ -836,9 +900,102 @@ def alert_text(payload: dict, budget: dict,
             f"Reasons: {reasons}. Over budget: {details}")
 
 
-def webhook_body(provider: str, text: str) -> bytes:
+# --- #
+# Tell the artist, not just the channel (G7)
+# --- #
+
+PEOPLE_ENV = "AGK_PEOPLE"
+
+
+@dataclass(frozen=True)
+class Person:
+    """Someone a failure can be addressed to: their chat handle, and the user
+    and machine names their gate reports with."""
+
+    key: str
+    name: str
+    chat: str                 # Slack member ID, Discord user ID, or Teams email
+    users: tuple[str, ...] = ()
+    hosts: tuple[str, ...] = ()
+
+
+def load_people(path: str | Path) -> list[Person]:
+    """Read people.toml (or .json): one [people.<key>] table per person."""
+    path = Path(path).expanduser()
+    text = path.read_text(encoding="utf-8-sig")
+    if path.suffix.lower() == ".json":
+        document = json.loads(text)
+    else:
+        document = agk.parse_rules_text(text, origin=str(path))
+    table = document.get("people", {}) if isinstance(document, dict) else None
+    if not isinstance(table, dict) or not table:
+        raise ValueError(f"{path}: expected [people.<name>] tables")
+    people = []
+    for key, entry in table.items():
+        if not isinstance(entry, dict):
+            raise ValueError(f"{path}: [people.{key}] must be a table")
+        unknown = set(entry) - {"name", "chat", "users", "hosts"}
+        if unknown:
+            raise ValueError(f"{path}: [people.{key}] has unknown key(s) {', '.join(sorted(unknown))}")
+        chat = str(entry.get("chat", "") or "").strip()
+        if not chat:
+            raise ValueError(f"{path}: [people.{key}] needs chat (Slack member ID, Discord "
+                             "user ID or Teams email)")
+        users = entry.get("users", [])
+        hosts = entry.get("hosts", [])
+        if not isinstance(users, list) or not isinstance(hosts, list) or not (users or hosts):
+            raise ValueError(f"{path}: [people.{key}] needs users and/or hosts lists")
+        people.append(Person(key=str(key), name=str(entry.get("name") or key), chat=chat,
+                             users=tuple(str(item).strip().lower() for item in users),
+                             hosts=tuple(str(item).strip().lower() for item in hosts)))
+    return people
+
+
+def person_for(people: "list[Person] | tuple", username: str = "", hostname: str = "") -> Person | None:
+    """The user name wins (it is the artist); the machine name is the fallback."""
+    user, host = str(username or "").strip().lower(), str(hostname or "").strip().lower()
+    for person in people or ():
+        if user and user in person.users:
+            return person
+    for person in people or ():
+        if host and host in person.hosts:
+            return person
+    return None
+
+
+def mention_for(provider: str, person: Person | None) -> str:
+    if person is None:
+        return ""
+    provider = (provider or "slack").lower()
+    if provider == "teams":
+        return f"<at>{person.name}</at>"
+    return f"<@{person.chat}>"     # Slack and Discord both mention by id
+
+
+def workstation_link(base: str, path: str, name: str) -> str:
+    """A link that opens the asset in the Art Workstation (?find= picks the newest
+    version whose depot path or name matches; nothing is looked up here)."""
+    if not base:
+        return ""
+    target = str(path or name or "")
+    return f"{base.rstrip('/')}/viewer?find={urllib.parse.quote(target, safe='')}" if target else ""
+
+
+def webhook_body(provider: str, text: str, person: Person | None = None) -> bytes:
     """Slack, Discord and Teams all want a slightly different envelope."""
     provider = (provider or "slack").lower()
+    if provider == "teams" and person is not None:
+        # A Teams mention only works inside an Adaptive Card, with the person
+        # named in msteams.entities; a MessageCard prints "<at>" as text.
+        body = {"type": "message", "attachments": [{
+            "contentType": "application/vnd.microsoft.card.adaptive",
+            "content": {"type": "AdaptiveCard", "version": "1.4",
+                        "$schema": "http://adaptivecards.io/schemas/adaptive-card.json",
+                        "body": [{"type": "TextBlock", "text": text, "wrap": True}],
+                        "msteams": {"entities": [{
+                            "type": "mention", "text": f"<at>{person.name}</at>",
+                            "mentioned": {"id": person.chat, "name": person.name}}]}}}]}
+        return json.dumps(body).encode("utf-8")
     if provider == "discord":
         body = {"content": text, "username": "AssetGatekeeper"}
     elif provider == "teams":
@@ -847,6 +1004,62 @@ def webhook_body(provider: str, text: str) -> bytes:
     else:  # slack (also the generic "something that takes {\"text\": ...}")
         body = {"text": text}
     return json.dumps(body).encode("utf-8")
+
+
+def digest_text(rows: list[dict], person: Person | None, provider: str,
+                workstation_url: str = "") -> str:
+    """One message for one person's failures since the last digest."""
+    who = mention_for(provider, person) if person else "Unassigned"
+    lines = [f"{who} - {len(rows)} asset{'s' if len(rows) != 1 else ''} failed the gate "
+             "since the last digest:"]
+    for row in rows[:20]:
+        reason = (row.get("reasons") or "no reason recorded").split("\n")[0]
+        link = workstation_link(workstation_url, row.get("filepath", ""), row.get("filename", ""))
+        lines.append(f"- {row['filename']}: {reason}" + (f" ({link})" if link else ""))
+    if len(rows) > 20:
+        lines.append(f"- ... and {len(rows) - 20} more on the dashboard")
+    return "\n".join(lines)
+
+
+def send_digest(db_path: str | Path, notifier: "Notifier", people: "list[Person] | tuple",
+                since: str, workstation_url: str = "") -> int:
+    """Group the failures received after ``since`` by person and send one
+    message each (and one for anyone unmatched). Returns messages sent."""
+    with open_db(db_path) as connection:
+        rows = connection.execute(
+            "SELECT v.id, v.filename, v.filepath, v.username, v.hostname,"
+            " (SELECT group_concat(p.message, char(10)) FROM problems p WHERE p.verdict_id = v.id)"
+            " AS reasons FROM verdicts v WHERE v.passed = 0 AND v.received_at > ?"
+            " ORDER BY v.id", (since,)).fetchall()
+    groups: dict = {}
+    for row in rows:
+        person = person_for(people, row["username"], row["hostname"])
+        groups.setdefault(person, []).append(dict(row))
+    for person, items in groups.items():
+        notifier.submit(digest_text(items, person, notifier.provider, workstation_url), person)
+    return len(groups)
+
+
+def _digest_loop(server) -> None:
+    """Sleep until HH:MM local time, send the digest, repeat."""
+    last = _utc_now()
+    while not server.stopping:
+        hour, minute = server.digest_at
+        now = datetime.now()
+        target = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        while not server.stopping and datetime.now() < target:
+            time.sleep(min(30.0, max(0.5, (target - datetime.now()).total_seconds())))
+        if server.stopping:
+            return
+        started = _utc_now()
+        try:
+            send_digest(server.db_path, server.notifier, server.people, last,
+                        server.workstation_url)
+        except Exception as exc:     # a digest must never take the server down
+            print(f"asset_health: digest failed ({type(exc).__name__}): {exc}", file=sys.stderr)
+        last = started
 
 
 def alert_scope(project_id: int | None) -> str:
@@ -946,28 +1159,29 @@ class Notifier:
             print("asset_health: webhook URL is not https; alert text is sent in clear text",
                   file=sys.stderr)
 
-    def submit(self, text: str) -> None:
+    def submit(self, text: str, person: Person | None = None) -> None:
         if self._closed:
             return
         if self._thread is None:
             self._thread = threading.Thread(target=self._run, name="ah-notifier", daemon=True)
             self._thread.start()
         try:
-            self._queue.put_nowait(text)
+            self._queue.put_nowait((text, person))
         except queue.Full:
             self.dropped += 1
             print("asset_health: webhook queue full, dropped an alert", file=sys.stderr)
 
     def _run(self) -> None:
         while True:
-            text = self._queue.get()
-            if text is None:
+            item = self._queue.get()
+            if item is None:
                 return
-            self._post(text)
+            text, person = item if isinstance(item, tuple) else (item, None)
+            self._post(text, person)
 
-    def _post(self, text: str) -> None:
+    def _post(self, text: str, person: Person | None = None) -> None:
         request = urllib.request.Request(
-            self.url, data=webhook_body(self.provider, text), method="POST",
+            self.url, data=webhook_body(self.provider, text, person), method="POST",
             headers={"Content-Type": "application/json", "User-Agent": "AssetHealth/1.0"})
         try:
             with urllib.request.urlopen(request, timeout=self.timeout) as response:
@@ -1069,6 +1283,14 @@ def _e(value: object) -> str:
 
 
 PLANNER_CSS = """
+.exceptions { width: 100%; border-collapse: collapse; font-size: 13px; margin: 10px 0; }
+.exceptions th, .exceptions td { text-align: left; padding: 7px 8px; border-bottom: 1px solid var(--line);
+  vertical-align: top; }
+.exceptions td.warn { color: #e0af68; } .exceptions td.err { color: #ff6b6b; }
+.exception-form { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 8px; }
+.exception-form input { font: inherit; color: var(--text); background: #0c1017;
+  border: 1px solid var(--line); border-radius: 8px; padding: 9px 12px; min-width: 0; }
+#exceptions h2 { margin: 0 0 6px; font-size: 15px; }
 .form { display: grid; gap: 22px; margin-top: 22px; }
 .field { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 16px 18px; }
 .field label { display: block; font-size: 13px; color: var(--muted); text-transform: uppercase;
@@ -1761,6 +1983,29 @@ def render_planner(db_path: str | Path, project_id: int, project_name: str,
     options = "".join(
         f'<option value="{row["id"]}"{" selected" if row["id"] == project_id else ""}>'
         f'{_e(row["name"])}</option>' for row in projects)
+    exceptions = list_exceptions(db_path, project_id)
+    today = datetime.now(timezone.utc).date()
+
+    def exception_row(item: dict) -> str:
+        try:
+            left = (date.fromisoformat(item["expires"]) - today).days
+        except ValueError:
+            left = 0
+        state = ("expired" if left < 0 else f"ends in {left} day{'s' if left != 1 else ''}"
+                 if left <= agk.EXCEPTION_WARN_DAYS else "active")
+        tone = "err" if left < 0 else "warn" if left <= agk.EXCEPTION_WARN_DAYS else ""
+        allow = item["allow"]
+        shown = f"{allow:,}" if isinstance(allow, int) and not isinstance(allow, bool) else str(allow).lower()
+        return (f'<tr><td><code>{_e(item["path"])}</code></td><td>{_e(item["rule"])} = {_e(shown)}</td>'
+                f'<td>{_e(item["owner"])}</td><td>{_e(item["reason"])}</td>'
+                f'<td class="{tone}">{_e(item["expires"])} &middot; {_e(state)}</td>'
+                f'<td><button type="button" class="remove-exception" data-id="{int(item["id"])}">'
+                f'Remove</button></td></tr>')
+
+    exception_rows = "".join(exception_row(item) for item in exceptions) or (
+        '<tr><td colspan="6" class="sub">None. Every asset gets the budget above.</td></tr>')
+    rule_options = "".join(f'<option value="{name}">{name}</option>'
+                           for name in sorted(agk.EXCEPTION_RULES))
     updated = budget.get("updated_at") or "never"
     updated_by = budget.get("updated_by") or "-"
 
@@ -1845,8 +2090,72 @@ def render_planner(db_path: str | Path, project_id: int, project_name: str,
     </div>
     <div class="notice" id="notice"></div>
   </form>
+
+  <section class="form" id="exceptions" data-project="{project_id}" data--token="{_e(token)}">
+    <h2>Exceptions</h2>
+    <div class="hint">A named, dated waiver for some paths: "the boss may use 80,000
+      triangles until alpha". Each needs a reason, an owner and an end date; the day
+      after it ends, the asset fails again with "exception expired". Paths are globs
+      under the watched folder (<code>*</code> crosses folders); a bare name matches
+      that file anywhere.</div>
+    <table class="exceptions">
+      <thead><tr><th>Path</th><th>Allows</th><th>Owner</th><th>Reason</th><th>Ends</th><th></th></tr></thead>
+      <tbody>{exception_rows}</tbody>
+    </table>
+    <div class="exception-form">
+      <input id="ex-path" placeholder="Characters/Boss/*">
+      <select id="ex-rule">{rule_options}</select>
+      <input id="ex-allow" placeholder="80000 (or true/false)">
+      <input id="ex-owner" placeholder="owner">
+      <input id="ex-reason" placeholder="why">
+      <input id="ex-expires" type="date">
+      <button type="button" id="ex-add">Add exception</button>
+    </div>
+    <div class="notice" id="ex-notice"></div>
+  </section>
 </div>
 <script>
+(function () {{
+  var box = document.getElementById("exceptions");
+  var exNotice = document.getElementById("ex-notice");
+  function send(path, payload) {{
+    payload.project_id = Number(box.dataset.project);
+    exNotice.className = "notice";
+    exNotice.textContent = "Publishing...";
+    return fetch(path, {{
+      method: "POST",
+      headers: {{"Content-Type": "application/json",
+                "Authorization": "Bearer " + box.dataset.token}},
+      body: JSON.stringify(payload)
+    }}).then(function (response) {{
+      return response.json().then(function (body) {{ return {{ok: response.ok, body: body}}; }});
+    }}).then(function (result) {{
+      if (result.ok) {{ window.location.reload(); return; }}
+      exNotice.className = "notice err";
+      exNotice.textContent = "Rejected: " + (result.body.error || "unknown error");
+    }}).catch(function (error) {{
+      exNotice.className = "notice err";
+      exNotice.textContent = "Could not reach the server: " + error;
+    }});
+  }}
+  document.getElementById("ex-add").addEventListener("click", function () {{
+    var raw = document.getElementById("ex-allow").value.trim();
+    var allow = raw === "true" ? true : raw === "false" ? false : Number(raw);
+    send("/api/save-exception", {{exception: {{
+      path: document.getElementById("ex-path").value.trim(),
+      rule: document.getElementById("ex-rule").value,
+      allow: allow,
+      owner: document.getElementById("ex-owner").value.trim(),
+      reason: document.getElementById("ex-reason").value.trim(),
+      expires: document.getElementById("ex-expires").value
+    }}}});
+  }});
+  Array.prototype.forEach.call(document.querySelectorAll(".remove-exception"), function (button) {{
+    button.addEventListener("click", function () {{
+      send("/api/remove-exception", {{id: Number(button.dataset.id)}});
+    }});
+  }});
+}})();
 (function () {{
   var form = document.getElementById("budget-form");
   var notice = document.getElementById("notice");
@@ -2310,7 +2619,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, describe_rules(self.server))  # type: ignore[arg-type]
             return
         db_path = self.server.db_path  # type: ignore[attr-defined]
-        self._json(200, budget_document(budget_for_project(db_path, project_id)))
+        self._json(200, budget_document(budget_for_project(db_path, project_id),
+                                        list_exceptions(db_path, project_id)))
 
     # - admin -
     # A second, cookie-based auth domain. Studio tokens scope a *pipeline*; the
@@ -3070,7 +3380,8 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/api/send-to-workstation":
             self._send_to_workstation(self._identify())
             return
-        if path not in ("/api/telemetry", "/api/save-budget"):
+        if path not in ("/api/telemetry", "/api/save-budget", "/api/save-exception",
+                        "/api/remove-exception"):
             self._json(404, {"error": "not found", "path": path})
             return
         payload = self._read_json()
@@ -3078,8 +3389,10 @@ class Handler(BaseHTTPRequestHandler):
             return
         if path == "/api/telemetry":
             self._ingest(payload)
-        else:
+        elif path == "/api/save-budget":
             self._save_budget(payload)
+        else:
+            self._save_exception(payload, remove=path == "/api/remove-exception")
 
     def _read_json(self) -> dict | None:
         """Parse the body, or answer with the right 4xx and return None."""
@@ -3172,14 +3485,26 @@ class Handler(BaseHTTPRequestHandler):
         overshoot = overshoots(payload, budget)
         if not overshoot:
             return
-        scope = alert_scope(project_id)
+        if getattr(server, "digest_at", None):
+            return      # a daily digest replaces one message per failure
+        person = person_for(getattr(server, "people", ()), payload.get("username", ""),
+                            payload.get("hostname", ""))
+        # Per person: one artist's broken batch must not silence another's alert.
+        scope = alert_scope(project_id) + (f":person:{person.key}" if person else "")
         if not claim_alert_slot(server.db_path, scope, server.alert_cooldown):
             server.alerts_suppressed += 1
             if not getattr(server, "quiet", False):
                 print(f"asset_health: alert for {scope} suppressed by the "
                       f"{server.alert_cooldown:g}s cooldown", file=sys.stderr)
             return
-        notifier.submit(alert_text(payload, budget, overshoot))
+        text = alert_text(payload, budget, overshoot)
+        if person is not None:
+            text = f"{mention_for(notifier.provider, person)} {text}"
+        link = workstation_link(server.workstation_url, payload.get("path", "") or "",
+                                payload.get("name") or payload.get("filename") or "")
+        if link:
+            text += f" Open it: {link}"
+        notifier.submit(text, person)
 
     def _save_budget(self, payload: dict) -> None:
         identity = self._identify()
@@ -3209,6 +3534,51 @@ class Handler(BaseHTTPRequestHandler):
         self._json(200, {"saved": True, "project_id": requested,
                          "budget": {k: v for k, v in saved.items()
                                     if k not in ("updated_at", "updated_by")}})
+
+    def _writable_project(self, payload: dict) -> int | None:
+        """The project a token may publish to, or None after answering 4xx."""
+        identity = self._identify()
+        if identity["role"] in ("denied", "open"):
+            self._json(401 if identity["role"] == "denied" else 403,
+                       {"error": "a project or admin token is required to publish budgets"})
+            return None
+        requested = payload.get("project_id")
+        if identity["role"] == "project":
+            requested = identity["project_id"]
+        if not isinstance(requested, int) or isinstance(requested, bool):
+            self._json(400, {"error": "project_id is required"})
+            return None
+        if not any(row["id"] == requested for row in list_projects(self.server.db_path)):
+            self._json(404, {"error": f"no such project: {requested}"})
+            return None
+        return requested
+
+    def _save_exception(self, payload: dict, remove: bool) -> None:
+        project_id = self._writable_project(payload)
+        if project_id is None:
+            return
+        db_path = self.server.db_path  # type: ignore[attr-defined]
+        if remove:
+            exception_id = payload.get("id")
+            if not isinstance(exception_id, int) or isinstance(exception_id, bool):
+                self._json(400, {"error": "id is required"})
+                return
+            if not remove_exception(db_path, project_id, exception_id):
+                self._json(404, {"error": f"no exception {exception_id} in this project"})
+                return
+            result = {"removed": exception_id}
+        else:
+            try:
+                result = {"saved": add_exception(db_path, project_id, payload.get("exception"),
+                                                 created_by=payload.get("updated_by", "") or "")}
+            except ValueError as exc:
+                self._json(400, {"error": str(exc)})
+                return
+        broadcaster = getattr(self.server, "broadcaster", None)  # type: ignore[attr-defined]
+        if broadcaster is not None:
+            broadcaster.publish({"type": "budget", "project_id": project_id})
+        self._json(200, {**result, "project_id": project_id,
+                         "exceptions": list_exceptions(db_path, project_id)})
 
     def _unauthorised(self) -> None:
         self._json(401, {"error": "unauthorised: send 'Authorization: Bearer <token>'"})
@@ -3756,8 +4126,11 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
                  rules_path: str | Path = "", rules_root: str | Path = "",
                  scan_root: str | Path = "", allow_roots: tuple[str, ...] = (),
                  workstation_url: str = "", workstation_token: str = "",
-                 allow_hosts: tuple[str, ...] = ()):
+                 allow_hosts: tuple[str, ...] = (), people: "list[Person] | tuple" = (),
+                 digest_at: "tuple[int, int] | None" = None):
         self.db_path = str(db_path)
+        self.people = tuple(people)
+        self.digest_at = digest_at       # (hour, minute) local, or None for live alerts
         self.auth_token = token          # the studio-wide admin token, optional
         self.quiet = quiet
         # Host header allow-list. The bind address and the loopback names are
@@ -3822,12 +4195,18 @@ def build_server(host: str, port: int, db_path: str | Path,
                  workstation_url: str = "",
                  workstation_token: str = "",
                  allow_hosts: tuple[str, ...] = (),
-                 audit=None) -> AssetHealthServer:
+                 audit=None, people: "list[Person] | tuple" = (),
+                 digest_at: "tuple[int, int] | None" = None) -> AssetHealthServer:
     if audit is not None:
         set_audit_log(audit)
-    return AssetHealthServer((host, port), db_path, token, quiet, notifier, alert_cooldown,
-                             rules_path, rules_root, scan_root, allow_roots,
-                             workstation_url, workstation_token, allow_hosts)
+    server = AssetHealthServer((host, port), db_path, token, quiet, notifier, alert_cooldown,
+                               rules_path, rules_root, scan_root, allow_roots,
+                               workstation_url, workstation_token, allow_hosts,
+                               people=people, digest_at=digest_at)
+    if digest_at and notifier is not None:
+        threading.Thread(target=_digest_loop, args=(server,), name="ah-digest",
+                         daemon=True).start()
+    return server
 
 
 def describe_rules(server: "AssetHealthServer") -> dict:
@@ -4039,6 +4418,12 @@ def build_parser() -> argparse.ArgumentParser:
     alerts.add_argument("--alert-cooldown", type=float, default=None, metavar="SECONDS",
                         help="minimum gap between alerts per project (default "
                              f"{DEFAULT_ALERT_COOLDOWN:g}s; 0 disables throttling)")
+    alerts.add_argument("--people", metavar="PATH", default=os.environ.get(PEOPLE_ENV, ""),
+                        help="people.toml mapping user and machine names to chat handles, so "
+                             f"an alert mentions the artist (or ${PEOPLE_ENV})")
+    alerts.add_argument("--alert-digest", metavar="HH:MM", default="",
+                        help="instead of one message per failure, one digest a day at this "
+                             "local time, a message per person")
     return parser
 
 
@@ -4182,6 +4567,22 @@ def main(argv: list[str] | None = None) -> int:
 
     webhook_url, webhook_provider, alert_cooldown = resolve_webhook(args)
     notifier = Notifier(webhook_url, webhook_provider) if webhook_url else None
+    people: list = []
+    if args.people:
+        try:
+            people = load_people(args.people)
+        except (OSError, ValueError, agk.ConfigError) as exc:
+            print(f"error: cannot read people: {exc}", file=sys.stderr)
+            return 2
+    digest_at = None
+    if args.alert_digest:
+        match = re.fullmatch(r"([01]?\d|2[0-3]):([0-5]\d)", args.alert_digest.strip())
+        if not match:
+            print("error: --alert-digest takes a time like 09:00", file=sys.stderr)
+            return 2
+        digest_at = (int(match.group(1)), int(match.group(2)))
+        if notifier is None:
+            print("warning: --alert-digest has no webhook to post to", file=sys.stderr)
 
     def _moved(old: int, new: int, exc: BaseException) -> None:
         print(f"note: port {old} is busy ({exc.__class__.__name__}), using {new}",
@@ -4202,7 +4603,8 @@ def main(argv: list[str] | None = None) -> int:
                                             # passed on, so Send to Workstation only
                                             # worked via agk-serve's .agk/ports.json.
                                             workstation_url=args.workstation_url,
-                                            workstation_token=args.workstation_token),
+                                            workstation_token=args.workstation_token,
+                                            people=people, digest_at=digest_at),
             args.host, args.port, auto=args.port_auto, tries=args.port_tries,
             reserved=(ART_WORKSTATION_PORT,), report=_moved)
     except OSError as exc:

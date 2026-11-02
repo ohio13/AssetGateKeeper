@@ -9,7 +9,8 @@ the staged copy is deleted and the artist's file is untouched — byte for byte.
 
 What can be healed, and why only that:
 
-``.png``  name suffix (rename) and non-power-of-two (resize by default; pad is
+``.png`` ``.tga`` (``.jpg`` with ``jpg = true``)  name suffix (rename) and
+          non-power-of-two (resize by default, normal maps renormalised; pad is
           opt-in). Neither changes what the image means, and every heal keeps
           the original (below).
           A rename also rewrites the ``.mtl``/``.gltf`` files that named the old
@@ -67,6 +68,11 @@ MANIFEST_NAME = "heal.json"
 # border - so it is opt-in and documented as UV-shifting.
 TEXTURE_MODES = ("resize", "pad")
 HEALABLE_MESH_SUFFIXES = {".obj"}
+# Textures the healer may rename and resize. JPEG is lossy: re-saving it costs
+# quality every time, so it is only healed when [healer] jpg = true.
+HEALABLE_TEXTURE_SUFFIXES = {".png", ".tga"}
+JPEG_SUFFIXES = {".jpg", ".jpeg"}
+JPEG_QUALITY = 95
 
 # Text files that can name a sibling texture by filename. A GLB embeds its
 # images, so it never needs rewriting; a .dae/.usda would, but the gate's own
@@ -198,8 +204,38 @@ def _pad_to(img, width: int, height: int):
     return canvas
 
 
-def heal_texture_file(path: Path, mode: str = "resize") -> Optional[str]:
-    """Make a texture's edges a power of two. Returns a change note, or None."""
+def is_normal_map(path: Path) -> bool:
+    """Named as a tangent-space normal map (the _Normal suffix, any case)."""
+    stem = path.stem.lower()
+    return stem.endswith(("_normal", "_nrm", "_n")) or "_normal_" in stem
+
+
+def renormalize(image):
+    """Make every pixel of an RGB(A) normal map a unit vector again.
+
+    Resampling averages neighbouring normals, and the average of two unit
+    vectors is shorter than one: a 45-degree crease came out at length 0.71,
+    which the engine shades as a dark seam. Alpha is left alone.
+    """
+    import numpy as np
+    if image.mode not in ("RGB", "RGBA"):
+        return image
+    data = np.asarray(image, dtype=np.float32).copy()
+    vectors = data[..., :3] / 127.5 - 1.0
+    length = np.linalg.norm(vectors, axis=-1, keepdims=True)
+    vectors = np.where(length > 1e-6, vectors / np.maximum(length, 1e-6),
+                       np.array([0.0, 0.0, 1.0], dtype=np.float32))
+    data[..., :3] = np.clip(np.rint((vectors + 1.0) * 127.5), 0, 255)
+    return Image.fromarray(data.astype(np.uint8), image.mode)
+
+
+def heal_texture_file(path: Path, mode: str = "resize",
+                      normal: Optional[bool] = None) -> Optional[str]:
+    """Make a texture's edges a power of two. Returns a change note, or None.
+
+    ``normal`` (default: from the name) renormalises a resized normal map.
+    JPEG is re-saved at quality 95 with no chroma subsampling.
+    """
     if Image is None:  # pragma: no cover - checked at startup by the gate
         raise HealError("Pillow is not installed")
     with Image.open(path) as img:
@@ -211,17 +247,30 @@ def heal_texture_file(path: Path, mode: str = "resize") -> Optional[str]:
         working = img
         if working.mode in ("P", "1", "LA"):   # resize/pad need a real channel model
             working = working.convert("RGBA")
+        suffix = path.suffix.lower()
+        normal = is_normal_map(path) if normal is None else normal
         if mode == "resize":
             healed = working.resize(target, Image.LANCZOS)
+            if normal:
+                healed = renormalize(healed)
         else:
-            healed = _pad_to(working, *target)
-        save_kwargs = {}
-        if path.suffix.lower() in (".png",):
+            healed = _pad_to(working, *target)   # repeats edge pixels: still unit vectors
+        save_kwargs: dict = {}
+        if suffix == ".png":
             save_kwargs["optimize"] = True
+        elif suffix in JPEG_SUFFIXES:
+            if healed.mode not in ("RGB", "L"):
+                healed = healed.convert("RGB")
+            save_kwargs.update(quality=JPEG_QUALITY, subsampling=0)
         healed.save(path, **save_kwargs)
-    return (f"resized {source_size[0]}x{source_size[1]} -> {target[0]}x{target[1]}"
+    note = (f"resized {source_size[0]}x{source_size[1]} -> {target[0]}x{target[1]}"
             if mode == "resize" else
             f"padded {source_size[0]}x{source_size[1]} -> {target[0]}x{target[1]}")
+    if normal and mode == "resize":
+        note += " (normals renormalised)"
+    if suffix in JPEG_SUFFIXES:
+        note += f" (re-saved as JPEG quality {JPEG_QUALITY})"
+    return note
 
 
 # --------------------------------------------------------------------------- #
@@ -433,7 +482,7 @@ class Healer:
     def __init__(self, budget, *, textures: bool = True, meshes: bool = True,
                  texture_mode: str = "resize", root: Optional[Path] = None,
                  resolve_references: Optional[Callable[[Path], list]] = None,
-                 backups: bool = True, dry_run: bool = False) -> None:
+                 backups: bool = True, dry_run: bool = False, jpg: bool = False) -> None:
         if texture_mode not in TEXTURE_MODES:
             raise HealError(f"texture_mode must be one of {', '.join(TEXTURE_MODES)}, "
                             f"got {texture_mode!r}")
@@ -441,6 +490,7 @@ class Healer:
             raise HealError("texture healing needs Pillow: python -m pip install pillow")
         self.budget = budget
         self.textures = textures
+        self.jpg = jpg
         self.meshes = meshes
         self.texture_mode = texture_mode
         # The project boundary, when the caller knows it. With a root the healer
@@ -537,7 +587,11 @@ class Healer:
                 LOG.debug("healing: staged %s alongside %s",
                           ", ".join(staged_refs), path.name)
 
-        if suffix == ".png" and self.textures:
+        if suffix in JPEG_SUFFIXES and self.textures and not self.jpg:
+            self.last_refusal = ("JPEG healing is off: re-saving a JPEG loses quality. Set "
+                                 "[healer] jpg = true to allow it, or fix it in the source")
+            return None
+        if (suffix in HEALABLE_TEXTURE_SUFFIXES or suffix in JPEG_SUFFIXES) and self.textures:
             # Name first: the rename decides the final filename, and every later
             # step has to work on the renamed copy (a stale handle was a real bug).
             renamed = self._rename_for_suffix(staged)
@@ -577,7 +631,7 @@ class Healer:
 
         if not modifications:
             self.last_refusal = ("nothing the healer can change would fix it (it renames and "
-                                 "resizes .png textures and strips zero-area .obj faces)")
+                                 "resizes .png/.tga textures - .jpg with jpg = true - and strips zero-area .obj faces)")
             return None
 
         # Renaming is only safe when we are not about to clobber another asset.
