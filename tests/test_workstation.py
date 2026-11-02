@@ -1221,6 +1221,25 @@ expect("with a project rules.toml, the fix is checked against it (and says so)",
 h_server.shutdown()
 h_server.server_close()
 
+print("29. textured FBX previews (W7)")
+t_db, t_data = fresh("fbx_textured")
+_fx = ROOT / "tests" / "fixtures" / "fbx"
+t_asset = aws.create_asset(t_db, t_data, "tex_relative.fbx", (_fx / "tex_relative.fbx").read_bytes())
+aws.add_sidecar(t_db, t_data, t_asset["id"], "tex_relative_wood_Albedo.png",
+                (_fx / "tex_relative_wood_Albedo.png").read_bytes())
+_glb = (t_data / "assets" / str(t_asset["id"]) / aws.PREVIEW_DIR / "preview.glb")
+_glb = _glb if _glb.is_file() else next((t_data / "assets" / str(t_asset["id"])).rglob("*.glb"))
+_raw = _glb.read_bytes()
+_doc = json.loads(_raw[20:20 + struct.unpack("<I", _raw[12:16])[0]])
+_attrs = _doc["meshes"][0]["primitives"][0]["attributes"]
+expect("the converted preview carries UVs and normals", "TEXCOORD_0" in _attrs and "NORMAL" in _attrs, _attrs)
+expect("... and the base-colour texture, by the path it is stored under",
+       _doc.get("images") == [{"uri": "tex_relative_wood_Albedo.png"}]
+       and "baseColorTexture" in _doc["materials"][0]["pbrMetallicRoughness"], _doc.get("images"))
+expect("the triangle count is still the gate's", aws.get_asset(t_db, t_asset["id"])["triangle_count"] == 12)
+expect("the banner says what the preview now shows",
+       "base-colour textures" in aws.fbx_preview.PREVIEW_WARNING and "Geometry only" not in aws.fbx_preview.PREVIEW_WARNING)
+
 import os  # noqa: E402
 import subprocess  # noqa: E402
 print("25. versions (W1) and where a file came from (W8)")

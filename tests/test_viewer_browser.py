@@ -417,7 +417,14 @@ with sync_playwright() as playwright:
     page.wait_for_timeout(600)
     expect("viewing an uploaded LOD says so", "your LOD (uploaded)" in readout(), readout())
     page.locator("#lod-list .lod-row[data-level='LOD4'] .del").click()
-    page.wait_for_timeout(800)
+    # Wait for the result, not a fixed time: 800 ms was too short on a busy CI runner.
+    try:
+        page.wait_for_function(
+            "() => !document.querySelector(\"#lod-list .lod-row[data-level='LOD4']\")"
+            " && document.getElementById('readout').textContent.trim().startsWith('source')",
+            timeout=15000)
+    except Exception:  # noqa: BLE001 - the expect below reports what was on screen
+        pass
     expect("deleting the LOD on screen goes back to the source",
            page.locator("#lod-list .lod-row[data-level='LOD4']").count() == 0
            and readout().startswith("source"), readout())
@@ -537,6 +544,57 @@ with sync_playwright() as playwright:
                            arg=str(ids["vase1"]), timeout=15000)
     expect("clicking v1 opens v1, with its own changelist",
            page.locator("#source-text").get_attribute("data-raw") == "//depot/Art/vase.obj @501")
+
+    print("8f. inspection views (W4)")
+    (WORK / "plane.obj").write_text("v -0.5 0 -0.5\nv 0.5 0 -0.5\nv 0.5 0 0.5\nv -0.5 0 0.5\n"
+                                    "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nvn 0 1 0\n"
+                                    "f 1/1/1 2/2/1 3/3/1\nf 1/1/1 3/3/1 4/4/1\n")
+    ids["plane"] = aws.create_asset(db, data, "plane.obj", (WORK / "plane.obj").read_bytes())["id"]
+    page.goto(f"{BASE}/viewer?live=0&asset={ids['plane']}")
+    page.wait_for_function("() => document.getElementById('status').textContent === 'plane.obj'",
+                           timeout=15000)
+    expect("a single version with no depot path shows no compare buttons and no empty Copy",
+           not page.locator("#compare-overlay").is_visible() and not page.locator("#source-copy").is_visible())
+    page.click("#mode-uv")
+    expect("UV check draws the numbered checker and says how to read it",
+           "UV checker" in readout() and "active" in (page.locator("#mode-uv").get_attribute("class") or ""),
+           readout())
+    page.click("#mode-texel")
+    expect("Texel shows the density in px/m, the gate's maths (1 m plane, 1024 texture = 1,024)",
+           "median 1,024 px/m (assuming a 1024 texture)" in readout(), readout())
+    expect("... and the Materials panel still lists the asset's own material",
+           "texel density" not in page.locator("#materials").inner_text()
+           and "UV checker" not in page.locator("#materials").inner_text(),
+           page.locator("#materials").inner_text())
+    page.click("#mode-textured")
+    expect("Textured goes back", "UV checker" not in readout() and "texel" not in readout())
+    page.click("#scale")
+    expect("Scale gives the size in metres beside a 1.8 m person",
+           "size 1.00 x 0.00 x 1.00 m (person: 1.8 m)" in readout(), readout())
+    page.click("#normals")
+    expect("Normals toggles on", "active" in (page.locator("#normals").get_attribute("class") or ""))
+    pick(ids["cube"])
+    page.click("#mode-uv")
+    expect("a mesh without UVs is shown pink, and the readout says so", "pink = no UVs" in readout())
+    page.click("#mode-textured")
+    page.click("#normals")
+    page.click("#scale")
+
+    print("8g. a textured FBX preview (W7)")
+    _fx = Path(__file__).resolve().parent / "fixtures" / "fbx"
+    ids["texfbx"] = aws.create_asset(db, data, "tex_relative.fbx", (_fx / "tex_relative.fbx").read_bytes())["id"]
+    aws.add_sidecar(db, data, ids["texfbx"], "tex_relative_wood_Albedo.png",
+                    (_fx / "tex_relative_wood_Albedo.png").read_bytes())
+    texture_hits = []
+    page.on("response", lambda response: texture_hits.append(response.status)
+            if response.url.endswith("/files/tex_relative_wood_Albedo.png") else None)
+    page.goto(f"{BASE}/viewer?live=0&asset={ids['texfbx']}")
+    page.wait_for_function("() => document.getElementById('status').textContent === 'tex_relative.fbx'",
+                           timeout=15000)
+    page.wait_for_timeout(500)
+    expect("the FBX preview loads its texture from the asset's files", 200 in texture_hits, texture_hits)
+    expect("... and the banner still says it is a converted preview, now with textures",
+           "base-colour textures" in page.locator("#preview-warning").inner_text())
 
     print("9. deleted while open")
     page.goto(f"{BASE}/viewer?asset={ids['embedded']}")

@@ -5,8 +5,11 @@ The browser cannot draw FBX, and the gate already parses it (binary and ASCII,
 no Autodesk SDK). This module turns that same node tree into a small GLB so a
 reviewer can orbit the mesh. It is a *preview*, and the viewer says so:
 
-* geometry only - positions and triangles; normals are recomputed by the viewer;
-* one flat colour per material slot (named after the FBX material), no textures;
+* positions, triangles, UVs (first set) and the file's own normals, per corner,
+  so hard edges and UV seams survive;
+* each material slot's base-colour (diffuse) texture, referenced by file name -
+  the server stores the asset's textures beside the preview, so they load when
+  they were uploaded with the FBX; a slot without one gets a flat colour;
 * no animation, skinning, blend shapes, cameras or lights;
 * object transforms are applied (translation, pre-rotation, rotation with its
   rotation order, scaling, geometric offsets) but rotation/scaling pivots and
@@ -25,6 +28,7 @@ from __future__ import annotations
 import json
 import math
 import struct
+from urllib.parse import quote
 import sys
 from pathlib import Path
 
@@ -43,10 +47,15 @@ except ImportError:                                   # pragma: no cover
 #: the report and the page cannot drift apart.
 PREVIEW_WARNING = (
     "You are viewing a .glb converted from this FBX, not the FBX itself. "
-    "Geometry only: one flat colour per material slot, no textures, animation "
-    "or skinning; pivots are not applied, so placement can differ from your DCC "
-    "or engine. The numbers on the right are measured from the FBX."
+    "Geometry, UVs, normals and base-colour textures (those uploaded with it); "
+    "a slot with no texture gets a flat colour. No animation, skinning or other "
+    "material inputs; pivots are not applied, so placement can differ from your "
+    "DCC or engine. The numbers on the right are measured from the FBX."
 )
+
+#: Material properties a base-colour texture is connected to, by DCC.
+BASE_COLOUR_PROPERTIES = ("diffusecolor", "basecolor", "base_color", "maya|basecolor",
+                          "maya|base_color", "3dsmax|parameters|base_color_map", "diffuse")
 
 #: Distinguishable, mid-value slot colours (sRGB 0..1), cycled.
 SLOT_COLOURS = (
@@ -181,6 +190,68 @@ def _scene(path: Path):
     return {node.name: node for node in nodes}
 
 
+def _layer_values(geometry, layer_name: str, values_name: str, index_name: str, width: int,
+                  corners, control_count: int):
+    """Per-corner values (UVs, normals) from an FBX layer element, or None.
+
+    Handles the mappings exporters actually write: ByPolygonVertex and
+    ByControlPoint/ByVertice, each Direct or IndexToDirect.
+    """
+    layer = geometry.child(layer_name)
+    if layer is None:
+        return None
+    values_node = layer.child(values_name)
+    if values_node is None or not values_node.props:
+        return None
+    values = np.asarray(values_node.props[0], dtype=np.float64)
+    if values.size == 0 or values.size % width:
+        return None
+    values = values.reshape(-1, width)
+    mapping = agk._fbx_string(layer.child("MappingInformationType"))
+    reference = agk._fbx_string(layer.child("ReferenceInformationType"))
+    index_node = layer.child(index_name)
+    indices = (np.asarray(index_node.props[0], dtype=np.int64)
+               if index_node is not None and index_node.props else None)
+    if mapping == "ByPolygonVertex":
+        lookup = np.arange(len(corners))
+    elif mapping in ("ByControlPoint", "ByVertice", "ByVertex"):
+        lookup = corners
+    else:
+        return None
+    if reference == "IndexToDirect" and indices is not None:
+        if lookup.size and int(lookup.max()) >= len(indices):
+            return None
+        lookup = indices[lookup]
+    if lookup.size and (int(lookup.max()) >= len(values) or int(lookup.min()) < 0):
+        return None
+    return values[lookup]
+
+
+def _textures_by_material(objects, connections) -> dict:
+    """material id -> the base-colour texture's path as the FBX names it."""
+    textures = {}
+    for node in objects.children:
+        if node.name != "Texture":
+            continue
+        relative = agk._fbx_string(node.child("RelativeFilename")).replace("\\", "/")
+        absolute = agk._fbx_string(node.child("FileName")).replace("\\", "/")
+        # Where the workstation keeps it: the relative path as written, or the
+        # bare file name for an absolute one (that is how sidecars are stored).
+        chosen = relative if relative and ":" not in relative and not relative.startswith("/") \
+            else (relative or absolute).rsplit("/", 1)[-1]
+        chosen = chosen.removeprefix("./")
+        if chosen:
+            textures[agk._fbx_id(node)] = chosen
+    found = {}
+    for link in (connections.all("C") if connections else []):
+        if len(link.props) < 4 or link.props[0] != "OP":
+            continue
+        texture, material, slot = link.props[1], link.props[2], str(link.props[3]).lower()
+        if texture in textures and slot in BASE_COLOUR_PROPERTIES and material not in found:
+            found[material] = textures[texture]
+    return found
+
+
 def convert(path: Path, out_path: Path) -> dict:
     """Write a preview GLB for ``path``; return what was converted.
 
@@ -217,6 +288,8 @@ def convert(path: Path, out_path: Path) -> dict:
         parents.setdefault(child, []).append(parent)
         children.setdefault(parent, []).append(child)
 
+    material_textures = _textures_by_material(objects, connections)
+
     # Same selection as the gate: no collision hulls, no LOD1+ levels.
     collision = {m for m, name in model_names.items()
                  if name.lower().startswith(agk.FBX_COLLISION_PREFIXES)}
@@ -249,8 +322,11 @@ def convert(path: Path, out_path: Path) -> dict:
         return matrix
 
     axis, unit_scale, axes_text = _axis_matrix(top)
-    all_positions, primitives = [], {}
+    all_positions, all_uvs, all_normals, primitives = [], [], [], {}
     material_names: list = []
+    material_texture: dict = {}      # material name -> texture path
+    has_uv = has_normals = False
+    corner_total = 0
     vertex_total = triangle_total = 0
     skipped = {"collision": 0, "lower_lod": 0}
     meshes = 0
@@ -281,6 +357,9 @@ def convert(path: Path, out_path: Path) -> dict:
         slot_ids = [c for c in children.get(model, []) if c in materials] if model else []
         slot_names = [agk._fbx_object_name(materials[m]) or f"material {i}"
                       for i, m in enumerate(slot_ids)] or ["default"]
+        for material_id, slot_name in zip(slot_ids, slot_names):
+            if material_id in material_textures:
+                material_texture.setdefault(slot_name, material_textures[material_id])
         per_polygon = np.zeros(len(sizes), dtype=np.int64)
         layer = geometry.child("LayerElementMaterial")
         if layer is not None:
@@ -304,8 +383,33 @@ def convert(path: Path, out_path: Path) -> dict:
         placed = (homogeneous @ transform.T)[:, :3]
         flip = np.linalg.det(transform[:3, :3]) < 0
 
-        base = vertex_total
-        all_positions.append(placed)
+        # One preview vertex per polygon corner, so per-corner UVs and normals
+        # (seams, hard edges) survive. The reported vertex count stays the
+        # FBX's own control points.
+        uv = _layer_values(geometry, "LayerElementUV", "UV", "UVIndex", 2, corners,
+                           len(positions))
+        normals = _layer_values(geometry, "LayerElementNormal", "Normals", "NormalsIndex", 3,
+                                corners, len(positions))
+        corner_positions = placed[corners]
+        if uv is None:
+            uv = np.zeros((len(corners), 2))
+        else:
+            has_uv = True
+            uv = np.c_[uv[:, 0], 1.0 - uv[:, 1]]          # FBX v is up, glTF v is down
+        if normals is None:
+            normals = np.zeros((len(corners), 3))
+        else:
+            has_normals = True
+            inverse_transpose = np.linalg.inv(transform[:3, :3]).T
+            normals = normals @ inverse_transpose.T
+            length = np.linalg.norm(normals, axis=1, keepdims=True)
+            normals = np.divide(normals, length, out=np.zeros_like(normals), where=length > 1e-12)
+
+        base = corner_total
+        all_positions.append(corner_positions)
+        all_uvs.append(uv)
+        all_normals.append(normals)
+        corner_total += len(corners)
         vertex_total += len(placed)
         meshes += 1
 
@@ -316,9 +420,9 @@ def convert(path: Path, out_path: Path) -> dict:
         owner = np.repeat(np.arange(len(sizes)), fan)
         first = np.repeat(np.cumsum(fan) - fan, fan)
         step = np.arange(count) - first + 1
-        a = corners[starts[owner]] + base
-        b = corners[starts[owner] + step] + base
-        c = corners[starts[owner] + step + 1] + base
+        a = starts[owner] + base
+        b = starts[owner] + step + base
+        c = starts[owner] + step + 1 + base
         triangles = np.stack([a, c, b] if flip else [a, b, c], axis=1)
         triangle_total += count
         for slot in np.unique(per_polygon[owner]):
@@ -331,9 +435,16 @@ def convert(path: Path, out_path: Path) -> dict:
     if not all_positions or not triangle_total:
         raise FbxPreviewError("the FBX has no mesh geometry to preview")
     positions = np.vstack(all_positions).astype(np.float32)
+    uvs = np.vstack(all_uvs).astype(np.float32) if has_uv else None
+    normals_out = np.vstack(all_normals).astype(np.float32) if has_normals else None
     groups = [(slot, np.vstack(parts).astype(np.uint32)) for slot, parts in sorted(primitives.items())]
-    _write_glb(Path(out_path), positions, groups, material_names, Path(path).stem)
+    textures = [material_texture.get(name, "") if has_uv else "" for name in material_names]
+    _write_glb(Path(out_path), positions, groups, material_names, Path(path).stem,
+               uvs=uvs, normals=normals_out, textures=textures)
     return {
+        "uvs": has_uv,
+        "normals": has_normals,
+        "textures": sorted({item for item in textures if item}),
         "triangles": triangle_total,
         "vertices": vertex_total,
         "materials": material_names,
@@ -350,8 +461,14 @@ def _pad(blob: bytes, filler: bytes) -> bytes:
     return blob + filler * ((4 - len(blob) % 4) % 4)
 
 
-def _write_glb(path: Path, positions, groups, material_names: list, name: str) -> None:
-    """One mesh, one primitive per material slot, positions shared. GLB 2.0."""
+def _write_glb(path: Path, positions, groups, material_names: list, name: str,
+               uvs=None, normals=None, textures: list | None = None) -> None:
+    """One mesh, one primitive per material slot, vertex arrays shared. GLB 2.0.
+
+    ``textures`` names each material's base-colour image by the path the
+    workstation stores it under; the viewer resolves it against the asset's
+    files, so a texture uploaded with the FBX shows, and one that was not
+    falls back to the slot colour."""
     position_bytes = positions.tobytes()
     buffer = bytearray(_pad(position_bytes, b"\x00"))
     views = [{"buffer": 0, "byteOffset": 0, "byteLength": len(position_bytes), "target": 34962}]
@@ -361,6 +478,17 @@ def _write_glb(path: Path, positions, groups, material_names: list, name: str) -
         "min": [float(v) for v in positions.min(axis=0)],
         "max": [float(v) for v in positions.max(axis=0)],
     }]
+    attributes = {"POSITION": 0}
+    for key, array, kind in (("NORMAL", normals, "VEC3"), ("TEXCOORD_0", uvs, "VEC2")):
+        if array is None:
+            continue
+        blob = array.tobytes()
+        offset = len(buffer)
+        buffer += _pad(blob, b"\x00")
+        views.append({"buffer": 0, "byteOffset": offset, "byteLength": len(blob), "target": 34962})
+        accessors.append({"bufferView": len(views) - 1, "componentType": 5126,
+                          "count": int(len(array)), "type": kind})
+        attributes[key] = len(accessors) - 1
     mesh_primitives = []
     for slot, triangles in groups:
         index_bytes = triangles.reshape(-1).tobytes()
@@ -370,22 +498,36 @@ def _write_glb(path: Path, positions, groups, material_names: list, name: str) -
                       "target": 34963})
         accessors.append({"bufferView": len(views) - 1, "componentType": 5125,
                           "count": int(triangles.size), "type": "SCALAR"})
-        mesh_primitives.append({"attributes": {"POSITION": 0}, "indices": len(accessors) - 1,
+        mesh_primitives.append({"attributes": dict(attributes), "indices": len(accessors) - 1,
                                 "material": int(slot), "mode": 4})
+    textures = textures or [""] * len(material_names)
+    images = sorted({item for item in textures if item})
+    material_list = []
+    for i, material in enumerate(material_names):
+        image = textures[i] if i < len(textures) else ""
+        pbr = {"metallicFactor": 0.0, "roughnessFactor": 0.8}
+        if image:
+            pbr["baseColorFactor"] = [1.0, 1.0, 1.0, 1.0]
+            pbr["baseColorTexture"] = {"index": images.index(image)}
+        else:
+            pbr["baseColorFactor"] = list(SLOT_COLOURS[i % len(SLOT_COLOURS)]) + [1.0]
+        material_list.append({"name": material, "doubleSided": True, "pbrMetallicRoughness": pbr})
     document = {
         "asset": {"version": "2.0", "generator": "AssetGatekeeper fbx_preview (preview only)"},
         "scene": 0,
         "scenes": [{"nodes": [0]}],
         "nodes": [{"mesh": 0, "name": name}],
         "meshes": [{"name": name, "primitives": mesh_primitives}],
-        "materials": [{"name": material, "doubleSided": True, "pbrMetallicRoughness": {
-            "baseColorFactor": list(SLOT_COLOURS[i % len(SLOT_COLOURS)]) + [1.0],
-            "metallicFactor": 0.0, "roughnessFactor": 0.8}}
-            for i, material in enumerate(material_names)],
+        "materials": material_list,
         "buffers": [{"byteLength": len(buffer)}],
         "bufferViews": views,
         "accessors": accessors,
     }
+    if images:
+        document["images"] = [{"uri": "/".join(quote(part) for part in image.split("/"))}
+                              for image in images]
+        document["samplers"] = [{"wrapS": 10497, "wrapT": 10497}]
+        document["textures"] = [{"source": i, "sampler": 0} for i in range(len(images))]
     json_blob = _pad(json.dumps(document, separators=(",", ":")).encode("utf-8"), b" ")
     bin_blob = bytes(buffer)
     total = 12 + 8 + len(json_blob) + 8 + len(bin_blob)

@@ -1,5 +1,21 @@
 # Since v1.1.1 (unreleased, on `main`)
 
+* **Inspection views and textured FBX (roadmap phase 3).**
+  * Viewer: **UV check** (numbered checker; pink where a mesh has no UVs), **Texel**
+    (density heat map against the mesh's median), **Normals** and **Scale** (a
+    1.8 m person and metre grid) views, with the size and median texel density in
+    the readout.
+  * FBX previews now carry UVs, the file's normals and each material's
+    base-colour texture (when it was uploaded with the FBX); before they were
+    flat colours with recomputed normals.
+  * Gate: `max_texture_mb` / `max_mesh_mb` GPU memory budgets (BC7/BC5 by
+    default, mips included), per-folder and per-platform, and texel density
+    limits (`texel_density_min` / `max`); `[[totals]]` caps a folder's combined
+    memory.
+  * Fixed: a version with no depot path showed compare buttons and an empty Copy
+    button (the `hidden` attribute lost to the stylesheet); the toolbar overflowed
+    a phone screen once the new buttons were in.
+
 * **Studio rules (roadmap phase 2).**
   * Expiring exceptions: `[[exceptions]]` in `rules.toml` (path, rule, allow,
     reason, owner, expires) relax one rule for some paths until a date; the day

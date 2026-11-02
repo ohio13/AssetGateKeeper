@@ -83,14 +83,35 @@ The browser cannot draw FBX, so the server converts its geometry to a `.glb`
 screen for the FBX and its LODs:
 
 > **Converted preview** - You are viewing a .glb converted from this FBX, not the
-> FBX itself. Geometry only: one flat colour per material slot, no textures,
-> animation or skinning; pivots are not applied, so placement can differ from
+> FBX itself. Geometry, UVs, normals and base-colour textures (those uploaded
+> with it); a slot with no texture gets a flat colour. No animation, skinning or
+> other material inputs; pivots are not applied, so placement can differ from
 > your DCC or engine. The numbers on the right are measured from the FBX.
 
 What is drawn is what the gate counts: Unreal collision meshes (`UCX_` and
-friends) and LOD1+ levels of an LOD group are left out, axes and units are
-converted to Y-up metres, and each material slot gets its own colour, named
-after the FBX material.
+friends) and LOD1+ levels of an LOD group are left out, and axes and units are
+converted to Y-up metres. The conversion keeps the first UV set and the FBX's
+own normals (so hard edges and UV seams look as authored) and each material's
+base-colour (diffuse) texture. That texture shows only if it was uploaded with
+the FBX - drop it in the same batch, or let the bulk uploader or AssetHealth
+send it; otherwise the slot is a flat colour named after the FBX material.
+Normal, roughness and other maps are not applied in the FBX preview; the UV and
+texel-density views (below) work on it like on any other mesh.
+
+### Inspection views
+
+The toolbar's view buttons switch how the mesh is drawn, without changing it:
+
+| Button | Shows |
+| --- | --- |
+| Textured / Geometry | the materials as authored, or plain grey shading |
+| **UV check** | a numbered checker through the first UV set - stretching, flipped or mirrored islands and seams show at a glance; a mesh with no UVs turns pink |
+| **Texel** | texel density per face, against the mesh's median: green is near the median, blue is lower (blurry), red is higher (wasted memory); the readout gives the median in pixels per metre |
+| **Normals** | short lines along the vertex normals (up to 20,000), to spot flipped or unwelded normals |
+| **Scale** | a 1.8 m person and a metre grid beside the asset; the readout gives its size in metres |
+
+Texel density uses the asset's own base-colour texture size where it has one,
+otherwise 1024 px (the gate's `texel_texture` default).
 
 ## The screen
 

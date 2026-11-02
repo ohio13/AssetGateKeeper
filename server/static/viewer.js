@@ -22,6 +22,11 @@ const state = {
   token: localStorage.getItem("aw_token") || "",
   sceneObjects: { model: null, collision: null, ghost: null },
   compare: null,        // null | "overlay" | "side": the previous version on screen
+  viewMode: "textured", // textured | geometry | uv | texel (W4)
+  normals: false,       // normals drawn as short lines
+  scale: false,         // the 1.8 m figure, a metre grid and the size in metres
+  heatGeometries: new Map(), // mesh -> its per-face texel-density geometry
+  texel: null,          // {median, assumed} of the last heat map
   me: null,             // /api/me: accounts on? who is signed in, and what they can do
   originals: new Map(), // material -> {color, map, ...} for the exposure sliders
   meshMaterials: new Map(), // mesh -> the material(s) it was loaded with
@@ -158,6 +163,7 @@ function disposeObject(object) {
  * material sliders - can be left on screen under another asset's name. */
 function clearModel() {
   clearGhost();
+  clearInspection();
   disposeObject(state.sceneObjects.model);
   state.sceneObjects.model = null;
   disposeObject(state.sceneObjects.collision);
@@ -300,6 +306,8 @@ async function loadModel(assetId, level) {
   scene.add(object);
   frameObject(object);
   applyMaterialMode();
+  drawNormals();
+  drawScale();
   buildMaterialControls();
   refreshCollisionExport();
   updateReadout();
@@ -318,11 +326,206 @@ const normalMaterial = new THREE.MeshNormalMaterial({ flatShading: false });
 function applyMaterialMode() {
   const object = state.sceneObjects.model;
   if (!object) return;
+  const mode = state.geometryMode && state.viewMode === "textured" ? "geometry" : state.viewMode;
+  if (mode === "texel") buildTexelHeat(object);
   object.traverse((node) => {
     if (!node.isMesh || !state.meshMaterials.has(node)) return;
-    node.material = state.geometryMode ? normalMaterial : state.meshMaterials.get(node);
+    const original = state.originalGeometries.get(node);
+    if (original && node.geometry !== original && mode !== "texel") node.geometry = original;
+    if (mode === "geometry") node.material = normalMaterial;
+    else if (mode === "uv") node.material = node.geometry.attributes.uv ? uvMaterial : missingUvMaterial;
+    else if (mode === "texel") {
+      const heat = state.heatGeometries.get(node);
+      if (heat) { node.geometry = heat; node.material = heatMaterial; }
+      else node.material = missingUvMaterial;
+    } else node.material = state.meshMaterials.get(node);
   });
   applyWireframe();
+}
+
+/* - inspection views (W4) */
+
+// A numbered checker: stretched squares show stretched UVs, flipped numbers flipped ones.
+const uvMaterial = (() => {
+  const canvas = document.createElement("canvas");
+  canvas.width = canvas.height = 512;
+  const context = canvas.getContext("2d");
+  for (let y = 0; y < 8; y += 1) {
+    for (let x = 0; x < 8; x += 1) {
+      context.fillStyle = (x + y) % 2 ? "#d9dde5" : "#4b5466";
+      context.fillRect(x * 64, y * 64, 64, 64);
+      context.fillStyle = (x + y) % 2 ? "#4b5466" : "#d9dde5";
+      context.font = "bold 22px sans-serif";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(`${String.fromCharCode(65 + x)}${8 - y}`, x * 64 + 32, y * 64 + 32);
+    }
+  }
+  const texture = new THREE.CanvasTexture(canvas);
+  texture.colorSpace = THREE.SRGBColorSpace;
+  texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+  return new THREE.MeshBasicMaterial({ map: texture, name: "UV checker", side: THREE.DoubleSide });
+})();
+// Both sides: a floor or a card seen from behind must not vanish in an inspection view.
+const missingUvMaterial = new THREE.MeshBasicMaterial({ color: 0xd04fbf, name: "no UVs",
+                                                        side: THREE.DoubleSide });
+const heatMaterial = new THREE.MeshBasicMaterial({ vertexColors: true, name: "texel density",
+                                                   side: THREE.DoubleSide });
+state.originalGeometries = new Map();
+
+function textureEdge(material) {
+  const map = material && material.map && material.map.image;
+  const width = map && (map.naturalWidth || map.width);
+  const height = map && (map.naturalHeight || map.height);
+  return width >= 16 && height >= 16 ? Math.sqrt(width * height) : 0;
+}
+
+/* Per-face texel density, coloured against the asset's own median: green near
+ * it, blue at half or less, red at double or more. Same maths as the gate's
+ * [mesh] texel_density (G8): sqrt(UV area x texture pixels / surface area). */
+function buildTexelHeat(object) {
+  if (state.heatGeometries.size) return;
+  const faces = [];
+  object.updateMatrixWorld(true);
+  let assumed = false;
+  object.traverse((node) => {
+    if (!node.isMesh || !state.meshMaterials.has(node)) return;
+    const source = state.originalGeometries.get(node) || node.geometry;
+    if (!source.attributes.uv) return;
+    state.originalGeometries.set(node, source);
+    const flat = source.index ? source.toNonIndexed() : source.clone();
+    const position = flat.attributes.position;
+    const uv = flat.attributes.uv;
+    const materials = Array.isArray(state.meshMaterials.get(node))
+      ? state.meshMaterials.get(node) : [state.meshMaterials.get(node)];
+    let edge = textureEdge(materials[0]);
+    if (!edge) { edge = 1024; assumed = true; }
+    const a = new THREE.Vector3(), b = new THREE.Vector3(), c = new THREE.Vector3();
+    const densities = new Float32Array(position.count / 3);
+    for (let face = 0; face < position.count / 3; face += 1) {
+      a.fromBufferAttribute(position, face * 3).applyMatrix4(node.matrixWorld);
+      b.fromBufferAttribute(position, face * 3 + 1).applyMatrix4(node.matrixWorld);
+      c.fromBufferAttribute(position, face * 3 + 2).applyMatrix4(node.matrixWorld);
+      const world = b.clone().sub(a).cross(c.clone().sub(a)).length() / 2;
+      const u0 = uv.getX(face * 3), v0 = uv.getY(face * 3);
+      const uvArea = Math.abs((uv.getX(face * 3 + 1) - u0) * (uv.getY(face * 3 + 2) - v0)
+        - (uv.getX(face * 3 + 2) - u0) * (uv.getY(face * 3 + 1) - v0)) / 2;
+      densities[face] = world > 0 ? Math.sqrt(uvArea * edge * edge / world) : 0;
+      faces.push(densities[face]);
+    }
+    flat.userData.densities = densities;
+    state.heatGeometries.set(node, flat);
+  });
+  const sorted = faces.filter((value) => value > 0).sort((x, y) => x - y);
+  const median = sorted.length ? sorted[Math.floor(sorted.length / 2)] : 0;
+  const low = new THREE.Color(0x3d7bfd), mid = new THREE.Color(0x3ecf8e), high = new THREE.Color(0xff5a5a);
+  for (const flat of state.heatGeometries.values()) {
+    const colours = new Float32Array(flat.attributes.position.count * 3);
+    const colour = new THREE.Color();
+    flat.userData.densities.forEach((density, face) => {
+      const t = median && density ? Math.max(-1, Math.min(1, Math.log2(density / median))) : -1;
+      colour.copy(mid).lerp(t < 0 ? low : high, Math.abs(t));
+      for (let corner = 0; corner < 3; corner += 1) colour.toArray(colours, (face * 3 + corner) * 3);
+    });
+    flat.setAttribute("color", new THREE.BufferAttribute(colours, 3));
+  }
+  state.texel = { median, assumed };
+}
+
+function clearInspection() {
+  for (const [node, original] of state.originalGeometries) node.geometry = original;
+  for (const heat of state.heatGeometries.values()) heat.dispose();
+  state.heatGeometries.clear();
+  state.originalGeometries.clear();
+  state.texel = null;
+  if (state.sceneObjects.normals) {
+    disposeObject(state.sceneObjects.normals);
+    state.sceneObjects.normals = null;
+  }
+  if (state.sceneObjects.scale) {
+    disposeObject(state.sceneObjects.scale);
+    state.sceneObjects.scale = null;
+  }
+  grid.visible = true;
+}
+
+function drawNormals() {
+  if (state.sceneObjects.normals) {
+    disposeObject(state.sceneObjects.normals);
+    state.sceneObjects.normals = null;
+  }
+  const object = state.sceneObjects.model;
+  if (!state.normals || !object) return;
+  object.updateMatrixWorld(true);
+  const box = new THREE.Box3().setFromObject(object);
+  const length = box.getSize(new THREE.Vector3()).length() * 0.02 || 0.02;
+  const points = [];
+  const p = new THREE.Vector3(), n = new THREE.Vector3();
+  const normalMatrix = new THREE.Matrix3();
+  object.traverse((node) => {
+    if (!node.isMesh || !state.meshMaterials.has(node)) return;
+    const geometry = state.originalGeometries.get(node) || node.geometry;
+    const position = geometry.attributes.position;
+    const normal = geometry.attributes.normal;
+    if (!position || !normal) return;
+    normalMatrix.getNormalMatrix(node.matrixWorld);
+    // At most ~20,000 lines in all, so a million-vertex mesh stays responsive.
+    const step = Math.max(1, Math.ceil(position.count / 20000));
+    for (let i = 0; i < position.count; i += step) {
+      p.fromBufferAttribute(position, i).applyMatrix4(node.matrixWorld);
+      n.fromBufferAttribute(normal, i).applyMatrix3(normalMatrix).normalize();
+      points.push(p.x, p.y, p.z, p.x + n.x * length, p.y + n.y * length, p.z + n.z * length);
+    }
+  });
+  const geometry = new THREE.BufferGeometry();
+  geometry.setAttribute("position", new THREE.Float32BufferAttribute(points, 3));
+  const lines = new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: 0x7aa2f7 }));
+  state.sceneObjects.normals = lines;
+  scene.add(lines);
+}
+
+function sizeOf(object) {
+  return new THREE.Box3().setFromObject(object).getSize(new THREE.Vector3());
+}
+
+function drawScale() {
+  if (state.sceneObjects.scale) {
+    disposeObject(state.sceneObjects.scale);
+    state.sceneObjects.scale = null;
+  }
+  grid.visible = !state.scale;
+  const object = state.sceneObjects.model;
+  if (!state.scale || !object) return;
+  const box = new THREE.Box3().setFromObject(object);
+  const size = box.getSize(new THREE.Vector3());
+  const group = new THREE.Group();
+  const skin = new THREE.MeshStandardMaterial({ color: 0x9ea3ad, roughness: 0.8 });
+  // A 1.8 m reference person: 1.44 m body, 0.18 m head, standing on the floor.
+  const body = new THREE.Mesh(new THREE.CylinderGeometry(0.18, 0.2, 1.44, 16), skin);
+  body.position.y = 0.72;
+  const head = new THREE.Mesh(new THREE.SphereGeometry(0.18, 16, 12), skin);
+  head.position.y = 1.62;
+  const person = new THREE.Group();
+  person.add(body, head);
+  person.position.set(box.max.x + 0.6, box.min.y, (box.min.z + box.max.z) / 2);
+  group.add(person);
+  const extent = Math.ceil(Math.max(size.x, size.z, 2) + 4);
+  const metres = new THREE.GridHelper(extent * 2, extent * 2, 0x3a4658, 0x232b38);
+  metres.position.set((box.min.x + box.max.x) / 2, box.min.y, (box.min.z + box.max.z) / 2);
+  group.add(metres);
+  state.sceneObjects.scale = group;
+  scene.add(group);
+}
+
+function setViewMode(mode) {
+  state.viewMode = mode;
+  state.geometryMode = mode === "geometry";
+  for (const [id, value] of [["mode-textured", "textured"], ["mode-geometry", "geometry"],
+                             ["mode-uv", "uv"], ["mode-texel", "texel"]]) {
+    $(id).classList.toggle("active", mode === value);
+  }
+  applyMaterialMode();
+  updateReadout();
 }
 
 function applyWireframe() {
@@ -788,9 +991,20 @@ function updateReadout() {
     : (lod.origin === "uploaded" ? "<span>your LOD (uploaded)</span>"
       : "<span>generated preview LOD - no UVs or materials</span>")
       + (lod.warning ? `<span class="bad">${escapeHtml(lod.warning)}</span>` : "");
+  const model = state.sceneObjects.model;
+  const size = state.scale && model ? sizeOf(model) : null;
+  const inspect = (size ? `<span>size ${size.x.toFixed(2)} x ${size.y.toFixed(2)} x `
+      + `${size.z.toFixed(2)} m (person: 1.8 m)</span>` : "")
+    + (state.viewMode === "texel" && state.texel
+      ? (state.texel.median
+        ? `<span>texel density: median ${fmt(Math.round(state.texel.median))} px/m`
+          + `${state.texel.assumed ? " (assuming a 1024 texture)" : ""}; `
+          + "blue = half or less, red = double or more</span>"
+        : "<span>texel density: no UVs (pink)</span>") : "")
+    + (state.viewMode === "uv" ? "<span>UV checker: stretched squares = stretched UVs; pink = no UVs</span>" : "");
   $("readout").innerHTML =
     `<span>${state.level === "source" ? "source" : state.level}</span>`
-    + geometry + lodNote
+    + geometry + lodNote + inspect
     + `<span>uploaded ${asset.uploaded_at.replace("T", " ")}</span>`
     + `<span>by ${escapeHtml(asset.uploader || "unknown")}</span>`;
 }
@@ -839,7 +1053,9 @@ function buildMaterialControls() {
   if (state.sceneObjects.model) {
     state.sceneObjects.model.traverse((child) => {
       if (!child.isMesh || !child.material) return;
-      const list = Array.isArray(child.material) ? child.material : [child.material];
+      // The asset's own materials, whatever view mode is drawing it right now.
+      const own = state.meshMaterials.get(child) || child.material;
+      const list = Array.isArray(own) ? own : [own];
       for (const material of list) {
         if (!material || entries.some((entry) => entry.material === material)) continue;
         entries.push({ material, name: material.name || `material ${entries.length}` });
@@ -1151,17 +1367,20 @@ host.addEventListener("drop", (event) => {
   uploadFiles(event.dataTransfer.files);
 });
 
-$("mode-textured").addEventListener("click", () => {
-  state.geometryMode = false;
-  $("mode-textured").classList.add("active");
-  $("mode-geometry").classList.remove("active");
-  applyMaterialMode();
+$("mode-textured").addEventListener("click", () => setViewMode("textured"));
+$("mode-geometry").addEventListener("click", () => setViewMode("geometry"));
+$("mode-uv").addEventListener("click", () => setViewMode("uv"));
+$("mode-texel").addEventListener("click", () => setViewMode("texel"));
+$("normals").addEventListener("click", () => {
+  state.normals = !state.normals;
+  $("normals").classList.toggle("active", state.normals);
+  drawNormals();
 });
-$("mode-geometry").addEventListener("click", () => {
-  state.geometryMode = true;
-  $("mode-geometry").classList.add("active");
-  $("mode-textured").classList.remove("active");
-  applyMaterialMode();
+$("scale").addEventListener("click", () => {
+  state.scale = !state.scale;
+  $("scale").classList.toggle("active", state.scale);
+  drawScale();
+  updateReadout();
 });
 $("wireframe").addEventListener("click", () => {
   state.wireframe = !state.wireframe;

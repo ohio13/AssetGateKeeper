@@ -252,6 +252,8 @@ body.rules-open { --rail: 430px; }
   .notes { order: 3; min-height: 320px; }
   .library { order: 4; max-height: none; }
   .toolbar { flex-wrap: wrap; }
+  .toolbar .group { flex-wrap: wrap; }
+  .toolbar .group.grow { min-width: 0; }
   .preview-warning { font-size: 11px; }
 }
 
@@ -286,3 +288,7 @@ body.rules-open { --rail: 430px; }
 .signin { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 10px 16px;
   border-bottom: 1px solid var(--line); background: var(--panel); }
 .signin[hidden] { display: none; }
+
+/* display:flex on these beat the [hidden] attribute: a v1 asset with no depot
+   path showed compare buttons and an empty Copy button. */
+.compare-tools[hidden], .source-link[hidden], .review-form[hidden] { display: none; }
