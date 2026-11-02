@@ -37,6 +37,7 @@ import subprocess
 import sys
 import tempfile
 from pathlib import Path
+from typing import Optional
 
 ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg"}
 # Actions that put bytes into the depot. "delete" and "move/delete" carry none.
@@ -104,6 +105,44 @@ def fetch_revision(changelist: str, depot_path: str, destination: Path) -> None:
     p4("p4", "print", "-q", "-o", str(destination), f"{depot_path}@={changelist}")
 
 
+RULES_FILENAME = "rules.toml"
+
+
+def depot_rules_for(depot_path: str, destination_root: Path, cache: dict) -> Optional[Path]:
+    """The nearest ``rules.toml`` above a depot file, fetched at ``#head``.
+
+    The asset is gated from a temp copy, and the gate reads ``rules.toml`` from
+    the folder it is given - which, in a temp folder, never has one. So the
+    studio's budget was silently replaced by the shipped defaults at submit
+    time. The project's file is fetched from the depot instead, at its
+    *submitted* head revision: a rules.toml edited in the same changelist does
+    not loosen its own gate.
+    """
+    folder = depot_path.rsplit("/", 1)[0]
+    walked = []
+    while folder.startswith("//") and folder.count("/") >= 2:     # up to //depot itself
+        if folder in cache:
+            found = cache[folder]
+            break
+        walked.append(folder)
+        target = destination_root / "_rules" / f"{len(cache) + len(walked)}" / RULES_FILENAME
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            p4("p4", "print", "-q", "-o", str(target), f"{folder}/{RULES_FILENAME}#head")
+        except (RuntimeError, OSError):             # no rules.toml at this level
+            folder = folder.rsplit("/", 1)[0]
+            continue
+        if target.is_file():
+            found = target
+            break
+        folder = folder.rsplit("/", 1)[0]
+    else:
+        found = None
+    for item in walked:
+        cache[item] = found
+    return found
+
+
 def gatekeeper_command() -> list[str]:
     """Resolve how to invoke the gate. Overridable for non-standard installs."""
     python = os.environ.get("AGK_PYTHON") or sys.executable
@@ -155,6 +194,7 @@ def main(argv: list[str] | None = None) -> int:
 
     temp_root = Path(tempfile.mkdtemp(prefix="agk-p4-"))
     failures: list[str] = []
+    rules_cache: dict = {}
     try:
         # Keep the depot's folder shape so relative texture/buffer references in a
         # .gltf still resolve when the copy is inspected.
@@ -171,7 +211,14 @@ def main(argv: list[str] | None = None) -> int:
                 failures.append(f"{depot_path}: could not fetch from depot ({exc})")
                 continue
 
-            completed = gate(destination, extra)
+            per_file = list(extra)
+            if not options.rules:
+                rules_file = depot_rules_for(depot_path, temp_root, rules_cache)
+                if rules_file is not None:
+                    per_file += ["--rules", str(rules_file)]
+                elif options.verbose:
+                    log(f"AssetGatekeeper: no rules.toml above {depot_path}; shipped defaults")
+            completed = gate(destination, per_file)
             if completed.returncode == 0:
                 if options.verbose:
                     log(f"AssetGatekeeper: PASSED {depot_path}")

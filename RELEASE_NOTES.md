@@ -67,6 +67,11 @@ several verdicts are deliberately stricter and some pipelines will turn red.
     the sidebar cut every reason to "159,200 tri... (+109,200)". Text now wraps.
   * Houdini SOP: a curves-only node (hair guides) no longer warns "no polygons";
     only a stream with nothing in it does.
+* **Perforce trigger applies the project's budget.** It gated a temp copy of each
+  file, where no `rules.toml` exists, so every submit was judged against the
+  shipped defaults. It now fetches the nearest depot `rules.toml` (at `#head`).
+* **Maya install docs:** the documented `sys.path` pointed one folder too high;
+  `import maya_preflight` failed.
 
 ---
 

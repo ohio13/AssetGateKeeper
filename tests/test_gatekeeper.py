@@ -957,6 +957,65 @@ expect("a fetch failure fails closed", p4_hook.main(["4711", "jdoe"]) == 1)
 p4_hook.p4 = lambda *a, **k: "Change 9 by x@y\n\nAffected files ...\n\n... //depot/x/readme.txt#1 edit\n"
 expect("a changelist with no assets passes", p4_hook.main(["9", "x"]) == 0)
 
+# -- p4: the project's rules.toml comes from the depot -------------------------
+# The gate reads rules.toml next to the file it is given; the trigger gates a
+# temp copy, so without this the studio budget was replaced by the defaults.
+DEPOT_RULES = {"//depot/art/rules.toml": "[mesh]\nmax_triangles = 120000\n"}
+p4_calls = []
+
+
+def fake_p4(*args, **kwargs):
+    p4_calls.append(args)
+    if args[1] == "describe":
+        return DESCRIBE
+    if args[1] == "print":
+        target, spec = args[4], args[5]
+        depot_file = spec.split("#")[0]
+        if depot_file not in DEPOT_RULES:
+            raise RuntimeError(f"{spec} - no such file(s).")
+        Path(target).write_text(DEPOT_RULES[depot_file], encoding="utf-8")
+        return ""
+    raise RuntimeError(f"unexpected p4 call {args}")
+
+
+seen_rules = []
+
+
+def rules_gate(path, extra):
+    if "--rules" in extra:
+        rules_file = Path(extra[extra.index("--rules") + 1])
+        seen_rules.append(rules_file.read_text(encoding="utf-8"))
+    else:
+        seen_rules.append(None)
+    return subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+
+p4_hook.p4 = fake_p4
+p4_hook.fetch_revision = lambda cl, depot, dest: dest.write_bytes(b"")
+p4_hook.gate = rules_gate
+expect("a clean changelist with depot rules passes", p4_hook.main(["4711", "jdoe"]) == 0)
+expect("every asset is gated with the depot's rules.toml, not the defaults",
+       len(seen_rules) == 2 and all(item and "120000" in item for item in seen_rules), str(seen_rules))
+rules_specs = [call[5] for call in p4_calls if call[1] == "print"]
+expect("the rules are read at the submitted head, not from this changelist",
+       rules_specs and all(spec.endswith("#head") for spec in rules_specs), str(rules_specs))
+expect("each depot folder is looked up once per changelist",
+       len(rules_specs) == len(set(rules_specs)), str(rules_specs))
+seen_rules.clear()
+DEPOT_RULES.clear()
+p4_hook.main(["4711", "jdoe"])
+expect("no rules.toml in the depot: the defaults, and the gate still runs",
+       seen_rules == [None, None], str(seen_rules))
+seen_rules.clear()
+DEPOT_RULES["//depot/art/rules.toml"] = "[mesh]\nmax_triangles = 120000\n"
+(heal_root / "explicit_rules.toml").write_text("[mesh]\nmax_triangles = 777\n", encoding="utf-8")
+p4_calls.clear()
+p4_hook.main(["4711", "jdoe", "--rules", str(heal_root / "explicit_rules.toml")])
+expect("--rules on the trigger line is what the gate gets",
+       seen_rules and all(item and "777" in item for item in seen_rules), str(seen_rules))
+expect("--rules on the trigger line skips the depot lookup",
+       not any(call[1] == "print" and "rules.toml" in call[5] for call in p4_calls))
+
 # -- p4: gatekeeper resolution -----------------------------------------------
 os.environ["AGK_GATEKEEPER"] = str(ROOT_MODULE_DIR / "asset_gatekeeper.py")
 expect("AGK_GATEKEEPER overrides the script path",

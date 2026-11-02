@@ -94,7 +94,10 @@ exactly the window a gate needs. It:
 * resolves each file in the changelist to its **depot** revision (`p4 print -q
   //depot/...@=<change>`), not the artist's workspace, so what is validated is
   what will be stored;
-* gates those revisions with the project's rules;
+* gates those revisions with the project's rules: the nearest `rules.toml`
+  above each file in the depot, at its submitted `#head` (so a `rules.toml`
+  edited in the same changelist does not loosen its own gate), or the file
+  given with `--rules` on the trigger line;
 * exits non-zero to refuse the submit, or prints warnings for advisory mode.
 
 Validation happens in a temp folder that is deleted afterwards. No sync, no

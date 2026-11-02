@@ -73,6 +73,9 @@ All of these are deliberate, and each one is a bug that used to pass:
   meshes and LOD1+ of an LOD group are no longer counted, matching what Unreal
   imports. An FBX that failed by a small margin may now pass.
 * **ASCII FBX is measured** instead of failing with "re-export as binary".
+* **The Perforce trigger now uses the depot's `rules.toml`** (nearest one above
+  each file, at `#head`). 1.0 used the shipped defaults at submit whatever the
+  project's budget was, so submits can change verdict in either direction.
 
 ## 4. Healing is safer, and refuses more
 
