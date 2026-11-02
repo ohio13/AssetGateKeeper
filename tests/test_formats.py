@@ -612,6 +612,19 @@ expect("Max: Physical Material and Multi/Sub-Object slots are counted",
 expect("Max: a Physical Material's base colour map is found",
        ("rock_Albedo.png", 4096, 4096) in max_textures, max_textures)
 
+# DCC Pythons (Unreal 5.3: 3.9, Blender 4.0: 3.10, Maya 2022-24) have no tomllib:
+# the engine must still read rules.toml there, through the bundled tomli.
+probe = ("import sys\nsys.modules['tomllib'] = None\nsys.modules['tomli'] = None\n"
+         f"sys.path.insert(0, {str(ROOT)!r})\n"
+         "import asset_gatekeeper as a\nfrom pathlib import Path\n"
+         "print(a.tomllib.__name__, a.Budget.from_mapping(a.parse_rules(Path(sys.argv[1]))).max_triangles)\n")
+vendor_rules = WORK / "vendor_rules.toml"
+vendor_rules.write_text("[mesh]\nmax_triangles = 1234\n", encoding="utf-8")
+completed = subprocess.run([sys.executable, "-c", probe, str(vendor_rules)],
+                           capture_output=True, text=True, timeout=120)
+expect("without tomllib or tomli (DCC Pythons) rules.toml is read by the bundled tomli",
+       completed.stdout.split() == ["agk_vendor.tomli", "1234"], completed.stdout + completed.stderr[-300:])
+
 print("10. Hooks and tools know the new formats")
 sys.path.insert(0, str(ROOT / "vcs_hooks"))
 import git_pre_commit  # noqa: E402

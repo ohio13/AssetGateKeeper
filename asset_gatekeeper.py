@@ -117,8 +117,20 @@ except ImportError:  # pragma: no cover
 
 try:  # Python 3.11+ ships a TOML parser in the standard library
     import tomllib
-except ModuleNotFoundError:  # pragma: no cover - Python 3.9 / 3.10
-    tomllib = None  # type: ignore[assignment]
+except ModuleNotFoundError:  # pragma: no cover - Python 3.7 - 3.10
+    try:
+        import tomli as tomllib  # type: ignore[no-redef]
+    except ModuleNotFoundError:
+        # DCC Pythons (Unreal 5.3: 3.9, Blender 4.0: 3.10, Maya 2022-24) have
+        # neither, and a project rules.toml then could not be read in-editor.
+        # tomli (the code tomllib came from) ships in agk_vendor/ for them.
+        _engine_dir = os.path.dirname(os.path.abspath(__file__))
+        if _engine_dir not in sys.path:
+            sys.path.append(_engine_dir)
+        try:
+            from agk_vendor import tomli as tomllib  # type: ignore[no-redef]
+        except ImportError:
+            tomllib = None  # type: ignore[assignment]
 
 try:  # numpy arrives with trimesh; used only for vectorised geometry maths
     import numpy as np

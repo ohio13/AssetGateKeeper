@@ -70,6 +70,11 @@ several verdicts are deliberately stricter and some pipelines will turn red.
 * **Perforce trigger applies the project's budget.** It gated a temp copy of each
   file, where no `rules.toml` exists, so every submit was judged against the
   shipped defaults. It now fetches the nearest depot `rules.toml` (at `#head`).
+* **`rules.toml` is read inside every DCC.** The engine needs `tomllib`
+  (Python 3.11+); Unreal 5.3 (3.9), Blender 4.0 (3.10) and Maya 2022-2024 have
+  neither it nor `tomli`, so a studio budget could not be read in-editor - in
+  Unreal the error was swallowed and imports went unchecked. `tomli` 2.0.1 (MIT)
+  now ships in `agk_vendor/` as the fallback; verified in Unreal 5.3.2.
 * **SIEM forwarding speaks the receivers' formats.** Splunk HEC rejects anything
   but its own `{"event": ...}` envelope; the webhook sent a generic body to the
   HEC URL its own docs used. Syslog lines named no host (`-`); they now carry

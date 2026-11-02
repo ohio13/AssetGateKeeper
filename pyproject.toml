@@ -70,13 +70,14 @@ py-modules = ["asset_gatekeeper", "healer", "notifier"]
 # server/ and engine/ are packages so that the dashboard, the workstation and the
 # LOD decimator travel with the wheel. They keep their folder names, which is what
 # the servers' own HERE/REPO_ROOT path bootstrapping already assumes.
-include = ["server*", "engine*", "tools*", "enterprise*", "plugins*"]
+include = ["server*", "engine*", "tools*", "enterprise*", "plugins*", "agk_vendor*"]
 namespaces = false
 
 [tool.setuptools.package-data]
 # Without the static folder the workstation serves a 404 at /viewer and the
 # dashboard renders unstyled, so this is not optional decoration.
 server = ["static/*"]
+"agk_vendor.tomli" = ["LICENSE", "py.typed"]
 
 [tool.setuptools.dynamic]
 version = { attr = "asset_gatekeeper.__version__" }

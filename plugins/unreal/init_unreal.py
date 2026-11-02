@@ -89,7 +89,17 @@ def load_budget():
     if path and os.path.isfile(path):
         from pathlib import Path
 
-        _budget = engine.Budget.from_mapping(engine.parse_rules(Path(path)))
+        try:
+            _budget = engine.Budget.from_mapping(engine.parse_rules(Path(path)))
+        except Exception as error:
+            # Raised inside the import delegate, this was swallowed by the engine
+            # and every import went unchecked without a word.
+            if not _state.get("rules_broken_told"):
+                _state["rules_broken_told"] = True
+                notify("AssetGatekeeper could not read its rules",
+                       f"{path}\n{error}\n\nImported meshes are NOT being checked "
+                       "until the file is fixed (restart the editor after fixing it).")
+            return None
     else:
         _budget = engine.Budget()
     return _budget

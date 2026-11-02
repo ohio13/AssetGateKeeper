@@ -63,7 +63,7 @@ DROP_IN_FILES = (
 #: console scripts and the DCC panels too; leaving them out meant the drop-in tree
 #: could not do half of what the README promised.
 DROP_IN_DIRS = ("server", "engine", "tools", "templates", "plugins", "enterprise",
-                "vcs_hooks", "docs")
+                "vcs_hooks", "docs", "agk_vendor")
 
 #: Never copied, whatever folder they appear in.
 SKIP_DIRS = {"__pycache__", ".git", ".agk", "build", "dist", "scratch", "dropbox",

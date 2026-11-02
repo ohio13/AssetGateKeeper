@@ -12,6 +12,7 @@ recursive-include tests *.py
 recursive-include engine *.py
 recursive-include tools *.py
 recursive-include enterprise *.py
+recursive-include agk_vendor *.py LICENSE py.typed
 recursive-include plugins *.py *.md
 recursive-include docs *.md
 prune .agk
