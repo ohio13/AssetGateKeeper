@@ -71,6 +71,13 @@ several verdicts are deliberately stricter and some pipelines will turn red.
 * **Perforce trigger applies the project's budget.** It gated a temp copy of each
   file, where no `rules.toml` exists, so every submit was judged against the
   shipped defaults. It now fetches the nearest depot `rules.toml` (at `#head`).
+* **Perforce trigger works on a real server.** The trigger runs inside the P4
+  service, which has no `P4PORT` or login, so the documented trigger line
+  refused every submit ("TCP connect to perforce:1666 failed"). New
+  `--port %serverport% --p4user --tickets` (or `AGK_P4PORT`/`AGK_P4USER`/
+  `AGK_P4TICKETS`) are passed to every `p4` call; README and docs/10 show the
+  working line, which also corrects the README's `change-submit` to
+  `change-content`. Verified on P4 Server 2026.1: 6/6 cases plus fail-closed.
 * **`rules.toml` is read inside every DCC.** The engine needs `tomllib`
   (Python 3.11+); Unreal 5.3 (3.9), Blender 4.0 (3.10) and Maya 2022-2024 have
   neither it nor `tomli`, so a studio budget could not be read in-editor - in

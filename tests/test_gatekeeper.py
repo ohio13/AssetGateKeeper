@@ -1016,6 +1016,43 @@ expect("--rules on the trigger line is what the gate gets",
 expect("--rules on the trigger line skips the depot lookup",
        not any(call[1] == "print" and "rules.toml" in call[5] for call in p4_calls))
 
+# -- p4: the trigger is told where the server is -------------------------------
+# A trigger runs inside the Perforce service: no P4PORT, no P4USER, no login.
+# Found on a real P4 Server: without these every submit failed with
+# "TCP connect to perforce:1666 failed".
+p4_conn = load_module("agk_p4_conn", Path("vcs_hooks") / "p4_pre_submit.py")
+conn_calls = []
+
+
+def fake_run(args, **kwargs):
+    conn_calls.append((list(args), kwargs.get("env")))
+    return subprocess.CompletedProcess(args=args, returncode=0, stdout=DESCRIBE, stderr="")
+
+
+p4_conn.subprocess = type("S", (), {"run": staticmethod(fake_run),
+                                    "CompletedProcess": subprocess.CompletedProcess})
+p4_conn.gate = lambda path, extra: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+p4_conn.fetch_revision = lambda cl, depot, dest: dest.write_bytes(b"")
+tickets_file = str(heal_root / "p4tickets.txt")
+p4_conn.main(["4711", "jdoe", "--port", "ssl:p4:1666", "--p4user", "agk-trigger",
+              "--tickets", tickets_file, "--p4", "C:/Perforce/p4.exe"])
+expect("every trigger p4 call carries the server address and user",
+       conn_calls and all(call[0][:5] == ["C:/Perforce/p4.exe", "-p", "ssl:p4:1666", "-u", "agk-trigger"]
+                          for call in conn_calls), str([call[0] for call in conn_calls[:1]]))
+expect("the trigger's p4 calls read the given tickets file",
+       all(call[1] and call[1].get("P4TICKETS") == tickets_file for call in conn_calls))
+conn_calls.clear()
+os.environ["AGK_P4PORT"] = "p4box:1666"
+p4_conn.main(["4711", "jdoe"])
+del os.environ["AGK_P4PORT"]
+expect("AGK_P4PORT works when the trigger line has no --port",
+       conn_calls and conn_calls[0][0][:3] == ["p4", "-p", "p4box:1666"], str([call[0] for call in conn_calls[:1]]))
+conn_calls.clear()
+p4_conn.main(["4711", "jdoe"])
+expect("with nothing configured the p4 call is unchanged",
+       conn_calls and conn_calls[0][0][:2] == ["p4", "describe"] and conn_calls[0][1] is None,
+       str([call[0] for call in conn_calls[:1]]))
+
 # -- p4: gatekeeper resolution -----------------------------------------------
 os.environ["AGK_GATEKEEPER"] = str(ROOT_MODULE_DIR / "asset_gatekeeper.py")
 expect("AGK_GATEKEEPER overrides the script path",

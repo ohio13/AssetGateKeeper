@@ -465,10 +465,9 @@ but nothing here can exercise them end to end):
   shape of the rows we read, not PostgreSQL's own semantics (`agk-enterprise
   doctor` reports the connection);
 * a real IdP (Okta / Entra ID / ADFS) for the full redirect round-trip;
-* a real Perforce server (`p4 print` against a live depot);
-* Maya, 3ds Max and Unreal installs for the other three panels (their adapters
-  are syntax-checked and share the verified core, but have not been driven in a
-  live session here).
+* Perforce, Maya 2027, 3ds Max 2027 and Unreal 5.3 have since been driven live
+  (see RELEASE_NOTES v1.1.0); the trigger needs `--port`/`--p4user`/`--tickets`
+  on a real server (docs/10).
 
 That boundary is stated here rather than implied, because "we integrated with
 Active Directory" means something very different in each case.

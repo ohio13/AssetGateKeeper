@@ -442,13 +442,15 @@ happen *before* a bad asset enters the depot. All three hooks pass
 
 | Hook | Installed as | Mechanism |
 | :--- | :--- | :--- |
-| `p4_pre_submit.py` | a `change-submit` trigger | `p4 describe` → `p4 print` each rev to a temp tree → gate → reject |
+| `p4_pre_submit.py` | a `change-content` trigger | `p4 describe` → `p4 print` each rev to a temp tree → gate → reject |
 | `git_pre_commit.py` | `.git/hooks/pre-commit` (`--install`) | `git diff --cached` → gate the staged assets |
 | `git_pre_push.sh` | `.git/hooks/pre-push` | upstream-or-empty-tree diff → gate → block the push |
 
 ```python
-# Perforce server trigger (p4 triggers), tabs between fields:
-AssetGatekeeper change-submit //depot/.../..."python C:\p4\hooks\p4_pre_submit.py %changelist% %user%"
+# Perforce server trigger (p4 triggers), one line, tabs between fields.
+# The trigger runs inside the P4 service, which has no P4PORT or login of its
+# own: --port/--p4user/--tickets tell it which server and login to use.
+AssetGatekeeper change-content //depot/... "python C:\p4\hooks\p4_pre_submit.py %changelist% %user% --port %serverport% --p4user agk-trigger --tickets C:\p4\hooks\p4tickets.txt"
 ```
 
 ```

@@ -11,7 +11,14 @@ enters the depot.
 
 Server trigger line (``p4 triggers``), one line, tabs between fields::
 
-    AssetGatekeeper change-content //depot/.../..."python C:\p4\hooks\p4_pre_submit.py %changelist% %user%"
+    AssetGatekeeper change-content //depot/... "python C:\p4\hooks\p4_pre_submit.py %changelist% %user% --port %serverport% --p4user agk-trigger --tickets C:\p4\hooks\p4tickets.txt"
+
+The trigger runs inside the Perforce service, which has no P4PORT, P4USER or
+login of its own - so without ``--port`` the trigger's own ``p4`` calls dial
+the default ``perforce:1666`` and every submit is refused. ``--p4user`` and
+``--tickets`` name a login (``p4 login -a`` with ``P4TICKETS`` set to that file)
+that can read the depot. Each can also come from ``AGK_P4PORT``,
+``AGK_P4USER``, ``AGK_P4TICKETS`` and ``AGK_P4`` (path to p4.exe).
 
 Behaviour
     * only inspects ``add``/``edit``/``branch``/``move/add``/``integrate`` revs of
@@ -50,9 +57,43 @@ def log(message: str) -> None:
     print(message, flush=True)
 
 
+# How the trigger reaches the server. Filled by configure_connection().
+P4_EXE = "p4"
+P4_GLOBAL: list[str] = []
+P4_ENV: Optional[dict] = None
+
+
+def configure_connection(port: str = "", user: str = "", tickets: str = "",
+                         executable: str = "") -> None:
+    """Point every p4 call at the right server and login.
+
+    A trigger inherits the service's environment, not an artist's, so nothing
+    can be assumed: the address, the user and the tickets file are passed in.
+    """
+    global P4_EXE, P4_GLOBAL, P4_ENV
+    P4_EXE = executable or os.environ.get("AGK_P4") or "p4"
+    port = port or os.environ.get("AGK_P4PORT", "")
+    user = user or os.environ.get("AGK_P4USER", "")
+    tickets = tickets or os.environ.get("AGK_P4TICKETS", "")
+    P4_GLOBAL = []
+    if port:
+        P4_GLOBAL += ["-p", port]
+    if user:
+        P4_GLOBAL += ["-u", user]
+    P4_ENV = None
+    if tickets:
+        P4_ENV = dict(os.environ, P4TICKETS=tickets)
+
+
 def p4(*args: str, timeout: float = 120.0) -> str:
-    """Run a p4 command and return stdout, raising on a non-zero exit."""
-    completed = subprocess.run(args, capture_output=True, text=True,
+    """Run a p4 command and return stdout, raising on a non-zero exit.
+
+    ``args`` starts with the literal ``"p4"``; it is swapped for the configured
+    executable and the connection flags are inserted after it.
+    """
+    if args and args[0] == "p4":
+        args = (P4_EXE, *P4_GLOBAL, *args[1:])
+    completed = subprocess.run(args, capture_output=True, text=True, env=P4_ENV,
                                encoding="utf-8", errors="replace", timeout=timeout)
     if completed.returncode != 0:
         raise RuntimeError(
@@ -169,8 +210,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("changelist", help="changelist number (%%changelist%%)")
     parser.add_argument("user", nargs="?", default="", help="submitting user (%%user%%)")
     parser.add_argument("--rules", help="rules file to use instead of <asset folder>/rules.toml")
+    parser.add_argument("--port", default="",
+                        help="server address for the trigger's own p4 calls (%%serverport%%)")
+    parser.add_argument("--p4user", default="",
+                        help="Perforce user the trigger reads the depot as")
+    parser.add_argument("--tickets", default="",
+                        help="P4TICKETS file holding that user's ticket (p4 login -a)")
+    parser.add_argument("--p4", dest="p4_exe", default="", help="path to p4 / p4.exe")
     parser.add_argument("--verbose", action="store_true")
     options = parser.parse_args(argv)
+    configure_connection(options.port, options.p4user, options.tickets, options.p4_exe)
 
     # Built here, not inside gate(), so what a trigger passes to the gate is
     # visible in one place — and provably includes the no-heal lockdown.

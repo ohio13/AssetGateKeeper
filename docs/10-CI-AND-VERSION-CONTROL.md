@@ -103,6 +103,44 @@ exactly the window a gate needs. It:
 Validation happens in a temp folder that is deleted afterwards. No sync, no
 workspace, nothing left behind.
 
+#### Installing it on the server
+
+The trigger runs **inside the Perforce service**, not as an artist. The service
+has no `P4PORT`, no `P4USER` and no login, so the trigger's own `p4 describe` /
+`p4 print` calls must be told where the server is and who to read the depot as.
+Without that, `p4` dials its default `perforce:1666` and every submit is refused
+with "TCP connect to perforce:1666 failed" (found on a real P4 Server 2026.1).
+
+1. Pick (or create) a Perforce user the trigger reads the depot as, e.g.
+   `agk-trigger`, with read access to the gated paths.
+2. Give it a ticket that works from any host, in a file the service can read:
+
+   ```
+   set P4TICKETS=C:\p4\hooks\p4tickets.txt
+   p4 -u agk-trigger login -a
+   ```
+
+   For an unattended server, put that user in a group with a long or unlimited
+   `Timeout`, otherwise the ticket expires (12 hours by default) and the gate
+   fails closed until someone logs in again.
+3. Install the trigger (`p4 triggers`), one line, tabs between fields:
+
+   ```
+   AssetGatekeeper change-content //depot/... "python C:\p4\hooks\p4_pre_submit.py %changelist% %user% --port %serverport% --p4user agk-trigger --tickets C:\p4\hooks\p4tickets.txt"
+   ```
+
+   Use the full path to a Python that has `trimesh`, `pillow` and `numpy`
+   installed - the service does not see a per-user `PATH`. `p4` itself must be
+   on the system `PATH`, or pass `--p4 <path to p4.exe>` (no spaces) or set
+   `AGK_P4`. `AGK_P4PORT`, `AGK_P4USER` and `AGK_P4TICKETS` work in place of
+   the flags.
+
+Verified on a real P4 Server 2026.1 (Windows): a clean FBX submits; a 240k-
+triangle FBX is refused with the reason in the submit output; a depot
+`rules.toml` raising the budget lets it through; a `rules.toml` lowered in the
+same changelist does not loosen its own gate; a 6-influence skin is refused;
+and a trigger pointing at a missing script refuses the submit (fails closed).
+
 ### Validating a depot path from anywhere
 
 ```
