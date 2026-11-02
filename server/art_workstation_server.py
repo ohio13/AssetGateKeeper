@@ -83,6 +83,7 @@ for path in (str(HERE), str(REPO_ROOT), str(REPO_ROOT / "engine")):
 import asset_gatekeeper as agk  # noqa: E402 - validated glTF/OBJ analysers
 import fbx_preview  # noqa: E402 - FBX -> .glb for the 3D preview
 import lod_manager  # noqa: E402 - the decimator
+import lod_shippable  # noqa: E402 - the decimator that keeps UVs, normals, materials
 from server import netguard  # noqa: E402 - shared Host policy with the dashboard
 
 DEFAULT_DB = "art_workstation.db"
@@ -389,6 +390,12 @@ def init_db(db_path: str | Path) -> None:
             # "generated" by the decimator, or "uploaded": an artist's own LOD file.
             connection.execute(
                 "ALTER TABLE lod_versions ADD COLUMN origin TEXT NOT NULL DEFAULT 'generated'")
+        # W6: which decimator made a generated level, and how far it moved the surface.
+        for column, kind in (("engine", "TEXT NOT NULL DEFAULT 'preview'"),
+                             ("error_m", "REAL NOT NULL DEFAULT 0"),
+                             ("lod_note", "TEXT NOT NULL DEFAULT ''")):
+            if column not in lod_columns:
+                connection.execute(f"ALTER TABLE lod_versions ADD COLUMN {column} {kind}")
 
 
 # --- #
@@ -1571,8 +1578,13 @@ def delete_asset(db_path: str | Path, data_dir: Path, asset_id: int) -> None:
 
 def generate_lods(db_path: str | Path, data_dir: Path, asset_id: int,
                   ratios: list[float] | None = None,
-                  max_triangles: list[int] | None = None, progress=None) -> list[dict]:
+                  max_triangles: list[int] | None = None, progress=None,
+                  shippable: bool = False) -> list[dict]:
     """Decimate the asset into LOD files and record them.
+
+    ``shippable`` uses ``engine/lod_shippable.py``: slower, but UVs, normals and
+    materials survive and the levels are ``.glb`` files an engine can import.
+    The default is the fast preview decimator, which judges cost only.
 
     Levels an artist uploaded by hand are never overwritten or removed by a
     generation: asking for one of those levels is a 409, and the "stale level"
@@ -1604,13 +1616,23 @@ def generate_lods(db_path: str | Path, data_dir: Path, asset_id: int,
         source = preview
 
     out_dir = lods_dir / str(asset_id)
+    extra: dict[str, tuple[str, float, str]] = {}
     try:
         lod_name = asset["filename"]
         if source.suffix.lower() == ".glb" and Path(lod_name).suffix.lower() in FBX_SUFFIXES:
             lod_name = Path(lod_name).stem + ".glb"
-        results = lod_manager.generate(source, out_dir, ratios, max_triangles or None,
-                                       name=lod_name, progress=progress)
-    except lod_manager.LodError as exc:
+        if shippable:
+            folder = asset_folder(Path(data_dir), asset)
+            shipped = lod_shippable.generate(source, out_dir, ratios, max_triangles or None,
+                                             name=lod_name, progress=progress,
+                                             resources=folder)
+            results = shipped
+            extra = {lod.level: ("shippable", lod.error_m, "; ".join(lod.notes))
+                     for lod in shipped}
+        else:
+            results = lod_manager.generate(source, out_dir, ratios, max_triangles or None,
+                                           name=lod_name, progress=progress)
+    except (lod_manager.LodError, lod_shippable.ShippableLodError) as exc:
         raise WorkstationError(str(exc), 422) from exc
 
     produced = {result.level for result in results}
@@ -1634,17 +1656,30 @@ def generate_lods(db_path: str | Path, data_dir: Path, asset_id: int,
 
         for result in results:
             relative = result.path.relative_to(data_dir).as_posix()
+            engine, error_m, lod_note = extra.get(result.level, ("preview", 0.0, ""))
+            old = connection.execute(
+                "SELECT file_path FROM lod_versions WHERE asset_id = ? AND level = ?",
+                (asset_id, result.level)).fetchone()
+            if old is not None and old["file_path"] != relative:
+                # preview .obj -> shippable .glb: the old file is not overwritten
+                stale_file = resolve_inside(data_dir, old["file_path"])
+                if stale_file is not None:
+                    stale_file.unlink(missing_ok=True)
             connection.execute(
                 "INSERT INTO lod_versions (asset_id, level, ratio, target_triangles,"
-                " triangle_count, vertex_count, file_path, created_at, origin)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'generated')"
+                " triangle_count, vertex_count, file_path, created_at, origin,"
+                " engine, error_m, lod_note)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'generated', ?, ?, ?)"
                 " ON CONFLICT(asset_id, level) DO UPDATE SET"
                 " ratio = excluded.ratio, target_triangles = excluded.target_triangles,"
                 " triangle_count = excluded.triangle_count,"
                 " vertex_count = excluded.vertex_count, file_path = excluded.file_path,"
-                " created_at = excluded.created_at, origin = 'generated'",
+                " created_at = excluded.created_at, origin = 'generated',"
+                " engine = excluded.engine, error_m = excluded.error_m,"
+                " lod_note = excluded.lod_note",
                 (asset_id, result.level, result.ratio, result.target_triangles,
-                 result.triangle_count, result.vertex_count, relative, utc_now()))
+                 result.triangle_count, result.vertex_count, relative, utc_now(),
+                 engine, error_m, lod_note))
     return list_lods(db_path, asset_id)
 
 
@@ -2931,10 +2966,14 @@ class Handler(BaseHTTPRequestHandler):
                     # "or {}" generated default LODs and wrote a second response
                     # on the same keep-alive connection.
                     return
-                unknown = sorted(set(payload) - {"ratios", "max_tris"})
+                unknown = sorted(set(payload) - {"ratios", "max_tris", "shippable"})
                 if unknown:
                     raise WorkstationError(
-                        f"unknown field(s) {', '.join(unknown)}; expected ratios and/or max_tris", 400)
+                        f"unknown field(s) {', '.join(unknown)}; expected ratios, max_tris "
+                        "and/or shippable", 400)
+                shippable = payload.get("shippable", False)
+                if not isinstance(shippable, bool):
+                    raise WorkstationError("shippable must be true or false", 400)
                 ratios = payload.get("ratios") or list(lod_manager.DEFAULT_RATIOS)
                 if not isinstance(ratios, list) or not all(
                         isinstance(r, (int, float)) and not isinstance(r, bool)
@@ -2958,15 +2997,17 @@ class Handler(BaseHTTPRequestHandler):
                     db_path, data_dir = server.db_path, Path(server.data_dir)
                     publish = self._publish
 
-                    def work(progress, _asset=asset_id, _ratios=ratio_list, _caps=caps):
-                        lods = generate_lods(db_path, data_dir, _asset, _ratios, _caps, progress)
+                    def work(progress, _asset=asset_id, _ratios=ratio_list, _caps=caps,
+                             _shippable=shippable):
+                        lods = generate_lods(db_path, data_dir, _asset, _ratios, _caps, progress,
+                                             shippable=_shippable)
                         publish("lod", _asset)
                         return {"lods": lods}
                     job = server.jobs.submit(asset_id, work)
                     self._json(202, {"job": job})
                     return
                 lods = generate_lods(server.db_path, Path(server.data_dir),
-                                     asset_id, ratio_list, caps)
+                                     asset_id, ratio_list, caps, shippable=shippable)
                 self._publish("lod", asset_id)
                 self._json(201, {"lods": lods})
                 return

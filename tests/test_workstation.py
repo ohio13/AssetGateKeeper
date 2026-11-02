@@ -1340,6 +1340,159 @@ with aws.open_db(_old_db) as _conn:
 expect("an older library gains the pin columns and keeps its notes",
        {"pin_json", "screenshot"} <= _cols and _kept == "from 1.1", _cols)
 
+print("31. shippable LODs (W6)")
+import math as _math  # noqa: E402
+import numpy as _np  # noqa: E402
+import trimesh as _trimesh  # noqa: E402
+
+
+def textured_sphere(rings=64, segments=128, texture=512):
+    """A lat-long sphere: its UVs are known analytically, so stretching is measurable."""
+    vertices, uvs, normals, faces = [], [], [], []
+    for i in range(rings + 1):
+        theta = _math.pi * i / rings
+        for j in range(segments + 1):
+            phi = 2 * _math.pi * j / segments
+            n = (_math.sin(theta) * _math.cos(phi), _math.cos(theta), _math.sin(theta) * _math.sin(phi))
+            vertices.append(n)
+            normals.append(n)
+            uvs.append((j / segments, 1 - i / rings))
+    width = segments + 1
+    for i in range(rings):
+        for j in range(segments):
+            a, c = i * width + j, (i + 1) * width + j
+            if i != 0:
+                faces.append([a, c, a + 1])
+            if i != rings - 1:
+                faces.append([a + 1, c, c + 1])
+    image = Image.new("RGB", (texture, texture), (90, 140, 200))
+    material = _trimesh.visual.material.PBRMaterial(name="Checker", baseColorTexture=image)
+    mesh = _trimesh.Trimesh(_np.array(vertices), _np.array(faces), vertex_normals=_np.array(normals),
+                            visual=_trimesh.visual.TextureVisuals(uv=_np.array(uvs), material=material),
+                            process=False)
+    return _trimesh.Scene(mesh).export(file_type="glb"), len(faces)
+
+
+def worst_uv_error(glb_path):
+    """Largest gap, in UV units, between the LOD's interpolated UV and the true one."""
+    geometry = _trimesh.load(str(glb_path), force="scene", process=False).dump(concatenate=False)[0]
+    uv, points, worst = _np.asarray(geometry.visual.uv), _np.asarray(geometry.vertices), 0.0
+    for face in _np.asarray(geometry.faces):
+        for weights in ((1 / 3, 1 / 3, 1 / 3), (0.6, 0.2, 0.2), (0.2, 0.6, 0.2), (0.2, 0.2, 0.6)):
+            point = sum(w * points[k] for w, k in zip(weights, face))
+            mapped = sum(w * uv[k] for w, k in zip(weights, face))
+            d = point / _np.linalg.norm(point)
+            if abs(d[1]) > 0.9:
+                continue                       # u is undefined at the poles
+            u = (_math.atan2(d[2], d[0]) / (2 * _math.pi)) % 1
+            v = 1 - _math.acos(d[1]) / _math.pi
+            du = abs(mapped[0] - u)
+            worst = max(worst, min(du, 1 - du), abs(mapped[1] - v))
+    return worst, geometry
+
+
+s_db, s_data = fresh("shippable")
+_sphere_bytes, _sphere_tris = textured_sphere()
+s_asset = aws.create_asset(s_db, s_data, "globe.glb", _sphere_bytes)
+_ship = aws.generate_lods(s_db, s_data, s_asset["id"], [0.5, 0.25, 0.125], shippable=True)
+expect("shippable LODs: three .glb levels, marked shippable, with their surface error",
+       [l["level"] for l in _ship] == ["LOD1", "LOD2", "LOD3"]
+       and all(l["engine"] == "shippable" and l["file_path"].endswith(".glb") and l["error_m"] > 0
+               for l in _ship), [(l["level"], l["engine"], l["file_path"], l["error_m"]) for l in _ship])
+expect("... each within 2 % of its target", all(
+    abs(l["triangle_count"] - l["target_triangles"]) <= 0.02 * l["target_triangles"] for l in _ship),
+    [(l["triangle_count"], l["target_triangles"]) for l in _ship])
+expect("... and each level smaller than the one above, with no warnings",
+       _ship[0]["triangle_count"] > _ship[1]["triangle_count"] > _ship[2]["triangle_count"]
+       and not any(l["warning"] or l["lod_note"] for l in _ship))
+_lod2 = s_data / _ship[1]["file_path"]
+_uv_err, _lod2_geometry = worst_uv_error(_lod2)
+expect("LOD2 keeps its texture without stretching (worst UV error under 2 texels of 512)",
+       _uv_err * 512 < 2.0, round(_uv_err * 512, 2))
+_material = _lod2_geometry.visual.material
+expect("... with its UVs, normals and textured material",
+       _lod2_geometry.visual.uv is not None and _material.name == "Checker"
+       and getattr(_material, "baseColorTexture", None) is not None
+       and len(_lod2_geometry.vertex_normals) == len(_lod2_geometry.vertices))
+_source_geometry = _trimesh.load(_trimesh.util.wrap_as_stream(_sphere_bytes), file_type="glb",
+                                 force="scene", process=False).dump(concatenate=False)[0]
+_source_keys = {(tuple(_np.round(p, 6)), tuple(_np.round(t, 6)))
+                for p, t in zip(_source_geometry.vertices, _source_geometry.visual.uv)}
+expect("every LOD vertex is an original vertex with its original UV (nothing re-interpolated)",
+       all((tuple(_np.round(p, 6)), tuple(_np.round(t, 6))) in _source_keys
+           for p, t in zip(_lod2_geometry.vertices, _lod2_geometry.visual.uv)))
+_seam = {tuple(_np.round(p, 6)) for p, t in zip(_source_geometry.vertices, _source_geometry.visual.uv)
+         if t[0] in (0.0, 1.0)}
+_lod3_points = {tuple(_np.round(p, 6)) for p in _trimesh.load(
+    str(s_data / _ship[2]["file_path"]), force="scene", process=False).dump(concatenate=False)[0].vertices}
+expect("the UV seam is locked: every seam vertex is still there at LOD3", _seam <= _lod3_points,
+       len(_seam - _lod3_points))
+_two = aws.create_asset(s_db, s_data, "prop_crate.glb", (ROOT / "dropbox" / "prop_crate.glb").read_bytes())
+_two_lods = aws.generate_lods(s_db, s_data, _two["id"], [0.5], shippable=True)
+_two_scene = _trimesh.load(str(s_data / _two_lods[0]["file_path"]), force="scene", process=False)
+expect("material slots survive: two in, two out, with their names",
+       sorted(g.visual.material.name for g in _two_scene.dump(concatenate=False)) == ["mat_0", "mat_1"],
+       [g.visual.material.name for g in _two_scene.dump(concatenate=False)])
+# Every triangle has its own three vertices: every edge is a border, nothing may move.
+_soup_lines = [line for line in OBJ.splitlines() if line.startswith("v ")]
+_soup_obj = []
+for _face in [line for line in OBJ.splitlines() if line.startswith("f ")]:
+    _ids = [int(item.split("/")[0]) for item in _face.split()[1:]]
+    _base = len([line for line in _soup_obj if line.startswith("v ")])
+    _soup_obj += [_soup_lines[k - 1] for k in _ids]
+    _soup_obj.append(f"f {_base + 1} {_base + 2} {_base + 3}")
+_seams_only = aws.create_asset(s_db, s_data, "soup.obj", "\n".join(_soup_obj).encode())
+_soup = aws.generate_lods(s_db, s_data, _seams_only["id"], [0.5], shippable=True)
+expect("a mesh that is all seams stops where it must, and says why (never tears the texture)",
+       _soup[0]["triangle_count"] == 12 and "UV seams" in _soup[0]["lod_note"]
+       and "same triangle count as the source" in _soup[0]["warning"], _soup[0])
+_preview_again = aws.generate_lods(s_db, s_data, s_asset["id"], [0.5, 0.25])
+expect("regenerating as preview replaces the shippable files and drops the extra level",
+       [l["engine"] for l in _preview_again] == ["preview", "preview"]
+       and not (s_data / _ship[0]["file_path"]).exists() or _ship[0]["file_path"] == _preview_again[0]["file_path"],
+       [l["file_path"] for l in _preview_again])
+expect("... LOD3's shippable file is gone with its row", not (s_data / _ship[2]["file_path"]).exists())
+_fx = ROOT / "tests" / "fixtures" / "fbx"
+_tex_fbx = aws.create_asset(s_db, s_data, "tex_relative.fbx", (_fx / "tex_relative.fbx").read_bytes())
+aws.add_sidecar(s_db, s_data, _tex_fbx["id"], "tex_relative_wood_Albedo.png",
+                (_fx / "tex_relative_wood_Albedo.png").read_bytes())
+_fbx_lods = aws.generate_lods(s_db, s_data, _tex_fbx["id"], [0.5], shippable=True)
+_fbx_geometry = _trimesh.load(str(s_data / _fbx_lods[0]["file_path"]), force="scene",
+                              process=False).dump(concatenate=False)[0]
+expect("an FBX's shippable LOD carries the texture uploaded with it",
+       getattr(_fbx_geometry.visual.material, "baseColorTexture", None) is not None
+       or getattr(_fbx_geometry.visual.material, "image", None) is not None,
+       type(_fbx_geometry.visual.material).__name__)
+ship_server = aws.build_server("127.0.0.1", 0, s_db, s_data, quiet=True)
+ship_port = ship_server.server_address[1]
+threading.Thread(target=ship_server.serve_forever, daemon=True).start()
+time.sleep(0.1)
+_status, _body = Client(ship_port).json(f"/api/assets/{s_asset['id']}/lods", method="POST",
+                                        body={"ratios": [0.5], "shippable": "yes"})
+expect("POST .../lods refuses shippable that is not true/false", _status == 400, _body)
+_status, _body = Client(ship_port).json(f"/api/assets/{s_asset['id']}/lods?async=1", method="POST",
+                                        body={"ratios": [0.5, 0.25], "shippable": True})
+_job = _body.get("job", {})
+for _ in range(200):
+    _status, _job = Client(ship_port).json(f"/api/jobs/{_job.get('id')}")
+    if _job.get("state") in ("done", "failed"):
+        break
+    time.sleep(0.1)
+expect("... and runs shippable as a background job",
+       _job.get("state") == "done" and all(l["engine"] == "shippable" for l in _job["result"]["lods"]),
+       _job)
+_status, _raw, _headers = Client(ship_port).call(f"/api/assets/{s_asset['id']}/lods/LOD1/file")
+expect("a shippable level downloads as a .glb", _status == 200 and _raw[:4] == b"glTF"
+       and ".glb" in _headers.get("Content-Disposition", ""), _headers.get("Content-Disposition"))
+ship_server.shutdown()
+ship_server.server_close()
+_cli = subprocess.run([sys.executable, str(ROOT / "engine" / "lod_shippable.py"),
+                       str(s_data / s_asset["file_path"]), "--out-dir", str(WORK / "ship_cli"),
+                       "--ratios", "0.5,0.25"], capture_output=True, text=True, timeout=300)
+expect("engine/lod_shippable.py runs on its own",
+       _cli.returncode == 0 and "LOD2:" in _cli.stdout and (WORK / "ship_cli" / "LOD2_globe.glb").is_file(),
+       _cli.stdout + _cli.stderr)
+
 print("25. versions (W1) and where a file came from (W8)")
 v_db, v_data = fresh("versions")
 v1 = aws.create_asset(v_db, v_data, "rock.obj", OBJ.encode())

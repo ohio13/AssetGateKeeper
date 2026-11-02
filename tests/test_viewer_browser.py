@@ -675,6 +675,52 @@ with sync_playwright() as playwright:
            and "missed" in page.locator("#note-pin-state").inner_text())
     page.click("#note-pin")
 
+    print("8i. shippable LODs (W6)")
+    import math as _math
+    import numpy as _np
+    import trimesh as _trimesh
+    _verts, _uvs, _faces = [], [], []
+    for _i in range(25):
+        for _j in range(49):
+            _t, _p = _math.pi * _i / 24, 2 * _math.pi * _j / 48
+            _verts.append((_math.sin(_t) * _math.cos(_p), _math.cos(_t), _math.sin(_t) * _math.sin(_p)))
+            _uvs.append((_j / 48, 1 - _i / 24))
+    for _i in range(24):
+        for _j in range(48):
+            _a, _c = _i * 49 + _j, (_i + 1) * 49 + _j
+            if _i:
+                _faces.append([_a, _c, _a + 1])
+            if _i != 23:
+                _faces.append([_a + 1, _c, _c + 1])
+    _material = _trimesh.visual.material.PBRMaterial(
+        name="Checker", baseColorTexture=Image.new("RGB", (256, 256), (200, 80, 40)))
+    _globe = _trimesh.Scene(_trimesh.Trimesh(
+        _np.array(_verts), _np.array(_faces), vertex_normals=_np.array(_verts),
+        visual=_trimesh.visual.TextureVisuals(uv=_np.array(_uvs), material=_material),
+        process=False)).export(file_type="glb")
+    ids["globe"] = aws.create_asset(db, data, "globe.glb", _globe)["id"]
+    page.goto(f"{BASE}/viewer?live=0&asset={ids['globe']}")
+    page.wait_for_function("() => document.getElementById('status').textContent === 'globe.glb'",
+                           timeout=15000)
+    page.check("#lod-shippable")
+    page.click("#lod-generate")
+    page.wait_for_function("() => /generated|error/.test(document.getElementById('lod-progress').textContent)",
+                           timeout=60000)
+    _rows = page.locator("#lod-list .lod-row").all_inner_texts()
+    expect("Shippable generates levels marked shippable, with their surface error",
+           len(_rows) == 3 and all("shippable" in row and "mm" in row for row in _rows), _rows)
+    expect("... each with a download link", page.locator("#lod-list a.get").count() == 3
+           and page.locator("#lod-list a.get").first.get_attribute("href").endswith("/lods/LOD1/file"))
+    page.locator('#lod-buttons [data-level="LOD2"]').click()
+    page.wait_for_function("() => document.getElementById('status').textContent.includes('LOD2')",
+                           timeout=15000)
+    page.wait_for_timeout(300)
+    expect("viewing a shippable LOD keeps its material and texture (not the grey preview)",
+           "Checker" in page.locator("#materials").inner_text()
+           and "no materials" not in page.locator("#materials").inner_text(),
+           page.locator("#materials").inner_text()[:200])
+    page.uncheck("#lod-shippable")
+
     print("9. deleted while open")
     page.goto(f"{BASE}/viewer?asset={ids['embedded']}")
     page.wait_for_function("() => document.getElementById('status').textContent === 'embedded.gltf'",

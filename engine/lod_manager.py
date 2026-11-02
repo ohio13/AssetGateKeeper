@@ -9,8 +9,9 @@ but it is deterministic, has no dependencies, never produces non-manifold
 garbage, and its output triangle count is controllable to within a few percent.
 
 That trade is deliberate: LODs generated here exist so a technical artist can
-*see* the cost of a level in the viewer and argue about it in a note. Anything
-that ships still gets a proper decimation pass in DCC.
+*see* the cost of a level in the viewer and argue about it in a note. Levels
+that ship come from ``engine/lod_shippable.py`` (UVs, normals and materials kept)
+or a DCC decimation pass.
 
 Usage
     python engine/lod_manager.py model.obj --out-dir out --ratios 0.5,0.25,0.125

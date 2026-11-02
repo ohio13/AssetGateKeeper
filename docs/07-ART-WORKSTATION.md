@@ -174,10 +174,11 @@ with the file as the body.
 
 ## LODs
 
-The **LODs** section lists each level with its triangles, its share of the source
-and where it came from. Two ways to fill it:
+The **LODs** section lists each level with its triangles, its share of the source,
+where it came from (preview, shippable or uploaded) and a download link. Three
+ways to fill it:
 
-* **Generate preview LODs** - pick a preset (Standard 50 / 25 / 12.5 %,
+* **Generate LODs** - pick a preset (Standard 50 / 25 / 12.5 %,
   Aggressive 40 / 15 / 5 %, Mobile 25 / 10 / 3 %, or one level at 50 %) and press
   **Generate**. It runs in the background and says which level it is on; the page
   stays usable. These are *preview* LODs from a fast clustering decimator:
@@ -192,6 +193,26 @@ and where it came from. Two ways to fill it:
     so a LOD sits exactly where the source does.
   * If a level cannot reach its target - asking for 4 triangles of a 12-triangle
     cube - it is kept, and flagged *over its N-triangle target*.
+* **Generate LODs with Shippable ticked** - the same presets through a second
+  decimator (`engine/lod_shippable.py`) whose levels you can put in the game:
+  * **UVs, normals and materials are kept.** It collapses edges by quadric error
+    (flat areas first, silhouettes last), and only ever moves a vertex onto a
+    neighbour, so every vertex left is an original one with its exact UV and
+    normal. On a textured test sphere, LOD2 (25 %) samples its texture within
+    0.7 texels of 512 of where the source does.
+  * **UV seams, hard edges and material borders are locked**, so the texture
+    cannot tear and slots cannot pull apart. A mesh that is mostly seams cannot
+    get as low; the level then says where it stopped and why.
+  * No flipped faces, slivers or non-manifold edges; each level is within 2 %
+    of its target when the mesh allows it, and is a subset of the level above.
+  * Each level shows its **surface error** (`shippable +/-1.23 mm`): the
+    largest distance, as a quadric RMS, that a collapse moved the surface.
+  * The levels are `.glb` files with the materials and textures embedded,
+    placed in world space: download one with the arrow on its row and import it
+    into Unreal, Unity or Blender. In the viewer they are drawn with their
+    materials, not the grey preview.
+  * Slower: about 4 seconds for 65,000 triangles and 80 seconds for a million,
+    all levels, in the background.
 * **Upload your own LOD** - choose the level and a `.glb`, self-contained `.gltf`,
   `.obj` or `.fbx`. It is measured like the source (an FBX by the gate's reader,
   viewed through a converted `.glb`). A file named `<asset>_LOD1` ... `_LOD4`
@@ -209,7 +230,8 @@ What the viewer flags, on the level's button, its row and the readout:
 * percentages always use the source as the denominator.
 
 API: `POST /api/assets/<id>/lods?async=1` with `{"ratios": [0.5, 0.25]}` or
-`{"max_tris": [5000, 1000]}` (or both) returns a job (`GET /api/jobs/<job id>` for its
+`{"max_tris": [5000, 1000]}` (or both), plus `"shippable": true` for the second
+decimator, returns a job (`GET /api/jobs/<job id>` for its
 state and current level); without `async` it answers when done. Up to four
 levels; ratios must get smaller level by level. One job per asset at a time
 (another request gets 409). `POST /api/assets/<id>/lods/LOD2?filename=x.fbx`

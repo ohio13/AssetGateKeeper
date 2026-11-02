@@ -1006,7 +1006,9 @@ server/
   art_workstation_server.py     3D viewer, LODs, collision, notes
   static/                       viewer.html, viewer.js, app.css (Three.js r160 vendored)
 engine/
-  lod_manager.py                vertex-cluster decimator (stdlib only)
+  lod_manager.py                vertex-cluster decimator for preview LODs (stdlib only)
+  lod_shippable.py              quadric decimator that keeps UVs, normals, materials
+  fbx_preview.py                FBX -> .glb for the viewer (UVs, normals, textures)
   dashboard.png                  what /dashboard looks like (README)
   budget_planner.png             what /budget-planner looks like (README)
 vcs_hooks/
@@ -1239,9 +1241,26 @@ Two things that make it work on real exports:
    within a few percent.
 
 A ratio is the director's intent, `max_tris` is the platform ceiling, and the
-tighter one wins. LODs drop UVs and materials by design — they exist to be *looked
-at*, and anything that ships still gets a DCC decimation pass.
+tighter one wins. These LODs drop UVs and materials by design — they exist to be
+*looked at*. For levels that ship, use the shippable engine below.
 
+
+### Shippable LODs
+
+`engine/lod_shippable.py` is the second engine: quadric-error half-edge collapses,
+so every vertex that survives is an original one with its exact UV and normal.
+UV seams, hard edges and material borders are locked; each level records its
+surface error and is written as a `.glb` with its materials and textures.
+
+```bash
+python engine/lod_shippable.py globe.glb --ratios 0.5,0.25,0.125
+# LOD1: 8,064 tris (target 8,064), error 1.23 mm  -> lods/LOD1_globe.glb
+# LOD2: 4,032 tris (target 4,032), error 1.98 mm  -> lods/LOD2_globe.glb
+# LOD3: 2,016 tris (target 2,016), error 4.42 mm  -> lods/LOD3_globe.glb
+```
+
+Slower than clustering (about 80 s per million triangles, pure Python), which is
+why the Art Workstation offers it as a tick box rather than the default.
 ### Solo or studio
 
 | Mode | Behaviour |

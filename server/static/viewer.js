@@ -290,7 +290,10 @@ async function loadModel(assetId, level) {
   $("viewport-hint").style.display = "none";
   showPreviewWarning(converted(state.asset)
     ? (state.asset.preview.warning || "Converted preview, not the original file.") : "");
-  const grey = level === "source" ? null
+  const lodRow = (state.asset.lods || []).find((lod) => lod.level === level);
+  const keepsMaterials = level === "source" || (lodRow && lodRow.origin !== "uploaded"
+                                                && lodRow.engine === "shippable");
+  const grey = keepsMaterials ? null
     : new THREE.MeshStandardMaterial({ color: 0x9ea3ad, metalness: 0.05, roughness: 0.7,
                                        name: "LOD preview (no materials)" });
   object.traverse((node) => {
@@ -878,7 +881,7 @@ function renderLodList() {
   }
   const lods = asset.lods || [];
   if (!lods.length) {
-    host.innerHTML = '<div class="empty">No LODs yet. Generate preview LODs or upload your own.</div>';
+    host.innerHTML = '<div class="empty">No LODs yet. Generate them or upload your own.</div>';
     return;
   }
   host.innerHTML = "";
@@ -888,12 +891,21 @@ function renderLodList() {
     const row = document.createElement("div");
     row.className = "lod-row";
     row.dataset.level = lod.level;
+    const shippable = lod.origin !== "uploaded" && lod.engine === "shippable";
+    const kind = lod.origin === "uploaded" ? "uploaded"
+      : shippable ? `<span class="ship" title="UVs, normals and materials kept; largest surface change">`
+        + `shippable &plusmn;${(Number(lod.error_m || 0) * 1000).toFixed(2)} mm</span>`
+      : `<span title="Judges cost only: no UVs, normals or materials">preview only</span>`;
+    const token = state.token ? `?token=${encodeURIComponent(state.token)}` : "";
     row.innerHTML =
       `<span class="lvl">${escapeHtml(lod.level)}</span>`
-      + `<span class="meta">${fmt(lod.triangle_count)} tris - ${share} - `
-      + `${lod.origin === "uploaded" ? "uploaded" : "generated"}</span>`
+      + `<span class="meta">${fmt(lod.triangle_count)} tris - ${share}</span>`
+      + `<a class="chip get" download href="/api/assets/${asset.id}/lods/${lod.level}/file${token}" `
+      + `title="Download ${escapeHtml(lod.level)}">&darr;</a>`
       + `<button class="chip del" type="button" title="Delete ${escapeHtml(lod.level)}">x</button>`
-      + (lod.warning ? `<span class="warn">${escapeHtml(lod.warning)}</span>` : "");
+      + `<span class="kind">${kind}</span>`
+      + (lod.warning ? `<span class="warn">${escapeHtml(lod.warning)}</span>` : "")
+      + (lod.lod_note ? `<span class="warn">${escapeHtml(lod.lod_note)}</span>` : "");
     row.querySelector(".del").addEventListener("click", async () => {
       try {
         const wasViewing = state.level === lod.level;
@@ -928,7 +940,7 @@ async function generateLods() {
     const response = await api(`/api/assets/${asset.id}/lods?async=1`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ratios }),
+      body: JSON.stringify({ ratios, shippable: $("lod-shippable").checked }),
     });
     let job = (await response.json()).job;
     state.lodJob = job.id;
@@ -1014,6 +1026,9 @@ function updateReadout() {
       + `<span>${share}</span>`;
   const lodNote = !lod ? ""
     : (lod.origin === "uploaded" ? "<span>your LOD (uploaded)</span>"
+      : lod.engine === "shippable"
+        ? `<span>shippable LOD - UVs, normals and materials kept; surface within `
+          + `${(Number(lod.error_m || 0) * 1000).toFixed(2)} mm</span>`
       : "<span>generated preview LOD - no UVs or materials</span>")
       + (lod.warning ? `<span class="bad">${escapeHtml(lod.warning)}</span>` : "");
   const model = state.sceneObjects.model;

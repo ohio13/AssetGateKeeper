@@ -10,6 +10,13 @@
   * Art Workstation: notes pinned to the model - a numbered pin, the camera and a
     picture of the view; clicking it (or a `?note=` link on another machine)
     flies back to that view; the printable report includes the pictures.
+  * Art Workstation: **shippable LODs** (tick Shippable before Generate): a
+    quadric edge-collapse decimator that keeps UVs, normals and materials, locks
+    UV seams and material borders, records each level's surface error, and
+    writes `.glb` levels with their textures to download and import. Also
+    `python engine/lod_shippable.py model.glb --ratios 0.5,0.25`. No new
+    dependency (meshoptimizer has no Windows wheels; pyfqmr and
+    fast-simplification move vertices and drop UVs).
   * Fixed: the header said "1 notes" / "1 LODs", and its note count lagged one
     note behind.
 
