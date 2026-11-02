@@ -241,6 +241,20 @@ class Budget:
     pivot_tolerance: float = 0.05         # fraction of the bbox diagonal
     transform_epsilon: float = 1e-4       # metres; below this a translation is "baked"
 
+    # - memory (G2): what the asset costs in GPU memory on the target - #
+    # 0 = not budgeted. Textures: width x height x bytes per pixel of the
+    # compressed format, x 4/3 for mips. Meshes: vertices x vertex size +
+    # indices. Estimates, calibrated against the engine's own numbers.
+    max_texture_mb: float = 0.0
+    max_mesh_mb: float = 0.0
+    texture_format: str = "bc7"           # colour textures
+    normal_format: str = "bc5"            # textures named _Normal/_nrm/_n
+
+    # - texel density (G8): pixels per metre of surface; (0, 0) = not checked - #
+    texel_density_min: float = 0.0
+    texel_density_max: float = 0.0
+    texel_texture: int = 1024             # assumed texture size when the mesh names none
+
     # Which platform profile produced this budget (for the log line only).
     platform: str = ""
 
@@ -310,7 +324,7 @@ class Budget:
             raise ConfigError("the rules file must contain a table of settings")
         _reject_unknown(document, ("mesh", "texture", "server", "healer",
                                    "platforms", "platform", "tags", "tagging",
-                                   "preset", "notify", "filters", "exceptions"),
+                                   "preset", "notify", "filters", "exceptions", "totals"),
                         "the rules file")
         filters = document.get("filters") or {}
         if not isinstance(filters, dict):
@@ -328,9 +342,12 @@ class Budget:
                                "max_uv_channels", "allow_degenerate", "degenerate_epsilon",
                                "check_references", "allow_outside_references",
                                "audit_transforms", "require_indexed",
-                               "pivot_tolerance", "transform_epsilon"), "[mesh]")
+                               "pivot_tolerance", "transform_epsilon", "max_mb",
+                               "texel_density", "texel_texture"), "[mesh]")
         _reject_unknown(texture, ("max_edge", "power_of_two", "naming", "suffixes",
-                                  "pbr", "pbr_floor", "pbr_ceiling", "pbr_suffixes"), "[texture]")
+                                  "pbr", "pbr_floor", "pbr_ceiling", "pbr_suffixes",
+                                  "max_mb", "format", "normal_format"), "[texture]")
+        memory = _read_memory(mesh, texture)
 
         max_triangles = _read_int(mesh, "max_triangles", "[mesh]", minimum=0)
         max_material_slots = _read_int(mesh, "max_material_slots", "[mesh]", minimum=0)
@@ -405,7 +422,76 @@ class Budget:
             transform_epsilon=(
                 defaults.transform_epsilon if transform_epsilon is None else transform_epsilon
             ),
+            **memory,
         )
+
+
+# Bytes per pixel of the GPU texture formats a budget can name (before mips).
+GPU_TEXTURE_FORMATS: dict[str, float] = {
+    "bc1": 0.5, "bc3": 1.0, "bc4": 0.5, "bc5": 1.0, "bc6h": 1.0, "bc7": 1.0,
+    "astc4x4": 1.0, "astc5x5": 0.64, "astc6x6": 0.444, "astc8x8": 0.25,
+    "etc2": 0.5, "etc2a": 1.0, "rgba8": 4.0, "rgba16f": 8.0,
+}
+MIP_FACTOR = 4.0 / 3.0
+
+
+def _read_memory(mesh: dict, texture: dict) -> dict:
+    """The G2/G8 keys of [mesh]/[texture], only those present (the rest default)."""
+    found: dict[str, object] = {}
+    for table, key, field, where in ((texture, "max_mb", "max_texture_mb", "[texture]"),
+                                     (mesh, "max_mb", "max_mesh_mb", "[mesh]")):
+        value = _read_float(table, key, where)
+        if value is not None:
+            if value < 0:
+                raise ConfigError(f"{where}.{key} must be 0 (off) or more, got {value}")
+            found[field] = value
+    for key, field in (("format", "texture_format"), ("normal_format", "normal_format")):
+        value = _read_str(texture, key, "[texture]")
+        if value is not None:
+            if value.lower() not in GPU_TEXTURE_FORMATS:
+                raise ConfigError(f"[texture].{key} must be one of "
+                                  f"{', '.join(GPU_TEXTURE_FORMATS)}, got {value!r}")
+            found[field] = value.lower()
+    if "texel_density" in mesh:
+        value = mesh["texel_density"]
+        if (not isinstance(value, (list, tuple)) or len(value) != 2
+                or any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0
+                       for v in value) or float(value[0]) > float(value[1]) or not value[1]):
+            raise ConfigError("[mesh].texel_density must be [min, max] in pixels per metre, "
+                              f"with min <= max, got {value!r}")
+        found["texel_density_min"], found["texel_density_max"] = float(value[0]), float(value[1])
+    texel_texture = _read_int(mesh, "texel_texture", "[mesh]", minimum=1)
+    if texel_texture is not None:
+        found["texel_texture"] = texel_texture
+    return found
+
+
+def is_normal_name(path: Path) -> bool:
+    """Named as a normal map: these compress as BC5 / two-channel formats."""
+    stem = path.stem.lower()
+    return stem.endswith(("_normal", "_nrm", "_n")) or "_normal_" in stem
+
+
+def texture_memory_bytes(width: int, height: int, format_name: str, mips: bool = True) -> int:
+    return int(width * height * GPU_TEXTURE_FORMATS[format_name] * (MIP_FACTOR if mips else 1.0))
+
+
+def mesh_vertex_size(uv_channels: int, skinned: bool, colours: bool = False) -> int:
+    """Bytes per vertex, engine-style: float3 position, a packed tangent frame
+    (8), half-float UVs (4 each), 8-bit colour, 4 bone indices + 4 weights."""
+    return 12 + 8 + 4 * max(1, uv_channels) + (4 if colours else 0) + (8 if skinned else 0)
+
+
+def mesh_memory_bytes(vertices: int, triangles: int, uv_channels: int, skinned: bool,
+                      colours: bool = False) -> int:
+    index = 2 if vertices <= 65_535 else 4
+    return vertices * mesh_vertex_size(uv_channels, skinned, colours) + triangles * 3 * index
+
+
+def _mb(value: int) -> str:
+    if value < 1024 * 1024:
+        return f"{value / 1024:.0f} KB"
+    return f"{value / (1024 * 1024):.1f} MB"
 
 
 @dataclass(frozen=True)
@@ -541,8 +627,8 @@ PLATFORM_KEYS = ("max_triangles", "max_material_slots", "max_texture_edge",
 # require_indexed, pbr, naming). A profile may tighten a threshold; it may never
 # make a check disappear - that would let one platform ship unaudited assets.
 PLATFORM_SECTION_KEYS: dict[str, tuple[str, ...]] = {
-    "mesh": ("pivot_tolerance", "transform_epsilon"),
-    "texture": ("pbr_floor", "pbr_ceiling"),
+    "mesh": ("pivot_tolerance", "transform_epsilon", "max_mb"),
+    "texture": ("pbr_floor", "pbr_ceiling", "max_mb", "format", "normal_format"),
 }
 
 
@@ -903,6 +989,7 @@ EXCEPTION_RULES: dict[str, type] = {
     "max_bone_influences": int, "max_uv_channels": int,
     "require_power_of_two": bool, "enforce_texture_naming": bool,
     "allow_degenerate": bool, "check_references": bool, "pbr_check": bool,
+    "max_texture_mb": float, "max_mesh_mb": float,
 }
 EXCEPTION_WARN_DAYS = 14
 
@@ -988,6 +1075,10 @@ def parse_exceptions(document: Optional[dict], base: Optional[Path] = None,
             raise ConfigError(f"{label}.allow must be a whole number for {rule}, got {allow!r}")
         if kind is bool and not isinstance(allow, bool):
             raise ConfigError(f"{label}.allow must be true or false for {rule}, got {allow!r}")
+        if kind is float:
+            if isinstance(allow, bool) or not isinstance(allow, (int, float)) or allow < 0:
+                raise ConfigError(f"{label}.allow must be a number of MB for {rule}, got {allow!r}")
+            allow = float(allow)
         found.append(BudgetException(
             path=str(entry["path"]).strip(), rule=rule, allow=allow,
             reason=str(entry["reason"]).strip()[:300], owner=str(entry["owner"]).strip()[:80],
@@ -1011,6 +1102,71 @@ def resolve_exceptions(root: Path, args: argparse.Namespace,
         return parse_exceptions(parse_rules(rules_path), base=rules_path.parent.resolve())
     except ConfigError as exc:
         raise ConfigError(f"{rules_path}: {exc}") from exc
+
+
+@dataclass(frozen=True)
+class MemoryTotal:
+    """A memory budget for everything under some paths: "Props/* <= 300 MB"."""
+
+    path: str
+    max_mb: float
+    base: Optional[Path] = None
+
+    def matches(self, asset: Path) -> bool:
+        return BudgetException(self.path, "max_triangles", 0, "", "", date.max,
+                               self.base).matches(asset)
+
+
+def parse_totals(document: Optional[dict], base: Optional[Path] = None) -> tuple[MemoryTotal, ...]:
+    if not document or document.get("totals") in (None, []):
+        return ()
+    entries = document["totals"]
+    if not isinstance(entries, list):
+        raise ConfigError("[[totals]] must be a list of tables")
+    found = []
+    for index, entry in enumerate(entries, 1):
+        where = f"[[totals]] #{index}"
+        if not isinstance(entry, dict):
+            raise ConfigError(f"{where} must be a table")
+        _reject_unknown(entry, ("path", "max_mb"), where)
+        if not str(entry.get("path", "")).strip():
+            raise ConfigError(f"{where} needs path")
+        limit = _read_float(entry, "max_mb", where)
+        if limit is None or limit <= 0:
+            raise ConfigError(f"{where} needs max_mb above 0")
+        found.append(MemoryTotal(str(entry["path"]).strip(), limit, base))
+    return tuple(found)
+
+
+def resolve_totals(root: Path, args: argparse.Namespace,
+                   remote_document: Optional[dict] = None) -> tuple[MemoryTotal, ...]:
+    if remote_document is not None:
+        return parse_totals(remote_document, base=root)
+    rules_path = Path(args.rules).expanduser() if getattr(args, "rules", None) else root / RULES_FILENAME
+    if not rules_path.is_file():
+        return ()
+    try:
+        return parse_totals(parse_rules(rules_path), base=rules_path.parent.resolve())
+    except ConfigError as exc:
+        raise ConfigError(f"{rules_path}: {exc}") from exc
+
+
+def check_totals(totals: Sequence[MemoryTotal], verdicts: Sequence[Verdict]) -> list[Verdict]:
+    """One failing verdict per total that is over its budget."""
+    failed = []
+    for total in totals:
+        members = [verdict for verdict in verdicts if total.matches(verdict.path)]
+        used = sum(int(dict(verdict.stats).get("memory_kb", 0)) for verdict in members) * 1024
+        limit = int(total.max_mb * 1024 * 1024)
+        LOG.info("total   %s: ~%s of %g MB (%d asset%s)", total.path, _mb(used), total.max_mb,
+                 len(members), "" if len(members) == 1 else "s")
+        if used > limit:
+            failed.append(Verdict(Path(f"[total] {total.path}"),
+                                  (f"~{_mb(used)} estimated GPU memory across {len(members)} "
+                                   f"assets exceeds the {total.max_mb:g} MB budget for "
+                                   f"{total.path}",),
+                                  f"~{_mb(used)}", (("memory_kb", used // 1024),)))
+    return failed
 
 
 def resolve_budget(root: Path, args: argparse.Namespace,
@@ -2748,6 +2904,64 @@ def read_accessor(path: Path, document: dict, index: int) -> list[tuple]:
     return [unpack(start + i * stride) for i in range(count)]
 
 
+def _texture_edge_of(geometry) -> int:
+    """The base-colour texture's size (sqrt of its area) a mesh's material names, or 0."""
+    material = getattr(getattr(geometry, "visual", None), "material", None)
+    for attribute in ("baseColorTexture", "image"):
+        image = getattr(material, attribute, None)
+        size = getattr(image, "size", None)
+        # trimesh gives a material-less mesh a tiny placeholder image; anything
+        # under 16 px is that, not an artist's texture.
+        if size and len(size) == 2 and min(size) >= 16:
+            return int(round(math.sqrt(size[0] * size[1])))
+    return 0
+
+
+def mesh_facts(path: Path, assumed_texture: int = 1024) -> dict:
+    """Vertex count, vertex colours and texel density, from the placed scene.
+
+    Texel density is pixels per metre of surface, area-weighted over every mesh
+    with UVs: sqrt(UV area x texture pixels / world area). The texture is the
+    one the material names when it can be read, else ``assumed_texture``.
+    Units are taken as metres (glTF's unit; OBJ has none).
+    """
+    import numpy as np
+    scene = load_scene(path)
+    meshes = scene.dump(concatenate=False) if hasattr(scene, "dump") else [scene]
+    vertices = 0
+    colours = False
+    weighted = world_total = 0.0
+    with_uv = without_uv = 0
+    textures = set()
+    for mesh in meshes:
+        points = getattr(mesh, "vertices", None)
+        faces = getattr(mesh, "faces", None)
+        if points is None or faces is None or not len(faces):
+            continue
+        vertices += len(points)
+        visual = getattr(mesh, "visual", None)
+        kind = getattr(visual, "kind", None)
+        colours = colours or kind == "vertex"
+        uv = getattr(visual, "uv", None)
+        if uv is None or len(uv) != len(points):
+            without_uv += 1
+            continue
+        with_uv += 1
+        uv = np.asarray(uv, dtype=np.float64)[:, :2]
+        tri = uv[np.asarray(faces)]
+        uv_area = 0.5 * np.abs((tri[:, 1, 0] - tri[:, 0, 0]) * (tri[:, 2, 1] - tri[:, 0, 1])
+                               - (tri[:, 2, 0] - tri[:, 0, 0]) * (tri[:, 1, 1] - tri[:, 0, 1])).sum()
+        world_area = float(mesh.area)
+        edge = _texture_edge_of(mesh) or assumed_texture
+        textures.add(edge if _texture_edge_of(mesh) else 0)
+        weighted += float(uv_area) * edge * edge
+        world_total += world_area
+    density = math.sqrt(weighted / world_total) if world_total > 0 and weighted > 0 else None
+    return {"vertices": int(vertices), "colours": colours, "texel_density": density,
+            "with_uv": with_uv, "without_uv": without_uv,
+            "assumed_texture": 0 in textures}
+
+
 def count_uv_channels(path: Path) -> int:
     """Number of distinct texture-coordinate sets (TEXCOORD_n / OBJ vt / FBX UV layers)."""
     suffix = path.suffix.lower()
@@ -3255,6 +3469,8 @@ class Gatekeeper:
         self.budget = budget
         self.exceptions = tuple(exceptions)
         self.today = today
+        # Measure mesh memory even without a per-asset budget: [[totals]] add it up.
+        self.want_memory = False
         self.healer = healer
         self.tag_budgets = tag_budgets or {}
         self.tag_mode = tag_mode if tag_mode in TAG_MODES else "suggest"
@@ -3463,6 +3679,54 @@ class Gatekeeper:
                         f"tracing compute garbage from these"
                     )
 
+        # Memory (G2) and texel density (G8): measured when budgeted, or when a
+        # [[totals]] line needs the number.
+        want_memory = self.budget.max_mesh_mb > 0 or self.want_memory
+        want_texel = self.budget.texel_density_max > 0
+        if (want_memory or want_texel) and path.suffix.lower() in FBX_SUFFIXES:
+            if self.budget.max_mesh_mb or want_texel:
+                warnings.append("mesh memory and texel density are not measured for FBX yet")
+        elif want_memory or want_texel:
+            try:
+                facts = mesh_facts(path, self.budget.texel_texture)
+            except Exception as exc:          # a measurement must never break the verdict
+                warnings.append(f"mesh memory / texel density not measured ({exc})")
+            else:
+                known = dict(stats)
+                if want_memory:
+                    size = mesh_memory_bytes(facts["vertices"], triangles,
+                                             int(known.get("uv_channels", 0)),
+                                             int(known.get("max_bone_influences", 0)) > 0,
+                                             facts["colours"])
+                    stats.append(("memory_kb", size // 1024))
+                    stats.append(("vertices", facts["vertices"]))
+                    if self.budget.max_mesh_mb:
+                        metrics.append(f"~{_mb(size)}")
+                        if size > self.budget.max_mesh_mb * 1024 * 1024:
+                            problems.append(
+                                f"~{_mb(size)} estimated GPU memory exceeds the "
+                                f"{self.budget.max_mesh_mb:g} MB mesh budget "
+                                f"({facts['vertices']:,} vertices)")
+                if want_texel:
+                    density = facts["texel_density"]
+                    if density is None:
+                        warnings.append("no UVs: texel density not checked")
+                    else:
+                        stats.append(("texel_density", int(round(density))))
+                        metrics.append(f"{density:,.0f} px/m")
+                        assumed = (f" (assuming a {self.budget.texel_texture}px texture)"
+                                   if facts["assumed_texture"] else "")
+                        low, high = self.budget.texel_density_min, self.budget.texel_density_max
+                        if density < low:
+                            problems.append(f"texel density {density:,.0f} px/m is below the "
+                                            f"{low:,.0f} px/m minimum{assumed}")
+                        elif density > high:
+                            problems.append(f"texel density {density:,.0f} px/m is above the "
+                                            f"{high:,.0f} px/m maximum{assumed}")
+                        if facts["without_uv"]:
+                            warnings.append(f"{facts['without_uv']} mesh(es) without UVs are "
+                                            "not in the texel density")
+
         # Broken references are unconditional when enabled: a .gltf pointing at a
         # texture nobody shipped fails to load in every engine, on every platform.
         if self.budget.check_references:
@@ -3518,6 +3782,17 @@ class Gatekeeper:
         if self.budget.require_power_of_two and not (is_power_of_two(width) and is_power_of_two(height)):
             problems.append(f"{width}x{height} is not a power of two")
 
+        # GPU memory in the target's compressed format, mips included (G2).
+        texture_format = (self.budget.normal_format if is_normal_name(path)
+                          else self.budget.texture_format)
+        memory = texture_memory_bytes(width, height, texture_format)
+        memory_metric = ""
+        if self.budget.max_texture_mb:
+            memory_metric = f" ~{_mb(memory)} {texture_format.upper()}"
+            if memory > self.budget.max_texture_mb * 1024 * 1024:
+                problems.append(f"~{_mb(memory)} as {texture_format.upper()} with mips exceeds the "
+                                f"{self.budget.max_texture_mb:g} MB texture budget")
+
         if self._naming is not None and not self._naming.search(path.stem):
             expected = ", ".join(self.budget.texture_suffixes)
             problems.append(f"name does not end with a standard suffix ({expected})")
@@ -3530,8 +3805,8 @@ class Gatekeeper:
             if violation:
                 problems.append(violation)
 
-        return Verdict(path, tuple(problems), f"{width}x{height}",
-                       (("width", width), ("height", height)))
+        return Verdict(path, tuple(problems), f"{width}x{height}{memory_metric}",
+                       (("width", width), ("height", height), ("memory_kb", memory // 1024)))
 
     def _is_pbr(self, path: Path) -> bool:
         stem = path.stem.lower()
@@ -4002,13 +4277,19 @@ def describe_budget(budget: Budget) -> str:
         f"refs={'checked' if budget.check_references else 'ignored'}  "
         f"pbr={'on' if budget.pbr_check else 'off'}  "
         f"audit={'on' if budget.audit_transforms else 'off'}"
+        + (f"  texture<={budget.max_texture_mb:g}MB({budget.texture_format})"
+           if budget.max_texture_mb else "")
+        + (f"  mesh<={budget.max_mesh_mb:g}MB" if budget.max_mesh_mb else "")
+        + (f"  texel={budget.texel_density_min:g}-{budget.texel_density_max:g}px/m"
+           if budget.texel_density_max else "")
         + (f"  platform={budget.platform}" if budget.platform else "")
     )
 
 
 def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
              recursive: bool, exclude: Sequence[str] = (),
-             follow_symlinks: bool = False, allow_empty: bool = False) -> int:
+             follow_symlinks: bool = False, allow_empty: bool = False,
+             totals: Sequence["MemoryTotal"] = ()) -> int:
     unreadable: list[str] = []
     candidates = sorted(p for p in walk_files(root, recursive=recursive,
                                               follow_symlinks=follow_symlinks,
@@ -4030,14 +4311,24 @@ def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
                   "--allow-empty if this folder is meant to be empty", root)
         return 1
 
+    checked: list[Verdict] = []
     for path in candidates:
         if wait_until_stable(path):
-            reporter.report(gatekeeper.check(path))
+            verdict = gatekeeper.check(path)
+            checked.append(verdict)
+            reporter.report(verdict)
         else:
             LOG.warning("%s is still being written by another process; skipped", path.name)
 
+    over = check_totals(totals, checked) if totals else []
+    for verdict in over:
+        # Printed and counted, and in the JUnit/SARIF report, but never sent as
+        # telemetry: a folder total is not an asset on the dashboard.
+        LOG.error("FAILED: %s  %s", verdict.reason, str(verdict.path).replace("\\", "/"))
+        if reporter.keep_verdicts:
+            reporter.verdicts.append(verdict)
     reporter.summary()
-    return 1 if reporter.failed else 0
+    return 1 if (reporter.failed or over) else 0
 
 
 def run_watch(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
@@ -4438,6 +4729,8 @@ def _report_target(text: str) -> tuple[str, str]:
 
 
 def _relative_name(path: Path, root: Optional[Path]) -> str:
+    if str(path).startswith("[total] "):       # a [[totals]] line, not a file
+        return str(path).replace("\\", "/")
     if root is not None:
         try:
             return path.resolve().relative_to(root.resolve()).as_posix()
@@ -4841,10 +5134,16 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if notifier is not None:
         LOG.info("toasts  on (%d/min)", notifier.max_per_minute)
 
+    try:
+        totals = resolve_totals(watch_dir, args, remote_document)
+    except ConfigError as exc:
+        LOG.error("invalid totals: %s", exc)
+        return 2
     gatekeeper = Gatekeeper(budget, healer=healer, overrides=overrides,
                             tag_budgets=tag_budgets,
                             tag_mode=tag_mode, tag_similarity=tag_similarity,
                             tag_root=watch_dir, exceptions=exceptions)
+    gatekeeper.want_memory = bool(totals)
     reporter = Reporter(color=not args.no_color and not args.json, root=watch_dir,
                         json_mode=args.json, telemetry=telemetry, notifier=notifier)
     reporter.keep_verdicts = bool(args.report)
@@ -4868,7 +5167,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.once:
         status = run_once(watch_dir, gatekeeper, reporter, args.recursive, budget.exclude,
                           follow_symlinks=getattr(args, "follow_symlinks", False),
-                          allow_empty=getattr(args, "allow_empty", False))
+                          allow_empty=getattr(args, "allow_empty", False), totals=totals)
         if args.report:
             write_reports(args.report, reporter.verdicts, watch_dir)
     else:

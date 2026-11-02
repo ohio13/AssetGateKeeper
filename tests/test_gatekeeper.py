@@ -1161,6 +1161,106 @@ expect("with jpg = true it heals, and the note says it was re-saved",
        and Image.open(_jpg).size == (1024, 1024), _jv.heal_notes)
 expect("[healer] jpg is read from the rules", agk.HealSettings.from_mapping({"jpg": True}).jpg is True)
 
+print("14f. memory budgets (G2) and texel density (G8)")
+mem_dir = scratch / "memory"
+if mem_dir.exists():
+    shutil.rmtree(mem_dir)
+(mem_dir / "Props").mkdir(parents=True)
+expect("a 2048 BC7 texture with mips is about 5.3 MB",
+       abs(agk.texture_memory_bytes(2048, 2048, "bc7") / 2**20 - 5.333) < 0.01)
+expect("... and 2.7 MB as BC1", abs(agk.texture_memory_bytes(2048, 2048, "bc1") / 2**20 - 2.667) < 0.01)
+expect("a 1,000-vertex static mesh with one UV set: 24 bytes a vertex + 16-bit indices",
+       agk.mesh_memory_bytes(1000, 1500, 1, False) == 1000 * 24 + 1500 * 3 * 2)
+expect("... skinned, two UV sets, over 65,535 vertices: 36 bytes + 32-bit indices",
+       agk.mesh_memory_bytes(70000, 100000, 2, True) == 70000 * 36 + 100000 * 3 * 4)
+Image.new("RGB", (2048, 2048), (120, 90, 70)).save(mem_dir / "Props" / "wall_Albedo.png")
+Image.new("RGB", (2048, 2048), (128, 128, 255)).save(mem_dir / "Props" / "wall_Normal.png")
+_mb_budget = agk.Budget(max_texture_mb=4, pbr_check=False)
+_va = agk.Gatekeeper(_mb_budget).check(mem_dir / "Props" / "wall_Albedo.png")
+_vn = agk.Gatekeeper(_mb_budget).check(mem_dir / "Props" / "wall_Normal.png")
+expect("a 2048 albedo (BC7, 5.3 MB) fails a 4 MB texture budget, naming the format",
+       not _va.passed and "~5.3 MB as BC7 with mips exceeds the 4 MB texture budget" in _va.reason, _va.reason)
+expect("a 2048 normal map counts as BC5 by its name", "BC5" in _vn.metric, _vn.metric)
+expect("every texture reports its memory, budgeted or not",
+       dict(agk.Gatekeeper(agk.Budget(pbr_check=False)).check(mem_dir / "Props" / "wall_Albedo.png").stats)["memory_kb"] == 5461)
+_vb = agk.Gatekeeper(agk.Budget(max_texture_mb=4, texture_format="bc1", pbr_check=False)).check(
+    mem_dir / "Props" / "wall_Albedo.png")
+expect("... and passes as BC1 (2.7 MB)", _vb.passed, _vb.reason)
+_vm = agk.Gatekeeper(agk.Budget(max_mesh_mb=1, max_triangles=100000, max_material_slots=8)).check(
+    DROP / "boss_statue.gltf")
+expect("a mesh over its MB budget fails with its vertex count",
+       not _vm.passed and "estimated GPU memory exceeds the 1 MB mesh budget" in _vm.reason
+       and "217,500 vertices" in _vm.reason, _vm.reason)
+_doc = {"texture": {"max_mb": 8, "format": "astc6x6", "normal_format": "bc5"}, "mesh": {"max_mb": 2},
+        "platforms": {"switch": {"texture": {"max_mb": 2, "format": "astc8x8"}, "mesh": {"max_mb": 1}}}}
+_b = agk.Budget.from_mapping(_doc)
+expect("[texture] max_mb / format and [mesh] max_mb load",
+       (_b.max_texture_mb, _b.texture_format, _b.max_mesh_mb) == (8, "astc6x6", 2))
+_bs = agk.Budget.from_mapping(agk.apply_platform(_doc, "switch"))
+expect("a platform profile sets its own memory budgets and format",
+       (_bs.max_texture_mb, _bs.texture_format, _bs.max_mesh_mb) == (2, "astc8x8", 1))
+for _bad, _why in (({"texture": {"format": "dxt99"}}, "format"), ({"mesh": {"max_mb": -1}}, "max_mb"),
+                   ({"mesh": {"texel_density": [800, 400]}}, "texel_density"),
+                   ({"totals": [{"path": "Props/*"}]}, "max_mb")):
+    try:
+        agk.Budget.from_mapping(_bad) if "totals" not in _bad else agk.parse_totals(_bad)
+        expect(f"a bad memory setting is refused ({_why})", False)
+    except agk.ConfigError as exc:
+        expect(f"a bad memory setting is refused ({_why})", _why in str(exc), str(exc))
+_ex = agk.parse_exceptions({"exceptions": [{"path": "*", "rule": "max_texture_mb", "allow": 6,
+                                            "reason": "r", "owner": "o", "expires": "2099-01-01"}]})
+expect("an exception can raise a memory budget",
+       agk.Gatekeeper(_mb_budget, exceptions=_ex).check(mem_dir / "Props" / "wall_Albedo.png").passed)
+(mem_dir / "rules.toml").write_text('[texture]\npbr = false\n[[totals]]\npath = "Props/*"\nmax_mb = 8\n',
+                                    encoding="utf-8")
+_tot = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(mem_dir),
+                       "--once", "--recursive", "--no-color", "--report", f"junit:{mem_dir / 'r.xml'}"],
+                      capture_output=True, text=True, encoding="utf-8", errors="replace")
+_tot_out = _tot.stdout + _tot.stderr
+expect("[[totals]]: a folder over its memory budget fails the run, though each file passes",
+       _tot.returncode == 1 and "2 passed, 0 failed" in _tot_out
+       and "exceeds the 8 MB budget for Props/*" in _tot_out and "10.7 MB" in _tot_out, _tot_out[-600:])
+expect("... and is a failing case in the JUnit report",
+       "[total] Props/*" in (mem_dir / "r.xml").read_text(encoding="utf-8"))
+(mem_dir / "rules.toml").write_text('[texture]\npbr = false\n[[totals]]\npath = "Props/*"\nmax_mb = 12\n',
+                                    encoding="utf-8")
+_tot = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(mem_dir),
+                       "--once", "--recursive", "--no-color"], capture_output=True, text=True,
+                      encoding="utf-8", errors="replace")
+expect("... under budget it passes and says how much is used",
+       _tot.returncode == 0 and "Props/*: ~10.7 MB of 12 MB (2 assets)" in _tot.stdout + _tot.stderr,
+       (_tot.stdout + _tot.stderr)[-300:])
+
+
+def uv_plane(path, size_m):
+    half = size_m / 2
+    path.write_text(f"v {-half} 0 {-half}\nv {half} 0 {-half}\nv {half} 0 {half}\nv {-half} 0 {half}\n"
+                    "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nf 1/1 2/2 3/3\nf 1/1 3/3 4/4\n", encoding="utf-8")
+    return path
+
+
+_p1 = uv_plane(mem_dir / "plane1.obj", 1.0)
+_p2 = uv_plane(mem_dir / "plane2.obj", 2.0)
+_facts = agk.mesh_facts(_p1, 1024)
+expect("texel density: a 1 m plane with 0-1 UVs and a 1024 texture reads 1024 px/m",
+       abs(_facts["texel_density"] - 1024) < 1 and _facts["assumed_texture"], _facts)
+expect("... and the same plane at 2 m reads 512",
+       abs(agk.mesh_facts(_p2, 1024)["texel_density"] - 512) < 1)
+_tb = agk.Budget(texel_density_min=800, texel_density_max=2000, enforce_texture_naming=False)
+_v1, _v2 = agk.Gatekeeper(_tb).check(_p1), agk.Gatekeeper(_tb).check(_p2)
+expect("[mesh] texel_density = [800, 2000]: the 1 m plane passes, the 2 m one fails, saying why",
+       _v1.passed and not _v2.passed and "texel density 512 px/m is below the 800 px/m minimum "
+       "(assuming a 1024px texture)" in _v2.reason, (_v1.reason, _v2.reason))
+expect("a mesh with no UVs is warned about, not failed",
+       agk.Gatekeeper(_tb).check(DROP / "crate_1mtl.obj").passed
+       and any("no UVs" in w for w in agk.Gatekeeper(_tb).check(DROP / "crate_1mtl.obj").warnings))
+expect("[mesh] texel_density and texel_texture load",
+       (agk.Budget.from_mapping({"mesh": {"texel_density": [400, 2048], "texel_texture": 2048}}).texel_texture)
+       == 2048)
+expect("the budget line shows memory and texel budgets when set",
+       "texture<=4MB(bc7)" in agk.describe_budget(_mb_budget)
+       and "texel=800-2000px/m" in agk.describe_budget(_tb))
+
 print("14c. expiring exceptions (G1)")
 from datetime import date as _date, timedelta as _timedelta  # noqa: E402
 ex_root = scratch / "exceptions"
@@ -1278,7 +1378,7 @@ if rep_dir.exists():
 (rep_dir / "Props").mkdir(parents=True)
 shutil.copy(DROP / "crate_1mtl.obj", rep_dir / "Props" / "crate_1mtl.obj")
 shutil.copy(DROP / "crate_1mtl.mtl", rep_dir / "Props" / "crate_1mtl.mtl")
-shutil.copy(DROP / "boss_statue.gltf", rep_dir / "Props" / "boss & <statue>.gltf")
+shutil.copy(DROP / "boss_statue.gltf", rep_dir / "Props" / "boss & statue's.gltf")
 _run = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(rep_dir),
                        "--once", "--recursive", "--no-color",
                        "--report", f"junit:{rep_dir / 'out' / 'gate.xml'}",
@@ -1289,24 +1389,29 @@ expect("--report writes both files on a --once run", _run.returncode == 1
        (_run.stdout + _run.stderr)[-300:])
 _junit = _ET.parse(rep_dir / "out" / "gate.xml").getroot()
 _cases = _junit.findall(".//testcase")
-expect("JUnit: well-formed XML, one test case per asset, even with & and < in a name",
+expect("JUnit: well-formed XML, one test case per asset, even with & and ' in a name",
        len(_cases) == 2 and _junit.get("tests") == "2" and _junit.get("failures") == "1",
        [c.get("name") for c in _cases])
 _failed = [c for c in _cases if c.find("failure") is not None]
 expect("... the failing asset is named by its path and carries the reason",
-       len(_failed) == 1 and _failed[0].get("name") == "Props/boss & <statue>.gltf"
+       len(_failed) == 1 and _failed[0].get("name") == "Props/boss & statue's.gltf"
        and "triangles exceeds" in _failed[0].find("failure").get("message")
        and _failed[0].get("classname") == "Props", _failed[0].attrib if _failed else None)
 _sarif = json.loads((rep_dir / "out" / "gate.sarif").read_text(encoding="utf-8"))
 _results = _sarif["runs"][0]["results"]
 expect("SARIF 2.1.0: one result per problem of each failing asset, with its path",
        _sarif["version"] == "2.1.0" and _results
-       and all(r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "Props/boss & <statue>.gltf"
+       and all(r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "Props/boss & statue's.gltf"
                for r in _results) and all(r["ruleId"] == "agk/budget" for r in _results), _results[:1])
 expect("... and passing assets add nothing to it", len(_results) == len(
     [c for c in _failed[0].find("failure").text.splitlines() if c]))
 _err = agk.Verdict(rep_dir / "locked.obj", ("cannot be read",), unreadable=True)
 _junit_err = _ET.fromstring(agk.junit_report([_err], rep_dir))
+_angle = agk.Verdict(rep_dir / "a<b>.gltf", ("x < y & z",))
+_angle_xml = _ET.fromstring(agk.junit_report([_angle], rep_dir))
+expect("names and reasons with < > & stay well-formed XML (no such file on Windows, so built here)",
+       _angle_xml.find(".//testcase").get("name") == "a<b>.gltf"
+       and _angle_xml.find(".//failure").get("message") == "x < y & z")
 expect("an unreadable asset is a JUnit error, not a failure",
        _junit_err.get("errors") == "1" and _junit_err.find(".//error") is not None)
 _single = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"),

@@ -168,6 +168,54 @@ This is why tags are folders and not `[tags.*]` glob patterns in the file: a
 pattern-based system cannot tell you the folder is misspelled, it just fails to
 match and silently applies the default.
 
+## Memory and texel density
+
+Budgets for what an asset costs on the target, not just how big the file is.
+
+```toml
+[texture]
+max_mb = 4                 # per texture, compressed, with mips (0 = off)
+format = "bc7"             # colour textures: bc1 bc3 bc4 bc5 bc6h bc7 astc4x4 astc5x5
+normal_format = "bc5"      #   astc6x6 astc8x8 etc2 etc2a rgba8 rgba16f
+
+[mesh]
+max_mb = 2                 # per mesh: vertex + index buffers (0 = off)
+texel_density = [400, 1200]  # pixels per metre of surface
+texel_texture = 1024       # texture size assumed when the mesh's material names none
+
+[[totals]]                 # everything under a path, added up (--once runs)
+path = "Props/*"
+max_mb = 300
+
+[platforms.switch.texture]
+max_mb = 2
+format = "astc8x8"
+```
+
+* **Texture memory** = width x height x bytes per pixel of the format (BC1 0.5,
+  BC7 and BC5 1, ASTC 6x6 0.44, RGBA8 4) x 4/3 for mips. A 2048 texture is about
+  5.3 MB as BC7 and 2.7 MB as BC1. Textures named `_Normal`, `_nrm` or `_n` use
+  `normal_format`. Every texture reports its estimate (`memory_kb` in `--json`
+  and telemetry); the budget only applies when `max_mb` is set.
+* **Mesh memory** = vertices x vertex size + indices. A vertex is 12 bytes of
+  position, 8 of packed tangent frame, 4 per UV set (half floats), 4 for vertex
+  colours and 8 for skinning; indices are 16-bit up to 65,535 vertices, else
+  32-bit. glTF and OBJ only for now; an FBX gets a note instead.
+* **Texel density** = sqrt(UV area x texture pixels / surface area), weighted by
+  area over the asset's meshes, in pixels per metre (glTF is in metres; OBJ is
+  read as metres). A 1 m plane with 0-1 UVs and a 1024 texture is 1024 px/m.
+  The texture is the one the material names when it can be read, else
+  `texel_texture` (and the failure says it assumed one). A mesh without UVs gets
+  a note, not a failure.
+* **`[[totals]]`** add up the estimate of every asset under `path` (a glob
+  relative to the folder holding `rules.toml`, `*` crossing folders). A total
+  over budget fails the run - even when every file passes - and is a failing
+  case named `[total] <path>` in `--report junit`. Each total's use is printed.
+* These are **estimates** in the engine's terms; check a few against the
+  engine's own numbers (Unreal: Size Map, `memreport`) before tightening a
+  budget on them. `max_texture_mb` and `max_mesh_mb` can be relaxed per asset
+  with [[exceptions]].
+
 ## [[exceptions]]
 
 A named, owned, dated waiver: "the boss may use 80,000 triangles until alpha",
