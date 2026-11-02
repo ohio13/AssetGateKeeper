@@ -101,7 +101,9 @@ badge. Click a card to open the viewer.
 |---|---|
 | viewport | orbit (drag), pan (right-drag), zoom (wheel); no wireframe clutter by default |
 | readout | triangles and vertices at the current LOD, as a percentage of the source |
-| LOD selector | one entry per stored level; the readout shows that level's cost and share |
+| LOD selector | one entry per stored level; the readout shows that level's cost, share, origin and any warning |
+| LODs section | generate preview LODs, upload your own, delete a level |
+| Delete asset | removes the asset, its files, LODs, collision and notes (asks for a second click) |
 | gate verdict panel | status, problems, tag, and where the verdict came from (CLI / CI / dashboard) |
 | notes | add, categorise, read; machine text is never mixed into them |
 | collision | the stored proxy, if any |
@@ -124,16 +126,34 @@ human typed, and the panel says so.
 
 ## LODs
 
-Upload a source mesh and then upload LODs: each subsequent upload of the same
-name at a lower level is stored as a level, not as a new asset. The viewer's
-selector then shows each level's triangles and its share of the source, which is
-the number that decides whether the chain is worth keeping.
+The **LODs** section on the right lists each level with its triangles, its share
+of the source and where it came from. Two ways to fill it:
 
-Two rules the viewer enforces quietly:
+* **Generate preview LODs** - pick a preset (Standard 50 / 25 / 12.5 %,
+  Aggressive 40 / 15 / 5 %, Mobile 25 / 10 / 3 %, or one level at 50 %) and press
+  **Generate**. It runs in the background and says which level it is on; a large
+  mesh takes minutes, and the page stays usable. These are *preview* LODs from a
+  quick decimator: positions only, no UVs, normals or materials - the readout says
+  so - for judging the cost of a chain, not for shipping.
+* **Upload your own LOD** - choose the level and a `.glb`, self-contained `.gltf`,
+  `.obj` or `.fbx`. It is measured like the source (an FBX by the gate's reader,
+  viewed through a converted `.glb`). A file named `<asset>_LOD1` ... `_LOD4`
+  dropped on the page or picked with **Upload asset** becomes that level of the
+  asset with the same name, not a new asset.
 
-* a LOD heavier than its parent is flagged - a "LOD" that costs more is a bug;
-* the source mesh is the denominator, so percentages stay meaningful even if the
-  artist re-uploads.
+Generation never overwrites or removes a level you uploaded: asking for it is
+refused until you delete that level (the **x** on its row).
+
+What the viewer flags, on the level's button, its row and the readout:
+
+* a LOD with the same triangle count as the source or the level above, or more
+  than either - a "LOD" that saves nothing, or costs more, is a bug in the chain;
+* percentages always use the source as the denominator.
+
+API: `POST /api/assets/<id>/lods?async=1` with `{"ratios": [...]}` returns a job
+(`GET /api/jobs/<job id>` for its state and level); without `async` it answers
+when done. Ratios must get smaller level by level. `POST /api/assets/<id>/lods/LOD2?filename=x.fbx`
+uploads a level; `DELETE /api/assets/<id>/lods/LOD2` removes one.
 
 ## Collision
 

@@ -24,6 +24,7 @@ const state = {
   originals: new Map(), // material -> {color, map, ...} for the exposure sliders
   meshMaterials: new Map(), // mesh -> the material(s) it was loaded with
   selectSeq: 0,         // the newest selectAsset call wins; older ones stop
+  lodJob: null,         // id of the LOD job this tab is waiting on
 };
 
 // Formats the browser can draw. Everything else the server stores is measured
@@ -482,6 +483,9 @@ async function selectAsset(id) {
   state.level = "source";
   clearModel();
   buildLodButtons();
+  renderLodList();
+  setLodTools(asset);
+  $("lod-progress").textContent = "";
   renderNotes();
   showVerdict(asset);
   updateReadout();
@@ -546,6 +550,10 @@ async function refreshSelected() {
   const asset = await json(`/api/assets/${id}`);
   if (!state.asset || state.asset.id !== id) return;
   state.asset = asset;
+  if (!asset.lods.some((lod) => lod.level === state.level)) state.level = "source";
+  buildLodButtons();
+  renderLodList();
+  setLodTools(asset);
   renderNotes();
   updateReadout();
   showVerdict(asset);
@@ -559,6 +567,9 @@ function clearSelection() {
   state.level = "source";
   clearModel();
   $("lod-buttons").innerHTML = "";
+  renderLodList();
+  setLodTools(null);
+  $("lod-progress").textContent = "";
   renderNotes();
   showVerdict(null);
   updateReadout();
@@ -576,12 +587,15 @@ function buildLodButtons() {
     (state.asset.lods || []).map((lod) => ({
       level: lod.level,
       label: `${lod.level}  ${fmt(lod.triangle_count)}`,
+      warning: lod.warning || "",
     })));
   levels.forEach((item) => {
     const button = document.createElement("button");
-    button.className = "chip" + (item.level === state.level ? " active" : "");
+    button.className = "chip" + (item.level === state.level ? " active" : "")
+      + (item.warning ? " warned" : "");
     button.dataset.level = item.level;
     button.textContent = item.label;
+    if (item.warning) button.title = item.warning;
     button.addEventListener("click", async () => {
       state.level = item.level;
       Array.from(container.children).forEach((child) =>
@@ -597,6 +611,135 @@ function buildLodButtons() {
     });
     container.appendChild(button);
   });
+}
+
+/* - LOD ladder: list, generate, upload, delete */
+
+function renderLodList() {
+  const host = $("lod-list");
+  const asset = state.asset;
+  if (!asset) {
+    host.innerHTML = '<div class="empty">No asset selected.</div>';
+    return;
+  }
+  const lods = asset.lods || [];
+  if (!lods.length) {
+    host.innerHTML = '<div class="empty">No LODs yet. Generate preview LODs or upload your own.</div>';
+    return;
+  }
+  host.innerHTML = "";
+  lods.forEach((lod) => {
+    const share = asset.triangle_count
+      ? `${(lod.triangle_count / asset.triangle_count * 100).toFixed(1)}%` : "-";
+    const row = document.createElement("div");
+    row.className = "lod-row";
+    row.dataset.level = lod.level;
+    row.innerHTML =
+      `<span class="lvl">${escapeHtml(lod.level)}</span>`
+      + `<span class="meta">${fmt(lod.triangle_count)} tris - ${share} - `
+      + `${lod.origin === "uploaded" ? "uploaded" : "generated"}</span>`
+      + `<button class="chip del" type="button" title="Delete ${escapeHtml(lod.level)}">x</button>`
+      + (lod.warning ? `<span class="warn">${escapeHtml(lod.warning)}</span>` : "");
+    row.querySelector(".del").addEventListener("click", async () => {
+      try {
+        const wasViewing = state.level === lod.level;
+        await api(`/api/assets/${asset.id}/lods/${lod.level}`, { method: "DELETE" });
+        await refreshSelected();
+        if (wasViewing && state.asset && previewable(state.asset)) {
+          await loadModel(state.asset.id, "source");          // back to the source
+        }
+        $("status").textContent = `${lod.level} deleted`;
+      } catch (error) { $("status").textContent = `error: ${error.message}`; }
+    });
+    host.appendChild(row);
+  });
+}
+
+function setLodTools(asset) {
+  const measured = !!asset && asset.kind === "mesh";
+  $("lod-generate").disabled = !(measured && previewable(asset)) || state.lodJob !== null;
+  $("lod-upload").disabled = !measured;
+  $("lod-upload-label").classList.toggle("disabled", !measured);
+  $("asset-delete").disabled = !asset;
+  disarmDelete();
+}
+
+async function generateLods() {
+  if (!state.asset) return;
+  const asset = state.asset;
+  const ratios = $("lod-preset").value.split(",").map(Number);
+  $("lod-generate").disabled = true;
+  $("lod-progress").textContent = "queued";
+  try {
+    const response = await api(`/api/assets/${asset.id}/lods?async=1`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ratios }),
+    });
+    let job = (await response.json()).job;
+    state.lodJob = job.id;
+    while (job.state === "queued" || job.state === "running") {
+      $("lod-progress").textContent = job.state === "queued" ? "queued"
+        : `generating ${job.level || "LODs"} (${job.step} of ${job.steps})`;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      job = await json(`/api/jobs/${job.id}`);
+    }
+    if (job.state === "failed") throw new Error(job.error || "LOD generation failed");
+    if (state.asset && state.asset.id === asset.id) {
+      await refreshSelected();             // the buttons and list first, then the message
+    }
+    const made = ((job.result && job.result.lods) || []).filter((lod) => lod.origin !== "uploaded");
+    const warned = made.filter((lod) => lod.warning).length;
+    $("lod-progress").textContent = `${made.length} LOD${made.length === 1 ? "" : "s"} generated`
+      + (warned ? ` - ${warned} save${warned === 1 ? "s" : ""} nothing over the level above` : "");
+  } catch (error) {
+    $("lod-progress").textContent = `error: ${error.message}`;
+  } finally {
+    state.lodJob = null;
+    setLodTools(state.asset);
+  }
+}
+
+async function uploadLodFile(file, level, asset = state.asset) {
+  if (!asset) return null;
+  const query = new URLSearchParams({ filename: file.name });
+  const response = await api(`/api/assets/${asset.id}/lods/${level}?${query}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: file,
+  });
+  return (await response.json()).lods;
+}
+
+let deleteTimer = null;
+function disarmDelete() {
+  const button = $("asset-delete");
+  button.classList.remove("armed");
+  button.textContent = "Delete asset";
+  if (deleteTimer) clearTimeout(deleteTimer);
+  deleteTimer = null;
+}
+
+async function deleteSelected() {
+  const button = $("asset-delete");
+  if (!state.asset) return;
+  if (!button.classList.contains("armed")) {
+    // Two clicks, no dialog: a stray click cannot delete an asset.
+    button.classList.add("armed");
+    button.textContent = `Click again to delete ${state.asset.filename}`;
+    deleteTimer = setTimeout(disarmDelete, 4000);
+    return;
+  }
+  const asset = state.asset;
+  disarmDelete();
+  try {
+    await api(`/api/assets/${asset.id}`, { method: "DELETE" });
+    clearSelection();
+    await refreshAssets();
+    $("status").textContent = `${asset.filename} deleted`;
+  } catch (error) {
+    $("status").textContent = `error: ${error.message}`;
+  }
 }
 
 function updateReadout() {
@@ -615,9 +758,13 @@ function updateReadout() {
       ? `<span>${escapeHtml(asset.analyse_note || "texture")}</span>`
     : `<span>${fmt(tris)} tris</span><span>${fmt(verts)} verts</span>`
       + `<span>${share}</span>`;
+  const lodNote = !lod ? ""
+    : (lod.origin === "uploaded" ? "<span>your LOD (uploaded)</span>"
+      : "<span>generated preview LOD - no UVs or materials</span>")
+      + (lod.warning ? `<span class="bad">${escapeHtml(lod.warning)}</span>` : "");
   $("readout").innerHTML =
     `<span>${state.level === "source" ? "source" : state.level}</span>`
-    + geometry
+    + geometry + lodNote
     + `<span>uploaded ${asset.uploaded_at.replace("T", " ")}</span>`
     + `<span>by ${escapeHtml(asset.uploader || "unknown")}</span>`;
 }
@@ -791,6 +938,8 @@ async function uploadFiles(files) {
   const done = [];
   const refused = [];
   let attached = 0;
+  const lodsAdded = [];
+  let lodTarget = null;
   const total = pending.length;
   const take = (name) => {
     const index = pending.findIndex((file) => file.name.toLowerCase() === name);
@@ -819,7 +968,27 @@ async function uploadFiles(files) {
   if (state.asset && (state.asset.missing || []).length) {
     state.asset = await attachMissing(state.asset) || state.asset;
   }
-  // 2. Files that can reference others go first, so their sidecars find them.
+  // 2. "rock_LOD1.fbx" is LOD1 of the asset named rock.* - the selected one if
+  //    it matches, else the newest match in the library.
+  for (const file of pending.slice()) {
+    const match = file.name.match(/^(.*)_lod([1-4])\.(glb|gltf|obj|fbx)$/i);
+    if (!match) continue;
+    const stem = match[1].toLowerCase();
+    const sameStem = (asset) => asset && asset.kind === "mesh"
+      && asset.filename.toLowerCase().replace(/\.[^.]+$/, "") === stem;
+    const target = sameStem(state.asset) ? state.asset : (state.assets || []).find(sameStem);
+    if (!target) continue;
+    pending.splice(pending.indexOf(file), 1);
+    $("status").textContent = `adding ${file.name} as LOD${match[2]} of ${target.filename}`;
+    try {
+      await uploadLodFile(file, `LOD${match[2]}`, target);
+      lodsAdded.push(`${file.name} -> LOD${match[2]} of ${target.filename}`);
+      lodTarget = target.id;
+    } catch (error) {
+      refused.push(`${file.name}: ${error.message}`);
+    }
+  }
+  // 3. Files that can reference others go first, so their sidecars find them.
   pending.sort((a, b) => Number(!REFERENCING.includes(suffixOf(a.name)))
     - Number(!REFERENCING.includes(suffixOf(b.name))));
   while (pending.length) {
@@ -834,6 +1003,7 @@ async function uploadFiles(files) {
   }
   await refreshAssets().catch(() => {});
   if (done.length) await selectAsset(done[done.length - 1].id);
+  else if (lodTarget !== null) await selectAsset(lodTarget);
   else if (attached && state.asset) await selectAsset(state.asset.id);
   const parts = [];
   if (done.length === 1) {
@@ -844,11 +1014,31 @@ async function uploadFiles(files) {
     parts.push(`${done.length} files uploaded`);
   }
   if (attached) parts.push(`${attached} file${attached === 1 ? "" : "s"} added alongside`);
+  if (lodsAdded.length) parts.push(`LOD added: ${lodsAdded.join("; ")}`);
   if (refused.length) parts.push(`refused: ${refused.join("; ")}`);
   $("status").textContent = parts.join(" - ");
 }
 
 /* - wiring */
+
+$("lod-generate").addEventListener("click", () => { generateLods(); });
+$("asset-delete").addEventListener("click", () => { deleteSelected(); });
+$("lod-upload").addEventListener("change", async (event) => {
+  const file = event.target.files && event.target.files[0];
+  event.target.value = "";
+  if (!file || !state.asset) return;
+  const level = $("lod-upload-level").value;
+  $("lod-progress").textContent = `uploading ${file.name} as ${level}`;
+  try {
+    await uploadLodFile(file, level);
+    await refreshSelected();
+    const lod = (state.asset.lods || []).find((item) => item.level === level);
+    $("lod-progress").textContent = `${file.name} is now ${level}`
+      + (lod && lod.warning ? ` - warning: ${lod.warning}` : "");
+  } catch (error) {
+    $("lod-progress").textContent = `error: ${error.message}`;
+  }
+});
 
 $("upload").addEventListener("change", (event) => {
   const files = Array.from(event.target.files || []);
@@ -1009,8 +1199,9 @@ function connectLive() {
         showVerdict(asset);
         refreshCollisionOverlay().catch(() => {});
         if (type === "lod") {
-          state.level = keepLevel;
+          state.level = asset.lods.some((lod) => lod.level === keepLevel) ? keepLevel : "source";
           buildLodButtons();
+          renderLodList();
         }
       }).catch(() => {});
     });

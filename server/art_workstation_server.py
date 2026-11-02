@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Art Workstation - a technical-art review tool built on the gate's ecosystem.
 
-Zero external dependencies: ``http.server``, ``sqlite3``, ``json``. The browser
-side loads Three.js from a CDN and nothing else.
+Standard library on the server (``http.server``, ``sqlite3``, ``json``), plus the
+gate's own readers. The browser side uses the Three.js copy vendored in
+``static/vendor`` and nothing else.
 
 What it is for: an asset lands in the repository, and someone has to answer
 "does this look right, is the LOD ladder sane, does the collision hull actually
@@ -23,13 +24,19 @@ Routes
     GET  /static/<file>             -> css/js
     GET  /api/health                -> liveness + counts
     GET  /api/assets                -> every asset with its LOD count
-    POST /api/assets?filename=...   -> upload a .obj/.gltf/.glb (raw body)
+    POST /api/assets?filename=...   -> upload any accepted file (raw body)
     GET  /api/assets/<id>           -> metadata + lods + collision + note count
     GET  /api/assets/<id>/file      -> the bytes
     DEL  /api/assets/<id>           -> delete the row and its files
-    GET  /api/assets/<id>/lods      -> generated LODs
-    POST /api/assets/<id>/lods      -> generate them ({"ratios": [...]})
+    GET  /api/assets/<id>/lods      -> LODs (generated and uploaded, with warnings)
+    POST /api/assets/<id>/lods      -> generate them ({"ratios": [...]}; ?async=1 -> a job)
+    POST /api/assets/<id>/lods/<lvl>?filename=...  -> upload your own LOD file
+    DEL  /api/assets/<id>/lods/<lvl>
     GET  /api/assets/<id>/lods/<lvl>/file
+    GET  /api/jobs/<id>             -> a background job's state and progress
+    POST /api/assets/<id>/files?filename=...       -> add a file the asset references
+    GET  /api/assets/<id>/files/<path>             -> serve it
+    GET  /api/assets/<id>/preview   -> converted preview (FBX .glb, texture .png)
     GET  /api/assets/<id>/collision
     POST /api/assets/<id>/collision -> {"kind": "box"|"sphere"|"hull", ...}
     GET  /api/assets/<id>/notes
@@ -303,6 +310,11 @@ def init_db(db_path: str | Path) -> None:
             if column not in have:
                 connection.execute(
                     f"ALTER TABLE assets ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        lod_columns = {row["name"] for row in connection.execute("PRAGMA table_info(lod_versions)")}
+        if "origin" not in lod_columns:
+            # "generated" by the decimator, or "uploaded": an artist's own LOD file.
+            connection.execute(
+                "ALTER TABLE lod_versions ADD COLUMN origin TEXT NOT NULL DEFAULT 'generated'")
 
 
 # --- #
@@ -609,10 +621,34 @@ def get_asset(db_path: str | Path, asset_id: int) -> dict:
 
 
 def list_lods(db_path: str | Path, asset_id: int) -> list[dict]:
+    """The LOD ladder, each level with a ``warning`` when it is not a saving.
+
+    A LOD that costs as much as (or more than) the level above it, or the
+    source, is a bug in the chain - the docs promised it would be flagged and
+    nothing did. Generated levels of a 12-triangle box came out as three more
+    12-triangle "LODs" without a word.
+    """
     with open_db(db_path) as connection:
-        rows = connection.execute(
-            "SELECT * FROM lod_versions WHERE asset_id = ? ORDER BY level", (asset_id,)).fetchall()
-    return [dict(row) for row in rows]
+        rows = [dict(row) for row in connection.execute(
+            "SELECT * FROM lod_versions WHERE asset_id = ? ORDER BY level", (asset_id,)).fetchall()]
+        source = connection.execute(
+            "SELECT triangle_count FROM assets WHERE id = ?", (asset_id,)).fetchone()
+    source_tris = int(source["triangle_count"]) if source is not None else 0
+    previous = None
+    for row in rows:
+        row.setdefault("origin", "generated")
+        warning = ""
+        tris = int(row["triangle_count"])
+        if source_tris and tris >= source_tris:
+            warning = ("same triangle count as the source" if tris == source_tris
+                       else f"heavier than the source ({tris:,} > {source_tris:,})")
+        elif previous is not None and tris > int(previous["triangle_count"]):
+            warning = f"heavier than {previous['level']} ({tris:,} > {int(previous['triangle_count']):,})"
+        elif previous is not None and tris == int(previous["triangle_count"]):
+            warning = f"same triangle count as {previous['level']}"
+        row["warning"] = warning
+        previous = row
+    return rows
 
 
 def list_notes(db_path: str | Path, asset_id: int) -> list[dict]:
@@ -1001,9 +1037,25 @@ def delete_asset(db_path: str | Path, data_dir: Path, asset_id: int) -> None:
 
 def generate_lods(db_path: str | Path, data_dir: Path, asset_id: int,
                   ratios: list[float] | None = None,
-                  max_triangles: list[int] | None = None) -> list[dict]:
-    """Decimate the asset into LOD files and record them."""
+                  max_triangles: list[int] | None = None, progress=None) -> list[dict]:
+    """Decimate the asset into LOD files and record them.
+
+    Levels an artist uploaded by hand are never overwritten or removed by a
+    generation: asking for one of those levels is a 409, and the "stale level"
+    clean-up only touches generated levels.
+    """
     asset = get_asset(db_path, asset_id)
+    ratios = list(ratios or lod_manager.DEFAULT_RATIOS)
+    if any(later >= earlier for earlier, later in zip(ratios, ratios[1:])):
+        raise WorkstationError("ratios must get smaller level by level (e.g. 0.5, 0.25, 0.125); "
+                               "otherwise a LOD would cost more than the one above it", 400)
+    wanted = set(lod_manager.LEVEL_NAMES[:len(ratios)])
+    hand_made = {row["level"] for row in list_lods(db_path, asset_id) if row["origin"] == "uploaded"}
+    clash = sorted(wanted & hand_made)
+    if clash:
+        raise WorkstationError(
+            f"{', '.join(clash)} {'was' if len(clash) == 1 else 'were'} uploaded by hand; delete "
+            f"{'it' if len(clash) == 1 else 'them'} first or generate fewer levels", 409)
     _, lods_dir = asset_paths(data_dir)
     source = resolve_inside(data_dir, asset["file_path"])
     if source is None or not source.is_file():
@@ -1022,9 +1074,8 @@ def generate_lods(db_path: str | Path, data_dir: Path, asset_id: int,
         lod_name = asset["filename"]
         if source.suffix.lower() == ".glb" and Path(lod_name).suffix.lower() in FBX_SUFFIXES:
             lod_name = Path(lod_name).stem + ".glb"
-        results = lod_manager.generate(source, out_dir,
-                                       ratios or lod_manager.DEFAULT_RATIOS,
-                                       max_triangles or None, name=lod_name)
+        results = lod_manager.generate(source, out_dir, ratios, max_triangles or None,
+                                       name=lod_name, progress=progress)
     except lod_manager.LodError as exc:
         raise WorkstationError(str(exc), 422) from exc
 
@@ -1033,7 +1084,8 @@ def generate_lods(db_path: str | Path, data_dir: Path, asset_id: int,
         # A regeneration with fewer ratios must not leave the old levels behind:
         # a stale "LOD3  4,328 tris" button would be a lie the viewer repeats.
         stale = [row["level"] for row in connection.execute(
-            "SELECT level FROM lod_versions WHERE asset_id = ?", (asset_id,)).fetchall()
+            "SELECT level FROM lod_versions WHERE asset_id = ? AND origin = 'generated'",
+            (asset_id,)).fetchall()
             if row["level"] not in produced]
         for level in stale:
             row = connection.execute(
@@ -1050,16 +1102,166 @@ def generate_lods(db_path: str | Path, data_dir: Path, asset_id: int,
             relative = result.path.relative_to(data_dir).as_posix()
             connection.execute(
                 "INSERT INTO lod_versions (asset_id, level, ratio, target_triangles,"
-                " triangle_count, vertex_count, file_path, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                " triangle_count, vertex_count, file_path, created_at, origin)"
+                " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'generated')"
                 " ON CONFLICT(asset_id, level) DO UPDATE SET"
                 " ratio = excluded.ratio, target_triangles = excluded.target_triangles,"
                 " triangle_count = excluded.triangle_count,"
                 " vertex_count = excluded.vertex_count, file_path = excluded.file_path,"
-                " created_at = excluded.created_at",
+                " created_at = excluded.created_at, origin = 'generated'",
                 (asset_id, result.level, result.ratio, result.target_triangles,
                  result.triangle_count, result.vertex_count, relative, utc_now()))
     return list_lods(db_path, asset_id)
+
+
+LOD_UPLOAD_SUFFIXES = {".glb", ".gltf", ".obj", ".fbx"}
+
+
+def upload_lod(db_path: str | Path, data_dir: Path, asset_id: int, level: str,
+               filename: str, payload: bytes) -> list[dict]:
+    """Store an artist's own LOD file as ``level`` of an asset.
+
+    The docs promised this ("upload LODs ... stored as a level, not as a new
+    asset"); every upload created a new asset instead. The file is measured with
+    the gate's readers; an FBX is converted to a .glb for the viewer, as the
+    source is. A self-contained file is required: a LOD has no folder of its own
+    for a .bin to live in.
+    """
+    if level not in lod_manager.LEVEL_NAMES:
+        raise WorkstationError(f"level must be one of {', '.join(lod_manager.LEVEL_NAMES)}", 400)
+    asset = get_asset(db_path, asset_id)
+    name = safe_filename(filename)
+    suffix = Path(name).suffix.lower()
+    if suffix not in LOD_UPLOAD_SUFFIXES:
+        raise WorkstationError("a LOD must be a .glb, a self-contained .gltf, an .obj or an .fbx", 415)
+    if not payload:
+        raise WorkstationError("empty upload", 400)
+    _, lods_dir = asset_paths(data_dir)
+    out_dir = lods_dir / str(asset_id)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stored = out_dir / f"{level}_uploaded_{name}"
+    stored.write_bytes(payload)
+    viewable = stored
+    try:
+        if suffix in FBX_SUFFIXES:
+            triangles = int(agk.read_fbx(stored).triangles)
+            viewable = out_dir / f"{level}_uploaded_{Path(name).stem}.glb"
+            info = fbx_preview.convert(stored, viewable)
+            vertices = int(info["vertices"])
+        else:
+            triangles = int(agk.count_triangles(stored))
+            vertices = mesh_vertices(stored)
+    except Exception as exc:
+        for path in {stored, viewable}:
+            path.unlink(missing_ok=True)
+        raise WorkstationError(f"the LOD cannot be read: {exc}", 422) from exc
+    source_tris = int(asset["triangle_count"]) or 0
+    ratio = triangles / source_tris if source_tris else 0.0
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        old = connection.execute(
+            "SELECT file_path FROM lod_versions WHERE asset_id = ? AND level = ?",
+            (asset_id, level)).fetchone()
+        connection.execute(
+            "INSERT INTO lod_versions (asset_id, level, ratio, target_triangles,"
+            " triangle_count, vertex_count, file_path, created_at, origin)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'uploaded')"
+            " ON CONFLICT(asset_id, level) DO UPDATE SET"
+            " ratio = excluded.ratio, target_triangles = excluded.target_triangles,"
+            " triangle_count = excluded.triangle_count, vertex_count = excluded.vertex_count,"
+            " file_path = excluded.file_path, created_at = excluded.created_at,"
+            " origin = 'uploaded'",
+            (asset_id, level, ratio, triangles, triangles, vertices,
+             viewable.relative_to(data_dir).as_posix(), utc_now()))
+    if old is not None:
+        previous = resolve_inside(Path(data_dir), old["file_path"])
+        if previous is not None and previous not in (stored, viewable):
+            previous.unlink(missing_ok=True)
+    return list_lods(db_path, asset_id)
+
+
+def delete_lod(db_path: str | Path, data_dir: Path, asset_id: int, level: str) -> list[dict]:
+    get_asset(db_path, asset_id)
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        row = connection.execute(
+            "SELECT file_path FROM lod_versions WHERE asset_id = ? AND level = ?",
+            (asset_id, level)).fetchone()
+        if row is None:
+            raise WorkstationError(f"no {level} for asset {asset_id}", 404)
+        connection.execute("DELETE FROM lod_versions WHERE asset_id = ? AND level = ?",
+                           (asset_id, level))
+    path = resolve_inside(Path(data_dir), row["file_path"])
+    if path is not None:
+        for sibling in path.parent.glob(f"{level}_*"):
+            sibling.unlink(missing_ok=True)
+    return list_lods(db_path, asset_id)
+
+
+class JobRunner:
+    """LOD generation off the request thread, one job per asset at a time.
+
+    A 1.3-million-triangle mesh took 201 s; as a request that is a browser tab
+    waiting three minutes with no feedback, and a proxy timing out. Jobs run on
+    one worker thread (the decimator is pure Python, so more threads would not
+    be faster) and report the level they are on.
+    """
+
+    KEEP = 200
+
+    def __init__(self, publish=None) -> None:
+        self._jobs: dict[int, dict] = {}
+        self._lock = threading.Lock()
+        self._queue: "queue.Queue[tuple[int, object]]" = queue.Queue()
+        self._next = 1
+        self._publish = publish
+        self._thread = threading.Thread(target=self._work, name="lod-jobs", daemon=True)
+        self._thread.start()
+
+    def submit(self, asset_id: int, work) -> dict:
+        with self._lock:
+            for job in self._jobs.values():
+                if job["asset_id"] == asset_id and job["state"] in ("queued", "running"):
+                    raise WorkstationError(
+                        f"LODs for asset {asset_id} are already being generated (job {job['id']})", 409)
+            job_id = self._next
+            self._next += 1
+            job = {"id": job_id, "asset_id": asset_id, "kind": "lods", "state": "queued",
+                   "level": "", "step": 0, "steps": 0, "error": "", "result": None,
+                   "created_at": utc_now()}
+            self._jobs[job_id] = job
+            for old in sorted(self._jobs)[:-self.KEEP]:
+                if self._jobs[old]["state"] in ("done", "failed"):
+                    del self._jobs[old]
+        self._queue.put((job_id, work))
+        return dict(job)
+
+    def get(self, job_id: int) -> dict:
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise WorkstationError(f"no job {job_id}", 404)
+            return dict(job)
+
+    def _update(self, job_id: int, **fields) -> None:
+        with self._lock:
+            self._jobs[job_id].update(fields)
+            job = dict(self._jobs[job_id])
+        if self._publish is not None:
+            self._publish({"type": "job", "asset_id": job["asset_id"], "job": job})
+
+    def _work(self) -> None:
+        while True:
+            job_id, work = self._queue.get()
+            self._update(job_id, state="running")
+
+            def progress(level, index, total, _job=job_id):
+                self._update(_job, level=level, step=index + 1, steps=total)
+            try:
+                result = work(progress)
+                self._update(job_id, state="done", result=result)
+            except WorkstationError as exc:
+                self._update(job_id, state="failed", error=str(exc))
+            except Exception as exc:                 # a job must never kill the worker
+                self._update(job_id, state="failed", error=f"internal error: {exc}")
 
 
 def add_note(db_path: str | Path, asset_id: int, category: str, note_text: str,
@@ -1392,6 +1594,8 @@ ASSET_SIDECAR_RE = re.compile(r"^/api/assets/(\d+)/files/(.+)$")
 ASSET_SIDECARS_RE = re.compile(r"^/api/assets/(\d+)/files$")
 ASSET_LODS_RE = re.compile(r"^/api/assets/(\d+)/lods$")
 ASSET_LOD_FILE_RE = re.compile(r"^/api/assets/(\d+)/lods/(LOD[1-4])/file$")
+ASSET_LOD_RE = re.compile(r"^/api/assets/(\d+)/lods/(LOD[1-4])$")
+JOB_RE = re.compile(r"^/api/jobs/(\d+)$")
 ASSET_NOTES_RE = re.compile(r"^/api/assets/(\d+)/notes$")
 ASSET_COLLISION_RE = re.compile(r"^/api/assets/(\d+)/collision$")
 ASSET_REFERENCES_RE = re.compile(r"^/api/assets/(\d+)/references$")
@@ -1644,6 +1848,11 @@ class Handler(BaseHTTPRequestHandler):
             self._serve_lod_file(int(match.group(1)), match.group(2))
             return
 
+        match = JOB_RE.match(path)
+        if match:
+            self._json(200, server.jobs.get(int(match.group(1))))
+            return
+
         match = ASSET_NOTES_RE.match(path)
         if match:
             get_asset(server.db_path, int(match.group(1)))      # 404, not an empty list
@@ -1893,9 +2102,41 @@ class Handler(BaseHTTPRequestHandler):
                 if caps is not None and (not isinstance(caps, list) or not all(
                         isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in caps)):
                     raise WorkstationError("max_tris must be a list of positive integers", 400)
+                asset_id = int(match.group(1))
+                get_asset(server.db_path, asset_id)                 # 404 before queueing
+                ratio_list = [float(r) for r in ratios]
+                if any(later >= earlier for earlier, later in zip(ratio_list, ratio_list[1:])):
+                    raise WorkstationError(
+                        "ratios must get smaller level by level (e.g. 0.5, 0.25, 0.125); "
+                        "otherwise a LOD would cost more than the one above it", 400)
+                if (self._query().get("async", [""])[0] or "") in ("1", "true", "yes"):
+                    db_path, data_dir = server.db_path, Path(server.data_dir)
+                    publish = self._publish
+
+                    def work(progress, _asset=asset_id, _ratios=ratio_list, _caps=caps):
+                        lods = generate_lods(db_path, data_dir, _asset, _ratios, _caps, progress)
+                        publish("lod", _asset)
+                        return {"lods": lods}
+                    job = server.jobs.submit(asset_id, work)
+                    self._json(202, {"job": job})
+                    return
                 lods = generate_lods(server.db_path, Path(server.data_dir),
-                                     int(match.group(1)),
-                                     [float(r) for r in ratios], caps)
+                                     asset_id, ratio_list, caps)
+                self._publish("lod", asset_id)
+                self._json(201, {"lods": lods})
+                return
+
+            match = ASSET_LOD_RE.match(path)
+            if match:
+                raw = self._body(MAX_UPLOAD_BYTES)
+                if raw is None:
+                    return
+                filename = (self._query().get("filename", [""])[0]
+                            or self.headers.get("X-Filename", ""))
+                if not filename:
+                    raise WorkstationError("filename is required (query or X-Filename)", 400)
+                lods = upload_lod(server.db_path, Path(server.data_dir), int(match.group(1)),
+                                  match.group(2), filename, raw)
                 self._publish("lod", int(match.group(1)))
                 self._json(201, {"lods": lods})
                 return
@@ -1940,6 +2181,13 @@ class Handler(BaseHTTPRequestHandler):
                 delete_asset(server.db_path, Path(server.data_dir), int(match.group(1)))
                 self._publish("asset-deleted", int(match.group(1)))
                 self._json(200, {"deleted": True})
+                return
+            match = ASSET_LOD_RE.match(path)
+            if match:
+                lods = delete_lod(server.db_path, Path(server.data_dir), int(match.group(1)),
+                                  match.group(2))
+                self._publish("lod", int(match.group(1)))
+                self._json(200, {"lods": lods})
                 return
             match = NOTE_RE.match(path)
             if match:
@@ -1995,6 +2243,7 @@ class WorkstationServer(socketserver.ThreadingTCPServer):
         self.rules_path = str(rules_path or "")
         self.rules_root = str(rules_root or Path.cwd())
         self.broadcaster = Broadcaster()   # /api/events
+        self.jobs = JobRunner(self.broadcaster.publish)
         self.stopping = False
         super().__init__(address, Handler)
 

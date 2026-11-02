@@ -456,16 +456,22 @@ class GeneratedLod:
 
 def generate(source: Path, out_dir: Path, ratios: Sequence[float] = DEFAULT_RATIOS,
              max_triangles: Sequence[int] | None = None,
-             name: str = "") -> list[GeneratedLod]:
+             name: str = "", progress=None) -> list[GeneratedLod]:
     """Decimate `source` into LOD files under `out_dir`.
 
     Every level is decimated and checked *before* the first file is written, so
     a refusal leaves no half-generated ladder behind: the server records what
     this returns, and files without rows are files the viewer never lists.
+
+    ``progress(level, index, total)`` is called before each level is decimated,
+    so a long job can say where it is.
     """
     mesh = load_mesh(source)
     planned: list[tuple[str, int, float, Mesh]] = []
-    for level, target, ratio in plan_targets(mesh.triangles, ratios, max_triangles):
+    plan = plan_targets(mesh.triangles, ratios, max_triangles)
+    for index, (level, target, ratio) in enumerate(plan):
+        if progress is not None:
+            progress(level, index, len(plan))
         if target >= mesh.triangles:
             # Nothing to gain: still emit the level so the viewer shows it as 100%.
             reduced = mesh

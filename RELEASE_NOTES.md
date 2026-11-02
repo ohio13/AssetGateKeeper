@@ -4,6 +4,13 @@
   the previous asset when a load fails; embedded glTF buffers, every LOD and
   Geometry -> Textured work; other websites can no longer write to it; collision
   export, filenames and API errors fixed. A Chromium test suite runs in CI.
+* **Art Workstation, phase 3.** LODs can be generated from the viewer (presets,
+  background job with progress), artists can upload their own LOD files (also by
+  naming them `<asset>_LOD1`...), and levels can be deleted one at a time; generation
+  never overwrites an uploaded level. A LOD that saves nothing over the level above
+  or the source is flagged. Assets can be deleted from the viewer. The gate verdict
+  panel, which was drawn underneath the collision panel and never visible, is now
+  on screen.
 * **Art Workstation, phase 2.** FBX is measured by the gate's reader and drawn
   through a converted `.glb`, under an on-screen warning that it is a conversion
   (`engine/fbx_preview.py`). Textures are previewed (TGA/TIF/DDS via PNG). Each

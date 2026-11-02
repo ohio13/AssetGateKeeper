@@ -958,6 +958,117 @@ expect("an unreferenced texture still goes up as an asset", "lone_Albedo.png" in
 p2_server.shutdown()
 p2_server.server_close()
 
+print("21. phase 3: LOD jobs, uploaded LODs, warnings")
+p3_db, p3_data = fresh("phase3")
+box = aws.create_asset(p3_db, p3_data, "box.obj", OBJ.encode())
+lods = aws.generate_lods(p3_db, p3_data, box["id"], [0.5, 0.25])
+expect("a LOD that saves nothing is flagged (was silent)",
+       all("same triangle count as the source" in lod["warning"] for lod in lods),
+       [lod["warning"] for lod in lods])
+try:
+    aws.generate_lods(p3_db, p3_data, box["id"], [0.1, 0.5])
+    expect("ratios that grow are refused", False)
+except aws.WorkstationError as exc:
+    expect("ratios that grow are refused", exc.status == 400 and "smaller level by level" in str(exc))
+
+ball = lod_manager.Mesh([(math.cos(i * 0.37) * math.sin(i * 0.11), math.sin(i * 0.37) * math.sin(i * 0.11),
+                          math.cos(i * 0.11)) for i in range(400)],
+                        [(i, i + 1, i + 2) for i in range(0, 396)])
+lod_manager.write_glb(WORK / "ball.glb", ball, "ball")
+ball_asset = aws.create_asset(p3_db, p3_data, "ball.glb", (WORK / "ball.glb").read_bytes())
+
+# Background jobs: one per asset, with progress.
+release = threading.Event()
+runner = aws.JobRunner()
+blocked = runner.submit(1, lambda progress: (progress("LOD1", 0, 2), release.wait(5), {"ok": True})[-1])
+try:
+    runner.submit(1, lambda progress: None)
+    expect("a second job for the same asset is refused while one runs", False)
+except aws.WorkstationError as exc:
+    expect("a second job for the same asset is refused while one runs", exc.status == 409, str(exc))
+other = runner.submit(2, lambda progress: {"ok": 2})
+time.sleep(0.2)
+expect("a running job reports its level and step",
+       runner.get(blocked["id"])["state"] == "running" and runner.get(blocked["id"])["level"] == "LOD1"
+       and runner.get(blocked["id"])["steps"] == 2, runner.get(blocked["id"]))
+release.set()
+for _ in range(50):
+    if runner.get(other["id"])["state"] == "done":
+        break
+    time.sleep(0.05)
+expect("jobs finish and keep their result", runner.get(blocked["id"])["state"] == "done"
+       and runner.get(other["id"])["result"] == {"ok": 2}, runner.get(other["id"]))
+failing = runner.submit(3, lambda progress: (_ for _ in ()).throw(aws.WorkstationError("nope", 422)))
+time.sleep(0.2)
+expect("a failed job says why", runner.get(failing["id"])["state"] == "failed"
+       and runner.get(failing["id"])["error"] == "nope", runner.get(failing["id"]))
+
+p3_server = aws.build_server("127.0.0.1", 0, p3_db, p3_data, quiet=True)
+p3_port = p3_server.server_address[1]
+threading.Thread(target=p3_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+c3 = Client(p3_port)
+status, body = c3.json(f"/api/assets/{ball_asset['id']}/lods?async=1", "POST", {"ratios": [0.5, 0.25]})
+expect("LOD generation can run as a job (202)", status == 202 and body["job"]["state"] in ("queued", "running"),
+       (status, body))
+job_id = body["job"]["id"]
+for _ in range(100):
+    status, job = c3.json(f"/api/jobs/{job_id}")
+    if job["state"] in ("done", "failed"):
+        break
+    time.sleep(0.05)
+expect("the job finishes with the LODs", job["state"] == "done" and len(job["result"]["lods"]) == 2
+       and job["steps"] == 2, job)
+status, _ = c3.json("/api/jobs/9999")
+expect("an unknown job is a 404", status == 404, status)
+status, _ = c3.json("/api/assets/9999/lods?async=1", "POST", {"ratios": [0.5]})
+expect("a job for a missing asset is a 404 before it is queued", status == 404, status)
+
+# An artist's own LOD files.
+lod_manager.write_glb(WORK / "one_tri.glb",
+                      lod_manager.Mesh([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [(0, 1, 2)]), "lod")
+status, body = c3.json(f"/api/assets/{ball_asset['id']}/lods/LOD3?filename=ball_LOD3.glb", "POST",
+                       (WORK / "one_tri.glb").read_bytes())
+lod3 = next((lod for lod in body.get("lods", []) if lod["level"] == "LOD3"), {})
+expect("an uploaded LOD is stored as a level, not a new asset",
+       status == 201 and lod3.get("origin") == "uploaded" and lod3.get("triangle_count") == 1
+       and len(aws.list_assets(p3_db)) == 2, (status, lod3))
+status, raw, _ = c3.call(f"/api/assets/{ball_asset['id']}/lods/LOD3/file")
+expect("... and served for the viewer", status == 200 and raw[:4] == b"glTF", status)
+status, body = c3.json(f"/api/assets/{ball_asset['id']}/lods?async=0", "POST", {"ratios": [0.5]})
+expect("regenerating fewer levels keeps the uploaded LOD3",
+       status == 201 and any(l["level"] == "LOD3" and l["origin"] == "uploaded" for l in body["lods"]),
+       [(l["level"], l["origin"]) for l in body.get("lods", [])])
+status, body = c3.json(f"/api/assets/{ball_asset['id']}/lods", "POST", {"ratios": [0.5, 0.3, 0.1]})
+expect("generation will not overwrite an uploaded level (409)",
+       status == 409 and "LOD3" in body.get("error", ""), (status, body))
+status, body = c3.json(f"/api/assets/{ball_asset['id']}/lods/LOD2?filename=mats5.fbx", "POST",
+                       (FIXTURES / "fbx" / "mats5.fbx").read_bytes())
+lod2 = next((lod for lod in body.get("lods", []) if lod["level"] == "LOD2"), {})
+expect("an FBX LOD is measured from the FBX and viewed as a converted .glb",
+       status == 201 and lod2.get("triangle_count") == 12 and lod2.get("file_path", "").endswith(".glb"),
+       (status, lod2))
+status, _ = c3.json(f"/api/assets/{ball_asset['id']}/lods/LOD4?filename=notes.txt", "POST", b"hello")
+expect("a LOD must be a mesh file (415)", status == 415, status)
+before_files = sorted(path.name for path in (p3_data / "lods" / str(ball_asset["id"])).iterdir())
+status, _ = c3.json(f"/api/assets/{ball_asset['id']}/lods/LOD4?filename=bad.glb", "POST", b"garbage!")
+after_files = sorted(path.name for path in (p3_data / "lods" / str(ball_asset["id"])).iterdir())
+expect("an unreadable LOD is a 422 and leaves nothing behind", status == 422 and before_files == after_files,
+       (status, set(after_files) - set(before_files)))
+status, _ = c3.json(f"/api/assets/{ball_asset['id']}/lods/LOD5?filename=x.glb", "POST", b"x")
+expect("only LOD1-LOD4 exist", status == 404, status)
+status, body, _ = c3.call(f"/api/assets/{ball_asset['id']}/lods/LOD3", "DELETE", None,
+                          {"Origin": "http://evil.example"})
+expect("a cross-site LOD delete is refused", status == 403, status)
+status, body = c3.json(f"/api/assets/{ball_asset['id']}/lods/LOD3", "DELETE")
+expect("a single LOD can be deleted, with its files",
+       status == 200 and all(l["level"] != "LOD3" for l in body["lods"])
+       and not list((p3_data / "lods" / str(ball_asset["id"])).glob("LOD3_*")), body)
+status, _ = c3.json(f"/api/assets/{ball_asset['id']}/lods/LOD3", "DELETE")
+expect("deleting a LOD that is not there is a 404", status == 404, status)
+p3_server.shutdown()
+p3_server.server_close()
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

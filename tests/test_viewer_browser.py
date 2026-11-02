@@ -102,6 +102,9 @@ def png(width, height):
 (WORK / "rock_Albedo.png").write_bytes(png(64, 64))
 (WORK / "tool.exe").write_bytes(b"MZ")
 (WORK / "second.glb").write_bytes((WORK / "cube.glb").read_bytes())
+lod_manager.write_glb(WORK / "one_tri.glb",
+                      lod_manager.Mesh([(0, 0, 0), (1, 0, 0), (0, 1, 0)], [(0, 1, 2)]), "lod")
+(WORK / "ball_LOD3.glb").write_bytes((WORK / "one_tri.glb").read_bytes())
 FBX = ROOT / "tests" / "fixtures" / "fbx" / "cube_subd3.fbx"
 (WORK / "scene.blend").write_bytes(b"BLENDER-v300" + b"\x00" * 64)
 (WORK / "junk.glb").write_bytes(b"\x13\x37" * 300)
@@ -170,7 +173,12 @@ class Evil(http.server.SimpleHTTPRequestHandler):
         pass
 
 
-evil = socketserver.TCPServer(("127.0.0.1", 0), Evil)
+class QuietServer(socketserver.TCPServer):
+    def handle_error(self, request, client_address):   # the browser hanging up is fine
+        pass
+
+
+evil = QuietServer(("127.0.0.1", 0), Evil)
 threading.Thread(target=evil.serve_forever, daemon=True).start()
 
 
@@ -360,6 +368,61 @@ with sync_playwright() as playwright:
            "planks" in page.locator("#materials").inner_text(), page.locator("#materials").inner_text())
     expect("... and the texture is not a separate asset",
            "planks_Albedo.png" not in page.locator("#asset-list").inner_text())
+
+    print("8c. LODs: generate, upload, warnings, delete")
+    page.goto(f"{BASE}/viewer?live=0")
+    page.wait_for_selector("#asset-list .asset")
+    verdict_box = page.locator("#verdict-panel").bounding_box()
+    covering = page.evaluate(
+        "([x, y]) => { const el = document.elementFromPoint(x, y);"
+        " return !!(el && el.closest('#verdict-panel')); }",
+        [verdict_box["x"] + 20, verdict_box["y"] + 10]) if verdict_box else False
+    expect("the gate verdict panel is on screen (another panel drew over it)", covering, verdict_box)
+    pick(ids["cube"])
+    page.select_option("#lod-preset", "0.5,0.25,0.125")
+    page.click("#lod-generate")
+    page.wait_for_function("() => /generated|error/.test(document.getElementById('lod-progress').textContent)",
+                           timeout=30000)
+    progress_text = page.locator("#lod-progress").inner_text()
+    expect("Generate LODs runs from the viewer", "3 LODs generated" in progress_text, progress_text)
+    expect("... and says the 12-triangle box's LODs save nothing",
+           "save nothing" in progress_text
+           and page.locator("#lod-buttons button.warned").count() == 3
+           and "same triangle count as the source" in page.locator("#lod-list").inner_text(),
+           page.locator("#lod-list").inner_text()[:160])
+    pick(ids["ball"])
+    page.select_option("#lod-upload-level", "LOD4")
+    page.set_input_files("#lod-upload", str(WORK / "one_tri.glb"))
+    page.wait_for_function("() => /is now LOD4|error/.test(document.getElementById('lod-progress').textContent)",
+                           timeout=15000)
+    expect("Upload your own LOD stores it as a level",
+           "is now LOD4" in page.locator("#lod-progress").inner_text()
+           and "uploaded" in page.locator("#lod-list .lod-row[data-level='LOD4']").inner_text(),
+           page.locator("#lod-progress").inner_text())
+    count_before = page.locator("#asset-list .asset").count()
+    page.set_input_files("#upload", str(WORK / "ball_LOD3.glb"))
+    page.wait_for_function("() => /LOD added|refused/.test(document.getElementById('status').textContent)",
+                           timeout=15000)
+    expect("a file named ball_LOD3 becomes LOD3 of ball.obj, not a new asset",
+           "LOD3 of ball.obj" in status() and page.locator("#asset-list .asset").count() == count_before,
+           status())
+    page.locator("#lod-buttons button[data-level='LOD4']").click()
+    page.wait_for_timeout(600)
+    expect("viewing an uploaded LOD says so", "your LOD (uploaded)" in readout(), readout())
+    page.locator("#lod-list .lod-row[data-level='LOD4'] .del").click()
+    page.wait_for_timeout(800)
+    expect("deleting the LOD on screen goes back to the source",
+           page.locator("#lod-list .lod-row[data-level='LOD4']").count() == 0
+           and readout().startswith("source"), readout())
+    page.click("#asset-delete")
+    expect("Delete asset asks for a second click", "Click again" in page.locator("#asset-delete").inner_text()
+           and page.locator(f'#asset-list .asset[data-id="{ids["ball"]}"]').count() == 1)
+    page.click("#asset-delete")
+    page.wait_for_function("(id) => !document.querySelector(`#asset-list .asset[data-id='${id}']`)",
+                           arg=ids["ball"], timeout=10000)
+    expect("... and the second click deletes it",
+           page.locator(f'#asset-list .asset[data-id="{ids["ball"]}"]').count() == 0 and hint_visible(),
+           status())
 
     print("9. deleted while open")
     page.goto(f"{BASE}/viewer?asset={ids['embedded']}")

@@ -106,15 +106,39 @@
     <div class="readout" id="readout"></div>
   </section>
 
-  <!-- ---------------------------------------------------------------- verdict -->
-  <section class="panel inspector" id="verdict-panel">
-    <h2>Gate verdict</h2>
-    <div id="verdict-body"><div class="empty">No asset selected.</div></div>
-  </section>
-
-  <!-- ------------------------------------------------------------- collision -->
+  <!-- -------------------------------------------------------------- inspector -->
+  <!-- One scrolling column. The verdict used to be a second panel in the same grid
+       cell, drawn underneath the collision panel - it was never visible. -->
   <section class="panel inspector">
-    <h2>Collision inspector</h2>
+    <div id="verdict-panel">
+      <h2>Gate verdict</h2>
+      <div id="verdict-body"><div class="empty">No asset selected.</div></div>
+    </div>
+
+    <h2 class="section">LODs</h2>
+    <div id="lod-list" class="lod-list"><div class="empty">No asset selected.</div></div>
+    <div class="field" id="lod-tools">
+      <label for="lod-preset">Generate preview LODs</label>
+      <select id="lod-preset">
+        <option value="0.5,0.25,0.125">Standard - 50 / 25 / 12.5 %</option>
+        <option value="0.4,0.15,0.05">Aggressive - 40 / 15 / 5 %</option>
+        <option value="0.25,0.1,0.03">Mobile - 25 / 10 / 3 %</option>
+        <option value="0.5">One level - 50 %</option>
+      </select>
+      <button id="lod-generate" class="chip" type="button" disabled>Generate</button>
+      <div id="lod-progress" class="sub" aria-live="polite"></div>
+      <label for="lod-upload-level">Upload your own LOD</label>
+      <div class="row">
+        <select id="lod-upload-level">
+          <option>LOD1</option><option>LOD2</option><option>LOD3</option><option>LOD4</option>
+        </select>
+        <label class="chip file-chip" id="lod-upload-label">Choose file
+          <input type="file" id="lod-upload" accept=".glb,.gltf,.obj,.fbx" hidden disabled>
+        </label>
+      </div>
+    </div>
+
+    <h2 class="section">Collision inspector</h2>
     <div id="collision-info" class="kv">
       <div class="empty">No asset selected.</div>
     </div>
@@ -129,9 +153,15 @@
       <a id="collision-export" class="chip" href="#" download
          title="Download the proxy as a standalone Wavefront .obj">Export .obj</a>
     </div>
-    <h2 style="margin-top:18px">Materials</h2>
+    <h2 class="section">Materials</h2>
     <div id="materials" class="materials">
       <div class="empty">No asset selected.</div>
+    </div>
+
+    <h2 class="section">Asset</h2>
+    <div class="field">
+      <button id="asset-delete" class="chip danger" type="button" disabled>Delete asset</button>
+      <div class="sub">Removes the file, its LODs, collision and notes.</div>
     </div>
   </section>
 
