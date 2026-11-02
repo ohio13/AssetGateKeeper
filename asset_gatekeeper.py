@@ -1766,6 +1766,14 @@ def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:
 # Analyzers - one concern each, no logging, no watching.
 # --- #
 
+def _mesh_read_error(exc: BaseException) -> str:
+    """The FAILED reason for a mesh trimesh could not load, with the fix if there is one."""
+    if isinstance(exc, ModuleNotFoundError) and getattr(exc, "name", "") == "charset_normalizer":
+        return ("could not read mesh: it is not UTF-8 text, and reading it needs "
+                "charset-normalizer (python -m pip install charset-normalizer)")
+    return f"could not read mesh ({type(exc).__name__}: {exc})"
+
+
 @lru_cache(maxsize=8)
 def _load_scene_cached(path_string: str, modified_ns: int) -> object:
     """One load per (path, mtime). The mtime keeps the cache honest on re-export."""
@@ -1779,7 +1787,7 @@ def load_scene(path: Path) -> object:
     try:
         return _load_scene_cached(str(path), path.stat().st_mtime_ns)
     except Exception as exc:
-        raise AssetError(f"could not read mesh ({type(exc).__name__}: {exc})") from exc
+        raise AssetError(_mesh_read_error(exc)) from exc
 
 
 def _geometries(scene: object) -> list:
@@ -2445,7 +2453,7 @@ def count_triangles(path: Path) -> int:
             raise
         except Exception as exc:  # trimesh raises a wide variety of errors
             if path.suffix.lower() not in GLTF_SUFFIXES:
-                raise AssetError(f"could not read mesh ({type(exc).__name__}: {exc})") from exc
+                raise AssetError(_mesh_read_error(exc)) from exc
             LOG.debug("trimesh failed on %s, falling back to JSON: %s", path.name, exc)
 
     if path.suffix.lower() in GLTF_SUFFIXES:
@@ -4074,6 +4082,15 @@ def run_doctor(target: Optional[Path], args: argparse.Namespace,
         else:
             found = getattr(module, "__version__", "?")
             line("ok", name, f"version {found}")
+
+    try:
+        import charset_normalizer  # presence check only
+        line("ok", "charset-normalizer",
+             f"{getattr(charset_normalizer, '__version__', '?')} - non-UTF-8 .obj/.mtl")
+    except Exception:
+        line("warn", "charset-normalizer", "not installed",
+             "python -m pip install charset-normalizer (an .obj/.mtl that is not UTF-8 "
+             "fails as unreadable without it)")
 
     try:
         import watchdog  # presence check only

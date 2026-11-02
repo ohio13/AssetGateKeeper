@@ -1032,6 +1032,9 @@ expect("stripping faces keeps CRLF and non-UTF-8 bytes (were rewritten)",
        crlf_obj.read_bytes() == b"# made in caf\xe9 tools\r\nusemtl verre_\xe9\r\nv 0 0 0\r\n"
                                 b"v 1 0 0\r\nv 0 1 0\r\nv 2 0 0\r\nf 1 2 3\r\n",
        crlf_obj.read_bytes())
+expect("without charset-normalizer, a non-UTF-8 .obj says how to fix it",
+       "pip install charset-normalizer" in agk._mesh_read_error(
+           ModuleNotFoundError("No module named 'charset_normalizer'", name="charset_normalizer")))
 crlf_record = agk_healer.undo_heal(crlf_dir / "stone.png")
 expect("... so the undo of a repoint verifies and restores",
        crlf_record.undone and (crlf_dir / "crlf.mtl").read_bytes() == b"newmtl b\r\nmap_Kd stone.png\r\n")

@@ -29,7 +29,10 @@ classifiers = [
 # a gate that silently skips half its rules is worse than one that refuses to
 # start. Everything else in this repository (the servers, the healer, the LOD
 # engine, the workstation) is standard library only.
-dependencies = ["trimesh>=4.0", "pillow>=9.0",
+# charset-normalizer: trimesh needs it to read any .obj/.mtl that is not UTF-8
+# (a cp1252 material name from an older Windows exporter); without it such a file
+# fails as "could not read mesh".
+dependencies = ["trimesh>=4.0", "pillow>=9.0", "charset-normalizer>=3.0",
                 "tomli>=2.0; python_version < '3.11'"]
 
 [project.optional-dependencies]

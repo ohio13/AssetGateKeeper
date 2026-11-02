@@ -30,7 +30,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install watchdog trimesh pillow numpy pyflakes
+          python -m pip install watchdog trimesh pillow numpy pyflakes charset-normalizer
 
       # bpy.props property annotations make pyflakes emit bogus F722
       # ("syntax error in forward annotation"), so the engine and tests are
@@ -102,7 +102,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install trimesh pillow numpy playwright
+          python -m pip install trimesh pillow numpy playwright charset-normalizer
           python -m playwright install --with-deps chromium
 
       - name: Viewer suite (Chromium)

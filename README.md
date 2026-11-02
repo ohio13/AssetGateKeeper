@@ -175,7 +175,7 @@ exit $status
 ```yaml
 - name: Asset budget gate
   run: |
-    python -m pip install watchdog trimesh pillow
+    python -m pip install watchdog trimesh pillow charset-normalizer
     python tools/asset_gatekeeper.py Assets/Exports --once --recursive
 ```
 

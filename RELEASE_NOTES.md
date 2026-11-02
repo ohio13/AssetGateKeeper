@@ -24,6 +24,11 @@
     artist's LF `.mtl`/`.gltf` into CRLF on Windows (and CRLF into LF elsewhere), and
     stripping `.obj` faces also replaced any non-UTF-8 byte (a Latin-1 material
     name) with U+FFFD. Every kept line is now written back byte for byte.
+  * Fixed (gate): an `.obj`/`.mtl` that is not UTF-8 - a cp1252 material name from
+    an older Windows exporter - failed as "could not read mesh
+    (ModuleNotFoundError ...)" unless `charset-normalizer` happened to be
+    installed. It is now a declared dependency, `--doctor` checks it, and the
+    failure says how to fix it.
   * Docs: README, docs/03, 05, 06, 07 and 12 corrected - `--heal-dry-run` did not
     exist, the healer never "resizes oversized" textures, and `pad` was the real
     default in 1.1.0.

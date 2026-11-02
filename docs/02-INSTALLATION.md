@@ -48,10 +48,11 @@ a double-click:
 | `start_asset_health.bat` | AssetHealth only (port 8080) |
 
 Install `trimesh` and `Pillow` into the same Python if you want mesh and texture
-measurement:
+measurement, and `charset-normalizer`, without which trimesh cannot read an `.obj`
+or `.mtl` that is not UTF-8 (a cp1252 material name from an older Windows exporter):
 
 ```
-python -m pip install "trimesh>=4" "pillow>=10"
+python -m pip install "trimesh>=4" "pillow>=10" charset-normalizer
 ```
 
 ## Path B - wheel into a virtual environment

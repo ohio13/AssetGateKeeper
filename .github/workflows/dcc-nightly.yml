@@ -32,7 +32,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install watchdog trimesh pillow numpy
+          python -m pip install watchdog trimesh pillow numpy charset-normalizer
 
       # Cached so the nightly costs ~20 s instead of a 400 MB download.
       - name: Cache Blender
