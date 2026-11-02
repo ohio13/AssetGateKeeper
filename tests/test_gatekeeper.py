@@ -1567,6 +1567,12 @@ if _elsewhere.parent.exists():
 subprocess.run(_gate_cli + ["--cache", str(_elsewhere)], capture_output=True, text=True)
 expect("--cache FILE puts it where CI keeps its caches, creating the folder", _elsewhere.is_file())
 
+_json_run = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"),
+                            str(DROP / "bark_Albedo.png"), "--json"], capture_output=True, text=True)
+_json_line = json.loads(_json_run.stdout.splitlines()[0])
+expect("--json carries the numbers behind the verdict (memory_kb, as docs/05 says)",
+       _json_line.get("stats", {}).get("memory_kb", 0) > 0, _json_line)
+
 print("15. VCS hook integrations")
 
 p4_hook = load_module("agk_p4_hook", Path("vcs_hooks") / "p4_pre_submit.py")

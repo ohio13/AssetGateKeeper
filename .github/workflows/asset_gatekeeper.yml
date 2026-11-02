@@ -99,9 +99,11 @@ jobs:
 
       # Unchanged files (and their textures) reuse last run's verdict; any rule
       # or gate change re-checks everything. An old cache is never wrong, only slower.
+      # restore + save as two steps: actions/cache alone saves only when the job
+      # passes, and a gate that fails is exactly the run worth caching.
       - name: Restore the verdict cache
         if: steps.target.outputs.found == 'true'
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: .agk-ci-cache
           key: agk-verdicts-${{ github.sha }}
@@ -113,6 +115,13 @@ jobs:
           asset-gatekeeper "${{ steps.target.outputs.dir }}" --once --no-color
           --jobs 0 --cache .agk-ci-cache/verdicts.json
           --report junit:gate-junit.xml --report sarif:gate.sarif
+
+      - name: Save the verdict cache
+        if: always() && steps.target.outputs.found == 'true' && hashFiles('.agk-ci-cache/verdicts.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: .agk-ci-cache
+          key: agk-verdicts-${{ github.sha }}
 
       # Each failing asset becomes an annotation on the pull request. Needs
       # code scanning (public repos, or GitHub Advanced Security).

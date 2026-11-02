@@ -3294,7 +3294,9 @@ def pbr_violation(path: Path, budget: Budget) -> Optional[str]:
         with Image.open(path) as image:
             image = image.convert("RGB")
             image.thumbnail((64, 64), Image.BILINEAR)
-            pixels = list(image.getdata())
+            # Pillow 12+ renamed it (getdata goes in Pillow 14, 2027-10).
+            flatten = getattr(image, "get_flattened_data", None) or image.getdata
+            pixels = list(flatten())
     except Exception as exc:     # unreadable: the texture check already fails it
         LOG.debug("pbr: cannot sample %s: %s", path.name, exc)
         return None
@@ -4075,6 +4077,8 @@ class Reporter:
                     "problems": list(verdict.problems),
                     "modifications": list(verdict.heal_notes),
                     "warnings": list(verdict.warnings),
+                    # Numbers behind the metric: triangles, memory_kb, texel density...
+                    "stats": {name: value for name, value in verdict.stats},
                 }), flush=True)
             return
 
