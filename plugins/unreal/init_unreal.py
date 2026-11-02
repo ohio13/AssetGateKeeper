@@ -213,6 +213,8 @@ def _process_pending(_delta_seconds=0.0) -> None:
 
 
 def _schedule(path: str, mode: str, problems: list) -> None:
+    if any(item[0] == path for item in _pending):
+        return                       # already queued for this tick
     _pending.append((path, mode, problems))
     register = getattr(unreal, "register_slate_post_tick_callback", None)
     if not callable(register):           # no editor tick (commandlet): act now
@@ -226,6 +228,11 @@ def reject(path: str, mode: str, problems: list) -> str:
     """Quarantine or delete an imported asset; returns what was done."""
     reasons = "\n".join(f"- {problem}" for problem in problems)
     library = unreal.EditorAssetLibrary
+    if not library.does_asset_exist(path):
+        # Already moved or deleted (by us on an earlier report, or by hand):
+        # nothing to do, and nothing to alarm the artist with.
+        unreal.log(f"[AssetGatekeeper] {path} is already gone; nothing to reject")
+        return "gone"
     referencers = _referencers(path)
     if referencers:
         notify("AssetGatekeeper: asset exceeds budget (left in place)",
@@ -251,6 +258,28 @@ def reject(path: str, mode: str, problems: list) -> str:
     return outcome
 
 
+# UE 5.3.2 reports one FBX drag-and-drop to OnAssetPostImport twice (seen live:
+# one "import starting", then two checks of the same mesh). The second check
+# queued the same move again, and the artist got a second, false message:
+# "... could NOT be moved". A repeat for the same asset within this window is
+# ignored.
+DUPLICATE_WINDOW_SECONDS = 2.0
+_recent: dict = {}
+
+
+def _first_report(path: str) -> bool:
+    import time
+
+    now = time.monotonic()
+    for key, when in list(_recent.items()):
+        if now - when > DUPLICATE_WINDOW_SECONDS:
+            del _recent[key]
+    if path in _recent:
+        return False
+    _recent[path] = now
+    return True
+
+
 def _on_post_import(factory, created_object) -> None:
     """OnAssetPostImport passes (factory, created_object) - two arguments.
 
@@ -260,6 +289,8 @@ def _on_post_import(factory, created_object) -> None:
     """
     asset = created_object
     if asset is None or not isinstance(asset, unreal.StaticMesh):
+        return
+    if not _first_report(_asset_path(asset)):
         return
 
     budget = load_budget()

@@ -476,6 +476,51 @@ expect("delete mode deletes", init_unreal.reject("/Game/Props/crate", "delete", 
        and ("delete", "/Game/Props/crate") in library.calls, library.calls)
 
 
+# Verified in UE 5.3.2 by hand: one drag-and-drop reported the mesh twice, and
+# the second report logged "could NOT be moved" after the first had moved it.
+class _FakeMesh(fake_unreal.StaticMesh):
+    def __init__(self, path):
+        self.path = path
+
+    def get_path_name(self):
+        return self.path + "." + self.path.rsplit("/", 1)[-1]
+
+    def get_name(self):
+        return self.path.rsplit("/", 1)[-1]
+
+
+saved_budget, saved_check = init_unreal.load_budget, init_unreal.check_static_mesh
+init_unreal.load_budget = lambda: {"max_triangles": 50000}
+init_unreal.check_static_mesh = lambda asset, budget: ["240,000 triangles exceeds the 50,000 budget"]
+library = _FakeLibrary({"/Game/DragTest/SM_2_TooHeavy"})
+fake_unreal.EditorAssetLibrary = library
+told.clear()
+mesh = _FakeMesh("/Game/DragTest/SM_2_TooHeavy")
+init_unreal._on_post_import(None, mesh)
+init_unreal._on_post_import(None, mesh)          # the engine's second report
+expect("a mesh reported twice by one import is moved once",
+       [c for c in library.calls if c[0] == "rename"] == [
+           ("rename", "/Game/DragTest/SM_2_TooHeavy", "/Game/_AssetGatekeeper_Rejected/SM_2_TooHeavy")],
+       library.calls)
+expect("... and the artist gets one message, not a false 'could NOT be moved'",
+       len(told) == 1 and "could NOT" not in told[0], told)
+init_unreal.load_budget, init_unreal.check_static_mesh = saved_budget, saved_check
+told.clear()
+expect("rejecting an asset that is already gone is quiet",
+       init_unreal.reject("/Game/DragTest/SM_2_TooHeavy", "quarantine", ["x"]) == "gone" and not told, told)
+ticks = []
+fake_unreal.register_slate_post_tick_callback = lambda fn: ticks.append(fn) or len(ticks)
+fake_unreal.unregister_slate_post_tick_callback = lambda handle: None
+library = _FakeLibrary({"/Game/DragTest/SM_3_FiveMaterials"})
+fake_unreal.EditorAssetLibrary = library
+init_unreal._schedule("/Game/DragTest/SM_3_FiveMaterials", "quarantine", ["5 material slots"])
+init_unreal._schedule("/Game/DragTest/SM_3_FiveMaterials", "quarantine", ["5 material slots"])
+init_unreal._process_pending()
+expect("the same asset queued twice in one tick is handled once",
+       len(library.calls) == 1 and len(told) == 1, (library.calls, told))
+del fake_unreal.register_slate_post_tick_callback, fake_unreal.unregister_slate_post_tick_callback
+
+
 class _FakeEvent:
     def __init__(self):
         self.handlers = []

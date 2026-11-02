@@ -1,3 +1,12 @@
+# Since v1.1.0 (unreleased, on `main`)
+
+* **Unreal: one message per rejected drag-and-drop.** UE 5.3.2 reports a single
+  FBX drag-and-drop to the post-import hook twice. The first report moved the
+  mesh to `/Game/_AssetGatekeeper_Rejected`; the second queued the same move and
+  told the artist it "could NOT be moved". Repeat reports of the same asset
+  within 2 seconds are now ignored, a path is queued once per tick, and an asset
+  that is already gone is skipped quietly. Found in a hand test on 2026-11-02.
+
 # AssetGatekeeper v1.1.0
 
 **Released:** 2026-11-01  **Tag:** `v1.1.0`
