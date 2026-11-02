@@ -34,6 +34,7 @@ import socket
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -162,6 +163,22 @@ class JsonLineEmitter:
         return
 
 
+_HOSTNAME = socket.gethostname() or "-"
+
+
+def _syslog_token(value: str, limit: int) -> str:
+    """An RFC 5424 header field: printable US-ASCII, no spaces, bounded, or "-"."""
+    cleaned = "".join(ch for ch in str(value) if 33 <= ord(ch) <= 126)[:limit]
+    return cleaned or "-"
+
+
+def _epoch(timestamp: str) -> float:
+    try:
+        return datetime.fromisoformat(timestamp.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return time.time()
+
+
 class SyslogEmitter:
     """RFC 5424 over UDP (fire and forget) or TCP (framed with a newline)."""
 
@@ -194,9 +211,14 @@ class SyslogEmitter:
         return sock
 
     def format(self, event: AuditEvent) -> bytes:
+        # RFC 5424: <PRI>1 TIMESTAMP HOSTNAME APP-NAME PROCID MSGID SD MSG.
+        # HOSTNAME used to be "-" (nil), so every event in the SIEM looked as if
+        # it came from the same nowhere; the machine name is what an incident
+        # responder filters on first.
         priority = self.facility * 8 + SEVERITY_NUMBER[event.severity]
-        header = (f"<{priority}>1 {event.timestamp} - {self.app_name} - "
-                  f"{event.event} - ")
+        header = (f"<{priority}>1 {event.timestamp} {_syslog_token(_HOSTNAME, 255)} "
+                  f"{_syslog_token(self.app_name, 48)} {os.getpid()} "
+                  f"{_syslog_token(event.event, 32)} - ")
         return (header + event.as_json()).encode("utf-8", "replace")
 
     def emit(self, event: AuditEvent) -> None:
@@ -227,7 +249,14 @@ class SyslogEmitter:
 
 
 class WebhookEmitter:
-    """Batch POST to Splunk HEC / Datadog / anything that takes JSON.
+    """Batch POST to Splunk HEC or any collector that takes JSON.
+
+    A URL containing ``/services/collector`` is Splunk's HTTP Event Collector,
+    which accepts only its own envelope - one ``{"time", "host", "sourcetype",
+    "event"}`` object per event, concatenated - and answers anything else with
+    400 "Event field is required". That envelope is what goes there; every
+    other URL gets ``{"schema": ..., "events": [...]}``. (The 1.0 emitter sent
+    the generic body to HEC too, including the HEC URL its own docs used.)
 
     Batched because one HTTP request per event turns a telemetry burst into a
     connection storm. Bounded queue: when the collector is down, events are
@@ -296,8 +325,23 @@ class WebhookEmitter:
         self._thread.start()
         return self
 
+    @property
+    def splunk_hec(self) -> bool:
+        path = urllib.parse.urlsplit(self.url).path.lower()
+        return "/services/collector" in path and not path.rstrip("/").endswith("/raw")
+
+    def body(self, batch: list[dict]) -> bytes:
+        if self.splunk_hec:
+            return "\n".join(
+                json.dumps({"time": round(_epoch(str(item.get("ts", ""))), 3),
+                            "host": _HOSTNAME, "source": "asset-gatekeeper",
+                            "sourcetype": "_json", "event": item},
+                           separators=(",", ":"), sort_keys=True)
+                for item in batch).encode("utf-8")
+        return json.dumps({"schema": SCHEMA, "events": batch}).encode("utf-8")
+
     def _send(self, batch: list[dict]) -> None:
-        body = json.dumps({"schema": SCHEMA, "events": batch}).encode("utf-8")
+        body = self.body(batch)
         headers = {"Content-Type": "application/json",
                    "User-Agent": "AssetGatekeeper-audit/1.0"}
         if self.token:

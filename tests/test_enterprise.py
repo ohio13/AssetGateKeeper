@@ -891,6 +891,14 @@ expect("syslog frames an RFC 5424 message with the right priority",
 expect("the syslog payload is the same JSON", json.loads(raw.split(" - ", 3)[-1])["event"]
        == "rbac.denied")
 expect("the emitter counts what it sent", syslog.sent == 1)
+import re as _re  # noqa: E402
+import socket as _socket  # noqa: E402
+rfc5424 = _re.match(r"^<(\d{1,3})>1 (\S+) (\S{1,255}) (\S{1,48}) (\S{1,128}) (\S{1,32}) (-|\[.*\]) (.*)$", raw)
+expect("the syslog header has every RFC 5424 field", rfc5424 is not None, raw[:120])
+expect("the syslog header names the sending machine, not '-'",
+       rfc5424 is not None and rfc5424.group(3) not in ("-", "") and
+       rfc5424.group(3) == audit._syslog_token(_socket.gethostname(), 255), raw[:120])
+expect("the syslog MSGID is the event name", rfc5424 is not None and rfc5424.group(6) == "rbac.denied")
 
 posted = []
 def fake_poster(url, body, headers, timeout):
@@ -906,6 +914,33 @@ webhook.close()
 expect("the webhook batches events", sum(len(b["events"]) for b in posted) == 5,
        str([len(b["events"]) for b in posted]))
 expect("the webhook reports what it delivered", webhook.sent == 5)
+
+# Splunk HEC accepts only {"event": ...} envelopes, one per event, concatenated.
+hec_posts = []
+def hec_poster(url, body, headers, timeout):
+    hec_posts.append((url, body.decode("utf-8"), headers))
+    return 200
+hec = audit.WebhookEmitter("https://splunk.studio.internal:8088/services/collector",
+                           token="t0k", batch_size=3, flush_interval=0.05, poster=hec_poster)
+hec.start()
+for index in range(3):
+    hec.emit(audit.AuditEvent(event="budget.violation", actor=f"u{index}"))
+hec.flush(2.0)
+hec.close()
+hec_lines = [json.loads(line) for _, body, _ in hec_posts for line in body.splitlines()]
+expect("a Splunk HEC URL gets HEC envelopes: one object per event, each with 'event'",
+       len(hec_lines) == 3 and all("event" in line and "time" in line for line in hec_lines),
+       str(hec_lines[:1]))
+expect("the HEC envelope carries the audit event unchanged",
+       all(line["event"]["event"] == "budget.violation" for line in hec_lines))
+expect("the HEC time is epoch seconds", all(isinstance(line["time"], (int, float))
+                                            and line["time"] > 1.7e9 for line in hec_lines))
+expect("HEC gets 'Authorization: Splunk <token>'",
+       all(headers.get("Authorization") == "Splunk t0k" for _, _, headers in hec_posts))
+expect("a generic webhook keeps the generic body",
+       not audit.WebhookEmitter("https://siem.example/ingest").splunk_hec and
+       audit.WebhookEmitter("https://s:8088/services/collector/event").splunk_hec and
+       not audit.WebhookEmitter("https://s:8088/services/collector/raw").splunk_hec)
 
 def failing_poster(url, body, headers, timeout):
     return 500

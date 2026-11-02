@@ -70,6 +70,10 @@ several verdicts are deliberately stricter and some pipelines will turn red.
 * **Perforce trigger applies the project's budget.** It gated a temp copy of each
   file, where no `rules.toml` exists, so every submit was judged against the
   shipped defaults. It now fetches the nearest depot `rules.toml` (at `#head`).
+* **SIEM forwarding speaks the receivers' formats.** Splunk HEC rejects anything
+  but its own `{"event": ...}` envelope; the webhook sent a generic body to the
+  HEC URL its own docs used. Syslog lines named no host (`-`); they now carry
+  the machine name.
 * **Maya install docs:** the documented `sys.path` pointed one folder too high;
   `import maya_preflight` failed.
 

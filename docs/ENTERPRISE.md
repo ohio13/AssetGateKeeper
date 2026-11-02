@@ -370,6 +370,13 @@ min_severity = "notice"
 
 Token for the webhook: `AGK_AUDIT_WEBHOOK_TOKEN` (never in the file).
 
+A `webhook_url` containing `/services/collector` is treated as Splunk's HTTP
+Event Collector: each event is sent in HEC's own envelope (`time`, `host`,
+`source`, `sourcetype` `_json`, `event`) with `Authorization: Splunk <token>`.
+Any other URL receives `{"schema": "agk.audit/1.0", "events": [...]}`. Syslog
+lines carry the sending machine's name as the RFC 5424 HOSTNAME, the process id
+as PROCID and the event name (`budget.violation`, ...) as MSGID.
+
 Events: `auth.token.rejected`, `auth.login.failed`, `rbac.denied`,
 `rbac.override`, `budget.violation`, `admin.action`, `migration.applied` - each a
 JSON object with `schema`, `ts`, `event`, `severity`, `actor`, `action`, `path`,
