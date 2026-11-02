@@ -169,10 +169,18 @@ def load_gltf(path: Path) -> Mesh:
 def load_mesh(path: Path) -> Mesh:
     suffix = path.suffix.lower()
     if suffix in OBJ_SUFFIXES:
-        return load_obj(path)
-    if suffix in GLTF_SUFFIXES:
-        return load_gltf(path)
-    raise LodError(f"unsupported format {suffix} (use .obj, .gltf or .glb)")
+        mesh = load_obj(path)
+    elif suffix in GLTF_SUFFIXES:
+        mesh = load_gltf(path)
+    else:
+        raise LodError(f"unsupported format {suffix} (use .obj, .gltf or .glb)")
+    # A NaN or infinite coordinate cannot be snapped to a grid cell: clustering
+    # died with "cannot convert float NaN to integer" and the server said 500.
+    for index, point in enumerate(mesh.positions):
+        if not all(math.isfinite(value) for value in point):
+            raise LodError(f"{path.name}: vertex {index + 1} has a non-finite coordinate "
+                           f"{tuple(point)}; fix the export")
+    return mesh
 
 
 # --------------------------------------------------------------------------- #

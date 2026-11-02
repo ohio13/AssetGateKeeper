@@ -36,7 +36,7 @@ jobs:
       # ("syntax error in forward annotation"), so the engine and tests are
       # linted here and the plugins are syntax-checked below instead.
       - name: Lint engine, server + tests
-        run: python -m pyflakes asset_gatekeeper.py healer.py notifier.py engine/lod_manager.py tools/houdini_export_hook.py server/asset_health_server.py server/art_workstation_server.py vcs_hooks/p4_pre_submit.py vcs_hooks/git_pre_commit.py tests/test_gatekeeper.py tests/test_server.py tests/test_workstation.py tests/test_admin.py tests/gen_test_assets.py tests/run_headless_integration.py tests/test_formats.py plugins/unreal/import_gatekeeper.py
+        run: python -m pyflakes asset_gatekeeper.py healer.py notifier.py engine/lod_manager.py tools/houdini_export_hook.py server/asset_health_server.py server/art_workstation_server.py vcs_hooks/p4_pre_submit.py vcs_hooks/git_pre_commit.py tests/test_gatekeeper.py tests/test_server.py tests/test_workstation.py tests/test_viewer_browser.py tests/test_admin.py tests/gen_test_assets.py tests/run_headless_integration.py tests/test_formats.py plugins/unreal/import_gatekeeper.py
 
       - name: Syntax-check DCC plugins
         run: python -m compileall -q plugins
@@ -85,3 +85,25 @@ jobs:
 
       - name: Headless integration (synthetic exporter)
         run: python tests/run_headless_integration.py --synthetic
+
+  # The Art Workstation viewer in a real browser. The API suite passed for
+  # months while the page showed the wrong model, refused embedded glTF
+  # buffers and crashed on Geometry -> Textured; only a browser sees that.
+  viewer-browser:
+    name: viewer · chromium
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install trimesh pillow numpy playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Viewer suite (Chromium)
+        run: python tests/test_viewer_browser.py

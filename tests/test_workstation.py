@@ -640,6 +640,172 @@ expect("the stats endpoint exposes both counts",
 um_server.shutdown()
 um_server.server_close()
 
+print("19. phase 1 fixes (found by driving the viewer in a browser, 2026-11-02)")
+import math  # noqa: E402
+import socket  # noqa: E402
+
+# Filenames keep their extension; Unicode stems survive.
+expect("a Unicode stem keeps its name and extension", aws.safe_filename("岩.obj") == "岩.obj",
+       aws.safe_filename("岩.obj"))
+expect("a Cyrillic name keeps its extension",
+       aws.safe_filename("наш_ящик.glb") == "наш_ящик.glb", aws.safe_filename("наш_ящик.glb"))
+long_name = aws.safe_filename("a" * 300 + ".glb")
+expect("a long name is shortened before the extension",
+       long_name.endswith(".glb") and len(long_name) <= aws.MAX_NAME, long_name[-10:])
+expect("path parts are still stripped", aws.safe_filename("..\\..\\x/evil.glb") == "evil.glb",
+       aws.safe_filename("..\\..\\x/evil.glb"))
+expect("a bare extension gets a stem", aws.safe_filename(".glb") == "asset.glb",
+       aws.safe_filename(".glb"))
+p1_db, p1_data = fresh("phase1")
+uni = aws.create_asset(p1_db, p1_data, "岩.obj", OBJ.encode())
+expect("a Unicode-named mesh is measured, not unverified",
+       uni["kind"] == "mesh" and uni["triangle_count"] == 12, (uni["kind"], uni["triangle_count"]))
+
+# Collision values are validated before they are stored.
+def refused(kind, data):
+    try:
+        aws.set_collision(p1_db, uni["id"], kind, data)
+    except aws.WorkstationError as exc:
+        return exc.status
+    return None
+
+
+expect("an infinite radius is refused (it was stored as Infinity)",
+       refused("sphere", {"center": [0, 0, 0], "radius": 1e999}) == 400)
+expect("a zero radius is refused", refused("sphere", {"center": [0, 0, 0], "radius": 0}) == 400)
+expect("an inverted box is refused", refused("box", {"min": [1, 1, 1], "max": [0, 0, 0]}) == 400)
+expect("a text coordinate is a 400, not a 500",
+       refused("box", {"min": ["a", 0, 0], "max": [1, 1, 1]}) == 400)
+expect("true is not a number", refused("sphere", {"center": [0, 0, 0], "radius": True}) == 400)
+expect("non-object data is a 400", refused("box", [1, 2, 3]) == 400)
+stored = aws.get_collision(p1_db, uni["id"])
+expect("a refused value leaves the stored proxy alone", stored["kind"] == "box", str(stored)[:80])
+
+# Exported OBJ face numbers point at real vertices.
+def obj_indices(text):
+    vertices = sum(1 for line in text.splitlines() if line.startswith("v "))
+    indices = [int(token) for line in text.splitlines() if line.startswith("f ")
+               for token in line.split()[1:]]
+    return vertices, min(indices), max(indices)
+
+
+box_v, box_lo, box_hi = obj_indices(aws.collision_obj(uni, aws.get_collision(p1_db, uni["id"])))
+expect("box export face numbers run 1..8 (was up to 9)", (box_lo, box_hi) == (1, box_v) == (1, 8),
+       (box_v, box_lo, box_hi))
+aws.set_collision(p1_db, uni["id"], "sphere", {"center": [0, 0, 0], "radius": 1.0})
+sp_v, sp_lo, sp_hi = obj_indices(aws.collision_obj(uni, aws.get_collision(p1_db, uni["id"])))
+expect("sphere export face numbers stay inside the vertex list",
+       sp_lo == 1 and sp_hi <= sp_v, (sp_v, sp_lo, sp_hi))
+
+# Hulls: a cube is 12 outward triangles; a dense cloud is reduced, then exportable.
+cube = [[x, y, z] for x in (0, 1) for y in (0, 1) for z in (0, 1)]
+cube_faces, cube_points = aws.convex_hull_triangles(cube)
+expect("a cube hull is 12 triangles (was 24 overlapping)", len(cube_faces) == 12, len(cube_faces))
+
+
+def outward(faces, points):
+    centre = [sum(p[i] for p in points) / len(points) for i in range(3)]
+    for a, b, c in faces:
+        pa, pb, pc = points[a], points[b], points[c]
+        n = aws._cross([pb[i] - pa[i] for i in range(3)], [pc[i] - pa[i] for i in range(3)])
+        if aws._dot(n, [pa[i] - centre[i] for i in range(3)]) <= 0:
+            return False
+    return True
+
+
+expect("every cube hull triangle faces outward", outward(cube_faces, cube_points))
+cloud = [[math.cos(i * 0.7) * math.sin(i * 0.3), math.sin(i * 0.7) * math.sin(i * 0.3),
+          math.cos(i * 0.3)] for i in range(400)]
+aws.set_collision(p1_db, uni["id"], "hull", {"points": cloud})
+hull = aws.get_collision(p1_db, uni["id"])
+expect("a 400-point hull is stored as at most 64 support points",
+       4 <= len(hull["data"]["points"]) <= aws.HULL_POINT_LIMIT, len(hull["data"]["points"]))
+hull_faces, hull_points = aws.convex_hull_triangles(hull["data"]["points"])
+expect("... and it exports (was always 413)", len(hull_faces) >= 4 and outward(hull_faces, hull_points),
+       len(hull_faces))
+
+# LOD inputs.
+nan_obj = OBJ.replace("v 1 1 1", "v nan 1 1")
+nan_asset = aws.create_asset(p1_db, p1_data, "nan.obj", nan_obj.encode())
+try:
+    aws.generate_lods(p1_db, p1_data, nan_asset["id"])
+    expect("a NaN vertex is a 422, not a 500", False)
+except aws.WorkstationError as exc:
+    expect("a NaN vertex is a 422, not a 500", exc.status == 422 and "non-finite" in str(exc),
+           (exc.status, str(exc)))
+
+expect("the page may fetch data: and blob: (embedded glTF buffers and GLB textures)",
+       any(key == "Content-Security-Policy" and "connect-src 'self' data: blob:" in value
+           for key, value in aws.WORKSTATION_SECURITY_HEADERS))
+expect("a stalled client cannot hold a thread forever", (aws.Handler.timeout or 0) > 0)
+
+p1_server = aws.build_server("127.0.0.1", 0, p1_db, p1_data, quiet=True,
+                             allow_hosts=("review.studio.example",))
+p1_port = p1_server.server_address[1]
+threading.Thread(target=p1_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+p1 = Client(p1_port)
+note = {"asset_id": uni["id"], "category": "Other", "note_text": "x"}
+status, _, _ = p1.call("/api/notes", "POST", note, {"Origin": "http://evil.example",
+                                                     "Content-Type": "text/plain"})
+expect("a write from another website is refused", status == 403, status)
+status, _, _ = p1.call("/api/notes", "POST", note, {"Origin": f"http://127.0.0.1:{p1_port + 1}"})
+expect("... including another port on the same machine", status == 403, status)
+status, _, _ = p1.call("/api/notes", "POST", note, {"Origin": "null"})
+expect("... and an opaque 'null' origin", status == 403, status)
+status, _, _ = p1.call("/api/notes", "POST", note, {"Sec-Fetch-Site": "cross-site"})
+expect("... and a browser write with no Origin but Sec-Fetch-Site: cross-site", status == 403, status)
+status, _, _ = p1.call(f"/api/assets/{uni['id']}", "DELETE", None, {"Origin": "http://evil.example"})
+expect("a cross-site delete is refused", status == 403, status)
+status, _, _ = p1.call("/api/notes", "POST", note, {"Origin": f"http://127.0.0.1:{p1_port}"})
+expect("the viewer's own page may still write", status == 201, status)
+status, _, _ = p1.call("/api/notes", "POST", note, {"Origin": "https://review.studio.example"})
+expect("a name passed with --allow-host may write (proxy setups)", status == 201, status)
+status, _, _ = p1.call("/api/notes", "POST", note)
+expect("non-browser clients (uploader, AssetHealth) are unaffected", status == 201, status)
+status, _, headers = p1.call("/api/notes", "OPTIONS", None,
+                             {"Origin": "http://evil.example", "Access-Control-Request-Method": "DELETE"})
+expect("a CORS preflight gets 405 and no permission",
+       status == 405 and not any(k.lower().startswith("access-control") for k in headers), (status, headers))
+status, _ = p1.json("/api/assets/9999/notes")
+expect("notes of a missing asset are a 404", status == 404, status)
+status, _ = p1.json("/api/assets/9999/lods")
+expect("LODs of a missing asset are a 404", status == 404, status)
+status, body = p1.json(f"/api/assets/{uni['id']}/lods", "POST", {"max_triangles": [100]})
+expect("an unknown LOD field is named, not ignored", status == 400 and "max_triangles" in body["error"],
+       body)
+status, _ = p1.json(f"/api/assets/{uni['id']}/lods", "POST", {"ratios": [0.5] * 5})
+expect("more than 4 LOD levels is a 400, not silently cut", status == 400, status)
+status, _ = p1.json(f"/api/assets/{uni['id']}/lods", "POST", {"max_tris": [-5]})
+expect("a negative cap is a 400", status == 400, status)
+status, body = p1.json(f"/api/assets/{uni['id']}/collision", "POST",
+                       {"kind": "sphere", "data": {"center": [0, 0, 0], "radius": 1e999}})
+expect("an infinite radius over HTTP is a 400", status == 400, (status, body))
+
+# One request, one answer: a bad LOD body used to get a 400 *and* a 201.
+raw = socket.create_connection(("127.0.0.1", p1_port))
+bad = b"not json"
+raw.sendall(b"POST /api/assets/%d/lods HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+            b"Content-Type: application/json\r\nContent-Length: %d\r\n\r\n" % (uni["id"], p1_port, len(bad))
+            + bad)
+raw.settimeout(3)
+received = b""
+try:
+    while True:
+        chunk = raw.recv(65536)
+        if not chunk:
+            break
+        received += chunk
+except socket.timeout:
+    pass
+raw.close()
+expect("a bad LOD body gets exactly one response", received.count(b"HTTP/1.1 ") == 1,
+       received.count(b"HTTP/1.1 "))
+expect("... and no LODs are generated behind it", aws.list_lods(p1_db, uni["id"]) == [],
+       aws.list_lods(p1_db, uni["id"]))
+p1_server.shutdown()
+p1_server.server_close()
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

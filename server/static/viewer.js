@@ -1,6 +1,6 @@
 /* Art Workstation viewer.
  *
- * Three.js comes from a CDN (the only external dependency in the whole system);
+ * Three.js is vendored under /static/vendor (no CDN, no network at runtime);
  * everything else - routing, auth, notes, collision - is the stdlib server.
  */
 import * as THREE from "three";
@@ -20,8 +20,22 @@ const state = {
   collision: true,
   token: localStorage.getItem("aw_token") || "",
   sceneObjects: { model: null, collision: null },
-  originals: new Map(), // material -> {color, map, ...} for the textured restore
+  originals: new Map(), // material -> {color, map, ...} for the exposure sliders
+  meshMaterials: new Map(), // mesh -> the material(s) it was loaded with
+  selectSeq: 0,         // the newest selectAsset call wins; older ones stop
 };
+
+// Formats the browser can draw. Everything else the server stores is measured
+// (or labelled unverified) but gets the "no 3D preview" panel instead of being
+// fed to the glTF loader, which used to fail with "not valid JSON" and leave
+// the previous asset on screen.
+const PREVIEW_SUFFIXES = [".glb", ".gltf", ".obj"];
+const suffixOf = (name) => {
+  const lower = String(name || "").toLowerCase();
+  return lower.includes(".") ? lower.slice(lower.lastIndexOf(".")) : "";
+};
+const previewable = (asset) => !!asset && asset.kind === "mesh"
+  && PREVIEW_SUFFIXES.includes(suffixOf(asset.filename));
 
 /* - auth */
 
@@ -105,6 +119,9 @@ const objLoader = new OBJLoader();
 function disposeObject(object) {
   if (!object) return;
   object.traverse((node) => {
+    // In Geometry mode a mesh wears the shared normal material; dispose the
+    // material it was loaded with instead (and keep the shared one alive).
+    if (state.meshMaterials.has(node)) node.material = state.meshMaterials.get(node);
     if (node.geometry) node.geometry.dispose();
     if (node.material) {
       const materials = Array.isArray(node.material) ? node.material : [node.material];
@@ -112,11 +129,30 @@ function disposeObject(object) {
         for (const value of Object.values(material)) {
           if (value && value.isTexture) value.dispose();
         }
-        material.dispose();
+        if (material !== normalMaterial) material.dispose();
       });
     }
   });
   scene.remove(object);
+}
+
+/* The one way to empty the viewport. Called on every selection, on delete and
+ * when a load fails, so nothing of the previous asset - model, collision box,
+ * material sliders - can be left on screen under another asset's name. */
+function clearModel() {
+  disposeObject(state.sceneObjects.model);
+  state.sceneObjects.model = null;
+  disposeObject(state.sceneObjects.collision);
+  state.sceneObjects.collision = null;
+  state.meshMaterials.clear();
+  state.originals.clear();
+  $("materials").innerHTML = '<div class="empty">No 3D model loaded.</div>';
+}
+
+function showHint(title, body) {
+  $("hint-title").textContent = title;
+  $("hint-body").textContent = body;
+  $("viewport-hint").style.display = "";
 }
 
 function frameObject(object) {
@@ -140,30 +176,46 @@ function frameObject(object) {
 }
 
 async function loadModel(assetId, level) {
+  const lod = level === "source" ? null
+    : ((state.asset && state.asset.lods) || []).find((item) => item.level === level);
   const path = level === "source"
     ? `/api/assets/${assetId}/file`
     : `/api/assets/${assetId}/lods/${level}/file`;
   const response = await api(path);
   const buffer = await response.arrayBuffer();
+  // The loader follows the stored file's real type. LODs used to be named
+  // "<level>.gltf" whatever they were, so every LOD of an .obj failed with
+  // "Unexpected token '#' ... is not valid JSON".
   const name = level === "source"
-    ? (state.asset ? state.asset.filename : "") : `${level}.gltf`;
-  const lower = name.toLowerCase();
-
-  $("viewport-hint").style.display = "none";
-  disposeObject(state.sceneObjects.model);
+    ? (state.asset ? state.asset.filename : "")
+    : (lod ? lod.file_path : `${level}.glb`);
 
   let object;
-  if (lower.endsWith(".obj")) {
+  if (suffixOf(name) === ".obj") {
     object = objLoader.parse(new TextDecoder().decode(buffer));
   } else {
     const gltf = await new Promise((resolve, reject) =>
       gltfLoader.parse(buffer, "", resolve, reject));
     object = gltf.scene;
   }
+  if (!state.asset || state.asset.id !== assetId) {
+    disposeObject(object);                 // the user moved on while this loaded
+    return;
+  }
 
-  state.originals.clear();
+  clearModel();
+  $("viewport-hint").style.display = "none";
+  const grey = level === "source" ? null
+    : new THREE.MeshStandardMaterial({ color: 0x9ea3ad, metalness: 0.05, roughness: 0.7,
+                                       name: "LOD preview (no materials)" });
   object.traverse((node) => {
     if (!node.isMesh) return;
+    // Generated LODs carry positions only: no UVs, normals or materials.
+    if (grey) {
+      if (node.geometry && !node.geometry.attributes.normal) node.geometry.computeVertexNormals();
+      node.material = grey;
+    }
+    state.meshMaterials.set(node, node.material);
     const materials = Array.isArray(node.material) ? node.material : [node.material];
     materials.forEach((material) => {
       if (!state.originals.has(material)) {
@@ -181,41 +233,29 @@ async function loadModel(assetId, level) {
   scene.add(object);
   frameObject(object);
   applyMaterialMode();
-  applyWireframe();
   buildMaterialControls();
   refreshCollisionExport();
   updateReadout();
   await refreshCollisionOverlay();
+  $("collision-derive").disabled = false;
 }
 
 /* - materials */
+
+// One shared normal material for Geometry mode. Swapping whole materials keeps
+// the originals untouched: the old code wrote a MeshNormalMaterial over each
+// mesh, then tried to "restore" colour on it (it has none) - Textured threw
+// "Cannot read properties of undefined (reading 'set')" and never came back.
+const normalMaterial = new THREE.MeshNormalMaterial({ flatShading: false });
 
 function applyMaterialMode() {
   const object = state.sceneObjects.model;
   if (!object) return;
   object.traverse((node) => {
-    if (!node.isMesh) return;
-    if (state.geometryMode) {
-      node.material = new THREE.MeshNormalMaterial({ flatShading: false });
-    } else {
-      const materials = Array.isArray(node.material) ? node.material : [node.material];
-      const restore = (material) => {
-        const original = state.originals.get(material);
-        if (!original) {
-          // LODs are written without materials; give them something readable.
-          material.color.set(0.62, 0.64, 0.68);
-          material.metalness = 0.05;
-          material.roughness = 0.7;
-          return;
-        }
-        if (original.color) material.color.copy(original.color);
-        if (original.map) { material.map = original.map; material.needsUpdate = true; }
-        if (original.metalness !== undefined) material.metalness = original.metalness;
-        if (original.roughness !== undefined) material.roughness = original.roughness;
-      };
-      materials.forEach(restore);
-    }
+    if (!node.isMesh || !state.meshMaterials.has(node)) return;
+    node.material = state.geometryMode ? normalMaterial : state.meshMaterials.get(node);
   });
+  applyWireframe();
 }
 
 function applyWireframe() {
@@ -228,6 +268,7 @@ function applyWireframe() {
       if ("wireframe" in material) material.wireframe = state.wireframe;
     });
   });
+  normalMaterial.wireframe = state.wireframe;
 }
 
 /* - collision */
@@ -269,7 +310,10 @@ function collisionLines(kind, data) {
 async function refreshCollisionOverlay() {
   disposeObject(state.sceneObjects.collision);
   state.sceneObjects.collision = null;
-  if (!state.asset) return;
+  if (!state.asset) {
+    $("collision-info").innerHTML = '<div class="empty">No asset selected.</div>';
+    return;
+  }
   $("collision-info").innerHTML = "";
   const collision = state.asset.collision;
   if (!collision) {
@@ -278,7 +322,7 @@ async function refreshCollisionOverlay() {
     return;
   }
   renderCollisionInfo(collision);
-  if (!state.collision) return;
+  if (!state.collision || !state.sceneObjects.model) return;
   const group = collisionLines(collision.kind, collision.data);
   state.sceneObjects.collision = group;
   scene.add(group);
@@ -308,26 +352,29 @@ function renderCollisionInfo(collision) {
 
 function fmt(n) { return Number(n || 0).toLocaleString(); }
 
+// "FAILED" from the CLI and "failed" from AssetHealth are the same verdict.
+const verdictOf = (asset) => String((asset && asset.verdict_status) || "").trim().toLowerCase();
+
 async function refreshAssets() {
   const data = await json("/api/assets");
   state.assets = data.assets || [];
   const list = $("asset-list");
   if (!state.assets.length) {
     list.innerHTML = '<div class="empty">Nothing uploaded yet.<br>'
-      + "Drop a .obj / .gltf / .glb anywhere.</div>";
+      + "Drop meshes, textures or source files anywhere.</div>";
     return;
   }
   list.innerHTML = "";
   const wanted = state.filter || "all";
   const visible = state.assets.filter((asset) => wanted === "all"
     ? true
-    : wanted === "attention" ? asset.verdict_status === "failed"
-      : asset.verdict_status === "passed");
+    : wanted === "attention" ? verdictOf(asset) === "failed"
+      : verdictOf(asset) === "passed");
   visible.forEach((asset) => {
     const element = document.createElement("div");
     element.className = "asset" + (state.asset && state.asset.id === asset.id ? " active" : "");
     element.dataset.id = asset.id;
-    element.dataset.verdict = asset.verdict_status || "";
+    element.dataset.verdict = verdictOf(asset);
     // An unverified format (.blend, .max, .ma) has no triangle count at all.
     // Printing "0 tris" would read as a cheap mesh rather than an unmeasured
     // one, so it is named as unmeasured and its reason moved into the tooltip.
@@ -339,13 +386,15 @@ async function refreshAssets() {
     const geometry = unverified
       ? `<span title="${escapeHtml(asset.analyse_note || "needs a DCC to measure")}">`
         + `unmeasured ${escapeHtml(suffix)}</span>`
-      : `${fmt(asset.triangle_count)} tris  ${fmt(asset.vertex_count)} verts  `
-        + `${asset.material_slots} mat${heavy}`;
+      : asset.kind === "texture"
+        ? `texture  ${escapeHtml((asset.analyse_note || "").replace(/ texture$/, ""))}`
+        : `${fmt(asset.triangle_count)} tris  ${fmt(asset.vertex_count)} verts  `
+          + `${asset.material_slots} mat${heavy}`;
     // Straight from AssetHealth: reviewers should never have to open the
     // dashboard in another tab to know what they are looking at.
-    const verdict = asset.verdict_status === "failed"
+    const verdict = verdictOf(asset) === "failed"
       ? '<span class="verdict failed" title="AssetHealth: failed">FAILED</span>'
-      : asset.verdict_status === "passed"
+      : verdictOf(asset) === "passed"
         ? '<span class="verdict passed" title="AssetHealth: passed">PASSED</span>' : "";
     element.innerHTML =
       `<div class="name">${verdict}${escapeHtml(asset.filename)}</div>`
@@ -366,20 +415,85 @@ async function refreshAssets() {
 }
 
 async function selectAsset(id) {
+  const seq = ++state.selectSeq;
+  let asset;
   try {
-    state.asset = await json(`/api/assets/${id}`);
-    state.level = "source";
-    buildLodButtons();
-    renderNotes();
-    await refreshAssets();
-    await loadModel(id, "source");
-    $("status").textContent = state.asset.filename;
-    $("note-submit").disabled = false;
-    $("note-text").disabled = false;
-    $("collision-derive").disabled = false;
+    asset = await json(`/api/assets/${id}`);
   } catch (error) {
-    $("status").textContent = `error: ${error.message}`;
+    if (seq === state.selectSeq) $("status").textContent = `error: ${error.message}`;
+    return;
   }
+  if (seq !== state.selectSeq) return;     // a newer click already took over
+
+  state.asset = asset;
+  state.level = "source";
+  clearModel();
+  buildLodButtons();
+  renderNotes();
+  showVerdict(asset);
+  updateReadout();
+  refreshCollisionExport();
+  await refreshCollisionOverlay();
+  // Notes work for every asset: an unmeasured .blend is exactly the one a
+  // reviewer needs to comment on.
+  $("note-submit").disabled = false;
+  $("note-text").disabled = false;
+  $("collision-derive").disabled = true;    // needs a model on screen
+  refreshAssets().catch(() => {});
+
+  if (!previewable(asset)) {
+    const what = asset.kind === "texture"
+      ? `${asset.analyse_note || "texture"} - the 3D view shows meshes only.`
+      : asset.kind === "unverified"
+        ? (asset.analyse_note || "This format cannot be measured or drawn here.")
+        : `${suffixOf(asset.filename)} files are measured but not drawn in the browser.`;
+    showHint(`${asset.filename}: no 3D preview`,
+             `${what} Its numbers, collision and notes are on the right.`);
+    $("status").textContent = `${asset.filename} (no 3D preview)`;
+    return;
+  }
+  showHint(`Loading ${asset.filename}`, "");
+  $("status").textContent = `loading ${asset.filename}`;
+  try {
+    await loadModel(asset.id, "source");
+    if (seq === state.selectSeq) $("status").textContent = asset.filename;
+  } catch (error) {
+    if (seq !== state.selectSeq) return;
+    clearModel();
+    showHint(`${asset.filename} could not be displayed`, error.message);
+    $("status").textContent = `${asset.filename}: could not display it`;
+  }
+}
+
+/* Re-read the selected asset without reloading its model (notes, collision,
+ * LOD list): reloading reset the camera every time a note was added. */
+async function refreshSelected() {
+  if (!state.asset) return;
+  const id = state.asset.id;
+  const asset = await json(`/api/assets/${id}`);
+  if (!state.asset || state.asset.id !== id) return;
+  state.asset = asset;
+  renderNotes();
+  updateReadout();
+  showVerdict(asset);
+  await refreshCollisionOverlay();
+  refreshAssets().catch(() => {});
+}
+
+function clearSelection() {
+  state.selectSeq += 1;
+  state.asset = null;
+  state.level = "source";
+  clearModel();
+  $("lod-buttons").innerHTML = "";
+  renderNotes();
+  showVerdict(null);
+  updateReadout();
+  refreshCollisionExport();
+  refreshCollisionOverlay().catch(() => {});
+  $("note-submit").disabled = true;
+  $("collision-derive").disabled = true;
+  showHint("No asset loaded", "Pick one from the library, or drop a file here to upload it.");
 }
 
 function buildLodButtons() {
@@ -393,6 +507,7 @@ function buildLodButtons() {
   levels.forEach((item) => {
     const button = document.createElement("button");
     button.className = "chip" + (item.level === state.level ? " active" : "");
+    button.dataset.level = item.level;
     button.textContent = item.label;
     button.addEventListener("click", async () => {
       state.level = item.level;
@@ -400,7 +515,10 @@ function buildLodButtons() {
         child.classList.toggle("active", child === button));
       try {
         await loadModel(state.asset.id, item.level);
+        $("status").textContent = `${state.asset.filename}  ${item.level === "source" ? "" : item.level}`;
       } catch (error) {
+        clearModel();
+        showHint(`${item.level} could not be displayed`, error.message);
         $("status").textContent = `error: ${error.message}`;
       }
     });
@@ -418,6 +536,8 @@ function updateReadout() {
     ? `${(tris / asset.triangle_count * 100).toFixed(1)}% of source` : "source";
   const geometry = asset.kind === "unverified"
     ? "<span>unmeasured - no triangle count</span>"
+    : asset.kind === "texture"
+      ? `<span>${escapeHtml(asset.analyse_note || "texture")}</span>`
     : `<span>${fmt(tris)} tris</span><span>${fmt(verts)} verts</span>`
       + `<span>${share}</span>`;
   $("readout").innerHTML =
@@ -550,7 +670,7 @@ function renderNotes() {
     element.querySelector("[data-note]").addEventListener("click", async () => {
       try {
         await api(`/api/notes/${note.id}`, { method: "DELETE" });
-        await selectAsset(state.asset.id);
+        await refreshSelected();
       } catch (error) { $("status").textContent = `error: ${error.message}`; }
     });
     container.appendChild(element);
@@ -564,24 +684,51 @@ async function uploadFile(file) {
     filename: file.name,
     uploader: $("note-author").value.trim() || "anonymous",
   });
-  $("status").textContent = `uploading ${file.name}`;
   const response = await api(`/api/assets?${query}`, {
     method: "POST",
     headers: { "Content-Type": "application/octet-stream" },
     body: file,
   });
-  const asset = await response.json();
-  await refreshAssets();
-  await selectAsset(asset.id);
-  $("status").textContent = `${asset.filename}  ` + (asset.kind === "unverified"
-    ? "stored, not measured" : `${fmt(asset.triangle_count)} tris`);
+  return response.json();
+}
+
+/* Upload one or more files, one after another, and say what happened to each.
+ * A refused file (an .exe, an oversized export) used to leave the status bar on
+ * "uploading ..." with an uncaught error and nothing for the user to read. */
+async function uploadFiles(files) {
+  const list = Array.from(files || []);
+  if (!list.length) return;
+  const done = [];
+  const refused = [];
+  for (const [index, file] of list.entries()) {
+    $("status").textContent = list.length > 1
+      ? `uploading ${index + 1}/${list.length}: ${file.name}` : `uploading ${file.name}`;
+    try {
+      done.push(await uploadFile(file));
+    } catch (error) {
+      refused.push(`${file.name}: ${error.message}`);
+    }
+  }
+  await refreshAssets().catch(() => {});
+  if (done.length) await selectAsset(done[done.length - 1].id);
+  const parts = [];
+  if (done.length === 1) {
+    const asset = done[0];
+    parts.push(`${asset.filename} uploaded`
+      + (asset.kind === "mesh" ? ` (${fmt(asset.triangle_count)} tris)` : ""));
+  } else if (done.length) {
+    parts.push(`${done.length} files uploaded`);
+  }
+  if (refused.length) parts.push(`refused: ${refused.join("; ")}`);
+  $("status").textContent = parts.join(" - ");
 }
 
 /* - wiring */
 
 $("upload").addEventListener("change", (event) => {
-  if (event.target.files[0]) uploadFile(event.target.files[0]);
+  const files = Array.from(event.target.files || []);
   event.target.value = "";
+  uploadFiles(files);
 });
 
 ["dragenter", "dragover"].forEach((name) =>
@@ -595,10 +742,7 @@ $("upload").addEventListener("change", (event) => {
     $("dropzone").classList.remove("visible");
   }));
 host.addEventListener("drop", (event) => {
-  const file = event.dataTransfer.files[0];
-  if (file) uploadFile(file).catch((error) => {
-    $("status").textContent = `error: ${error.message}`;
-  });
+  uploadFiles(event.dataTransfer.files);
 });
 
 $("mode-textured").addEventListener("click", () => {
@@ -636,25 +780,42 @@ $("collision-derive").addEventListener("click", async () => {
   const kind = $("collision-kind").value;
   try {
     let data;
+    const model = state.sceneObjects.model;
+    if (!model) return;
+    model.updateMatrixWorld(true);
     if (kind === "box") {
-      const box = new THREE.Box3().setFromObject(state.sceneObjects.model);
+      const box = new THREE.Box3().setFromObject(model);
       data = { min: box.min.toArray(), max: box.max.toArray() };
     } else if (kind === "sphere") {
-      const box = new THREE.Box3().setFromObject(state.sceneObjects.model);
-      const center = box.getCenter(new THREE.Vector3());
-      const size = box.getSize(new THREE.Vector3());
-      data = { center: center.toArray(), radius: Math.max(size.x, size.y, size.z) / 2 };
+      // The bounding sphere of the box - half its diagonal - so the proxy
+      // contains the mesh. Half the largest side left a cube's corners outside.
+      const sphere = new THREE.Box3().setFromObject(model).getBoundingSphere(new THREE.Sphere());
+      data = { center: sphere.center.toArray(), radius: sphere.radius };
     } else {
-      const points = [];
-      state.sceneObjects.model.traverse((node) => {
-        if (!node.isMesh) return;
+      // Send the points that reach furthest in 64 directions, in world space.
+      // Sampling every Nth vertex missed the extremes, ignored node transforms,
+      // and sent up to 4,000 points that export then refused.
+      const directions = [];
+      const golden = Math.PI * (3 - Math.sqrt(5));
+      for (let n = 0; n < 64; n += 1) {
+        const y = 1 - 2 * (n + 0.5) / 64;
+        const r = Math.sqrt(Math.max(0, 1 - y * y));
+        directions.push(new THREE.Vector3(Math.cos(golden * n) * r, y, Math.sin(golden * n) * r));
+      }
+      const best = directions.map(() => ({ score: -Infinity, point: null }));
+      const point = new THREE.Vector3();
+      model.traverse((node) => {
+        if (!node.isMesh || !node.geometry || !node.geometry.attributes.position) return;
         const position = node.geometry.attributes.position;
-        const step = Math.max(1, Math.floor(position.count / 400));
-        for (let i = 0; i < position.count; i += step) {
-          points.push([position.getX(i), position.getY(i), position.getZ(i)]);
+        for (let i = 0; i < position.count; i += 1) {
+          point.fromBufferAttribute(position, i).applyMatrix4(node.matrixWorld);
+          directions.forEach((direction, d) => {
+            const score = point.dot(direction);
+            if (score > best[d].score) best[d] = { score, point: point.toArray() };
+          });
         }
       });
-      data = { points: points.slice(0, 4000) };
+      data = { points: best.filter((item) => item.point).map((item) => item.point) };
     }
     await api(`/api/assets/${state.asset.id}/collision`, {
       method: "POST",
@@ -685,7 +846,7 @@ $("note-form").addEventListener("submit", async (event) => {
       }),
     });
     $("note-text").value = "";
-    await selectAsset(state.asset.id);
+    await refreshSelected();
   } catch (error) {
     $("status").textContent = `error: ${error.message}`;
   }
@@ -704,12 +865,8 @@ function connectLive() {
   source.addEventListener("asset-deleted", (event) => {
     const payload = JSON.parse(event.data);
     if (state.asset && state.asset.id === payload.asset_id) {
-      state.asset = null;
-      disposeObject(state.sceneObjects.model);
-      state.sceneObjects.model = null;
-      $("viewport-hint").style.display = "";
-      $("note-submit").disabled = true;
-      $("readout").textContent = "";
+      clearSelection();
+      $("status").textContent = "the asset you were viewing was deleted";
     }
     refreshAssets().catch(() => {});
   });
@@ -718,10 +875,13 @@ function connectLive() {
       const payload = JSON.parse(event.data || "{}");
       if (!state.asset || (payload.asset_id && payload.asset_id !== state.asset.id)) return;
       // Someone else changed what this tab is looking at: re-read, don't guess.
-      json(`/api/assets/${state.asset.id}`).then((asset) => {
+      const id = state.asset.id;
+      json(`/api/assets/${id}`).then((asset) => {
+        if (!state.asset || state.asset.id !== id) return;
         const keepLevel = state.level;
         state.asset = asset;
         renderNotes();
+        showVerdict(asset);
         refreshCollisionOverlay().catch(() => {});
         if (type === "lod") {
           state.level = keepLevel;
@@ -735,19 +895,6 @@ function connectLive() {
   };
 }
 
-/* - boot */
-
-resize();
-animate();
-(async () => {
-  try {
-    const health = await json("/api/health");
-    $("status").textContent = health.auth ? "token mode" : "solo mode";
-    await refreshAssets();
-
-    // ?live=0 turns the stream off: headless screenshots and kiosk displays never
-    // finish loading while an EventSource holds the connection open.
-    const params = new URLSearchParams(location.search);
 /* - rules inspector */
 
 /* Read-only card: what the gate would enforce for this project. It renders the
@@ -851,9 +998,12 @@ function renderRules(data) {
     </div>
     <div class="rules-source">${escapeHtml(data.source || "")}</div>`;
 
-  $("status").textContent = tags.length
-    ? `${tags.length} tag budget${tags.length === 1 ? "" : "s"} loaded`
-    : "rules loaded";
+  // The status bar names the asset on screen; the rules never overwrite that.
+  if (!state.asset) {
+    $("status").textContent = tags.length
+      ? `${tags.length} tag budget${tags.length === 1 ? "" : "s"} loaded`
+      : "rules loaded";
+  }
 }
 
 async function loadRules(force = false) {
@@ -923,18 +1073,25 @@ for (const button of document.querySelectorAll("button.filter")) {
 // Rows are re-rendered after every upload, so re-apply rather than wiring each one.
 new MutationObserver(applyVerdictFilter).observe($("asset-list"), { childList: true });
 
-function showVerdict(assetId) {
+function showVerdict(assetOrId) {
+  // Called with the selected asset by selectAsset - so uploads, live updates
+  // and ?asset= links show it too, not only a click on a library card.
   const body = $("verdict-body");
-  const asset = (state.assets || []).find((item) => String(item.id) === String(assetId));
-  if (!asset || !asset.verdict_status) {
+  const asset = assetOrId && typeof assetOrId === "object" ? assetOrId
+    : (state.assets || []).find((item) => String(item.id) === String(assetOrId));
+  if (!asset) {
+    body.innerHTML = '<div class="empty">No asset selected.</div>';
+    return;
+  }
+  if (!verdictOf(asset)) {
     body.innerHTML = '<div class="empty">No gate verdict on this asset. '
       + 'Ones sent from the AssetHealth dashboard carry one.</div>';
     return;
   }
   const problems = String(asset.verdict_problems || "").split("\n").filter(Boolean);
   body.innerHTML =
-    `<div class="verdict--line ${escapeHtml(asset.verdict_status)}">`
-    + `${escapeHtml(asset.verdict_status.toUpperCase())}</div>`
+    `<div class="verdict--line ${escapeHtml(verdictOf(asset))}">`
+    + `${escapeHtml(verdictOf(asset).toUpperCase())}</div>`
     + (problems.length
       ? `<ul class="verdict-problems">${problems.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`
       : '<div class="sub">No rule was broken.</div>')
@@ -942,19 +1099,30 @@ function showVerdict(assetId) {
     + (asset.source ? `<div class="verdict-source">sent from ${escapeHtml(asset.source)}</div>` : "");
 }
 
-document.addEventListener("click", (event) => {
-  const row = event.target.closest && event.target.closest(".asset");
-  if (row && row.dataset.id) showVerdict(row.dataset.id);
-});
-const requestedTab = (new URLSearchParams(window.location.search).get("tab")
-  || window.location.hash || "").replace(/^#/, "").toLowerCase();
-if (requestedTab === "rules" || requestedTab === "budgets") {
-  setTab("rules");
-} else {
-  loadRules();          // fetch on load, as specified: the panel is pre-populated
-}
 
-if (params.get("live") !== "0") connectLive();
+/* - boot */
+
+resize();
+animate();
+(async () => {
+  try {
+    const health = await json("/api/health");
+    $("status").textContent = health.auth ? "token mode" : "solo mode";
+    await refreshAssets();
+
+    // ?live=0 turns the stream off: headless screenshots and kiosk displays never
+    // finish loading while an EventSource holds the connection open.
+    const params = new URLSearchParams(location.search);
+    if (params.get("live") !== "0") connectLive();
+
+    // After the first API call, so a token prompt appears once, not per panel.
+    const requestedTab = (params.get("tab") || window.location.hash || "")
+      .replace(/^#/, "").toLowerCase();
+    if (requestedTab === "rules" || requestedTab === "budgets") {
+      setTab("rules");
+    } else {
+      loadRules();        // fetch on load, as specified: the panel is pre-populated
+    }
 
     // ?asset=<id> is a shareable review link: "look at asset 12, LOD2".
     const wanted = Number(params.get("asset"));

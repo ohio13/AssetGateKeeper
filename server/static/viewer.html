@@ -25,7 +25,8 @@
   <div class="actions">
     <label class="file-btn">
       Upload asset
-      <input type="file" id="upload" accept=".obj,.gltf,.glb" hidden>
+      <input type="file" id="upload" multiple hidden
+             accept=".glb,.gltf,.obj,.fbx,.ply,.stl,.dae,.png,.jpg,.jpeg,.tga,.bmp,.tif,.tiff,.exr,.hdr,.dds,.blend,.max,.ma,.mb,.abc,.usd,.usda,.usdc,.usdz,.bin,.mtl">
     </label>
     <span class="sub" id="stats"></span>
   </div>
@@ -50,7 +51,7 @@
         <button type="button" class="filter" data-filter="passed">Passed</button>
       </div>
       <div id="asset-list" class="list">
-        <div class="empty">Nothing uploaded yet.<br>Drop a .obj / .gltf / .glb anywhere.</div>
+        <div class="empty">Nothing uploaded yet.<br>Drop meshes, textures or source files anywhere.</div>
       </div>
     </div>
 
@@ -91,8 +92,8 @@
 
     <div class="canvas-host" id="canvas-host">
       <div class="hint" id="viewport-hint">
-        <strong>No asset loaded</strong>
-        <span>Pick one from the library, or drop a file here to upload it.</span>
+        <strong id="hint-title">No asset loaded</strong>
+        <span id="hint-body">Pick one from the library, or drop a file here to upload it.</span>
       </div>
       <div class="dropzone" id="dropzone">Drop to upload</div>
     </div>

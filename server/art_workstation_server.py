@@ -120,8 +120,11 @@ CATEGORIES = ("Geometry", "Texture", "LOD", "Collision", "Shading", "Other")
 #: Same reasoning as the dashboard: this page renders artist-supplied names and
 #: notes, and it is a local review tool, so it must not be framed or allowed to
 #: load anything from another origin. Inline script/style stay allowed because
-#: the viewer is built from Python strings; blob: is here because the model
-#: loader hands the canvas an object URL.
+#: the viewer is built from Python strings. data: and blob: are allowed for
+#: fetches because three.js loads a glTF's embedded buffers (``data:`` URIs - every
+#: .gltf LOD this server writes) and a GLB's embedded textures (``blob:`` URLs)
+#: through fetch(); with ``connect-src 'self'`` alone they were refused and the
+#: model failed to load or rendered untextured. Neither scheme reaches the network.
 WORKSTATION_SECURITY_HEADERS = (
     ("X-Content-Type-Options", "nosniff"),
     ("X-Frame-Options", "DENY"),
@@ -131,7 +134,7 @@ WORKSTATION_SECURITY_HEADERS = (
     ("Content-Security-Policy",
      "default-src 'none'; img-src 'self' data: blob:; media-src 'self' blob:; "
      "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
-     "connect-src 'self'; worker-src 'self' blob:; frame-ancestors 'none'; "
+     "connect-src 'self' data: blob:; worker-src 'self' blob:; frame-ancestors 'none'; "
      "base-uri 'none'; form-action 'self'"),
 )
 COLLISION_KINDS = ("box", "sphere", "hull")
@@ -423,14 +426,26 @@ def analyse_asset(path: Path, source: Path | None = None) -> dict:
 # Storage
 # --- #
 
-SAFE_NAME = re.compile(r"[^A-Za-z0-9._ -]+")
+SAFE_NAME = re.compile(r"[^\w. -]+")          # \w is Unicode-aware: 岩, наш, café stay
+SAFE_SUFFIX = re.compile(r"^\.[A-Za-z0-9]{1,12}$")
+MAX_NAME = 120
 
 
 def safe_filename(name: str) -> str:
-    """Strip directories, control characters and anything a shell would enjoy."""
+    """Strip directories, control characters and anything a shell would enjoy.
+
+    The stem and the extension are cleaned separately. Cleaning the whole name
+    at once turned ``岩.obj`` into ``obj`` and cut a 300-character name to 120 -
+    both lost their extension, so a valid mesh was stored as "unverified".
+    """
     base = Path(name.replace("\\", "/")).name.strip()
-    base = SAFE_NAME.sub("_", base).strip(" ._") or "asset"
-    return base[:120]
+    base = "".join(ch for ch in base if ch.isprintable())
+    stem, dot, suffix = base.rpartition(".")
+    if not dot or not SAFE_SUFFIX.match("." + suffix):
+        stem, suffix = base, ""
+    stem = SAFE_NAME.sub("_", stem).strip(" ._") or "asset"
+    suffix = ("." + suffix) if suffix else ""
+    return stem[:MAX_NAME - len(suffix)] + suffix
 
 
 def asset_paths(data_dir: Path) -> tuple[Path, Path]:
@@ -489,6 +504,39 @@ def list_notes(db_path: str | Path, asset_id: int) -> list[dict]:
 
 
 HULL_POINT_LIMIT = 64
+#: Directions used to pick a hull's support points (a Fibonacci sphere). Engines
+#: cap convex hulls far below a mesh's vertex count anyway (PhysX: 255 vertices).
+HULL_DIRECTIONS = 64
+
+
+def _support_points(points: list[list[float]], limit: int = HULL_POINT_LIMIT) -> list[list[float]]:
+    """Reduce a point cloud to at most ``limit`` points on its convex hull.
+
+    For each of HULL_DIRECTIONS evenly spread directions, keep the point that
+    reaches furthest that way. The result is a convex proxy inside the true
+    hull that touches it in every direction - what "Rebuild from mesh" means.
+    Before, the button sent up to 4,000 points and every export of that hull
+    was refused with 413 (export allowed 64).
+    """
+    unique: list[list[float]] = []
+    seen = set()
+    for point in points:
+        key = (round(point[0], 6), round(point[1], 6), round(point[2], 6))
+        if key not in seen:
+            seen.add(key)
+            unique.append(point)
+    if len(unique) <= limit:
+        return unique
+    chosen: list[int] = []
+    golden = math.pi * (3.0 - math.sqrt(5.0))
+    for n in range(HULL_DIRECTIONS):
+        y = 1.0 - 2.0 * (n + 0.5) / HULL_DIRECTIONS
+        r = math.sqrt(max(0.0, 1.0 - y * y))
+        direction = (math.cos(golden * n) * r, y, math.sin(golden * n) * r)
+        best = max(range(len(unique)), key=lambda i: _dot(direction, unique[i]))
+        if best not in chosen:
+            chosen.append(best)
+    return [unique[i] for i in sorted(chosen)[:limit]]
 
 
 def _cross(a, b):
@@ -504,9 +552,13 @@ def _dot(a, b):
 def convex_hull_triangles(points: list[list[float]]) -> list[tuple[int, int, int]]:
     """Exact convex hull by supporting-plane test (stdlib, brute force).
 
-    Every vertex triple defines a plane; the triple is a hull facet when no point
-    sits strictly on both sides of it. Cubic in the point count, so it is capped -
-    a collision proxy is a handful of points, not a mesh.
+    Every vertex triple defines a candidate plane; it is a hull facet when no
+    point sits strictly on both sides. Points sharing a facet plane (a cube's
+    four corners per side) are collected and triangulated once, as a fan
+    around the facet, wound outward - testing triples alone produced 24
+    overlapping, inconsistently wound triangles for a cube instead of 12.
+    Cubic in the point count, so it is capped: a collision proxy is a handful
+    of points, not a mesh.
     """
     unique: list[tuple[float, float, float]] = []
     seen = set()
@@ -520,29 +572,57 @@ def convex_hull_triangles(points: list[list[float]]) -> list[tuple[int, int, int
             f"exact hull export supports {HULL_POINT_LIMIT} points, got {len(unique)}; "
             f"decimate the proxy in the DCC first", 413)
 
-    faces: set[tuple[int, int, int]] = set()
     count = len(unique)
+    scale = max((abs(c) for point in unique for c in point), default=1.0) or 1.0
+    eps = 1e-9 * scale
+    planes: dict[tuple, tuple[tuple[float, float, float], list[int]]] = {}
     for i in range(count):
         for j in range(i + 1, count):
             for k in range(j + 1, count):
                 a, b, c = unique[i], unique[j], unique[k]
                 normal = _cross((b[0] - a[0], b[1] - a[1], b[2] - a[2]),
                                 (c[0] - a[0], c[1] - a[1], c[2] - a[2]))
-                if _dot(normal, normal) <= 1e-18:
+                length = math.sqrt(_dot(normal, normal))
+                if length <= 1e-12 * scale * scale:
                     continue                      # collinear triple
+                normal = (normal[0] / length, normal[1] / length, normal[2] / length)
                 offset = _dot(normal, a)
                 above = below = False
                 for m in range(count):
                     side = _dot(normal, unique[m]) - offset
-                    if side > 1e-9:
+                    if side > eps:
                         above = True
-                    elif side < -1e-9:
+                    elif side < -eps:
                         below = True
                     if above and below:
                         break
-                if not (above and below):
-                    faces.add((i, j, k))
-    return sorted(faces), unique  # type: ignore[return-value]
+                if above and below:
+                    continue
+                if above:                          # make the normal point outward
+                    normal, offset = (-normal[0], -normal[1], -normal[2]), -offset
+                key = (round(normal[0], 6), round(normal[1], 6), round(normal[2], 6),
+                       round(offset / scale, 6))
+                if key in planes:
+                    continue
+                on_plane = [m for m in range(count)
+                            if abs(_dot(normal, unique[m]) - offset) <= eps * 10]
+                planes[key] = (normal, on_plane)
+
+    faces: list[tuple[int, int, int]] = []
+    for normal, members in planes.values():
+        centre = [sum(unique[m][axis] for m in members) / len(members) for axis in range(3)]
+        seed = (1.0, 0.0, 0.0) if abs(normal[0]) < 0.9 else (0.0, 1.0, 0.0)
+        u = _cross(normal, seed)
+        u_len = math.sqrt(_dot(u, u))
+        u = (u[0] / u_len, u[1] / u_len, u[2] / u_len)
+        v = _cross(normal, u)
+        def angle(m: int) -> float:
+            d = (unique[m][0] - centre[0], unique[m][1] - centre[1], unique[m][2] - centre[2])
+            return math.atan2(_dot(d, v), _dot(d, u))
+        ring = sorted(members, key=angle)        # counter-clockwise seen from outside
+        for n in range(1, len(ring) - 1):
+            faces.append((ring[0], ring[n], ring[n + 1]))
+    return faces, unique  # type: ignore[return-value]
 
 
 def collision_obj(asset: dict, collision: dict) -> str:
@@ -564,8 +644,10 @@ def collision_obj(asset: dict, collision: dict) -> str:
                     (high[0], high[1], low[2]), (low[0], high[1], low[2]),
                     (low[0], low[1], high[2]), (high[0], low[1], high[2]),
                     (high[0], high[1], high[2]), (low[0], high[1], high[2])]
-        faces = [(1, 2, 3, 4), (5, 8, 7, 6), (1, 5, 6, 2),
-                 (2, 6, 7, 3), (3, 7, 8, 4), (4, 8, 5, 1)]
+        # 0-based like the hull's; the writer below adds 1 for OBJ. These were
+        # written 1-based and then shifted again: index 9 with 8 vertices.
+        faces = [(0, 3, 2, 1), (4, 5, 6, 7), (0, 1, 5, 4),
+                 (1, 2, 6, 5), (2, 3, 7, 6), (3, 0, 4, 7)]
     elif kind == "sphere":
         center = data["center"]
         radius = float(data["radius"])
@@ -579,7 +661,7 @@ def collision_obj(asset: dict, collision: dict) -> str:
                     center[1] + radius * math.cos(phi),
                     center[2] + radius * math.sin(phi) * math.sin(theta)))
         def index(ring: int, segment: int) -> int:
-            return ring * segments + (segment % segments) + 1
+            return ring * segments + (segment % segments)
         for ring in range(rings):
             for segment in range(segments):
                 faces.append((index(ring, segment), index(ring, segment + 1),
@@ -826,39 +908,65 @@ def delete_note(db_path: str | Path, note_id: int) -> None:
             raise WorkstationError(f"no note {note_id}", 404)
 
 
+def _number(value, what: str) -> float:
+    """A finite float, or a 400. ``True`` is not a number, and neither is 1e999."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise WorkstationError(f"{what} must be a number", 400)
+    number = float(value)
+    if not math.isfinite(number):
+        raise WorkstationError(f"{what} must be a finite number", 400)
+    return number
+
+
+def _vector(value, what: str) -> list[float]:
+    if not isinstance(value, list) or len(value) != 3:
+        raise WorkstationError(f"{what} must be [x, y, z]", 400)
+    return [_number(item, what) for item in value]
+
+
 def set_collision(db_path: str | Path, asset_id: int, kind: str, data: dict) -> dict:
-    """Store a collision proxy: an AABB, a sphere, or an explicit hull."""
+    """Store a collision proxy: an AABB, a sphere, or an explicit hull.
+
+    Values are checked before they are stored: ``1e999`` used to be saved as
+    ``Infinity``, which is not JSON, and the asset could no longer be opened in
+    the viewer; a non-number coordinate was a 500.
+    """
     if kind not in COLLISION_KINDS:
         raise WorkstationError(f"kind must be one of {', '.join(COLLISION_KINDS)}", 400)
+    if not isinstance(data, dict):
+        raise WorkstationError("collision data must be a JSON object", 400)
     get_asset(db_path, asset_id)
 
     if kind == "box":
-        low, high = data.get("min"), data.get("max")
-        if not (isinstance(low, list) and isinstance(high, list) and len(low) == 3 == len(high)):
+        if "min" not in data or "max" not in data:
             raise WorkstationError("box collision needs min:[x,y,z] and max:[x,y,z]", 400)
-        payload = {"min": [float(v) for v in low], "max": [float(v) for v in high]}
+        low, high = _vector(data["min"], "box min"), _vector(data["max"], "box max")
+        if any(lo > hi for lo, hi in zip(low, high)):
+            raise WorkstationError("box min must not exceed box max on any axis", 400)
+        payload = {"min": low, "max": high}
     elif kind == "sphere":
-        center = data.get("center")
-        radius = data.get("radius")
-        if not (isinstance(center, list) and len(center) == 3) or not isinstance(radius, (int, float)):
+        if "center" not in data or "radius" not in data:
             raise WorkstationError("sphere collision needs center:[x,y,z] and radius", 400)
-        payload = {"center": [float(v) for v in center], "radius": float(radius)}
+        center = _vector(data["center"], "sphere center")
+        radius = _number(data["radius"], "sphere radius")
+        if radius <= 0:
+            raise WorkstationError("sphere radius must be greater than 0", 400)
+        payload = {"center": center, "radius": radius}
     else:
         points = data.get("points")
         if not isinstance(points, list) or len(points) < 4 or len(points) > 5000:
             raise WorkstationError("hull collision needs 4..5000 points", 400)
-        cleaned = []
-        for point in points:
-            if not isinstance(point, list) or len(point) != 3:
-                raise WorkstationError("every hull point must be [x, y, z]", 400)
-            cleaned.append([float(v) for v in point])
-        payload = {"points": cleaned}
+        cleaned = [_vector(point, "every hull point") for point in points]
+        reduced = _support_points(cleaned)
+        if len(reduced) < 4:
+            raise WorkstationError("hull collision needs at least 4 distinct points", 400)
+        payload = {"points": reduced}
 
     with _WRITE_LOCK, open_db(db_path) as connection:
         connection.execute(
             "INSERT OR REPLACE INTO collisions (asset_id, kind, data_json, created_at)"
             " VALUES (?, ?, ?, ?)",
-            (asset_id, kind, json.dumps(payload), utc_now()))
+            (asset_id, kind, json.dumps(payload, allow_nan=False), utc_now()))
     return {"kind": kind, "data": payload}
 
 
@@ -1091,6 +1199,10 @@ NOTE_RE = re.compile(r"^/api/notes/(\d+)$")
 class Handler(BaseHTTPRequestHandler):
     server_version = "ArtWorkstation/1.0"
     protocol_version = "HTTP/1.1"
+    # Seconds a socket read or write may stall. Without it a client that
+    # announced a body and never sent it held a server thread forever. The live
+    # event stream writes a ping every 15 s, well inside this.
+    timeout = 60
 
     # - plumbing - #
 
@@ -1214,6 +1326,37 @@ class Handler(BaseHTTPRequestHandler):
                                      self.server.server_address[0],
                                      getattr(self.server, "allow_hosts", ()))
 
+    def _cross_site(self) -> bool:
+        """True when a browser sent this write from another site.
+
+        In solo mode there is no token, so without this any page open in the
+        reviewer's browser could post here as a "simple" request (text/plain):
+        it added notes, and planted an asset marked "passed, source ci".
+        Browsers say where a request came from (Origin, or Sec-Fetch-Site);
+        non-browser clients - the bulk uploader, AssetHealth's bridge, curl -
+        send neither and are unaffected. Behind a proxy that rewrites Host, add
+        the public name with --allow-host.
+        """
+        origin = (self.headers.get("Origin") or "").strip()
+        if origin:
+            if origin == "null":
+                return True
+            try:
+                parts = urllib.parse.urlsplit(origin)
+            except ValueError:
+                return True
+            if parts.netloc.lower() == self.headers.get("Host", "").strip().lower():
+                return False
+            allowed = {name.lower() for name in getattr(self.server, "allow_hosts", ())}
+            return (parts.hostname or "").lower() not in allowed
+        fetch_site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
+        return fetch_site not in ("", "same-origin", "none")
+
+    def _reject_cross_site(self) -> None:
+        self._json(403, {"error": "cross-site request refused",
+                         "detail": "this request came from another website; the Art "
+                                   "Workstation only accepts changes from its own pages"})
+
     def _reject_host(self) -> None:
         self._json(403, {"error": "unexpected Host header",
                          "detail": netguard.refusal_detail(self.headers.get("Host", "")),
@@ -1281,6 +1424,7 @@ class Handler(BaseHTTPRequestHandler):
 
         match = ASSET_LODS_RE.match(path)
         if match:
+            get_asset(server.db_path, int(match.group(1)))      # 404, not an empty list
             self._json(200, {"lods": list_lods(server.db_path, int(match.group(1)))})
             return
 
@@ -1291,6 +1435,7 @@ class Handler(BaseHTTPRequestHandler):
 
         match = ASSET_NOTES_RE.match(path)
         if match:
+            get_asset(server.db_path, int(match.group(1)))      # 404, not an empty list
             self._json(200, {"notes": list_notes(server.db_path, int(match.group(1)))})
             return
 
@@ -1420,6 +1565,9 @@ class Handler(BaseHTTPRequestHandler):
         if not self._host_allowed():
             self._reject_host()
             return
+        if self._cross_site():
+            self._reject_cross_site()
+            return
         path = urllib.parse.urlsplit(self.path).path
         try:
             if not self._authorised():
@@ -1467,15 +1615,28 @@ class Handler(BaseHTTPRequestHandler):
 
             match = ASSET_LODS_RE.match(path)
             if match:
-                payload = self._json_body() or {}
+                payload = self._json_body()
+                if payload is None:
+                    # _json_body already answered (400/411/413). Carrying on with
+                    # "or {}" generated default LODs and wrote a second response
+                    # on the same keep-alive connection.
+                    return
+                unknown = sorted(set(payload) - {"ratios", "max_tris"})
+                if unknown:
+                    raise WorkstationError(
+                        f"unknown field(s) {', '.join(unknown)}; expected ratios and/or max_tris", 400)
                 ratios = payload.get("ratios") or list(lod_manager.DEFAULT_RATIOS)
                 if not isinstance(ratios, list) or not all(
-                        isinstance(r, (int, float)) and 0 < r < 1 for r in ratios):
+                        isinstance(r, (int, float)) and not isinstance(r, bool)
+                        and 0 < r < 1 for r in ratios):
                     raise WorkstationError("ratios must be a list of numbers between 0 and 1", 400)
+                if len(ratios) > len(lod_manager.LEVEL_NAMES):
+                    raise WorkstationError(
+                        f"at most {len(lod_manager.LEVEL_NAMES)} LOD levels, got {len(ratios)}", 400)
                 caps = payload.get("max_tris") or None
-                if caps is not None and (not isinstance(caps, list)
-                                         or not all(isinstance(c, int) for c in caps)):
-                    raise WorkstationError("max_tris must be a list of integers", 400)
+                if caps is not None and (not isinstance(caps, list) or not all(
+                        isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in caps)):
+                    raise WorkstationError("max_tris must be a list of positive integers", 400)
                 lods = generate_lods(server.db_path, Path(server.data_dir),
                                      int(match.group(1)),
                                      [float(r) for r in ratios], caps)
@@ -1489,7 +1650,7 @@ class Handler(BaseHTTPRequestHandler):
                 if payload is None:
                     return
                 kind = str(payload.get("kind", ""))
-                data = payload.get("data", payload)
+                data = payload["data"] if "data" in payload else payload
                 collision = set_collision(server.db_path, int(match.group(1)), kind, data)
                 self._publish("collision", int(match.group(1)))
                 self._json(200, collision)
@@ -1508,6 +1669,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self) -> None:  # noqa: N802
         if not self._host_allowed():
             self._reject_host()
+            return
+        if self._cross_site():
+            self._reject_cross_site()
             return
         path = urllib.parse.urlsplit(self.path).path
         try:
@@ -1543,6 +1707,15 @@ class Handler(BaseHTTPRequestHandler):
             self._reject_host()
             return
         self._json(405, {"error": "method not allowed"})
+
+    def do_OPTIONS(self) -> None:  # noqa: N802
+        """No CORS: a preflight gets a plain 405 and no Access-Control headers,
+        so a browser on another site never gets permission to call the API."""
+        if not self._host_allowed():
+            self._reject_host()
+            return
+        self._send(405, json.dumps({"error": "method not allowed"}).encode("utf-8"),
+                   "application/json; charset=utf-8", {"Allow": "GET, HEAD, POST, DELETE"})
 
 
 class WorkstationServer(socketserver.ThreadingTCPServer):
