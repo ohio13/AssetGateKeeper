@@ -544,6 +544,146 @@ expect("hooks that the engine drops are re-attached by the watchdog",
        (first, again))
 expect("a bound hook is not bound twice", init_unreal.ensure_bound(force=True) == [])
 
+print("9b. Unreal Data Validation (G6): the rules on save and on Validate Changelist")
+import agk_validator  # noqa: E402
+import asset_gatekeeper as _agk  # noqa: E402
+_default = _agk.Budget()
+expect("init_unreal says why it did not register validation in an editor without it",
+       init_unreal.register_validation() is False)
+expect("a mesh over budget gets the gate's own wording",
+       agk_validator.mesh_problems({"triangles": 60_000, "material_slots": 4, "uv_channels": 2}, _default)
+       == ["60,000 triangles exceeds the 50,000 budget (+10,000)",
+           "4 material slots exceeds the 3 slot budget (draw calls)"])
+expect("UV channels count too", agk_validator.mesh_problems(
+    {"triangles": 10, "material_slots": 1, "uv_channels": 6}, _default)
+    == ["6 UV channels exceeds the 4 channel budget"])
+expect("a mesh within budget passes",
+       agk_validator.mesh_problems({"triangles": 4_000, "material_slots": 2, "uv_channels": 1}, _default) == [])
+_ue_rules = WORK / "ue_rules.toml"
+_ue_rules.write_text('[mesh]\nmax_triangles = 50000\n\n[[exceptions]]\npath = "Characters/Boss/*"\n'
+                     'rule = "max_triangles"\nallow = 80000\nreason = "hero boss"\nowner = "lena"\n'
+                     'expires = 2026-12-01\n', encoding="utf-8")
+agk_validator._cache.clear()
+with patch.dict(os.environ, {"ASSETGATEKEEPER_RULES": str(_ue_rules)}):
+    _budget, _exceptions = agk_validator.load_rules(_agk)
+_boss = {"triangles": 72_500, "material_slots": 2, "uv_channels": 1}
+expect("an [[exceptions]] path matches the content path below /Game",
+       agk_validator.mesh_problems(_boss, _budget, _exceptions, "/Game/Characters/Boss/SM_Boss.SM_Boss",
+                                   today=_agk.date(2026, 11, 2)) == [])
+expect("... and not another folder",
+       agk_validator.mesh_problems(_boss, _budget, _exceptions, "/Game/Props/SM_Statue.SM_Statue",
+                                   today=_agk.date(2026, 11, 2))[0].startswith("72,500 triangles"))
+_late = agk_validator.mesh_problems(_boss, _budget, _exceptions, "/Game/Characters/Boss/SM_Boss",
+                                    today=_agk.date(2026, 12, 2))
+expect("... and the day after it ends, the failure says the exception expired",
+       len(_late) == 2 and "expired on 2026-12-01" in _late[1], _late)
+expect("a texture: power of two, size and naming, as the gate words them",
+       agk_validator.texture_problems({"width": 1000, "height": 600, "name": "T_Rock"}, _default, _agk)
+       == ["1000x600 is not a power of two",
+           "name does not end with a standard suffix (_Albedo, _Normal, _Roughness, _BaseColor, _ORM)"]
+       and agk_validator.texture_problems({"width": 4096, "height": 4096, "name": "T_Rock_Albedo"},
+                                          _default, _agk)[0].startswith("4096x4096 exceeds")
+       and agk_validator.texture_problems({"width": 2048, "height": 1024, "name": "T_Rock_Albedo"},
+                                          _default, _agk) == [])
+
+
+class _ValidatorBase:
+    def __init__(self):
+        self.log = []
+
+    def asset_fails(self, asset, message, errors):
+        self.log.append(("fail", message))
+        return list(errors) + [message]
+
+    def asset_passes(self, asset):
+        self.log.append(("pass", None))
+
+    def asset_warning(self, asset, message):
+        self.log.append(("warn", message))
+
+
+class _ValidatorSubsystem:
+    def __init__(self):
+        self.validators = []
+
+    def add_validator(self, validator):
+        self.validators.append(validator)
+
+
+class _UvSubsystem:
+    def get_num_uv_channels(self, mesh, lod):
+        return mesh.uvs
+
+
+_validation = _ValidatorSubsystem()
+fake_unreal.EditorValidatorBase = _ValidatorBase
+fake_unreal.EditorValidatorSubsystem = _ValidatorSubsystem
+fake_unreal.StaticMeshEditorSubsystem = _UvSubsystem
+fake_unreal.Texture2D = type("Texture2D", (), {})
+fake_unreal.uclass = lambda: (lambda cls: cls)
+fake_unreal.ufunction = lambda **kw: (lambda fn: fn)
+fake_unreal.DataValidationResult = types.SimpleNamespace(VALID="VALID", INVALID="INVALID",
+                                                         NOT_VALIDATED="NOT_VALIDATED")
+fake_unreal.get_editor_subsystem = lambda cls: (_validation if cls is _ValidatorSubsystem
+                                                else _UvSubsystem() if cls is _UvSubsystem else subsystem)
+
+
+class _UeMesh(fake_unreal.StaticMesh):
+    def __init__(self, path, triangles, slots, uvs=1):
+        self.path, self.triangles, self.slots, self.uvs = path, triangles, slots, uvs
+
+    def get_path_name(self):
+        return self.path + "." + self.path.rsplit("/", 1)[-1]
+
+    def get_num_lods(self):
+        return 1
+
+    def get_num_triangles(self, lod):
+        return self.triangles
+
+    def get_editor_property(self, name):
+        return [object()] * self.slots
+
+
+with patch.dict(os.environ, {"ASSETGATEKEEPER_UNREAL_VALIDATE": "off"}):
+    expect("ASSETGATEKEEPER_UNREAL_VALIDATE=off leaves validation to the import check",
+           agk_validator.register_validator(fake_unreal) is None)
+agk_validator._cache.clear()
+with patch.dict(os.environ, {"ASSETGATEKEEPER_RULES": ""}):
+    _validator = agk_validator.register_validator(fake_unreal)
+    expect("the validator registers with the editor's validator subsystem, once",
+           _validator is not None and _validation.validators == [_validator]
+           and agk_validator.register_validator(fake_unreal) is _validator)
+    _heavy, _light = _UeMesh("/Game/Props/SM_Heavy", 60_000, 2), _UeMesh("/Game/Props/SM_Light", 800, 1)
+    expect("it validates static meshes and textures, nothing else",
+           _validator.can_validate_asset(_heavy) and _validator.can_validate_asset(fake_unreal.Texture2D())
+           and not _validator.can_validate_asset(object()))
+    _result, _errors = _validator.validate_loaded_asset(_heavy, [])
+    expect("an over-budget mesh is INVALID with the gate's reason in the Message Log",
+           _result == "INVALID" and _errors == ["AssetGatekeeper: 60,000 triangles exceeds the 50,000 budget (+10,000)"],
+           (_result, _errors))
+    _validator.log.clear()
+    _result, _errors = _validator.validate_loaded_asset(_light, [])
+    expect("a mesh within budget is VALID", _result == "VALID" and _validator.log == [("pass", None)])
+    _saved_engine = agk_validator.engine_module
+
+    def _no_engine():
+        raise ImportError("asset_gatekeeper")
+    agk_validator.engine_module = _no_engine
+    _validator.log.clear()
+    _result, _ = _validator.validate_loaded_asset(_heavy, [])
+    expect("on a machine without the gate it says NOT checked, never VALID",
+           _result == "NOT_VALIDATED" and "NOT checked" in _validator.log[0][1], _validator.log)
+    agk_validator.engine_module = _saved_engine
+_broken_rules = WORK / "ue_broken.toml"
+_broken_rules.write_text("[mesh]\nmax_triangles = 'lots'\n", encoding="utf-8")
+agk_validator._cache.clear()
+with patch.dict(os.environ, {"ASSETGATEKEEPER_RULES": str(_broken_rules)}):
+    _result, _errors = _validator.validate_loaded_asset(_light, [])
+expect("a broken rules file fails validation with the reason (it does not pass assets unchecked)",
+       _result == "INVALID" and "could not check" in _errors[0], _errors)
+agk_validator._cache.clear()
+
 # Blender add-on (verified in Blender 4.0.2; these pin the fixes without it).
 fake_bpy = types.ModuleType("bpy")
 fake_bpy.types = types.SimpleNamespace(PropertyGroup=object, Operator=object, Panel=object)

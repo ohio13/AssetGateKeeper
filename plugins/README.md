@@ -8,7 +8,7 @@ the artist where they actually work instead of in a terminal they never open.
 | **Blender** | `blender/addon.py` | Panel in the 3D Viewport sidebar, problems in red | Pre-export check (artist decides) |
 | **Maya** | `maya/gatekeeper_maya.py` + `userSetup.py` | Shelf button + dialog + Script Editor list | Pre-export, in-scene |
 | **Houdini** | `houdini/sop_gatekeeper.py` | Node warning badge on cook | Non-fatal warning (never breaks the cook) |
-| **Unreal** | `unreal/init_unreal.py` + `import_gatekeeper.py` | Message Log + dialog after import | **Yes** for scripted imports; warn-only for drag-and-drop |
+| **Unreal** | `unreal/init_unreal.py` + `import_gatekeeper.py` + `agk_validator.py` | Message Log + dialog after import; Data Validation on save and Validate Changelist | **Yes** for scripted imports; drag-and-drop moved to `_AssetGatekeeper_Rejected` (or warn/delete) |
 | **3ds Max** | `max/max_preflight.py` | Message box with the full report | Pre-export check (artist decides) |
 
 ## In-viewport pre-flight (v1.1)
@@ -104,15 +104,18 @@ interactive.
 
 ## Unreal
 
-1. Copy `unreal/init_unreal.py` and `unreal/import_gatekeeper.py` into
+1. Copy `unreal/init_unreal.py`, `unreal/import_gatekeeper.py` and
+   `unreal/agk_validator.py` (checks on save and on Validate Changelist) into
    `<Project>/Content/Python/`.
 2. Enable **Python Editor Script Plugin**.
 3. Set `ASSETGATEKEEPER_PYTHON` and `ASSETGATEKEEPER_HOME`; restart the editor.
 
-**Drag-and-drop is warn-only.** `OnAssetPreImport` is a notification, not a veto -
-by the time a Python delegate runs, the factory is already chosen and exceptions
-inside a delegate are swallowed. Dropped PNGs are checked from their header, and
-imported StaticMeshes are evaluated post-import with a dialog.
+**Drag-and-drop cannot be vetoed, so it is rejected after import.**
+`OnAssetPreImport` is a notification, not a veto - by the time a Python delegate
+runs, the factory is already chosen and exceptions inside a delegate are
+swallowed. Imported StaticMeshes are evaluated post-import and, by default,
+moved to `/Game/_AssetGatekeeper_Rejected` with a dialog
+(`ASSETGATEKEEPER_UNREAL_ON_FAIL=quarantine|delete|warn`).
 
 **Scripted imports can be blocked for real:**
 

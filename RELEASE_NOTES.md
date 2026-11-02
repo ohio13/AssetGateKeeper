@@ -10,6 +10,12 @@
   * Art Workstation: notes pinned to the model - a numbered pin, the camera and a
     picture of the view; clicking it (or a `?note=` link on another machine)
     flies back to that view; the printable report includes the pictures.
+  * Unreal: `plugins/unreal/agk_validator.py` runs the rules through Data
+    Validation - on save, Validate Assets and Validate Changelist - on
+    Unreal's own numbers (static meshes: LOD0 triangles, slots, UV channels;
+    textures: size, power of two, naming), with `[[exceptions]]` matched on
+    the `/Game` path. `tests/unreal/validate_in_editor.py` checks it in an
+    editor.
   * Art Workstation: **shippable LODs** (tick Shippable before Generate): a
     quadric edge-collapse decimator that keeps UVs, normals and materials, locks
     UV seams and material borders, records each level's surface error, and

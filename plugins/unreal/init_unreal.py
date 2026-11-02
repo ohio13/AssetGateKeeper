@@ -12,6 +12,9 @@ What it does
    ``rules.toml`` the CLI uses.
 2. **Notification.** Warning in the Message Log plus an editor dialog, so the
    artist sees it immediately.
+4. **Data Validation.** If ``agk_validator.py`` sits next to this file, the same
+   rules run on save, on *Validate Assets* and on *Validate Changelist*
+   (static meshes and textures, Unreal's own numbers). See that file.
 3. **Source pre-check for scripted imports.** See ``import_gatekeeper.py`` in this
    folder — that path *does* block, before ``import_asset_tasks`` runs.
 
@@ -419,4 +422,21 @@ def register_hooks() -> bool:
     return bool(bound)
 
 
+
+def register_validation() -> bool:
+    """G6: the rules on save and on Validate Changelist, via agk_validator.py."""
+    try:
+        import agk_validator
+    except ImportError:
+        unreal.log("[AssetGatekeeper] agk_validator.py is not installed next to "
+                   "init_unreal.py; assets are checked on import only")
+        return False
+    try:
+        return agk_validator.register_validator(unreal) is not None
+    except Exception as error:   # never let validation break the import guard
+        unreal.log_warning(f"[AssetGatekeeper] data validation not registered: {error}")
+        return False
+
+
 register_hooks()
+register_validation()

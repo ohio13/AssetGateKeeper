@@ -285,6 +285,48 @@ never moved or deleted; it gets the warning. The Output Log says
 `ASSETGATEKEEPER_HOME` is not set it says `NOT checked` instead, and shows a
 dialog once.
 
+### On save and on Validate Changelist (`agk_validator.py`)
+
+Copy `agk_validator.py` next to `init_unreal.py` in `Content/Python` and restart
+the editor; the Output Log says `[AssetGatekeeper] data validation active`. The
+same `rules.toml` then runs through Unreal's **Data Validation**:
+
+* when an asset is **saved** (Project Settings > Editor > Data Validation >
+  *Validate On Save*, on by default);
+* on **right-click > Asset Actions > Validate Assets**, or **Validate Data** on
+  a folder;
+* on **Validate Changelist** in the Revision Control window. With changelist
+  validation turned on for the project, a failing asset blocks the submit.
+
+It reads Unreal's own numbers for the imported asset - LOD0 triangles, material
+slots and UV channels of a static mesh; size, power of two and the naming suffix
+of a Texture2D - and puts each failure in the Message Log (Data Validation) in
+the gate's own words, e.g. `AssetGatekeeper: 60,000 triangles exceeds the
+50,000 budget (+10,000)`. `[[exceptions]]` apply, with `path` matched against
+the content path below `/Game` (`Characters/Boss/*` covers
+`/Game/Characters/Boss/SM_Boss`); the day after one ends, the failure says so.
+
+On a machine without `ASSETGATEKEEPER_HOME` an asset is reported *NOT checked*
+(a warning, never a pass); a `rules.toml` that cannot be read fails validation
+with the reason. `ASSETGATEKEEPER_UNREAL_VALIDATE=off` turns this part off and
+leaves the import check. Needs the **Data Validation** plugin (enabled by
+default in Unreal 5).
+
+Check it in your engine without clicking (it imports a good and an over-budget
+mesh into `/Game/AGK_ValidationTest`, validates them and deletes the folder):
+
+```
+set ASSETGATEKEEPER_HOME=C:\Users\you\Desktop\AssetGatekeeper
+UnrealEditor-Cmd.exe "<Project>.uproject" -run=pythonscript ^
+  -script="%ASSETGATEKEEPER_HOME%\tests\unreal\validate_in_editor.py" ^
+  -unattended -nopause -nosplash -NullRHI -nosound
+type "%ASSETGATEKEEPER_HOME%\validation_result.json"
+```
+
+`"ok": true` is a pass. Written against the UE 5.0-5.3 validator API
+(`validate_loaded_asset`); tested with stand-ins for `unreal` here, and to be
+confirmed in your 5.3 project (check N6 in the test report).
+
 ### Blocking scripted imports (`import_gatekeeper.py`)
 
 `import_with_gatekeeper(tasks)` runs the gate on every task whose source is a

@@ -758,7 +758,7 @@ Same rules, four front doors — the verdict arrives where the artist actually w
 | **Blender** | `plugins/blender/addon.py` | Viewport sidebar panel, problems in red | Pre-export check |
 | **Maya** | `plugins/maya/gatekeeper_maya.py` | Shelf button, dialog, Script Editor | In-scene, before export |
 | **Houdini** | `plugins/houdini/sop_gatekeeper.py` | Node warning badge on every cook | Non-fatal (never breaks a cook) |
-| **Unreal** | `plugins/unreal/init_unreal.py` | Message Log + dialog after import | Yes for scripted imports; warn-only for drag-and-drop |
+| **Unreal** | `plugins/unreal/init_unreal.py` + `agk_validator.py` | Message Log + dialog after import; Data Validation on save and Validate Changelist | Yes for scripted imports; drag-and-drop moved to `_AssetGatekeeper_Rejected`; a changelist when changelist validation is on |
 
 Every plugin reads the budget through the engine's own parser, so a rule can never
 mean different things in different applications. Install steps live in
@@ -1020,6 +1020,7 @@ plugins/
   maya/gatekeeper_maya.py        in-scene checks via maya.cmds / OpenMaya
   houdini/sop_gatekeeper.py      Python SOP with a node warning badge
   unreal/init_unreal.py          import hooks; import_gatekeeper.py blocks scripted imports
+  unreal/agk_validator.py        Data Validation: rules on save and on Validate Changelist
 ```
 
 ### Unit suite
