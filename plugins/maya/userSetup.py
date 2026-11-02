@@ -1,14 +1,17 @@
 """
 Maya startup hook for AssetGatekeeper.
 
-Maya runs every ``userSetup.py`` on ``MAYA_SCRIPT_PATH`` at launch. This one adds:
+Maya runs the ``userSetup.py`` it finds in its ``scripts`` folders or on
+``PYTHONPATH`` at launch. This one adds:
 
   * a "Run Gatekeeper Check" shelf button on the current shelf, and
   * a ``Gatekeeper`` menu item under the main menu bar's ``AssetGatekeeper`` menu.
 
-Drop this file (and ``gatekeeper_maya.py``) somewhere on MAYA_SCRIPT_PATH, and set
-``ASSETGATEKEEPER_HOME`` (env var or in ``Maya.env``) to the folder that contains
-``asset_gatekeeper.py``.
+Copy this file and ``gatekeeper_maya.py`` into ``Documents/maya/scripts`` (or
+put this folder on ``PYTHONPATH``), and set ``ASSETGATEKEEPER_HOME`` (env var or
+in ``Maya.env``) to the folder that contains ``asset_gatekeeper.py``.
+``MAYA_SCRIPT_PATH`` is not enough: verified in Maya 2027, a ``userSetup.py``
+found only there is never run.
 
 If you already have a ``userSetup.py``, paste the two blocks marked below instead
 of overwriting yours.
@@ -27,12 +30,26 @@ MENU_NAME = "assetGatekeeperMenu"
 
 
 def _scripts_dir() -> str:
-    return os.path.dirname(os.path.abspath(__file__))
+    """The folder holding ``gatekeeper_maya.py``.
+
+    Maya exec()s ``userSetup.py`` without defining ``__file__`` (verified in
+    Maya 2027), so reading it raised NameError, the setup below was skipped,
+    and no menu or shelf button ever appeared. Use it when it exists, and
+    otherwise find the folder on ``sys.path`` (Maya puts its scripts folders
+    there).
+    """
+    here = globals().get("__file__")
+    if here:
+        return os.path.dirname(os.path.abspath(here))
+    for entry in sys.path:
+        if entry and os.path.isfile(os.path.join(entry, "gatekeeper_maya.py")):
+            return entry
+    return ""
 
 
 def _ensure_path() -> None:
     directory = _scripts_dir()
-    if directory not in sys.path:
+    if directory and directory not in sys.path:
         sys.path.insert(0, directory)
 
 
@@ -79,10 +96,21 @@ def build_menu() -> None:
 
 
 # --- block to paste into an existing userSetup.py -------------------------- #
+def _build_ui() -> None:
+    try:
+        build_shelf_button()
+        build_menu()
+    except Exception as error:  # never break Maya startup over a pipeline tool
+        cmds.warning(f"[AssetGatekeeper] shelf/menu setup skipped: {error}")
+
+
 try:
     _ensure_path()
-    build_shelf_button()
-    build_menu()
+    # userSetup.py runs before Maya's main window and shelves exist. Building
+    # them here failed every time (verified in Maya 2027: no menu, no button),
+    # so the UI is built once Maya is idle. No UI at all in batch / mayapy.
+    if cmds is not None and not cmds.about(batch=True):
+        cmds.evalDeferred(_build_ui, lowestPriority=True)
 except Exception as error:  # never break Maya startup over a pipeline tool
     if cmds is not None:
         cmds.warning(f"[AssetGatekeeper] shelf/menu setup skipped: {error}")

@@ -143,6 +143,14 @@ it is one click from then on.
 * The window is Qt-free (plain `cmds`): it works in Maya 2022 to 2026 without a
   PySide version fight, which is the single most common reason DCC tools break.
 
+### Shelf button and menu
+
+Copy `plugins/maya/userSetup.py` and `gatekeeper_maya.py` into
+`Documents/maya/scripts` (or put `plugins/maya` on `PYTHONPATH`; `MAYA_SCRIPT_PATH`
+alone is not enough) and restart Maya: an **AGK** button on the current shelf and
+an **AssetGatekeeper** menu appear. Verified in Maya 2027.2, Nov 2026, together
+with the pre-flight window and the check itself (`mayapy`, 9 scene cases).
+
 ---
 
 ## 3ds Max (2021+)

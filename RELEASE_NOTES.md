@@ -87,6 +87,10 @@ several verdicts are deliberately stricter and some pipelines will turn red.
 * **Maya material slots:** both Maya tools counted every shading group connected
   to a mesh, including the empty `initialShadingGroup` left behind by per-face
   assignment. Verified in Maya 2027: 5 face materials read as 6.
+* **Maya shelf button and menu never appeared.** Maya runs `userSetup.py`
+  without `__file__`, so its setup raised NameError and was skipped (a warning
+  in the Script Editor was the only sign). It now finds its folder on
+  `sys.path` and builds the UI once Maya is idle; verified in Maya 2027.
 * **Maya install docs:** the documented `sys.path` pointed one folder too high;
   `import maya_preflight` failed.
 

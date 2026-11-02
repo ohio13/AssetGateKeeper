@@ -656,6 +656,23 @@ expect("Maya shelf check: an empty, still-connected initialShadingGroup is not a
 expect("Maya pre-flight: the same", sorted(maya_preflight._engines_used("|SM_mats|SM_matsShape"))
        == ["agk_SG0", "agk_SG1"])
 
+# Maya exec()s userSetup.py with no __file__ (verified in Maya 2027): the setup
+# used to die on NameError, so no menu or shelf button ever appeared.
+deferred = []
+fake_maya.cmds.about = lambda batch=False: False
+fake_maya.cmds.evalDeferred = lambda fn, lowestPriority=False: deferred.append(fn)
+fake_maya.cmds.warning = lambda text: deferred.append(("warning", text))
+fake_maya.mel = types.SimpleNamespace(eval=lambda text: "")
+sys.modules["maya.mel"] = fake_maya.mel
+user_setup_globals = {"__name__": "__main__"}
+exec(compile((ROOT / "plugins" / "maya" / "userSetup.py").read_text(encoding="utf-8"),
+             "userSetup.py", "exec"), user_setup_globals)
+expect("Maya userSetup.py runs without __file__ and defers building its menu and shelf button",
+       len(deferred) == 1 and callable(deferred[0]), deferred)
+expect("userSetup.py finds gatekeeper_maya.py's folder on sys.path",
+       user_setup_globals["_scripts_dir"]().replace("\\", "/").endswith("plugins/maya"),
+       user_setup_globals["_scripts_dir"]())
+
 print("10. Hooks and tools know the new formats")
 sys.path.insert(0, str(ROOT / "vcs_hooks"))
 import git_pre_commit  # noqa: E402

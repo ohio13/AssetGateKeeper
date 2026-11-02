@@ -14,8 +14,8 @@ exporter silently rewrites.
 
 Setup
 -----
-1. Put this folder on ``PYTHONPATH`` / MAYA_SCRIPT_PATH, or drop
-   ``gatekeeper_maya.py`` into your ``scripts`` directory.
+1. Put this folder on ``PYTHONPATH``, or drop ``gatekeeper_maya.py`` into your
+   ``scripts`` directory (``MAYA_SCRIPT_PATH`` alone does not reach Python).
 2. Set ``ASSETGATEKEEPER_HOME`` to the folder containing ``asset_gatekeeper.py``
    (the engine is imported here only for its rules parser and Budget defaults).
 3. Optional: ``ASSETGATEKEEPER_RULES`` to point at a specific ``rules.toml``.
