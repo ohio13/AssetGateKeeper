@@ -269,7 +269,8 @@ import, so this is reject-after-import; the mesh never stays where it was droppe
 | `delete` | deleted |
 | `warn` | 1.0 behaviour: dialog only, the asset stays |
 
-A mesh that other assets already reference (a re-import over a placed mesh) is
+Reimports (*Reimport*, *Reimport With New File*) are checked the same way. A
+mesh that other assets already reference (a reimport over a placed mesh) is
 never moved or deleted; it gets the warning. The Output Log says
 `[AssetGatekeeper] import guard active` at startup, and
 `... within budget` / `rejecting ...` per import. On a machine where

@@ -55,6 +55,7 @@ several verdicts are deliberately stricter and some pipelines will turn red.
   * Unreal `init_unreal.py`: both import hooks stopped firing after the first
     asset was deleted or moved, so drag-and-drop went unchecked within minutes.
     The hooks are now held and re-attached by a watchdog if the engine drops them.
+    Reimports fire a separate delegate and were never checked; they are now.
   * Unreal `init_unreal.py` on an unconfigured machine logged "engine not found"
     and then called every mesh, 240k triangles included, "within budget". It now
     says "NOT checked" and tells the artist once, on screen.

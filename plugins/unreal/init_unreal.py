@@ -285,7 +285,8 @@ def _on_post_import(factory, created_object) -> None:
 
 
 HOOKS = (("on_asset_pre_import", "_on_pre_import"),
-         ("on_asset_post_import", "_on_post_import"))
+         ("on_asset_post_import", "_on_post_import"),
+         ("on_asset_reimport", "_on_reimport"))
 WATCHDOG_SECONDS = 2.0
 
 # Strong references to everything a binding is made of. Verified in UE 5.3.2
@@ -350,6 +351,14 @@ def ensure_bound(_delta_seconds=0.0, force: bool = False) -> list:
         unreal.log_warning("[AssetGatekeeper] import hooks had been dropped by the "
                            "engine and were re-attached: " + ", ".join(added))
     return added
+
+
+def _on_reimport(asset) -> None:
+    """Reimport (right-click > Reimport / Reimport With New File) fires its own
+    delegate, not OnAssetPostImport: a heavier source swapped in under an
+    existing asset went unchecked. Same check; a referenced asset is never
+    moved, so a placed mesh gets the warning instead."""
+    _on_post_import(None, asset)
 
 
 def register_hooks() -> bool:
