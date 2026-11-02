@@ -103,6 +103,25 @@ def png(width, height):
 (WORK / "tool.exe").write_bytes(b"MZ")
 (WORK / "second.glb").write_bytes((WORK / "cube.glb").read_bytes())
 FBX = ROOT / "tests" / "fixtures" / "fbx" / "cube_subd3.fbx"
+(WORK / "scene.blend").write_bytes(b"BLENDER-v300" + b"\x00" * 64)
+(WORK / "junk.glb").write_bytes(b"\x13\x37" * 300)
+
+# A .gltf whose buffer is a separate rock.bin, as Blender exports it.
+import base64  # noqa: E402
+_doc = json.loads((WORK / "embedded.gltf").read_text())
+_blob = base64.b64decode(_doc["buffers"][0]["uri"].split(",", 1)[1])
+_doc["buffers"][0]["uri"] = "rock.bin"
+(WORK / "rock.gltf").write_text(json.dumps(_doc))
+(WORK / "rock.bin").write_bytes(_blob)
+
+# An .obj with its .mtl and texture.
+_obj = (WORK / "ball.obj").read_text().replace("v ", "mtllib crate.mtl\nusemtl planks\nv ", 1)
+(WORK / "crate.obj").write_text(_obj)
+(WORK / "crate.mtl").write_text("newmtl planks\nKd 0.8 0.5 0.2\nmap_Kd planks_Albedo.png\n")
+(WORK / "planks_Albedo.png").write_bytes(png(32, 32))
+
+from PIL import Image  # noqa: E402
+Image.new("RGB", (32, 32), (90, 120, 60)).save(WORK / "stone_Albedo.tga")
 
 db = WORK / "ws.db"
 data = WORK / "data"
@@ -119,6 +138,11 @@ ids["png"] = aws.create_asset(db, data, "rock_Albedo.png",
                               (WORK / "rock_Albedo.png").read_bytes())["id"]
 aws.generate_lods(db, data, ids["ball"], [0.5, 0.25])
 aws.generate_lods(db, data, ids["embedded"], [0.5])
+aws.generate_lods(db, data, ids["fbx"], [0.5])
+ids["blend"] = aws.create_asset(db, data, "scene.blend", (WORK / "scene.blend").read_bytes())["id"]
+ids["junk"] = aws.create_asset(db, data, "junk.glb", (WORK / "junk.glb").read_bytes())["id"]
+ids["tga"] = aws.create_asset(db, data, "stone_Albedo.tga",
+                              (WORK / "stone_Albedo.tga").read_bytes())["id"]
 
 server = aws.build_server("127.0.0.1", 0, db, data, quiet=True)
 port = server.server_address[1]
@@ -172,11 +196,15 @@ with sync_playwright() as playwright:
     def hint_visible():
         return page.locator("#viewport-hint").is_visible()
 
-    def pick(asset_id, settle="loaded"):
+    def pick(asset_id):
+        # Wait for *this* asset: the status bar names it once it has settled.
+        name = page.locator(f'#asset-list .asset[data-id="{asset_id}"] .name').inner_text()
+        name = name.replace("FAILED", "").replace("PASSED", "").strip()
         page.locator(f'#asset-list .asset[data-id="{asset_id}"]').click()
         page.wait_for_function(
-            "() => !document.getElementById('status').textContent.startsWith('loading')",
-            timeout=15000)
+            "(name) => { const s = document.getElementById('status').textContent;"
+            " return s.includes(name) && !s.startsWith('loading'); }",
+            arg=name, timeout=15000)
 
     page.goto(f"{BASE}/viewer?live=0")
     page.wait_for_selector("#asset-list .asset")
@@ -197,31 +225,67 @@ with sync_playwright() as playwright:
     expect("an .obj LOD loads (was parsed as glTF)", not status().startswith("error")
            and "LOD1" in readout(), (status(), readout()))
 
-    print("2. an asset that cannot be drawn never shows the previous one")
+    print("2. FBX: a converted .glb, and it says so")
     pick(ids["cube"])
     pick(ids["fbx"])
-    expect("selecting an FBX shows the no-preview panel", hint_visible()
+    warning = page.locator("#preview-warning")
+    expect("an FBX is drawn (through its converted preview)", not hint_visible()
+           and status() == "cube_subd3.fbx", status())
+    expect("the conversion warning is on screen", warning.is_visible()
+           and ".glb converted from this FBX" in warning.inner_text(), warning.inner_text()[:80])
+    expect("its numbers are the gate's, from the FBX (768 tris)", "768 tris" in readout(), readout())
+    page.locator("#lod-buttons button[data-level='LOD1']").click()
+    page.wait_for_timeout(800)
+    expect("an FBX LOD loads and keeps the warning", warning.is_visible()
+           and not status().startswith("error") and "LOD1" in readout(), (status(), readout()))
+    pick(ids["cube"])
+    expect("the warning goes away for a real .glb", not warning.is_visible())
+
+    print("3. an asset that cannot be drawn never shows the previous one")
+    pick(ids["blend"])
+    expect("a .blend shows the no-preview panel", hint_visible()
            and "no 3D preview" in page.locator("#hint-title").inner_text(),
            page.locator("#hint-title").inner_text())
     expect("the readout no longer shows the cube's 12 tris", "12 tris" not in readout(), readout())
-    expect("the header names the FBX", "cube_subd3.fbx" in status(), status())
+    expect("the header names the .blend", "scene.blend" in status(), status())
     expect("the cube's material sliders are gone",
-           "material" not in page.locator("#materials").inner_text().lower()
-           or "no 3d model" in page.locator("#materials").inner_text().lower(),
+           "no 3d model" in page.locator("#materials").inner_text().lower(),
            page.locator("#materials").inner_text())
     expect("a note can be added to an unmeasured asset", page.locator("#note-submit").is_enabled())
     page.fill("#note-text", "needs a re-export")
     page.locator("#note-submit").click()
     page.wait_for_timeout(600)
-    expect("... and it is saved", "needs a re-export" in notes_of(ids["fbx"]), notes_of(ids["fbx"]))
+    expect("... and it is saved", "needs a re-export" in notes_of(ids["blend"]), notes_of(ids["blend"]))
+    pick(ids["junk"])
+    expect("a corrupt .glb is called broken, not unverified",
+           "is broken" in page.locator("#hint-title").inner_text()
+           and "broken" in page.locator(f'#asset-list .asset[data-id="{ids["junk"]}"]').inner_text(),
+           page.locator("#hint-title").inner_text())
+    page.click("button.filter[data-filter='attention']")
+    expect("... and it needs attention",
+           page.locator(f'#asset-list .asset[data-id="{ids["junk"]}"]').is_visible())
+    page.click("button.filter[data-filter='all']")
+
+    print("4. textures are shown")
     pick(ids["png"])
-    expect("a texture says what it is instead of failing as glTF",
-           hint_visible() and "64x64" in page.locator("#hint-body").inner_text()
-           and "64x64" in readout(), (page.locator("#hint-body").inner_text(), readout()))
+    image = page.locator("#texture-img")
+    page.wait_for_function("() => document.getElementById('texture-img').naturalWidth > 0", timeout=10000)
+    expect("a PNG is drawn as an image", page.locator("#texture-view").is_visible()
+           and image.evaluate("img => img.naturalWidth") == 64)
+    expect("with its size", "64x64" in page.locator("#texture-caption").inner_text()
+           and "64x64" in readout(), page.locator("#texture-caption").inner_text())
     expect("its library card shows its size, not '0 tris'",
            "0 tris" not in page.locator(f'#asset-list .asset[data-id="{ids["png"]}"]').inner_text())
+    pick(ids["tga"])
+    page.wait_for_function("() => document.getElementById('texture-img').naturalWidth === 32",
+                           timeout=10000)
+    expect("a TGA is converted to PNG for preview, and says so",
+           "converted to PNG" in page.locator("#texture-caption").inner_text(),
+           page.locator("#texture-caption").inner_text())
+    pick(ids["cube"])
+    expect("the texture view is cleared for a mesh", not page.locator("#texture-view").is_visible())
 
-    print("3. materials")
+    print("5. materials")
     pick(ids["cube"])
     page.click("#mode-geometry")
     page.click("#mode-textured")
@@ -229,7 +293,7 @@ with sync_playwright() as playwright:
     page.click("#mode-textured")
     expect("Geometry -> Textured does not throw", not page_errors, page_errors[:1])
 
-    print("4. verdicts")
+    print("6. verdicts")
     page.goto(f"{BASE}/viewer?live=0&asset={ids['ball']}")
     page.wait_for_function(
         "() => !document.getElementById('status').textContent.startsWith('loading')"
@@ -240,10 +304,12 @@ with sync_playwright() as playwright:
            "FAILED" in verdict and "too heavy" in verdict, verdict.replace("\n", " | "))
     page.click("button.filter[data-filter='attention']")
     visible = page.locator("#asset-list .asset:visible").count()
-    expect("an upper-case FAILED counts as needing attention", visible == 1, visible)
+    expect("an upper-case FAILED counts as needing attention",
+           page.locator(f'#asset-list .asset[data-id="{ids["ball"]}"]').is_visible()
+           and visible == 2, visible)            # ball.obj (FAILED) + junk.glb (broken)
     page.click("button.filter[data-filter='all']")
 
-    print("5. uploads")
+    print("7. uploads")
     page.set_input_files("#upload", str(WORK / "tool.exe"))
     page.wait_for_function("() => !document.getElementById('status').textContent.startsWith('uploading')",
                            timeout=15000)
@@ -257,7 +323,7 @@ with sync_playwright() as playwright:
     expect("several files upload in one go", "second.glb" in names and names.count("rock_Albedo.png") == 2,
            status())
 
-    print("6. collision")
+    print("8. collision")
     pick(ids["cube"])
     page.select_option("#collision-kind", "hull")
     page.click("#collision-derive")
@@ -268,7 +334,34 @@ with sync_playwright() as playwright:
            sum(line.startswith("f ") for line in hull_obj.splitlines()) == 12,
            sum(line.startswith("f ") for line in hull_obj.splitlines()))
 
-    print("7. deleted while open")
+    print("8b. files an asset references travel with it")
+    def upload(paths):
+        page.set_input_files("#upload", [str(path) for path in paths])
+        page.wait_for_function(
+            "() => { const s = document.getElementById('status').textContent;"
+            " return !s.startsWith('uploading') && !s.startsWith('adding') && !s.startsWith('loading'); }",
+            timeout=20000)
+        page.wait_for_timeout(600)
+
+    upload([WORK / "rock.bin", WORK / "rock.gltf"])
+    expect("a .gltf dropped with its .bin loads (was 'could not read mesh: rock.bin')",
+           not hint_visible() and "1 file added alongside" in status(), status())
+    expect("the .bin is not a second asset", "rock.bin" not in page.locator("#asset-list").inner_text())
+    upload([WORK / "rock.gltf"])
+    expect("a .gltf alone says what it is waiting for",
+           "waiting for its files" in page.locator("#hint-title").inner_text()
+           and "rock.bin" in page.locator("#hint-body").inner_text(),
+           page.locator("#hint-title").inner_text())
+    upload([WORK / "rock.bin"])
+    expect("dropping the .bin onto it completes it", not hint_visible()
+           and "added alongside" in status(), status())
+    upload([WORK / "crate.obj", WORK / "crate.mtl", WORK / "planks_Albedo.png"])
+    expect("an .obj with its .mtl and texture uses its material",
+           "planks" in page.locator("#materials").inner_text(), page.locator("#materials").inner_text())
+    expect("... and the texture is not a separate asset",
+           "planks_Albedo.png" not in page.locator("#asset-list").inner_text())
+
+    print("9. deleted while open")
     page.goto(f"{BASE}/viewer?asset={ids['embedded']}")
     page.wait_for_function("() => document.getElementById('status').textContent === 'embedded.gltf'",
                            timeout=15000)
@@ -280,7 +373,7 @@ with sync_playwright() as playwright:
            and page.locator("#lod-buttons button").count() == 0,
            page.locator("#collision-info").inner_text())
 
-    print("8. another website")
+    print("10. another website")
     other = browser.new_page()
     other.goto(f"http://127.0.0.1:{evil.server_address[1]}/")
     other.wait_for_timeout(1500)

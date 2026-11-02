@@ -7,6 +7,7 @@ import * as THREE from "three";
 import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 import { GLTFLoader } from "three/addons/loaders/GLTFLoader.js";
 import { OBJLoader } from "three/addons/loaders/OBJLoader.js";
+import { MTLLoader } from "three/addons/loaders/MTLLoader.js";
 import { ConvexGeometry } from "three/addons/geometries/ConvexGeometry.js";
 
 const $ = (id) => document.getElementById(id);
@@ -34,8 +35,11 @@ const suffixOf = (name) => {
   const lower = String(name || "").toLowerCase();
   return lower.includes(".") ? lower.slice(lower.lastIndexOf(".")) : "";
 };
-const previewable = (asset) => !!asset && asset.kind === "mesh"
-  && PREVIEW_SUFFIXES.includes(suffixOf(asset.filename));
+const previewType = (asset) => (asset && asset.preview && asset.preview.type) || "";
+// FBX (and anything else the server converts) arrives as preview.glb.
+const previewable = (asset) => !!asset && (previewType(asset) === "glb"
+  || (asset.kind === "mesh" && PREVIEW_SUFFIXES.includes(suffixOf(asset.filename))));
+const converted = (asset) => previewType(asset) === "glb" && !!(asset.preview && asset.preview.converted);
 
 /* - auth */
 
@@ -113,8 +117,14 @@ function animate() {
 
 /* - loading */
 
-const gltfLoader = new GLTFLoader();
-const objLoader = new OBJLoader();
+// A .gltf's .bin and textures, and an .obj's .mtl and maps, are fetched by
+// the loaders themselves; in token mode they need the token on the URL.
+const manager = new THREE.LoadingManager();
+manager.setURLModifier((url) => {
+  if (!state.token || url.startsWith("data:") || url.startsWith("blob:")) return url;
+  return url + (url.includes("?") ? "&" : "?") + `token=${encodeURIComponent(state.token)}`;
+});
+const gltfLoader = new GLTFLoader(manager);
 
 function disposeObject(object) {
   if (!object) return;
@@ -147,6 +157,33 @@ function clearModel() {
   state.meshMaterials.clear();
   state.originals.clear();
   $("materials").innerHTML = '<div class="empty">No 3D model loaded.</div>';
+  showPreviewWarning("");
+  hideTexture();
+}
+
+function showPreviewWarning(text) {
+  const banner = $("preview-warning");
+  banner.textContent = text;
+  banner.hidden = !text;
+}
+
+function hideTexture() {
+  const view = $("texture-view");
+  view.hidden = true;
+  const image = $("texture-img");
+  if (image.src && image.src.startsWith("blob:")) URL.revokeObjectURL(image.src);
+  image.removeAttribute("src");
+}
+
+async function showTexture(asset) {
+  const blob = await (await api(`/api/assets/${asset.id}/preview`)).blob();
+  if (!state.asset || state.asset.id !== asset.id) return;
+  hideTexture();
+  $("texture-img").src = URL.createObjectURL(blob);
+  $("texture-caption").textContent = [asset.analyse_note || "texture",
+    asset.preview && asset.preview.converted ? asset.preview.warning : ""].filter(Boolean).join(" - ");
+  $("texture-view").hidden = false;
+  $("viewport-hint").style.display = "none";
 }
 
 function showHint(title, body) {
@@ -178,24 +215,37 @@ function frameObject(object) {
 async function loadModel(assetId, level) {
   const lod = level === "source" ? null
     : ((state.asset && state.asset.lods) || []).find((item) => item.level === level);
-  const path = level === "source"
-    ? `/api/assets/${assetId}/file`
-    : `/api/assets/${assetId}/lods/${level}/file`;
+  const fromPreview = level === "source" && previewType(state.asset) === "glb";
+  const path = level !== "source" ? `/api/assets/${assetId}/lods/${level}/file`
+    : fromPreview ? `/api/assets/${assetId}/preview` : `/api/assets/${assetId}/file`;
   const response = await api(path);
   const buffer = await response.arrayBuffer();
   // The loader follows the stored file's real type. LODs used to be named
   // "<level>.gltf" whatever they were, so every LOD of an .obj failed with
   // "Unexpected token '#' ... is not valid JSON".
-  const name = level === "source"
-    ? (state.asset ? state.asset.filename : "")
-    : (lod ? lod.file_path : `${level}.glb`);
+  const name = level !== "source" ? (lod ? lod.file_path : `${level}.glb`)
+    : fromPreview ? "preview.glb" : (state.asset ? state.asset.filename : "");
+  // Relative references (rock.bin, textures/wood.png) resolve inside the
+  // asset's folder on the server. An empty base path asked for /rock.bin.
+  const base = `/api/assets/${assetId}/files/`;
 
   let object;
   if (suffixOf(name) === ".obj") {
-    object = objLoader.parse(new TextDecoder().decode(buffer));
+    const text = new TextDecoder().decode(buffer);
+    const objLoader = new OBJLoader(manager);
+    const library = level === "source" ? (text.match(/^mtllib\s+(.+?)\s*$/m) || [])[1] : null;
+    if (library) {
+      try {
+        const mtl = await (await api(base + library.split("/").map(encodeURIComponent).join("/"))).text();
+        const materials = new MTLLoader(manager).setResourcePath(base).parse(mtl, base);
+        materials.preload();
+        objLoader.setMaterials(materials);
+      } catch (_) { /* no .mtl uploaded with it: draw it grey */ }
+    }
+    object = objLoader.parse(text);
   } else {
     const gltf = await new Promise((resolve, reject) =>
-      gltfLoader.parse(buffer, "", resolve, reject));
+      gltfLoader.parse(buffer, base, resolve, reject));
     object = gltf.scene;
   }
   if (!state.asset || state.asset.id !== assetId) {
@@ -205,16 +255,16 @@ async function loadModel(assetId, level) {
 
   clearModel();
   $("viewport-hint").style.display = "none";
+  showPreviewWarning(converted(state.asset)
+    ? (state.asset.preview.warning || "Converted preview, not the original file.") : "");
   const grey = level === "source" ? null
     : new THREE.MeshStandardMaterial({ color: 0x9ea3ad, metalness: 0.05, roughness: 0.7,
                                        name: "LOD preview (no materials)" });
   object.traverse((node) => {
     if (!node.isMesh) return;
-    // Generated LODs carry positions only: no UVs, normals or materials.
-    if (grey) {
-      if (node.geometry && !node.geometry.attributes.normal) node.geometry.computeVertexNormals();
-      node.material = grey;
-    }
+    // Generated LODs and converted FBX previews carry positions only.
+    if (node.geometry && !node.geometry.attributes.normal) node.geometry.computeVertexNormals();
+    if (grey) node.material = grey;
     state.meshMaterials.set(node, node.material);
     const materials = Array.isArray(node.material) ? node.material : [node.material];
     materials.forEach((material) => {
@@ -368,22 +418,24 @@ async function refreshAssets() {
   const wanted = state.filter || "all";
   const visible = state.assets.filter((asset) => wanted === "all"
     ? true
-    : wanted === "attention" ? verdictOf(asset) === "failed"
+    : wanted === "attention" ? (verdictOf(asset) === "failed" || asset.kind === "broken")
       : verdictOf(asset) === "passed");
   visible.forEach((asset) => {
     const element = document.createElement("div");
     element.className = "asset" + (state.asset && state.asset.id === asset.id ? " active" : "");
     element.dataset.id = asset.id;
-    element.dataset.verdict = verdictOf(asset);
+    element.dataset.verdict = asset.kind === "broken" && !verdictOf(asset) ? "failed" : verdictOf(asset);
     // An unverified format (.blend, .max, .ma) has no triangle count at all.
     // Printing "0 tris" would read as a cheap mesh rather than an unmeasured
     // one, so it is named as unmeasured and its reason moved into the tooltip.
-    const unverified = asset.kind === "unverified";
+    const unverified = asset.kind === "unverified" || asset.kind === "broken";
     const heavy = unverified ? ""
       : (asset.triangle_count > 50000 ? ' <span class="bad">!</span>' : "");
     const suffix = asset.filename.includes(".")
       ? asset.filename.slice(asset.filename.lastIndexOf(".")) : "";
-    const geometry = unverified
+    const geometry = asset.kind === "broken"
+      ? `<span class="bad" title="${escapeHtml(asset.analyse_note || "")}">broken ${escapeHtml(suffix)}</span>`
+      : unverified
       ? `<span title="${escapeHtml(asset.analyse_note || "needs a DCC to measure")}">`
         + `unmeasured ${escapeHtml(suffix)}</span>`
       : asset.kind === "texture"
@@ -409,9 +461,10 @@ async function refreshAssets() {
   // assets something actually counted, so it can never look artificially cheap.
   const unmeasured = stats.unverified
     ? `  ${stats.unverified} unmeasured (not in the tri total)` : "";
+  const broken = stats.broken ? `  ${stats.broken} broken` : "";
   $("stats").textContent =
     `${stats.assets} assets  ${fmt(stats.triangles)} tris  ${stats.lods} LODs  `
-    + `${stats.notes} notes${unmeasured}`;
+    + `${stats.notes} notes${unmeasured}${broken}`;
 }
 
 async function selectAsset(id) {
@@ -441,15 +494,35 @@ async function selectAsset(id) {
   $("collision-derive").disabled = true;    // needs a model on screen
   refreshAssets().catch(() => {});
 
+  if (previewType(asset) === "image") {
+    try {
+      await showTexture(asset);
+      if (seq === state.selectSeq) $("status").textContent = asset.filename;
+    } catch (error) {
+      if (seq === state.selectSeq) showHint(`${asset.filename} could not be displayed`, error.message);
+    }
+    return;
+  }
   if (!previewable(asset)) {
-    const what = asset.kind === "texture"
-      ? `${asset.analyse_note || "texture"} - the 3D view shows meshes only.`
-      : asset.kind === "unverified"
+    const missing = (asset.missing || []).map((uri) => uri.split(/[\\/]/).pop());
+    let title = `${asset.filename}: no 3D preview`;
+    let what;
+    if (asset.kind === "broken") {
+      title = `${asset.filename} is broken`;
+      what = `${asset.analyse_note || "The file cannot be read."} Re-export it from the DCC.`;
+    } else if (missing.length && asset.kind === "unverified") {
+      title = `${asset.filename} is waiting for its files`;
+      what = `It needs ${missing.join(", ")}. With this asset selected, drop those files `
+        + "here (or use Upload asset) to add them to it.";
+    } else if (asset.kind === "texture") {
+      what = `${asset.analyse_note || "texture"} - no browser preview for this format.`;
+    } else {
+      what = asset.kind === "unverified"
         ? (asset.analyse_note || "This format cannot be measured or drawn here.")
         : `${suffixOf(asset.filename)} files are measured but not drawn in the browser.`;
-    showHint(`${asset.filename}: no 3D preview`,
-             `${what} Its numbers, collision and notes are on the right.`);
-    $("status").textContent = `${asset.filename} (no 3D preview)`;
+    }
+    showHint(title, `${what} Its numbers, collision and notes are on the right.`);
+    $("status").textContent = `${asset.filename} (${asset.kind === "broken" ? "broken" : "no 3D preview"})`;
     return;
   }
   showHint(`Loading ${asset.filename}`, "");
@@ -534,7 +607,9 @@ function updateReadout() {
   const verts = lod ? lod.vertex_count : asset.vertex_count;
   const share = lod && asset.triangle_count
     ? `${(tris / asset.triangle_count * 100).toFixed(1)}% of source` : "source";
-  const geometry = asset.kind === "unverified"
+  const geometry = asset.kind === "broken"
+    ? "<span>broken - cannot be read</span>"
+    : asset.kind === "unverified"
     ? "<span>unmeasured - no triangle count</span>"
     : asset.kind === "texture"
       ? `<span>${escapeHtml(asset.analyse_note || "texture")}</span>`
@@ -692,25 +767,74 @@ async function uploadFile(file) {
   return response.json();
 }
 
+async function uploadSidecar(assetId, file, written) {
+  const query = new URLSearchParams({ filename: written || file.name });
+  const response = await api(`/api/assets/${assetId}/files?${query}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/octet-stream" },
+    body: file,
+  });
+  return response.json();
+}
+
+const REFERENCING = [".gltf", ".obj", ".fbx", ".mtl"];
+const baseName = (uri) => String(uri || "").split(/[\\/]/).pop().toLowerCase();
+
 /* Upload one or more files, one after another, and say what happened to each.
- * A refused file (an .exe, an oversized export) used to leave the status bar on
- * "uploading ..." with an uncaught error and nothing for the user to read. */
+ * Files an asset references (rock.bin, crate.mtl, wood_Albedo.png) go into that
+ * asset's folder instead of becoming assets of their own - dropped together
+ * with it, or dropped later onto the selected asset that is waiting for them.
+ * A refused file (an .exe, an oversized export) is reported, not swallowed. */
 async function uploadFiles(files) {
-  const list = Array.from(files || []);
-  if (!list.length) return;
+  const pending = Array.from(files || []);
+  if (!pending.length) return;
   const done = [];
   const refused = [];
-  for (const [index, file] of list.entries()) {
-    $("status").textContent = list.length > 1
-      ? `uploading ${index + 1}/${list.length}: ${file.name}` : `uploading ${file.name}`;
+  let attached = 0;
+  const total = pending.length;
+  const take = (name) => {
+    const index = pending.findIndex((file) => file.name.toLowerCase() === name);
+    return index < 0 ? null : pending.splice(index, 1)[0];
+  };
+  const attachMissing = async (asset) => {
+    // Repeat: an .mtl that arrives names textures of its own.
+    for (let round = 0; round < 4 && asset; round += 1) {
+      const wanted = (asset.missing || []).map((uri) => [uri, take(baseName(uri))])
+        .filter(([, file]) => file);
+      if (!wanted.length) break;
+      for (const [uri, file] of wanted) {
+        $("status").textContent = `adding ${file.name} to ${asset.filename}`;
+        try {
+          asset = await uploadSidecar(asset.id, file, uri.includes(":") ? file.name : uri);
+          attached += 1;
+        } catch (error) {
+          refused.push(`${file.name}: ${error.message}`);
+        }
+      }
+    }
+    return asset;
+  };
+
+  // 1. Files that are waiting on the selected asset.
+  if (state.asset && (state.asset.missing || []).length) {
+    state.asset = await attachMissing(state.asset) || state.asset;
+  }
+  // 2. Files that can reference others go first, so their sidecars find them.
+  pending.sort((a, b) => Number(!REFERENCING.includes(suffixOf(a.name)))
+    - Number(!REFERENCING.includes(suffixOf(b.name))));
+  while (pending.length) {
+    const file = pending.shift();
+    $("status").textContent = total > 1
+      ? `uploading ${total - pending.length}/${total}: ${file.name}` : `uploading ${file.name}`;
     try {
-      done.push(await uploadFile(file));
+      done.push(await attachMissing(await uploadFile(file)));
     } catch (error) {
       refused.push(`${file.name}: ${error.message}`);
     }
   }
   await refreshAssets().catch(() => {});
   if (done.length) await selectAsset(done[done.length - 1].id);
+  else if (attached && state.asset) await selectAsset(state.asset.id);
   const parts = [];
   if (done.length === 1) {
     const asset = done[0];
@@ -719,6 +843,7 @@ async function uploadFiles(files) {
   } else if (done.length) {
     parts.push(`${done.length} files uploaded`);
   }
+  if (attached) parts.push(`${attached} file${attached === 1 ? "" : "s"} added alongside`);
   if (refused.length) parts.push(`refused: ${refused.join("; ")}`);
   $("status").textContent = parts.join(" - ");
 }

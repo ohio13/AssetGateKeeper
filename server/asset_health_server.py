@@ -2890,6 +2890,45 @@ class Handler(BaseHTTPRequestHandler):
                 matched.append(name)
         return matched[:3]
 
+    def _send_sidecars(self, base: str, source: Path, asset_id) -> tuple[list, list]:
+        """Send the files ``source`` references (a .bin, a .mtl, textures).
+
+        The bridge used to post the one file, so a .gltf the gate had PASSED
+        arrived at the workstation unreadable ("could not read mesh: rock.bin").
+        Only files that resolve next to the asset are sent, under the relative
+        path the asset uses; each is size-capped like an upload.
+        """
+        if not isinstance(asset_id, int):
+            return [], []
+        sent, errors = [], []
+        try:
+            references = agk.resolve_references(source)
+        except Exception as exc:                       # the main file is already there
+            return [], [f"could not list references: {exc}"]
+        seen = set()
+        for written, target in references[:64]:
+            if written in seen or not target.is_file():
+                continue
+            seen.add(written)
+            try:
+                size = target.stat().st_size
+                if size > 64 * 1024 * 1024:
+                    errors.append(f"{written}: larger than 64 MB, not sent")
+                    continue
+                query = urllib.parse.urlencode({"filename": written})
+                request = urllib.request.Request(f"{base}/api/assets/{asset_id}/files?{query}",
+                                                 data=target.read_bytes(), method="POST")
+                if self.server.workstation_token:
+                    request.add_header("Authorization", f"Bearer {self.server.workstation_token}")
+                with urllib.request.urlopen(request, timeout=30) as response:
+                    response.read()
+                sent.append(written)
+            except urllib.error.HTTPError as exc:
+                errors.append(f"{written}: the workstation said {exc.code}")
+            except OSError as exc:
+                errors.append(f"{written}: {exc}")
+        return sent, errors
+
     def _send_to_workstation(self, identity: dict) -> None:
         if identity.get("role") == "denied":
             self._json(401, {"error": "a token is required to use this dashboard"})
@@ -2948,8 +2987,10 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 with urllib.request.urlopen(request, timeout=30) as response:
                     body = json.loads(response.read() or b"{}")
+                sidecars, sidecar_errors = self._send_sidecars(base, source, body.get("id"))
                 results.append({"ok": True, "id": verdict_id, "name": source.name,
-                                "asset_id": body.get("id"), "tags": tags})
+                                "asset_id": body.get("id"), "tags": tags,
+                                "sidecars": sidecars, "sidecar_errors": sidecar_errors})
             except urllib.error.HTTPError as exc:
                 detail = exc.read()[:160].decode("utf-8", "replace")
                 results.append({"ok": False, "id": verdict_id, "name": source.name,

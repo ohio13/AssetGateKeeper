@@ -527,6 +527,34 @@ expect("a batch of eleven is refused", status == 400 and b"10" in body, body[:14
 status, body = bridge.post("/api/send-to-workstation", {"verdicts": []})
 expect("an empty batch is refused", status == 400, str(status))
 
+# A .gltf with its buffer in a separate .bin: the gate passes it, and the
+# workstation must get both files (it used to get the .gltf alone, unreadable).
+import struct as _struct  # noqa: PLC0415
+_tri = _struct.pack("<9f", 0, 0, 0, 1, 0, 0, 0, 1, 0) + _struct.pack("<3I", 0, 1, 2)
+(WORK / "rock.bin").write_bytes(_tri)
+(WORK / "rock.gltf").write_text(json.dumps({
+    "asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
+    "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+    "buffers": [{"byteLength": len(_tri), "uri": "rock.bin"}],
+    "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36},
+                    {"buffer": 0, "byteOffset": 36, "byteLength": 12}],
+    "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                   "min": [0, 0, 0], "max": [1, 1, 0]},
+                  {"bufferView": 1, "componentType": 5125, "count": 3, "type": "SCALAR"}]}),
+    encoding="utf-8")
+status, body = bridge.post("/api/telemetry", {
+    "filename": "rock.gltf", "path": str(WORK / "rock.gltf"), "passed": True,
+    "status": "PASSED", "problems": []})
+rock_id = json.loads(body)["id"]
+status, body = bridge.post("/api/send-to-workstation", {"verdicts": [rock_id]})
+result = json.loads(body)["results"][0]
+expect("the bridge sends the .bin the .gltf references", result.get("sidecars") == ["rock.bin"],
+       str(result)[:200])
+rock = json.loads(urllib.request.urlopen(f"{ws_base}/api/assets/{result['asset_id']}", timeout=5).read())
+expect("so a gate-PASSED .gltf arrives measured, not 'could not read mesh'",
+       rock["kind"] == "mesh" and rock["triangle_count"] == 1 and rock["missing"] == [],
+       str({k: rock[k] for k in ("kind", "triangle_count", "analyse_note", "missing")}))
+
 missing_asset = WORK / "ghost.obj"
 status, body = bridge.post("/api/telemetry", {
     "filename": missing_asset.name, "path": str(missing_asset), "passed": True,

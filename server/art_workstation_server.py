@@ -64,6 +64,7 @@ for path in (str(HERE), str(REPO_ROOT), str(REPO_ROOT / "engine")):
         sys.path.insert(0, path)
 
 import asset_gatekeeper as agk  # noqa: E402 - validated glTF/OBJ analysers
+import fbx_preview  # noqa: E402 - FBX -> .glb for the 3D preview
 import lod_manager  # noqa: E402 - the decimator
 from server import netguard  # noqa: E402 - shared Host policy with the dashboard
 
@@ -88,10 +89,13 @@ MESH_SUFFIXES = {".obj", ".gltf", ".glb", ".ply", ".stl", ".off", ".dae", ".3mf"
 #: failed the budget, not be told the format is unsupported.
 TEXTURE_SUFFIXES = {".png", ".tga", ".dds", ".jpg", ".jpeg", ".bmp", ".tif",
                     ".tiff", ".exr", ".hdr", ".ktx", ".ktx2", ".webp"}
+#: FBX is measured by the gate's own reader and previewed through a converted
+#: .glb (engine/fbx_preview.py); the viewer says plainly that it is a conversion.
+FBX_SUFFIXES = {".fbx"}
 #: Real game exports we cannot parse in-process. They are *stored and reviewable*
-#: - geometry counts unknown, preview absent - because refusing a valid .fbx is
+#: - geometry counts unknown, preview absent - because refusing a valid .blend is
 #: the thing that makes a review tool untrustworthy.
-UNVERIFIED_SUFFIXES = {".fbx", ".abc", ".usd", ".usda", ".usdc", ".usdz", ".blend",
+UNVERIFIED_SUFFIXES = {".abc", ".usd", ".usda", ".usdc", ".usdz", ".blend",
                        ".max", ".ma", ".mb", ".lwo", ".lws", ".x", ".c4d", ".mdl",
                        ".psk", ".pskx", ".smd", ".vta", ".bhv", ".wrl", ".vrml"}
 #: Never accept these from a browser, whatever the name looks like.
@@ -104,15 +108,25 @@ try:                                          # ask trimesh what this build read
 except Exception:                             # pragma: no cover - trimesh missing
     pass
 
-ALLOWED_SUFFIXES = MESH_SUFFIXES | TEXTURE_SUFFIXES | UNVERIFIED_SUFFIXES
+#: Image formats a browser draws as-is; other textures get a PNG preview.
+BROWSER_IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"}
+#: Per-asset folder entries the server writes itself (previews), kept apart from
+#: the artist's files so a sidecar can never overwrite them.
+PREVIEW_DIR = ".agk"
+MAX_SIDECARS = 64
 
 
 def asset_kind(path: Path) -> str:
-    """mesh | texture | unverified, from the suffix alone."""
+    """mesh | texture | unverified, from the suffix alone.
+
+    A fourth kind, "broken", comes from analysis: a measurable format whose
+    bytes cannot be read. It is not the same as a .blend nobody here can open,
+    and the library says which one it is.
+    """
     suffix = path.suffix.lower()
     if suffix in TEXTURE_SUFFIXES:
         return "texture"
-    if suffix in MESH_SUFFIXES:
+    if suffix in MESH_SUFFIXES or suffix in FBX_SUFFIXES:
         return "mesh"
     return "unverified"
 CATEGORIES = ("Geometry", "Texture", "LOD", "Collision", "Shading", "Other")
@@ -363,55 +377,107 @@ def mesh_bounds(path: Path) -> tuple[list[float], list[float]] | None:
         return None
 
 
-def analyse_asset(path: Path, source: Path | None = None) -> dict:
+def missing_references(path: Path) -> list[str]:
+    """References the file makes that are not on disk next to it, as written."""
+    try:
+        return [written for written, target in agk.resolve_references(path)
+                if not target.is_file()]
+    except Exception:
+        return []
+
+
+def analyse_asset(path: Path, preview_dir: Path | None = None) -> dict:
     """Everything the assets table needs, in one pass.
 
-    Never raises for an accepted file. A build that cannot parse the geometry is
-    still an asset a reviewer needs to see, so the result degrades to
-    kind="unverified" with a human reason instead of a 422 - refusing a valid
-    .fbx, a Blender .blend or a glTF whose .bin was not copied is precisely what
-    makes a review tool untrustworthy. Only the *upload policy* refuses files,
-    and only executables.
+    Never raises for an accepted file. The kinds:
+
+    * ``mesh``      measured (and, for FBX, previewed through a converted .glb);
+    * ``texture``   sized, previewed as an image;
+    * ``unverified`` a format nothing here can open (.blend, .max, .ma), or a
+                    file still waiting for the sidecars it references - stored,
+                    reviewable, kept out of triangle totals;
+    * ``broken``    a measurable format whose bytes cannot be read: a corrupt
+                    .glb is a problem to fix, not a source file to wait on.
+
+    Only the *upload policy* refuses files, and only executables.
     """
-    analysable = source if source is not None and source.is_file() else path
     kind = asset_kind(path)
-    note = ""
+    suffix = path.suffix.lower()
+    if preview_dir is not None:
+        for stale in ("preview.glb", "preview.png"):
+            (preview_dir / stale).unlink(missing_ok=True)
 
     if kind == "texture":
-        width = height = 0
         try:                                   # Pillow is a gate dependency
             from PIL import Image
-            with Image.open(analysable) as image:
+            with Image.open(path) as image:
                 width, height = image.size
-            note = f"{width}x{height} texture"
+                if preview_dir is not None and suffix not in BROWSER_IMAGE_SUFFIXES:
+                    preview_dir.mkdir(parents=True, exist_ok=True)
+                    converted = image.convert("RGBA") if image.mode not in ("RGB", "RGBA", "L") else image
+                    converted.save(preview_dir / "preview.png")
         except Exception as exc:
-            note = f"texture, dimensions unread: {exc}"
-        return {"triangles": 0, "vertices": 0, "materials": 1, "bounds": None,
-                "kind": "texture", "note": note}
+            return {"triangles": 0, "vertices": 0, "materials": 0, "bounds": None,
+                    "kind": "broken", "note": f"the image cannot be read: {exc}"}
+        pot = width > 0 and height > 0 and not width & (width - 1) and not height & (height - 1)
+        return {"triangles": 0, "vertices": 0, "materials": 0, "bounds": None,
+                "kind": "texture",
+                "note": f"{width}x{height} texture" + ("" if pot else ", not a power of two")}
 
     if kind == "unverified":
         return {"triangles": 0, "vertices": 0, "materials": 0, "bounds": None,
                 "kind": "unverified",
-                "note": f"{path.suffix.lower() or 'no extension'} needs a DCC to "
+                "note": f"{suffix or 'no extension'} needs a DCC to "
                         "convert - stored for review without a 3D preview"}
 
+    if suffix in FBX_SUFFIXES:
+        try:
+            summary = agk.read_fbx(path)
+        except Exception as exc:
+            return {"triangles": 0, "vertices": 0, "materials": 0, "bounds": None,
+                    "kind": "broken", "note": f"the FBX cannot be read: {exc}"}
+        notes = []
+        if summary.collision_meshes:
+            notes.append(f"{summary.collision_meshes} collision mesh(es) not counted")
+        if summary.lower_lod_meshes:
+            notes.append(f"{summary.lower_lod_meshes} LOD1+ mesh(es) not counted")
+        vertices, bounds = 0, None
+        if preview_dir is not None:
+            try:
+                info = fbx_preview.convert(path, preview_dir / "preview.glb")
+                vertices, bounds = int(info["vertices"]), info["bounds"]
+                notes.insert(0, f"measured from the FBX ({info['axes']}); "
+                                "3D preview is a converted .glb")
+            except Exception as exc:
+                notes.insert(0, f"measured from the FBX; no 3D preview: {exc}")
+        return {"triangles": int(summary.triangles), "vertices": vertices,
+                "materials": int(summary.material_slots), "bounds": bounds,
+                "kind": "mesh", "note": "; ".join(notes)}
+
     try:
-        triangles = agk.count_triangles(analysable)
+        triangles = agk.count_triangles(path)
     except Exception as exc:
+        missing = missing_references(path)
+        if missing:
+            return {"triangles": 0, "vertices": 0, "materials": 0, "bounds": None,
+                    "kind": "unverified",
+                    "note": "waiting for its files: " + ", ".join(missing[:5])
+                            + (" ..." if len(missing) > 5 else "")
+                            + " - upload them with it"}
         return {"triangles": 0, "vertices": 0, "materials": 0, "bounds": None,
-                "kind": "unverified",
-                "note": f"stored, but the geometry could not be read: {exc}"}
+                "kind": "broken", "note": f"the file cannot be read: {exc}"}
     try:
-        materials = agk.count_material_slots(analysable)
+        materials = agk.count_material_slots(path)
     except Exception:
         materials = 1
     try:
-        vertices = mesh_vertices(analysable)
-        bounds = mesh_bounds(analysable)
+        vertices = mesh_vertices(path)
+        bounds = mesh_bounds(path)
     except Exception:
         vertices, bounds = 0, None
-    if analysable is not path:
-        note = "counted from the original file (external sidecars present)"
+    missing = missing_references(path)
+    note = ("missing: " + ", ".join(missing[:5]) + (" ..." if len(missing) > 5 else "")) \
+        if missing else ""
     return {
         "triangles": int(triangles),
         "vertices": vertices,
@@ -446,6 +512,60 @@ def safe_filename(name: str) -> str:
     stem = SAFE_NAME.sub("_", stem).strip(" ._") or "asset"
     suffix = ("." + suffix) if suffix else ""
     return stem[:MAX_NAME - len(suffix)] + suffix
+
+
+def safe_relative(name: str) -> str:
+    """A sidecar's path inside its asset folder, as the asset references it.
+
+    ``textures/wood_Albedo.png`` keeps its folder so the relative reference in
+    the .gltf/.mtl still resolves; anything climbing out (``..``), absolute
+    paths and drive letters are reduced to the file name.
+    """
+    parts = [part for part in name.replace("\\", "/").split("/") if part not in ("", ".")]
+    if not parts:
+        return ""
+    if ".." in parts or ":" in parts[0] or name.replace("\\", "/").startswith("/") or len(parts) > 5:
+        parts = parts[-1:]
+    cleaned = [safe_filename(part) for part in parts]
+    if cleaned[0].lower() == PREVIEW_DIR:
+        cleaned[0] = "_" + cleaned[0]
+    return "/".join(cleaned)
+
+
+def asset_folder(data_dir: Path, asset: dict) -> Path | None:
+    """``assets/<id>/`` for assets stored since folders; None for the old flat layout."""
+    parts = asset["file_path"].split("/")
+    if len(parts) == 3 and parts[0] == "assets" and parts[1] == str(asset["id"]):
+        return resolve_inside(Path(data_dir), f"assets/{asset['id']}")
+    return None
+
+
+def preview_of(data_dir: Path, asset: dict) -> dict:
+    """What the viewer should draw: {"type": "glb"|"image"|"", "converted": bool}."""
+    folder = asset_folder(Path(data_dir), asset)
+    suffix = Path(asset["filename"]).suffix.lower()
+    if folder is not None and (folder / PREVIEW_DIR / "preview.glb").is_file():
+        return {"type": "glb", "converted": True, "warning": fbx_preview.PREVIEW_WARNING}
+    if asset.get("kind") == "texture":
+        if suffix in BROWSER_IMAGE_SUFFIXES:
+            return {"type": "image", "converted": False, "warning": ""}
+        if folder is not None and (folder / PREVIEW_DIR / "preview.png").is_file():
+            return {"type": "image", "converted": True,
+                    "warning": f"{suffix} converted to PNG for preview"}
+    return {"type": "", "converted": False, "warning": ""}
+
+
+def asset_files(data_dir: Path, asset: dict) -> list[str]:
+    """The artist's files in the asset folder (the primary and its sidecars)."""
+    folder = asset_folder(Path(data_dir), asset)
+    if folder is None or not folder.is_dir():
+        return []
+    found = []
+    for path in sorted(folder.rglob("*")):
+        relative = path.relative_to(folder).as_posix()
+        if path.is_file() and not relative.startswith(PREVIEW_DIR + "/"):
+            found.append(relative)
+    return found
 
 
 def asset_paths(data_dir: Path) -> tuple[Path, Path]:
@@ -697,10 +817,17 @@ def asset_references(db_path: str | Path, data_dir: Path, asset_id: int) -> dict
         })
     missing = [item["uri"] for item in references if not item["exists"]]
 
-    # Orphans are repository-level, but scoped to the asset store: a texture in
-    # the store that no stored mesh points at is dead weight nobody will delete.
-    assets_dir, _ = asset_paths(data_dir)
-    orphaned = [path.name for path in agk.orphaned_files(assets_dir)]
+    # Orphans are scoped to the asset's own folder: a file uploaded with it that
+    # it never references. (Store-wide, every separately uploaded texture was
+    # reported as an orphan of every mesh.)
+    folder = asset_folder(Path(data_dir), asset)
+    used = {Path(item["resolved"]).resolve() for item in references}
+    orphaned = []
+    if folder is not None:
+        for relative in asset_files(Path(data_dir), asset):
+            candidate = (folder / relative).resolve()
+            if candidate != stored.resolve() and candidate not in used:
+                orphaned.append(relative)
 
     return {
         "asset_id": asset_id,
@@ -726,41 +853,33 @@ def get_collision(db_path: str | Path, asset_id: int) -> dict | None:
 # Mutations
 # --- #
 
-def copy_sidecars(origin: Path, destination: Path, name: str, limit: int = 20) -> int:
-    """Bring the sibling files a .gltf/.obj export needs to be viewable.
+def _record_facts(db_path: str | Path, asset_id: int, file_path: str, facts: dict,
+                  seed_collision: bool) -> None:
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        connection.execute(
+            "UPDATE assets SET file_path = ?, triangle_count = ?, vertex_count = ?,"
+            " material_slots = ?, kind = ?, analyse_note = ? WHERE id = ?",
+            (file_path, facts["triangles"], facts["vertices"],
+             facts["materials"], facts["kind"], facts["note"], asset_id))
+        if facts["bounds"] is not None:
+            existing = connection.execute(
+                "SELECT 1 FROM collisions WHERE asset_id = ?", (asset_id,)).fetchone()
+            if seed_collision or existing is None:
+                low, high = facts["bounds"]
+                connection.execute(
+                    "INSERT OR REPLACE INTO collisions (asset_id, kind, data_json, created_at)"
+                    " VALUES (?, 'box', ?, ?)",
+                    (asset_id, json.dumps({"min": low, "max": high}), utc_now()))
 
-    Blender writes ``model.gltf`` + ``model.bin`` + textures; uploading only the
-    json produces a mesh that loads as nothing. Copied names keep the stem so the
-    relative references inside the file still resolve; anything larger than 32 MB
-    or beyond ``limit`` files is skipped rather than silently ballooning storage.
-    """
-    stem = Path(name).stem
-    copied = 0
-    try:
-        siblings = sorted(origin.parent.iterdir())
-    except OSError:
-        return 0
-    for sibling in siblings:
-        if copied >= limit:
-            break
-        if sibling == origin or not sibling.is_file():
-            continue
-        if not sibling.name.startswith(stem) or sibling.suffix.lower() == origin.suffix.lower():
-            continue
-        try:
-            if sibling.stat().st_size > 32 * 1024 * 1024:
-                continue
-            target = destination / sibling.name
-            if not target.exists():
-                target.write_bytes(sibling.read_bytes())
-            copied += 1
-        except OSError:
-            continue
-    return copied
 
 def create_asset(db_path: str | Path, data_dir: Path, filename: str, payload: bytes,
                  uploader: str = "", provenance: dict | None = None) -> dict:
-    """Store an uploaded file, measure it, and seed its bounding-box collision."""
+    """Store an uploaded file in its own folder, measure it, seed its collision.
+
+    Each asset lives in ``assets/<id>/`` with the name it was uploaded under, so
+    a .gltf's .bin and textures can be added next to it (add_sidecar) and its
+    relative references resolve - in the measurement and in the browser.
+    """
     name = safe_filename(filename)
     suffix = Path(name).suffix.lower()
     if suffix in REFUSED_SUFFIXES:
@@ -782,33 +901,81 @@ def create_asset(db_path: str | Path, data_dir: Path, filename: str, payload: by
         asset_id = int(cursor.lastrowid or 0)
 
     assets_dir, _ = asset_paths(data_dir)
-    stored = assets_dir / f"{asset_id}_{name}"
+    folder = assets_dir / str(asset_id)
+    folder.mkdir(parents=True, exist_ok=True)
+    stored = folder / name
     stored.write_bytes(payload)
-
-    # A glTF exported next to its .bin/textures cannot be measured from the
-    # uploaded bytes alone, so analysis prefers the original file when the
-    # bridge told us where it lives. The uploaded bytes stay the stored copy.
-    origin = None
-    if provenance and provenance.get("origin_path"):
-        candidate = Path(str(provenance["origin_path"]))
-        if candidate.is_file() and candidate.name == name:
-            origin = candidate
-            copy_sidecars(candidate, assets_dir, name)
-    facts = analyse_asset(stored, origin)
-
-    with _WRITE_LOCK, open_db(db_path) as connection:
-        connection.execute(
-            "UPDATE assets SET file_path = ?, triangle_count = ?, vertex_count = ?,"
-            " material_slots = ?, kind = ?, analyse_note = ? WHERE id = ?",
-            (f"assets/{stored.name}", facts["triangles"], facts["vertices"],
-             facts["materials"], facts["kind"], facts["note"], asset_id))
-        if facts["bounds"] is not None:
-            low, high = facts["bounds"]
-            connection.execute(
-                "INSERT OR REPLACE INTO collisions (asset_id, kind, data_json, created_at)"
-                " VALUES (?, 'box', ?, ?)",
-                (asset_id, json.dumps({"min": low, "max": high}), utc_now()))
+    facts = analyse_asset(stored, folder / PREVIEW_DIR)
+    _record_facts(db_path, asset_id, f"assets/{asset_id}/{name}", facts, seed_collision=True)
     return get_asset(db_path, asset_id)
+
+
+def _ensure_folder(db_path: str | Path, data_dir: Path, asset: dict) -> Path:
+    """Move an asset stored in the old flat layout into its own folder."""
+    folder = asset_folder(data_dir, asset)
+    if folder is not None:
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+    assets_dir, _ = asset_paths(data_dir)
+    old = resolve_inside(Path(data_dir), asset["file_path"])
+    if old is None or not old.is_file():
+        raise WorkstationError("the stored file is missing", 410)
+    folder = assets_dir / str(asset["id"])
+    folder.mkdir(parents=True, exist_ok=True)
+    target = folder / asset["filename"]
+    shutil.move(str(old), str(target))
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        connection.execute("UPDATE assets SET file_path = ? WHERE id = ?",
+                           (f"assets/{asset['id']}/{asset['filename']}", asset["id"]))
+    asset["file_path"] = f"assets/{asset['id']}/{asset['filename']}"
+    return folder
+
+
+def add_sidecar(db_path: str | Path, data_dir: Path, asset_id: int, filename: str,
+                payload: bytes) -> dict:
+    """Store a file an asset references (a .bin, a .mtl, a texture) next to it.
+
+    The relative path the asset uses is kept (``textures/wood.png``), the asset
+    is measured again, and its "missing" list shrinks. Until now there was no
+    way to do this on any path: the browser, the bulk uploader and AssetHealth
+    all sent one file, so a .gltf with a .bin arrived unreadable.
+    """
+    asset = get_asset(db_path, asset_id)
+    relative = safe_relative(filename)
+    if not relative:
+        raise WorkstationError("filename is required", 400)
+    if Path(relative).suffix.lower() in REFUSED_SUFFIXES:
+        raise WorkstationError(
+            f"{Path(relative).suffix.lower()} is not an asset format - refusing to store it", 415)
+    if not payload:
+        raise WorkstationError("empty upload", 400)
+    folder = _ensure_folder(db_path, data_dir, asset)
+    if relative == asset["filename"]:
+        raise WorkstationError("that is the asset itself; upload a new asset instead", 409)
+    target = resolve_inside(folder, relative)
+    if target is None:
+        raise WorkstationError("that path is outside the asset's folder", 400)
+    if not target.exists() and len(asset_files(data_dir, asset)) > MAX_SIDECARS:
+        raise WorkstationError(f"an asset keeps at most {MAX_SIDECARS} files", 413)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(payload)
+    stored = folder / asset["filename"]
+    facts = analyse_asset(stored, folder / PREVIEW_DIR)
+    _record_facts(db_path, asset_id, asset["file_path"], facts, seed_collision=False)
+    return get_asset(db_path, asset_id)
+
+
+def asset_detail(db_path: str | Path, data_dir: Path, asset_id: int) -> dict:
+    """The asset as the viewer needs it: row + LODs + collision + notes + files."""
+    asset = get_asset(db_path, asset_id)
+    asset["lods"] = list_lods(db_path, asset_id)
+    asset["collision"] = get_collision(db_path, asset_id)
+    asset["notes"] = list_notes(db_path, asset_id)
+    asset["preview"] = preview_of(Path(data_dir), asset)
+    asset["files"] = asset_files(Path(data_dir), asset)
+    stored = resolve_inside(Path(data_dir), asset["file_path"])
+    asset["missing"] = missing_references(stored) if stored is not None and stored.is_file() else []
+    return asset
 
 
 def delete_asset(db_path: str | Path, data_dir: Path, asset_id: int) -> None:
@@ -822,9 +989,13 @@ def delete_asset(db_path: str | Path, data_dir: Path, asset_id: int) -> None:
         path = resolve_inside(data_dir, row["file_path"])
         if path is not None:
             path.unlink(missing_ok=True)
-    stored = resolve_inside(assets_dir, asset["file_path"].replace("assets/", "", 1))
-    if stored is not None:
-        stored.unlink(missing_ok=True)
+    folder = asset_folder(Path(data_dir), asset)
+    if folder is not None:
+        shutil.rmtree(folder, ignore_errors=True)      # the asset, its sidecars, previews
+    else:
+        stored = resolve_inside(assets_dir, asset["file_path"].replace("assets/", "", 1))
+        if stored is not None:
+            stored.unlink(missing_ok=True)
     shutil.rmtree(lods_dir / str(asset_id), ignore_errors=True)
 
 
@@ -837,12 +1008,23 @@ def generate_lods(db_path: str | Path, data_dir: Path, asset_id: int,
     source = resolve_inside(data_dir, asset["file_path"])
     if source is None or not source.is_file():
         raise WorkstationError("the stored file is missing", 410)
+    if source.suffix.lower() in FBX_SUFFIXES:
+        # Decimate the converted preview: lod_manager reads glTF, not FBX. The
+        # viewer keeps the "converted from FBX" warning on these levels too.
+        folder = asset_folder(Path(data_dir), asset)
+        preview = folder / PREVIEW_DIR / "preview.glb" if folder is not None else None
+        if preview is None or not preview.is_file():
+            raise WorkstationError("this FBX has no 3D preview to build LODs from", 422)
+        source = preview
 
     out_dir = lods_dir / str(asset_id)
     try:
+        lod_name = asset["filename"]
+        if source.suffix.lower() == ".glb" and Path(lod_name).suffix.lower() in FBX_SUFFIXES:
+            lod_name = Path(lod_name).stem + ".glb"
         results = lod_manager.generate(source, out_dir,
                                        ratios or lod_manager.DEFAULT_RATIOS,
-                                       max_triangles or None, name=asset["filename"])
+                                       max_triangles or None, name=lod_name)
     except lod_manager.LodError as exc:
         raise WorkstationError(str(exc), 422) from exc
 
@@ -983,9 +1165,11 @@ def repository_stats(db_path: str | Path) -> dict:
         assets = connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
         unverified = connection.execute(
             "SELECT COUNT(*) FROM assets WHERE kind = 'unverified'").fetchone()[0]
+        broken = connection.execute(
+            "SELECT COUNT(*) FROM assets WHERE kind = 'broken'").fetchone()[0]
         triangles = connection.execute(
             "SELECT COALESCE(SUM(triangle_count), 0) FROM assets"
-            " WHERE kind != 'unverified'").fetchone()[0]
+            " WHERE kind NOT IN ('unverified', 'broken')").fetchone()[0]
         lods = connection.execute("SELECT COUNT(*) FROM lod_versions").fetchone()[0]
         notes = connection.execute("SELECT COUNT(*) FROM reviews_and_notes").fetchone()[0]
         by_category = connection.execute(
@@ -993,9 +1177,10 @@ def repository_stats(db_path: str | Path) -> dict:
             " GROUP BY category ORDER BY n DESC").fetchall()
     return {
         "assets": int(assets),
-        # measured + unverified == assets; triangles covers measured only.
-        "measured": int(assets) - int(unverified),
+        # measured + unverified + broken == assets; triangles covers measured only.
+        "measured": int(assets) - int(unverified) - int(broken),
         "unverified": int(unverified),
+        "broken": int(broken),
         "triangles": int(triangles),
         "lods": int(lods),
         "notes": int(notes),
@@ -1171,6 +1356,17 @@ def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
 # HTTP
 # --- #
 
+def content_disposition(kind: str, name: str) -> str:
+    """Header-safe: an ASCII fallback plus the UTF-8 name (RFC 6266 / 5987).
+
+    Headers are Latin-1 on the wire; a raw "岩.obj" raised UnicodeEncodeError
+    inside send_header and the download became a 500.
+    """
+    fallback = "".join(ch if 32 <= ord(ch) < 127 and ch not in '"\\' else "_" for ch in name)
+    quoted = urllib.parse.quote(name, safe="")
+    return f'{kind}; filename="{fallback}"; filename*=UTF-8\'\'{quoted}'
+
+
 MIME = {
     ".html": "text/html; charset=utf-8",
     ".css": "text/css; charset=utf-8",
@@ -1182,10 +1378,18 @@ MIME = {
     ".glb": "model/gltf-binary",
     ".obj": "text/plain; charset=utf-8",
     ".bin": "application/octet-stream",
+    ".jpeg": "image/jpeg",
+    ".bmp": "image/bmp",
+    ".gif": "image/gif",
+    ".webp": "image/webp",
+    ".mtl": "text/plain; charset=utf-8",
 }
 
 ASSET_RE = re.compile(r"^/api/assets/(\d+)$")
 ASSET_FILE_RE = re.compile(r"^/api/assets/(\d+)/file$")
+ASSET_PREVIEW_RE = re.compile(r"^/api/assets/(\d+)/preview$")
+ASSET_SIDECAR_RE = re.compile(r"^/api/assets/(\d+)/files/(.+)$")
+ASSET_SIDECARS_RE = re.compile(r"^/api/assets/(\d+)/files$")
 ASSET_LODS_RE = re.compile(r"^/api/assets/(\d+)/lods$")
 ASSET_LOD_FILE_RE = re.compile(r"^/api/assets/(\d+)/lods/(LOD[1-4])/file$")
 ASSET_NOTES_RE = re.compile(r"^/api/assets/(\d+)/notes$")
@@ -1410,11 +1614,18 @@ class Handler(BaseHTTPRequestHandler):
 
         match = ASSET_RE.match(path)
         if match:
-            asset = get_asset(server.db_path, int(match.group(1)))
-            asset["lods"] = list_lods(server.db_path, asset["id"])
-            asset["collision"] = get_collision(server.db_path, asset["id"])
-            asset["notes"] = list_notes(server.db_path, asset["id"])
-            self._json(200, asset)
+            self._json(200, asset_detail(server.db_path, Path(server.data_dir),
+                                         int(match.group(1))))
+            return
+
+        match = ASSET_PREVIEW_RE.match(path)
+        if match:
+            self._serve_preview(int(match.group(1)))
+            return
+
+        match = ASSET_SIDECAR_RE.match(path)
+        if match:
+            self._serve_sidecar(int(match.group(1)), urllib.parse.unquote(match.group(2)))
             return
 
         match = ASSET_FILE_RE.match(path)
@@ -1524,6 +1735,34 @@ class Handler(BaseHTTPRequestHandler):
             raise WorkstationError("the stored file is missing", 410)
         self._send_file(path, download_name=asset["filename"])
 
+    def _serve_preview(self, asset_id: int) -> None:
+        server = self.server  # type: ignore[attr-defined]
+        asset = get_asset(server.db_path, asset_id)
+        preview = preview_of(Path(server.data_dir), asset)
+        folder = asset_folder(Path(server.data_dir), asset)
+        if preview["type"] == "glb" and folder is not None:
+            self._send_file(folder / PREVIEW_DIR / "preview.glb")
+            return
+        if preview["type"] == "image":
+            if preview["converted"] and folder is not None:
+                self._send_file(folder / PREVIEW_DIR / "preview.png")
+            else:
+                self._serve_asset_file(asset_id)
+            return
+        raise WorkstationError("this asset has no preview", 404)
+
+    def _serve_sidecar(self, asset_id: int, relative: str) -> None:
+        """A file inside the asset's folder: how a .gltf finds its .bin."""
+        server = self.server  # type: ignore[attr-defined]
+        asset = get_asset(server.db_path, asset_id)
+        folder = asset_folder(Path(server.data_dir), asset)
+        if folder is None or relative.split("/")[0] == PREVIEW_DIR:
+            raise WorkstationError("no such file", 404)
+        target = resolve_inside(folder, relative)
+        if target is None or not target.is_file():
+            raise WorkstationError(f"{relative} was not uploaded with this asset", 404)
+        self._send_file(target)
+
     def _serve_lod_file(self, asset_id: int, level: str) -> None:
         server = self.server  # type: ignore[attr-defined]
         with open_db(server.db_path) as connection:
@@ -1541,7 +1780,7 @@ class Handler(BaseHTTPRequestHandler):
         body = path.read_bytes()
         headers = {}
         if download_name:
-            headers["Content-Disposition"] = f'inline; filename="{download_name}"'
+            headers["Content-Disposition"] = content_disposition("inline", download_name)
         self._send(200, body, MIME.get(path.suffix.lower(), "application/octet-stream"),
                    headers)
 
@@ -1596,7 +1835,24 @@ class Handler(BaseHTTPRequestHandler):
                                      uploader=query.get("uploader", [""])[0],
                                      provenance=provenance)
                 self._publish("asset", asset["id"])
-                self._json(201, asset)
+                # The detail view, so a client sees "missing" and can send the
+                # sidecars the file references straight after it.
+                self._json(201, asset_detail(server.db_path, Path(server.data_dir), asset["id"]))
+                return
+
+            match = ASSET_SIDECARS_RE.match(path)
+            if match:
+                raw = self._body(MAX_UPLOAD_BYTES)
+                if raw is None:
+                    return
+                filename = (self._query().get("filename", [""])[0]
+                            or self.headers.get("X-Filename", ""))
+                if not filename:
+                    raise WorkstationError("filename is required (query or X-Filename)", 400)
+                asset = add_sidecar(server.db_path, Path(server.data_dir), int(match.group(1)),
+                                    filename, raw)
+                self._publish("asset", asset["id"])
+                self._json(201, asset_detail(server.db_path, Path(server.data_dir), asset["id"]))
                 return
 
             if path == "/api/notes":

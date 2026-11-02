@@ -122,7 +122,7 @@ expect("upload stores a row", asset["id"] == 1 and asset["filename"] == "cube.ob
 expect("triangle count is measured", asset["triangle_count"] == 12, str(asset["triangle_count"]))
 expect("vertex count is measured", asset["vertex_count"] == 8, str(asset["vertex_count"]))
 expect("material slots default to 1", asset["material_slots"] == 1)
-expect("the file lands on disk", (data_dir / "assets" / "1_cube.obj").is_file())
+expect("the file lands in its own folder", (data_dir / "assets" / "1" / "cube.obj").is_file())
 expect("an AABB collision is derived on upload",
        aws.get_collision(db, 1)["kind"] == "box", str(aws.get_collision(db, 1)))
 with aws.open_db(db) as connection:
@@ -141,8 +141,10 @@ except aws.WorkstationError as exc:
     expect("executables are refused with 415", exc.status == 415, str(exc))
 
 fbx = aws.create_asset(db, data_dir, "character.fbx", b"Kaydara FBX Binary  \x00")
-expect("an unparseable game export is accepted, not 422", fbx["kind"] == "unverified", str(fbx)[:120])
-expect("and says why it has no preview", "DCC" in (fbx["analyse_note"] or ""), fbx["analyse_note"][:90])
+# FBX is measured now, so a truncated one is *broken* (a problem to fix), not
+# "unverified" (a format nobody here can open). It is still stored, not a 422.
+expect("an unreadable game export is accepted, not 422", fbx["kind"] == "broken", str(fbx)[:120])
+expect("and says why", "cannot be read" in (fbx["analyse_note"] or ""), fbx["analyse_note"][:90])
 
 from PIL import Image as _PILImage  # noqa: PLC0415 - local to this section
 import io as _io
@@ -372,12 +374,18 @@ expect("the report is not ok", report["ok"] is False)
 # Ship the texture next to it: the same reference is now satisfied.
 from PIL import Image  # noqa: E402
 
-Image.new("RGB", (64, 64), (120, 100, 90)).save(assets_dir / "wood_Albedo.png")
+def png_bytes(colour):
+    out = _io.BytesIO()
+    Image.new("RGB", (64, 64), colour).save(out, format="PNG")
+    return out.getvalue()
+
+
+aws.add_sidecar(ref_db, ref_data, ref_asset["id"], "wood_Albedo.png", png_bytes((120, 100, 90)))
 report = aws.asset_references(ref_db, ref_data, ref_asset["id"])
 expect("adding the texture clears the missing link", report["missing"] == [])
 expect("and the reference is marked present", report["references"][0]["exists"] is True)
 
-Image.new("RGB", (64, 64), (30, 30, 30)).save(assets_dir / "nobody_uses_me.png")
+aws.add_sidecar(ref_db, ref_data, ref_asset["id"], "nobody_uses_me.png", png_bytes((30, 30, 30)))
 report = aws.asset_references(ref_db, ref_data, ref_asset["id"])
 expect("an unreferenced texture is an orphan", "nobody_uses_me.png" in report["orphaned"],
        str(report["orphaned"]))
@@ -805,6 +813,150 @@ expect("... and no LODs are generated behind it", aws.list_lods(p1_db, uni["id"]
        aws.list_lods(p1_db, uni["id"]))
 p1_server.shutdown()
 p1_server.server_close()
+
+print("20. phase 2: FBX preview, textures, sidecars, broken files")
+import io  # noqa: E402
+import contextlib  # noqa: E402
+from PIL import Image as _Image  # noqa: E402
+
+p2_db, p2_data = fresh("phase2")
+FIXTURES = ROOT / "tests" / "fixtures"
+
+# FBX: measured by the gate's reader, previewed through a converted .glb.
+mats5 = aws.create_asset(p2_db, p2_data, "mats5.fbx", (FIXTURES / "fbx" / "mats5.fbx").read_bytes())
+expect("an FBX is measured, not 'unverified'",
+       (mats5["kind"], mats5["triangle_count"], mats5["material_slots"]) == ("mesh", 12, 5),
+       (mats5["kind"], mats5["triangle_count"], mats5["material_slots"]))
+detail = aws.asset_detail(p2_db, p2_data, mats5["id"])
+expect("it has a converted .glb preview, flagged as converted",
+       detail["preview"]["type"] == "glb" and detail["preview"]["converted"]
+       and "converted from this FBX" in detail["preview"]["warning"], detail["preview"])
+ue_lod = aws.create_asset(p2_db, p2_data, "cube_lod.fbx",
+                          (FIXTURES / "fbx_ue" / "cube_lod_binary.fbx").read_bytes())
+expect("an Unreal FBX with collision and LOD1+ counts LOD0 only (768)",
+       ue_lod["triangle_count"] == 768 and "collision" in ue_lod["analyse_note"]
+       and "LOD1+" in ue_lod["analyse_note"], (ue_lod["triangle_count"], ue_lod["analyse_note"]))
+preview_glb = p2_data / "assets" / str(ue_lod["id"]) / ".agk" / "preview.glb"
+import trimesh  # noqa: E402
+scene = trimesh.load(preview_glb, force="scene")
+expect("the preview draws exactly what was counted",
+       sum(len(g.faces) for g in scene.geometry.values()) == 768)
+lods = aws.generate_lods(p2_db, p2_data, ue_lod["id"], [0.5])
+expect("an FBX gets LODs (from its preview), written as .glb",
+       len(lods) == 1 and lods[0]["file_path"].endswith(".glb") and 0 < lods[0]["triangle_count"] < 768,
+       lods)
+broken_fbx = aws.create_asset(p2_db, p2_data, "half.fbx",
+                              (FIXTURES / "fbx" / "mats5.fbx").read_bytes()[:400])
+expect("a truncated FBX is broken, with the reason", broken_fbx["kind"] == "broken"
+       and "cannot be read" in broken_fbx["analyse_note"], broken_fbx["analyse_note"])
+stats = aws.repository_stats(p2_db)
+expect("broken files are counted apart and kept out of the triangle total",
+       stats["broken"] == 1 and stats["triangles"] == 12 + 768, stats)
+
+# Textures: shown as images; formats a browser cannot draw get a PNG preview.
+tga_bytes = io.BytesIO()
+_Image.new("RGB", (48, 40), (90, 120, 60)).save(tga_bytes, format="TGA")
+tga = aws.create_asset(p2_db, p2_data, "stone.tga", tga_bytes.getvalue())
+tga_detail = aws.asset_detail(p2_db, p2_data, tga["id"])
+expect("a TGA is a texture with its size and a power-of-two note",
+       tga["kind"] == "texture" and "48x40" in tga["analyse_note"] and "power of two" in tga["analyse_note"],
+       tga["analyse_note"])
+expect("... previewed as a converted PNG", tga_detail["preview"]["type"] == "image"
+       and tga_detail["preview"]["converted"], tga_detail["preview"])
+junk_png = aws.create_asset(p2_db, p2_data, "junk.png", b"not a png at all")
+expect("an unreadable image is broken", junk_png["kind"] == "broken", junk_png["kind"])
+
+# Sidecars: a .gltf waits for its .bin, then measures.
+tri = struct.pack("<9f", 0, 0, 0, 1, 0, 0, 0, 1, 0) + struct.pack("<3I", 0, 1, 2)
+rock_gltf = json.dumps({
+    "asset": {"version": "2.0"}, "scene": 0, "scenes": [{"nodes": [0]}], "nodes": [{"mesh": 0}],
+    "meshes": [{"primitives": [{"attributes": {"POSITION": 0}, "indices": 1}]}],
+    "buffers": [{"byteLength": len(tri), "uri": "rock.bin"}],
+    "bufferViews": [{"buffer": 0, "byteOffset": 0, "byteLength": 36},
+                    {"buffer": 0, "byteOffset": 36, "byteLength": 12}],
+    "accessors": [{"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                   "min": [0, 0, 0], "max": [1, 1, 0]},
+                  {"bufferView": 1, "componentType": 5125, "count": 3, "type": "SCALAR"}]}).encode()
+p2_server = aws.build_server("127.0.0.1", 0, p2_db, p2_data, quiet=True)
+p2_port = p2_server.server_address[1]
+threading.Thread(target=p2_server.serve_forever, daemon=True).start()
+time.sleep(0.15)
+c2 = Client(p2_port)
+status, rock = c2.json("/api/assets?filename=rock.gltf", "POST", rock_gltf)
+expect("a .gltf without its .bin waits for it, and says which file",
+       status == 201 and rock["kind"] == "unverified" and rock["missing"] == ["rock.bin"]
+       and "waiting for its files" in rock["analyse_note"], (status, rock.get("missing"), rock.get("analyse_note")))
+status, rock = c2.json(f"/api/assets/{rock['id']}/files?filename=rock.bin", "POST", tri)
+expect("adding the .bin measures it", status == 201 and rock["kind"] == "mesh"
+       and rock["triangle_count"] == 1 and rock["missing"] == [], (status, rock.get("kind")))
+status, raw, _ = c2.call(f"/api/assets/{rock['id']}/files/rock.bin")
+expect("the viewer can fetch the .bin from the asset's folder", status == 200 and raw == tri, status)
+for bad in (".agk/preview.glb", "..%2F..%2Fws.db", "nope.bin"):
+    status, _, _ = c2.call(f"/api/assets/{rock['id']}/files/{bad}")
+    expect(f"files/{bad} is not served", status == 404, status)
+status, _ = c2.json(f"/api/assets/{rock['id']}/files?filename=tool.exe", "POST", b"MZ")
+expect("an executable sidecar is refused", status == 415, status)
+status, _ = c2.json(f"/api/assets/{rock['id']}/files?filename=rock.gltf", "POST", rock_gltf)
+expect("a sidecar cannot overwrite the asset itself", status == 409, status)
+status, body = c2.json(f"/api/assets/{rock['id']}/files?filename=textures/wood.png", "POST", b"png")
+expect("a sidecar keeps the folder the asset references it from",
+       status == 201 and "textures/wood.png" in body["files"], body.get("files"))
+status, body = c2.json(f"/api/assets/{rock['id']}/files?filename=../../escape.png", "POST", b"png")
+expect("a sidecar cannot climb out of the folder", status == 201 and "escape.png" in body["files"]
+       and not (p2_data / "escape.png").exists(), body.get("files"))
+status, _, _ = c2.call(f"/api/assets/{rock['id']}/files?filename=x.bin", "POST", b"x",
+                       {"Origin": "http://evil.example"})
+expect("a cross-site sidecar upload is refused", status == 403, status)
+
+# Old flat-layout assets move into a folder the first time a sidecar arrives.
+legacy_file = p2_data / "assets" / "999_old.gltf"
+legacy_file.write_bytes(rock_gltf)
+with aws.open_db(p2_db) as connection:
+    connection.execute(
+        "INSERT INTO assets (id, filename, file_path, filesize, triangle_count, vertex_count,"
+        " material_slots, uploaded_at, kind) VALUES (999, 'old.gltf', 'assets/999_old.gltf',"
+        " 10, 0, 0, 0, '2026-01-01T00:00:00+00:00', 'unverified')")
+legacy = aws.add_sidecar(p2_db, p2_data, 999, "rock.bin", tri)
+expect("a legacy asset is moved into its folder and measured",
+       legacy["file_path"] == "assets/999/old.gltf" and legacy["kind"] == "mesh"
+       and not legacy_file.exists(), (legacy["file_path"], legacy["kind"]))
+
+# Unicode names download (the header used to raise inside send_header).
+uni2 = aws.create_asset(p2_db, p2_data, "岩.obj", OBJ.encode())
+status, _, headers = c2.call(f"/api/assets/{uni2['id']}/file")
+expect("a Unicode filename downloads with an RFC 5987 header",
+       status == 200 and "filename*=UTF-8''%E5%B2%A9.obj" in headers.get("Content-Disposition", ""),
+       (status, headers.get("Content-Disposition")))
+status, raw, _ = c2.call(f"/api/assets/{mats5['id']}/preview")
+expect("the FBX preview is served as a GLB", status == 200 and raw[:4] == b"glTF", status)
+status, raw, _ = c2.call(f"/api/assets/{tga['id']}/preview")
+expect("the TGA preview is served as a PNG", status == 200 and raw[:4] == b"\x89PNG", status)
+status, _, _ = c2.call(f"/api/assets/{uni2['id']}/preview")
+expect("an .obj has no separate preview (404)", status == 404, status)
+
+# Delete takes the whole folder: the asset, its sidecars and its previews.
+folder = p2_data / "assets" / str(rock["id"])
+status, _ = c2.json(f"/api/assets/{rock['id']}", "DELETE")
+expect("deleting an asset removes its folder and sidecars", status == 200 and not folder.exists(), status)
+
+# The bulk uploader sends sidecars with their asset (and accepts the documented flags).
+sys.path.insert(0, str(ROOT / "tools"))
+import upload_assets  # noqa: E402
+bulk = WORK / "bulk"
+bulk.mkdir()
+(bulk / "rock.gltf").write_bytes(rock_gltf)
+(bulk / "rock.bin").write_bytes(tri)
+(bulk / "lone_Albedo.png").write_bytes(png_bytes((1, 2, 3)))
+out = io.StringIO()
+with contextlib.redirect_stdout(out):
+    code = upload_assets.main([str(bulk), "--workstation", f"http://127.0.0.1:{p2_port}", "--recursive"])
+names = sorted(row["filename"] for row in aws.list_assets(p2_db))
+expect("the uploader accepts --workstation and --recursive (as the docs say)", code == 0, out.getvalue()[-200:])
+expect("it sends rock.bin with rock.gltf, not as its own asset",
+       "rock.bin" not in names and "+1 file(s)" in out.getvalue(), out.getvalue()[-300:])
+expect("an unreferenced texture still goes up as an asset", "lone_Albedo.png" in names, names)
+p2_server.shutdown()
+p2_server.server_close()
 
 print()
 print("FAILURES:", failures if failures else "none")

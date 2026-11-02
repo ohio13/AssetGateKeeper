@@ -1,5 +1,16 @@
 # Since v1.1.0 (unreleased, on `main`)
 
+* **Art Workstation, phase 1 (audit 2026-11-02).** The viewer no longer shows
+  the previous asset when a load fails; embedded glTF buffers, every LOD and
+  Geometry -> Textured work; other websites can no longer write to it; collision
+  export, filenames and API errors fixed. A Chromium test suite runs in CI.
+* **Art Workstation, phase 2.** FBX is measured by the gate's reader and drawn
+  through a converted `.glb`, under an on-screen warning that it is a conversion
+  (`engine/fbx_preview.py`). Textures are previewed (TGA/TIF/DDS via PNG). Each
+  asset has its own folder, and the files it references travel with it on every
+  path - drag-and-drop, the bulk uploader (`--workstation`/`--recursive` now work
+  as documented) and AssetHealth's "Send to workstation" - so a `.gltf` with a
+  `.bin` arrives measured. Unreadable files are "broken", not "unverified".
 * **Unreal: one message per rejected drag-and-drop.** UE 5.3.2 reports a single
   FBX drag-and-drop to the post-import hook twice. The first report moved the
   mesh to `/Game/_AssetGatekeeper_Rejected`; the second queued the same move and
