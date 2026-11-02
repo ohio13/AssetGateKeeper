@@ -596,6 +596,85 @@ with sync_playwright() as playwright:
     expect("... and the banner still says it is a converted preview, now with textures",
            "base-colour textures" in page.locator("#preview-warning").inner_text())
 
+    print("8h. notes pinned to the model (W5)")
+    ids["pinned"] = aws.create_asset(db, data, "pinned_cube.glb", (WORK / "cube.glb").read_bytes())["id"]
+    page.goto(f"{BASE}/viewer?live=0&asset={ids['pinned']}")
+    page.wait_for_function("() => document.getElementById('status').textContent === 'pinned_cube.glb'",
+                           timeout=15000)
+    page.wait_for_timeout(800)              # let the framing damping settle
+
+    def canvas_box():
+        return page.locator("#canvas-host canvas").bounding_box()
+
+    def marker_tip(selector=".pin-marker:not(.draft)"):
+        box = page.locator(selector).first.bounding_box()
+        return (box["x"] + box["width"] / 2, box["y"] + box["height"]) if box else None
+
+    _box = canvas_box()
+    _click = (_box["x"] + _box["width"] / 2, _box["y"] + _box["height"] / 2)
+    expect("Pin to model is ready once the model is on screen", page.locator("#note-pin").is_enabled())
+    page.click("#note-pin")
+    page.mouse.click(*_click)
+    expect("a click on the model places a draft pin there",
+           page.locator(".pin-marker.draft").count() == 1
+           and "pinned here" in page.locator("#note-pin-state").inner_text(),
+           page.locator("#note-pin-state").inner_text())
+    page.fill("#note-text", "seam on this face")
+    page.click("#note-submit")
+    page.wait_for_selector(".pin-marker:not(.draft)", timeout=10000)
+    with urllib.request.urlopen(f"{BASE}/api/assets/{ids['pinned']}/notes") as _response:
+        _pinned = json.loads(_response.read())["notes"][0]
+    expect("the note is stored with its point, camera and a screenshot",
+           _pinned["pin"] and _pinned["pin"]["number"] == 1 and _pinned["screenshot"]
+           and len(_pinned["pin"]["camera"]["position"]) == 3, _pinned)
+    with urllib.request.urlopen(f"{BASE}{_pinned['screenshot']}") as _response:
+        _shot_bytes = _response.read()
+        _shot_type = _response.headers.get("Content-Type", "")
+    import io as _io
+    from PIL import Image as _Image
+    _shot_image = _Image.open(_io.BytesIO(_shot_bytes))
+    expect("... the screenshot is a JPEG of the view, at most 800 px wide, not a blank frame",
+           _shot_type.startswith("image/jpeg") and _shot_image.width <= 800
+           and len(set(_shot_image.convert("L").resize((32, 32)).getdata())) > 4,
+           (_shot_type, _shot_image.size))
+    _tip = marker_tip()
+    expect("the numbered pin sits where the model was clicked",
+           _tip and abs(_tip[0] - _click[0]) < 4 and abs(_tip[1] - _click[1]) < 4, (_tip, _click))
+    expect("the note shows its number and the view's picture",
+           "#1" in page.locator("#note-list .note").first.inner_text()
+           and page.locator("#note-list .note .shot").count() == 1)
+    page.mouse.move(_click[0] - 200, _click[1] - 120)
+    page.mouse.down()
+    page.mouse.move(_click[0] + 60, _click[1] - 40, steps=8)
+    page.mouse.up()
+    page.wait_for_timeout(900)
+    _moved = marker_tip()
+    expect("orbiting away moves the pin with the model",
+           _moved is None or abs(_moved[0] - _click[0]) > 15 or abs(_moved[1] - _click[1]) > 15,
+           (_moved, _click))
+    page.locator("#note-list .note [data-view]").first.click()
+    page.wait_for_timeout(1200)
+    _back = marker_tip()
+    expect("view flies the camera back to the pinned view",
+           _back and abs(_back[0] - _click[0]) < 4 and abs(_back[1] - _click[1]) < 4, (_back, _click))
+    _elsewhere = browser.new_page(viewport={"width": 1440, "height": 900})
+    _elsewhere.goto(f"{BASE}/viewer?live=0&asset={ids['pinned']}&note={_pinned['id']}")
+    _elsewhere.wait_for_selector(".pin-marker", timeout=15000)
+    _elsewhere.wait_for_timeout(1500)
+    _box2 = _elsewhere.locator(".pin-marker").first.bounding_box()
+    _tip2 = (_box2["x"] + _box2["width"] / 2, _box2["y"] + _box2["height"])
+    expect("a ?note= link opens the same view, with the same pin, in another browser",
+           abs(_tip2[0] - _click[0]) < 4 and abs(_tip2[1] - _click[1]) < 4
+           and "active" in (_elsewhere.locator("#note-list .note").first.get_attribute("class") or ""),
+           (_tip2, _click))
+    _elsewhere.close()
+    page.click("#note-pin")
+    page.mouse.click(_box["x"] + 5, _box["y"] + 5)
+    expect("a click beside the model places nothing and says so",
+           page.locator(".pin-marker.draft").count() == 0
+           and "missed" in page.locator("#note-pin-state").inner_text())
+    page.click("#note-pin")
+
     print("9. deleted while open")
     page.goto(f"{BASE}/viewer?asset={ids['embedded']}")
     page.wait_for_function("() => document.getElementById('status').textContent === 'embedded.gltf'",

@@ -292,3 +292,22 @@ body.rules-open { --rail: 430px; }
 /* display:flex on these beat the [hidden] attribute: a v1 asset with no depot
    path showed compare buttons and an empty Copy button. */
 .compare-tools[hidden], .source-link[hidden], .review-form[hidden] { display: none; }
+
+/* pinned notes (W5) */
+.pins { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.pin-marker { position: absolute; transform: translate(-50%, -100%); pointer-events: auto;
+  min-width: 22px; height: 22px; padding: 0 6px; border-radius: 11px 11px 11px 2px;
+  background: #e0af68; color: #111; font: 700 12px/22px system-ui, sans-serif;
+  text-align: center; cursor: pointer; border: 1px solid #0d1016;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, .5); }
+.pin-marker.draft { background: var(--accent); }
+.pin-marker.active { outline: 2px solid #fff; }
+.pin-marker[hidden] { display: none; }
+.canvas-host.pinning canvas { cursor: crosshair; }
+.pin-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.note .pin-badge { display: inline-block; min-width: 18px; padding: 0 5px; margin-right: 6px;
+  border-radius: 9px; background: #e0af68; color: #111; font-weight: 700; text-align: center; }
+.note .shot { display: block; width: 100%; margin-top: 6px; border: 1px solid var(--line);
+  border-radius: 6px; cursor: pointer; }
+.note.active { border-color: #e0af68; }
+.note-actions { display: flex; gap: 6px; flex-wrap: wrap; }

@@ -121,6 +121,7 @@
         <div class="texture-caption" id="texture-caption"></div>
       </div>
       <div class="preview-warning" id="preview-warning" role="note" hidden></div>
+      <div class="pins" id="pins"></div>
       <div class="dropzone" id="dropzone">Drop to upload</div>
     </div>
 
@@ -234,6 +235,11 @@
       </div>
       <textarea id="note-text" rows="4"
         placeholder="Markdown-ish: **bold**, `code`, - list items"></textarea>
+      <div class="pin-row">
+        <button type="button" id="note-pin" class="chip" disabled
+          title="Then click the model: the note keeps that point, this camera view and a picture of it">Pin to model</button>
+        <span id="note-pin-state" class="sub"></span>
+      </div>
       <button type="submit" id="note-submit" disabled>Add note</button>
     </form>
     <div id="note-list" class="list"></div>

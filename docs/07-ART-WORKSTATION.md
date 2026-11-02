@@ -138,6 +138,7 @@ reviewer's tab appears without a reload (a live event stream).
 |---|---|
 | `/viewer?asset=12` | asset 12, selected, with its verdict |
 | `/viewer?asset=12&lod=LOD2` | ... viewed at LOD2 |
+| `/viewer?asset=12&note=40` | ... from the camera of pinned note 40, that note highlighted |
 | `/viewer?tab=rules` (or `#rules`) | the Rules & Budgets tab |
 | `?live=0` (with any of the above) | no live stream - for headless screenshots and kiosk screens, which otherwise never finish loading |
 
@@ -255,6 +256,22 @@ nothing in a note is run as HTML.
 
 They are deliberately not free text in the verdict: a machine's finding and a
 human's opinion stay distinguishable six months later.
+
+### Notes pinned to the model
+
+"The seam on the left" depends on where the camera was. Press **Pin to model**,
+click the spot on the model, write the note and **Add note**. The note keeps:
+
+* the point you clicked (and which level - source or an LOD - was on screen);
+* the camera: where it stood, what it looked at, its field of view;
+* a picture of the view (a JPEG up to 800 px wide), shown under the note.
+
+Pinned notes are numbered on the model (#1 is the oldest and keeps its number as
+notes are added). Click a number, the picture or **view** to fly the camera back
+to that exact view; **link** copies `/viewer?asset=12&note=40`, which opens that
+view on any machine. The printable report carries each pin's number and picture,
+so it still makes sense on paper. Deleting a note deletes its picture. A click
+beside the model places nothing; press **Pin to model** again to cancel.
 
 ## Versions, sign-off and where a file came from
 
@@ -422,7 +439,8 @@ tab shows), `--allow-host NAME`, `--quiet`.
 | `GET` · `POST /api/assets/<id>/collision` · `GET .../collision.obj` | read · set · export the proxy |
 | `GET /api/assets/<id>/references` · `/report` | reference check · printable report |
 | `GET` · `POST /api/assets/<id>/heal` | what a fix would change (nothing stored) · make the fixed copy as a new asset |
-| `GET /api/assets/<id>/notes` · `POST /api/notes` · `DELETE /api/notes/<id>` | notes |
+| `GET /api/assets/<id>/notes` · `POST /api/notes` · `DELETE /api/notes/<id>` | notes; `POST` takes an optional `pin` (`point`, `normal`, `camera` {`position`, `target`, `fov`}, `level`) and `screenshot` (a PNG or JPEG `data:` URL, 600 KB max) |
+| `GET /api/notes/<id>/screenshot` | the view a pinned note was written in |
 | `GET` · `POST /api/assets/<id>/review` | sign-off history · a decision (`status`, `note`, `reviewer` without accounts) |
 | `GET /api/approvals/<sha256>` | is this exact file approved? (the Perforce trigger) |
 | `GET /api/me` · `POST` · `DELETE /api/session` | who is signed in · sign in · sign out |

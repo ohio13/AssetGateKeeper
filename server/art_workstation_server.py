@@ -42,7 +42,9 @@ Routes
     GET  /api/assets/<id>/collision
     POST /api/assets/<id>/collision -> {"kind": "box"|"sphere"|"hull", ...}
     GET  /api/assets/<id>/notes
-    POST /api/notes                 -> {"asset_id", "category", "note_text"}
+    POST /api/notes                 -> {"asset_id", "category", "note_text",
+                                        optional "pin": {"point", "camera"}, "screenshot"}
+    GET  /api/notes/<id>/screenshot -> the view the note was pinned in
     DEL  /api/notes/<id>
     GET  /api/stats                 -> repository totals
 """
@@ -50,6 +52,7 @@ Routes
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import hmac
 import html
@@ -375,6 +378,12 @@ def init_db(db_path: str | Path) -> None:
                            " ON assets(family_id, version)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_assets_key ON assets(family_key)")
         connection.execute("CREATE INDEX IF NOT EXISTS idx_assets_sha ON assets(sha256)")
+        note_columns = {row["name"] for row in connection.execute("PRAGMA table_info(reviews_and_notes)")}
+        for column in ("pin_json", "screenshot"):
+            # Pinned notes (W5): a point on the model, the camera, the view as an image.
+            if column not in note_columns:
+                connection.execute(
+                    f"ALTER TABLE reviews_and_notes ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
         lod_columns = {row["name"] for row in connection.execute("PRAGMA table_info(lod_versions)")}
         if "origin" not in lod_columns:
             # "generated" by the decimator, or "uploaded": an artist's own LOD file.
@@ -759,12 +768,29 @@ def list_lods(db_path: str | Path, asset_id: int) -> list[dict]:
     return rows
 
 
+def _note_out(row) -> dict:
+    """A note as the API returns it: the pin parsed, the screenshot as a URL."""
+    note = dict(row)
+    pin = note.pop("pin_json", "") or ""
+    try:
+        note["pin"] = json.loads(pin) if pin else None
+    except ValueError:
+        note["pin"] = None
+    note["screenshot"] = f"/api/notes/{note['id']}/screenshot" if note.get("screenshot") else ""
+    return note
+
+
 def list_notes(db_path: str | Path, asset_id: int) -> list[dict]:
     with open_db(db_path) as connection:
         rows = connection.execute(
             "SELECT * FROM reviews_and_notes WHERE asset_id = ?"
             " ORDER BY created_at DESC, id DESC", (asset_id,)).fetchall()
-    return [dict(row) for row in rows]
+    notes = [_note_out(row) for row in rows]
+    # Pins are numbered oldest first, so #1 stays #1 as the list grows.
+    for number, note in enumerate(sorted((n for n in notes if n["pin"]),
+                                         key=lambda n: (n["created_at"], n["id"])), 1):
+        note["pin"]["number"] = number
+    return notes
 
 
 HULL_POINT_LIMIT = 64
@@ -1525,7 +1551,10 @@ def delete_asset(db_path: str | Path, data_dir: Path, asset_id: int) -> None:
     with _WRITE_LOCK, open_db(db_path) as connection:
         lods = connection.execute(
             "SELECT file_path FROM lod_versions WHERE asset_id = ?", (asset_id,)).fetchall()
+        shots = [row["screenshot"] for row in connection.execute(
+            "SELECT screenshot FROM reviews_and_notes WHERE asset_id = ?", (asset_id,))]
         connection.execute("DELETE FROM assets WHERE id = ?", (asset_id,))
+    _remove_screenshots(data_dir, shots)
     for row in lods:
         path = resolve_inside(data_dir, row["file_path"])
         if path is not None:
@@ -1769,8 +1798,71 @@ class JobRunner:
                 self._update(job_id, state="failed", error=f"internal error: {exc}")
 
 
+NOTE_SHOTS_DIR = "note_shots"
+MAX_SCREENSHOT_BYTES = 600_000
+SCREENSHOT_TYPES = {b"\x89PNG\r\n\x1a\n": ".png", b"\xff\xd8\xff": ".jpg"}
+
+
+def _pin_vector(value, what: str) -> list[float]:
+    if not isinstance(value, (list, tuple)) or len(value) != 3:
+        raise WorkstationError(f"{what} must be three numbers [x, y, z]", 400)
+    return [round(_number(item, what), 6) for item in value]
+
+
+def clean_pin(pin) -> dict | None:
+    """A note's pin: the point on the model and the camera it was seen from."""
+    if pin in (None, "", {}):
+        return None
+    if not isinstance(pin, dict):
+        raise WorkstationError("pin must be an object {point, camera}", 400)
+    unknown = sorted(set(pin) - {"point", "normal", "camera", "level"})
+    if unknown:
+        raise WorkstationError(f"unknown pin field(s) {', '.join(unknown)}", 400)
+    camera = pin.get("camera")
+    if not isinstance(camera, dict):
+        raise WorkstationError("pin.camera must be an object {position, target}", 400)
+    cleaned = {"point": _pin_vector(pin.get("point"), "pin.point"),
+               "camera": {"position": _pin_vector(camera.get("position"), "pin.camera.position"),
+                          "target": _pin_vector(camera.get("target"), "pin.camera.target")}}
+    if camera.get("fov") is not None:
+        fov = _number(camera.get("fov"), "pin.camera.fov")
+        if not 1 <= fov <= 170:
+            raise WorkstationError("pin.camera.fov must be between 1 and 170 degrees", 400)
+        cleaned["camera"]["fov"] = round(fov, 3)
+    if pin.get("normal") is not None:
+        cleaned["normal"] = _pin_vector(pin.get("normal"), "pin.normal")
+    level = str(pin.get("level") or "source")
+    if not re.fullmatch(r"source|LOD[0-9]", level):
+        raise WorkstationError("pin.level must be source or LOD0-LOD9", 400)
+    cleaned["level"] = level
+    return cleaned
+
+
+def decode_screenshot(value) -> tuple[bytes, str] | None:
+    """A ``data:image/png;base64,...`` (or JPEG) view, checked by its bytes."""
+    if value in (None, ""):
+        return None
+    if not isinstance(value, str):
+        raise WorkstationError("screenshot must be a data: URL", 400)
+    header, _, encoded = value.partition(",")
+    if not re.fullmatch(r"data:image/(png|jpeg);base64", header):
+        raise WorkstationError("screenshot must be a PNG or JPEG data: URL", 400)
+    try:
+        data = base64.b64decode(encoded, validate=True)
+    except ValueError:
+        raise WorkstationError("screenshot is not valid base64", 400) from None
+    if len(data) > MAX_SCREENSHOT_BYTES:
+        raise WorkstationError(
+            f"screenshot is too large ({len(data):,} bytes; {MAX_SCREENSHOT_BYTES:,} max)", 413)
+    for magic, suffix in SCREENSHOT_TYPES.items():
+        if data.startswith(magic):
+            return data, suffix
+    raise WorkstationError("screenshot is not a PNG or JPEG image", 400)
+
+
 def add_note(db_path: str | Path, asset_id: int, category: str, note_text: str,
-             author: str = "") -> dict:
+             author: str = "", pin=None, screenshot=None,
+             data_dir: Path | None = None) -> dict:
     if category not in CATEGORIES:
         raise WorkstationError(f"category must be one of {', '.join(CATEGORIES)}", 400)
     text = (note_text or "").strip()
@@ -1778,23 +1870,57 @@ def add_note(db_path: str | Path, asset_id: int, category: str, note_text: str,
         raise WorkstationError("note_text must not be empty", 400)
     if len(text) > 20_000:
         raise WorkstationError("note_text is too long (20,000 characters max)", 413)
+    cleaned_pin = clean_pin(pin)
+    shot = decode_screenshot(screenshot)
+    if shot is not None and data_dir is None:
+        raise WorkstationError("screenshots need the server's data folder", 500)
     get_asset(db_path, asset_id)          # 404 before we insert anything
     with _WRITE_LOCK, open_db(db_path) as connection:
         cursor = connection.execute(
-            "INSERT INTO reviews_and_notes (asset_id, author, category, note_text, created_at)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (asset_id, author.strip()[:80], category, text, utc_now()))
+            "INSERT INTO reviews_and_notes (asset_id, author, category, note_text, created_at,"
+            " pin_json) VALUES (?, ?, ?, ?, ?, ?)",
+            (asset_id, author.strip()[:80], category, text, utc_now(),
+             json.dumps(cleaned_pin) if cleaned_pin else ""))
         note_id = int(cursor.lastrowid or 0)
-        row = connection.execute(
-            "SELECT * FROM reviews_and_notes WHERE id = ?", (note_id,)).fetchone()
-    return dict(row)
+        if shot is not None:
+            folder = Path(data_dir) / NOTE_SHOTS_DIR
+            folder.mkdir(parents=True, exist_ok=True)
+            relative = f"{NOTE_SHOTS_DIR}/{note_id}{shot[1]}"
+            (Path(data_dir) / relative).write_bytes(shot[0])
+            connection.execute("UPDATE reviews_and_notes SET screenshot = ? WHERE id = ?",
+                               (relative, note_id))
+    notes = list_notes(db_path, asset_id)
+    return next(note for note in notes if note["id"] == note_id)
 
 
-def delete_note(db_path: str | Path, note_id: int) -> None:
+def note_screenshot(db_path: str | Path, data_dir: Path, note_id: int) -> Path:
+    with open_db(db_path) as connection:
+        row = connection.execute("SELECT screenshot FROM reviews_and_notes WHERE id = ?",
+                                 (note_id,)).fetchone()
+    if row is None:
+        raise WorkstationError(f"no note {note_id}", 404)
+    path = resolve_inside(Path(data_dir), row["screenshot"]) if row["screenshot"] else None
+    if path is None or not path.is_file():
+        raise WorkstationError(f"note {note_id} has no screenshot", 404)
+    return path
+
+
+def _remove_screenshots(data_dir: Path | None, names) -> None:
+    for name in names:
+        if data_dir is not None and name:
+            path = resolve_inside(Path(data_dir), name)
+            if path is not None:
+                path.unlink(missing_ok=True)
+
+
+def delete_note(db_path: str | Path, note_id: int, data_dir: Path | None = None) -> None:
     with _WRITE_LOCK, open_db(db_path) as connection:
+        row = connection.execute("SELECT screenshot FROM reviews_and_notes WHERE id = ?",
+                                 (note_id,)).fetchone()
         cursor = connection.execute("DELETE FROM reviews_and_notes WHERE id = ?", (note_id,))
         if cursor.rowcount == 0:
             raise WorkstationError(f"no note {note_id}", 404)
+    _remove_screenshots(data_dir, [row["screenshot"]] if row else [])
 
 
 def _number(value, what: str) -> float:
@@ -1927,6 +2053,8 @@ ul { margin:6px 0 0 18px; padding:0; }
 li { margin:2px 0; }
 .note { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-top:8px; }
 .note .meta { color:var(--muted); font-size:11px; margin-bottom:4px; }
+.note .pin { display:inline-block; min-width:18px; padding:0 5px; border-radius:9px; background:#e0af68; color:#111; font-weight:700; text-align:center; }
+.note .shot { display:block; max-width:100%; margin-top:8px; border:1px solid var(--line); border-radius:6px; break-inside:avoid; }
 .mono { font-family:ui-monospace,Consolas,monospace; font-size:12px; }
 footer { margin-top:36px; color:var(--muted); font-size:11px; }
 @media print { body { padding:0; } h2 { break-after:avoid; } }
@@ -2008,11 +2136,26 @@ def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
         collision_html = (f"<p><strong>{html_escape(collision['kind'])}</strong> "
                           f"<span class='sub mono'>{html_escape(detail)}</span></p>")
 
+    def shot_html(note: dict) -> str:
+        # The report is one self-contained file: the view goes in as a data: URL.
+        if not note["screenshot"]:
+            return ""
+        try:
+            path = note_screenshot(db_path, data_dir, note["id"])
+        except WorkstationError:
+            return ""
+        kind = "png" if path.suffix == ".png" else "jpeg"
+        encoded = base64.b64encode(path.read_bytes()).decode("ascii")
+        return (f"<img class='shot' alt='The view note {note['id']} was pinned in' "
+                f"src='data:image/{kind};base64,{encoded}'>")
+
     notes_html = "".join(
-        f"<div class='note'><div class='meta'><strong>{html_escape(note['category'])}</strong>"
+        "<div class='note'><div class='meta'>"
+        + (f"<span class='pin'>#{note['pin']['number']}</span> " if note["pin"] else "")
+        + f"<strong>{html_escape(note['category'])}</strong>"
         f"  {html_escape(note['author'] or 'anonymous')}"
         f"  {html_escape(note['created_at'].replace('T', ' '))}</div>"
-        f"{html_escape(note['note_text'])}</div>"
+        f"{html_escape(note['note_text'])}{shot_html(note)}</div>"
         for note in notes) or "<p class='sub'>No review notes.</p>"
 
     geometry_rows = [
@@ -2122,6 +2265,7 @@ APPROVAL_RE = re.compile(r"^/api/approvals/([0-9a-fA-F]{64})$")
 LOGIN_WINDOW = 300          # seconds
 LOGIN_FAILURES = 10         # per address per window, then 429
 NOTE_RE = re.compile(r"^/api/notes/(\d+)$")
+NOTE_SHOT_RE = re.compile(r"^/api/notes/(\d+)/screenshot$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2474,6 +2618,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, server.jobs.get(int(match.group(1))))
             return
 
+        match = NOTE_SHOT_RE.match(path)
+        if match:
+            self._send_file(note_screenshot(server.db_path, server.data_dir, int(match.group(1))))
+            return
+
         match = ASSET_NOTES_RE.match(path)
         if match:
             get_asset(server.db_path, int(match.group(1)))      # 404, not an empty list
@@ -2767,7 +2916,9 @@ class Handler(BaseHTTPRequestHandler):
                                 str(payload.get("note_text", "")),
                                 # signed in: the account, never a typed name
                                 (who["display"] or who["name"]) if who["kind"] == "account"
-                                else str(payload.get("author", "")))
+                                else str(payload.get("author", "")),
+                                pin=payload.get("pin"), screenshot=payload.get("screenshot"),
+                                data_dir=server.data_dir)
                 self._publish("notes", asset_id)
                 self._json(201, note)
                 return
@@ -2894,7 +3045,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             match = NOTE_RE.match(path)
             if match:
-                delete_note(server.db_path, int(match.group(1)))
+                delete_note(server.db_path, int(match.group(1)), server.data_dir)
                 self._publish("notes")
                 self._json(200, {"deleted": True})
                 return

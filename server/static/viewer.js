@@ -32,6 +32,10 @@ const state = {
   meshMaterials: new Map(), // mesh -> the material(s) it was loaded with
   selectSeq: 0,         // the newest selectAsset call wins; older ones stop
   lodJob: null,         // id of the LOD job this tab is waiting on
+  pinning: false,       // "Pin to model" pressed: the next click on the model places it
+  pinDraft: null,       // {point, normal} waiting for the note text
+  activeNote: null,     // the note whose view is on screen
+  flight: null,         // camera animation towards a note's view
 };
 
 // Formats the browser can draw. Everything else the server stores is measured
@@ -123,8 +127,10 @@ new ResizeObserver(resize).observe(host);
 
 function animate() {
   requestAnimationFrame(animate);
+  stepFlight();
   controls.update();
   renderer.render(scene, camera);
+  placePins();
 }
 
 /* - loading */
@@ -173,6 +179,10 @@ function clearModel() {
   $("materials").innerHTML = '<div class="empty">No 3D model loaded.</div>';
   showPreviewWarning("");
   hideTexture();
+  setPinning(false);
+  state.pinDraft = null;
+  $("note-pin").disabled = true;
+  renderPins();
 }
 
 function showPreviewWarning(text) {
@@ -313,6 +323,8 @@ async function loadModel(assetId, level) {
   updateReadout();
   await refreshCollisionOverlay();
   $("collision-derive").disabled = false;
+  $("note-pin").disabled = false;
+  renderPins();
 }
 
 /* - materials */
@@ -690,8 +702,21 @@ async function refreshAssets() {
     ? `  ${stats.unverified} unmeasured (not in the tri total)` : "";
   const broken = stats.broken ? `  ${stats.broken} broken` : "";
   $("stats").textContent =
-    `${stats.assets} asset${stats.assets === 1 ? "" : "s"}  ${fmt(stats.triangles)} tris  ${stats.lods} LODs  `
-    + `${stats.notes} notes${unmeasured}${broken}`;
+    `${stats.assets} asset${stats.assets === 1 ? "" : "s"}  ${fmt(stats.triangles)} tris  `
+    + `${stats.lods} LOD${stats.lods === 1 ? "" : "s"}  `
+    + `${stats.notes} note${stats.notes === 1 ? "" : "s"}${unmeasured}${broken}`;
+}
+
+function waitForModel(timeout = 15000, previous = null) {
+  const started = performance.now();
+  return new Promise((resolve) => {
+    const tick = () => {
+      const model = state.sceneObjects.model;
+      if ((model && model !== previous) || performance.now() - started > timeout) resolve();
+      else setTimeout(tick, 50);
+    };
+    tick();
+  });
 }
 
 async function selectAsset(id) {
@@ -1178,31 +1203,208 @@ function refreshCollisionExport() {
 function renderNotes() {
   const container = $("note-list");
   const notes = (state.asset && state.asset.notes) || [];
+  renderPins();
   if (!notes.length) {
     container.innerHTML = '<div class="empty">No notes yet.</div>';
     return;
   }
   container.innerHTML = "";
+  const token = state.token ? `?token=${encodeURIComponent(state.token)}` : "";
   notes.forEach((note) => {
     const element = document.createElement("div");
-    element.className = "note";
+    element.className = "note" + (state.activeNote === note.id ? " active" : "");
+    element.dataset.noteId = note.id;
+    const badge = note.pin ? `<span class="pin-badge">#${note.pin.number}</span>` : "";
     element.innerHTML =
-      `<div class="head"><span class="cat">${escapeHtml(note.category)}</span>`
+      `<div class="head"><span>${badge}<span class="cat">${escapeHtml(note.category)}</span></span>`
       + `<span>${escapeHtml(note.author || "anonymous")}</span></div>`
       + `<div class="body">${renderMarkdown(note.note_text)}</div>`
+      + (note.screenshot ? `<img class="shot" alt="the view this note was pinned in" `
+         + `src="${note.screenshot}${token}" title="Show this view">` : "")
       + `<div class="head" style="margin-top:6px"><span>`
-      + `${escapeHtml(note.created_at.replace("T", " "))}</span>`
+      + `${escapeHtml(note.created_at.replace("T", " "))}</span><span class="note-actions">`
+      + (note.pin ? `<button class="chip" data-view style="padding:2px 8px">view</button>`
+         + `<button class="chip" data-link style="padding:2px 8px" title="Copy a link that opens this view">link</button>` : "")
       + `<button class="chip" data-note="${note.id}" style="padding:2px 8px">`
-      + `delete</button></div>`;
+      + `delete</button></span></div>`;
     element.querySelector("[data-note]").addEventListener("click", async () => {
       try {
         await api(`/api/notes/${note.id}`, { method: "DELETE" });
         await refreshSelected();
       } catch (error) { $("status").textContent = `error: ${error.message}`; }
     });
+    if (note.pin) {
+      element.querySelector("[data-view]").addEventListener("click", () => showNoteView(note));
+      const shot = element.querySelector(".shot");
+      if (shot) shot.addEventListener("click", () => showNoteView(note));
+      element.querySelector("[data-link]").addEventListener("click", async () => {
+        const link = `${window.location.origin}/viewer?asset=${state.asset.id}&note=${note.id}`;
+        try {
+          await navigator.clipboard.writeText(link);
+          $("status").textContent = "link to this view copied";
+        } catch (error) { $("status").textContent = link; }
+      });
+    }
     container.appendChild(element);
   });
 }
+
+/* - pinned notes (W5): a point on the model, the camera it was seen from, and
+ * a picture of that view. Pins are numbered oldest first by the server. */
+
+const raycaster = new THREE.Raycaster();
+const pointerDown = { x: 0, y: 0 };
+
+function setPinning(on) {
+  state.pinning = !!on;
+  host.classList.toggle("pinning", state.pinning);
+  $("note-pin").classList.toggle("active", state.pinning);
+  $("note-pin-state").textContent = state.pinning ? "click the model where the note is about"
+    : (state.pinDraft ? "pinned here - write the note, then Add note" : "");
+}
+
+function pinsShown() {
+  const notes = (state.asset && state.asset.notes) || [];
+  return state.sceneObjects.model ? notes.filter((note) => note.pin) : [];
+}
+
+function renderPins() {
+  const layer = $("pins");
+  if (!layer) return;
+  layer.innerHTML = "";
+  pinsShown().forEach((note) => {
+    const marker = document.createElement("div");
+    marker.className = "pin-marker" + (state.activeNote === note.id ? " active" : "");
+    marker.textContent = note.pin.number;
+    marker.title = `#${note.pin.number} ${note.category}: ${note.note_text.slice(0, 80)}`;
+    marker.dataset.noteId = note.id;
+    marker.addEventListener("click", () => showNoteView(note));
+    layer.appendChild(marker);
+  });
+  if (state.pinDraft) {
+    const draft = document.createElement("div");
+    draft.className = "pin-marker draft";
+    draft.textContent = "+";
+    draft.dataset.draft = "1";
+    layer.appendChild(draft);
+  }
+  placePins();
+}
+
+const projected = new THREE.Vector3();
+function placePins() {
+  const layer = $("pins");
+  if (!layer || !layer.children.length) return;
+  const width = host.clientWidth;
+  const height = host.clientHeight;
+  const byId = new Map(pinsShown().map((note) => [String(note.id), note.pin.point]));
+  Array.from(layer.children).forEach((marker) => {
+    const point = marker.dataset.draft ? state.pinDraft && state.pinDraft.point
+      : byId.get(marker.dataset.noteId);
+    if (!point) { marker.hidden = true; return; }
+    projected.set(point[0], point[1], point[2]).project(camera);
+    const visible = projected.z > -1 && projected.z < 1
+      && Math.abs(projected.x) <= 1.05 && Math.abs(projected.y) <= 1.05;
+    marker.hidden = !visible;
+    if (visible) {
+      marker.style.left = `${(projected.x + 1) / 2 * width}px`;
+      marker.style.top = `${(1 - projected.y) / 2 * height}px`;
+    }
+  });
+}
+
+function flyTo(view, duration = 600) {
+  const position = new THREE.Vector3(...view.position);
+  const target = new THREE.Vector3(...view.target);
+  if (view.fov && Math.abs(view.fov - camera.fov) > 0.01) {
+    camera.fov = view.fov;
+    camera.updateProjectionMatrix();
+  }
+  state.flight = { from: camera.position.clone(), fromTarget: controls.target.clone(),
+                   position, target, start: performance.now(), duration };
+}
+
+function stepFlight() {
+  const flight = state.flight;
+  if (!flight) return;
+  const t = Math.min(1, (performance.now() - flight.start) / flight.duration);
+  const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+  camera.position.lerpVectors(flight.from, flight.position, eased);
+  controls.target.lerpVectors(flight.fromTarget, flight.target, eased);
+  if (t >= 1) state.flight = null;
+}
+
+async function showNoteView(note) {
+  if (!note || !note.pin) return;
+  state.activeNote = note.id;
+  const level = note.pin.level || "source";
+  if (level !== state.level && state.asset) {
+    const button = Array.from($("lod-buttons").children)
+      .find((child) => child.dataset.level === level);
+    if (button) {
+      // Wait for that level to be on screen: loading it frames the camera,
+      // which would otherwise undo the flight.
+      const before = state.sceneObjects.model;
+      button.click();
+      await waitForModel(15000, before);
+    }
+  }
+  flyTo(note.pin.camera);
+  renderNotes();
+  const element = $("note-list").querySelector(`[data-note-id="${note.id}"]`);
+  if (element) element.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  $("status").textContent = `note #${note.pin.number}: ${note.category}`;
+}
+
+/* The view as a small JPEG: rendered now (the canvas is cleared after each
+ * frame), scaled to 800 px wide at most. HTML pins are not in the picture. */
+function captureView() {
+  renderer.render(scene, camera);
+  const source = renderer.domElement;
+  const scale = Math.min(1, 800 / Math.max(1, source.width));
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.max(1, Math.round(source.width * scale));
+  canvas.height = Math.max(1, Math.round(source.height * scale));
+  canvas.getContext("2d").drawImage(source, 0, 0, canvas.width, canvas.height);
+  return canvas.toDataURL("image/jpeg", 0.85);
+}
+
+$("note-pin").addEventListener("click", () => {
+  if (!state.sceneObjects.model) return;
+  if (state.pinDraft || state.pinning) {
+    state.pinDraft = null;
+    setPinning(false);
+    renderPins();
+    return;
+  }
+  setPinning(true);
+});
+
+renderer.domElement.addEventListener("pointerdown", (event) => {
+  pointerDown.x = event.clientX;
+  pointerDown.y = event.clientY;
+});
+
+renderer.domElement.addEventListener("pointerup", (event) => {
+  // A click, not the end of an orbit drag.
+  if (!state.pinning || !state.sceneObjects.model) return;
+  if (Math.hypot(event.clientX - pointerDown.x, event.clientY - pointerDown.y) > 4) return;
+  const rect = renderer.domElement.getBoundingClientRect();
+  const ndc = new THREE.Vector2(((event.clientX - rect.left) / rect.width) * 2 - 1,
+                                -((event.clientY - rect.top) / rect.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  const hit = raycaster.intersectObject(state.sceneObjects.model, true)
+    .find((item) => item.object.isMesh && item.object.visible);
+  if (!hit) {
+    $("note-pin-state").textContent = "that missed the model - click on it";
+    return;
+  }
+  const normal = hit.face ? hit.face.normal.clone().transformDirection(hit.object.matrixWorld) : null;
+  state.pinDraft = { point: hit.point.toArray(), normal: normal ? normal.toArray() : null };
+  setPinning(false);
+  renderPins();
+  $("note-text").focus();
+});
 
 /* - upload */
 
@@ -1460,18 +1662,33 @@ $("note-form").addEventListener("submit", async (event) => {
   const text = $("note-text").value.trim();
   if (!text) return;
   try {
-    await api("/api/notes", {
+    const payload = {
+      asset_id: state.asset.id,
+      category: $("note-category").value,
+      note_text: text,
+      author: $("note-author").value.trim() || "anonymous",
+    };
+    if (state.pinDraft) {
+      payload.pin = {
+        point: state.pinDraft.point,
+        camera: { position: camera.position.toArray(), target: controls.target.toArray(),
+                  fov: camera.fov },
+        level: state.level,
+      };
+      if (state.pinDraft.normal) payload.pin.normal = state.pinDraft.normal;
+      payload.screenshot = captureView();
+    }
+    const note = await (await api("/api/notes", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        asset_id: state.asset.id,
-        category: $("note-category").value,
-        note_text: text,
-        author: $("note-author").value.trim() || "anonymous",
-      }),
-    });
+      body: JSON.stringify(payload),
+    })).json();
     $("note-text").value = "";
+    state.pinDraft = null;
+    setPinning(false);
+    if (note && note.pin) state.activeNote = note.id;
     await refreshSelected();
+    refreshAssets().catch(() => {});     // the library's and header's note counts
   } catch (error) {
     $("status").textContent = `error: ${error.message}`;
   }
@@ -2045,6 +2262,15 @@ animate();
     const wanted = Number(params.get("asset"));
     if (Number.isFinite(wanted) && wanted > 0) {
       await selectAsset(wanted);
+      const noteId = Number(params.get("note"));
+      if (Number.isFinite(noteId) && noteId > 0 && state.asset) {
+        // ?note=<id>: open the view the note was pinned in, on any machine.
+        const note = (state.asset.notes || []).find((item) => item.id === noteId);
+        if (note && note.pin) {
+          await waitForModel();
+          await showNoteView(note);
+        }
+      }
       const level = params.get("lod");
       if (level) {
         const button = Array.from($("lod-buttons").children)

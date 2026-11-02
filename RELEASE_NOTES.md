@@ -7,6 +7,11 @@
     workflow keeps it between runs with `actions/cache`.
   * `--jobs N` checks files in parallel processes (`0` = one per CPU), with the
     same verdicts in the same order.
+  * Art Workstation: notes pinned to the model - a numbered pin, the camera and a
+    picture of the view; clicking it (or a `?note=` link on another machine)
+    flies back to that view; the printable report includes the pictures.
+  * Fixed: the header said "1 notes" / "1 LODs", and its note count lagged one
+    note behind.
 
 * **Inspection views and textured FBX (roadmap phase 3).**
   * Viewer: **UV check** (numbered checker; pink where a mesh has no UVs), **Texel**

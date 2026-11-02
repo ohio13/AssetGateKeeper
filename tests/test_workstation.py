@@ -1242,6 +1242,104 @@ expect("the banner says what the preview now shows",
 
 import os  # noqa: E402
 import subprocess  # noqa: E402
+print("30. notes pinned to the model (W5)")
+pin_db, pin_data = fresh("pins")
+pin_asset = aws.create_asset(pin_db, pin_data, "crate.obj", OBJ.encode())
+_shot = "data:image/png;base64," + base64.b64encode(png_bytes((200, 40, 40))).decode()
+_view = {"point": [0.5, 1.0, 0.5], "normal": [0, 1, 0],
+         "camera": {"position": [2.4, 1.8, 3.2], "target": [0.5, 0.5, 0.5], "fov": 45},
+         "level": "source"}
+_first_pin = aws.add_note(pin_db, pin_asset["id"], "Geometry", "seam on the lid", "ana",
+                          pin=_view, screenshot=_shot, data_dir=pin_data)
+_plain = aws.add_note(pin_db, pin_asset["id"], "Other", "no pin here", "ana")
+_second_pin = aws.add_note(pin_db, pin_asset["id"], "Texture", "stretched corner", "ana",
+                           pin=dict(_view, point=[1, 0, 1]), data_dir=pin_data)
+_listed = {note["id"]: note for note in aws.list_notes(pin_db, pin_asset["id"])}
+expect("a pinned note keeps its point, normal, camera and level",
+       _listed[_first_pin["id"]]["pin"]["point"] == [0.5, 1.0, 0.5]
+       and _listed[_first_pin["id"]]["pin"]["camera"]["target"] == [0.5, 0.5, 0.5]
+       and _listed[_first_pin["id"]]["pin"]["camera"]["fov"] == 45
+       and _listed[_first_pin["id"]]["pin"]["level"] == "source", _listed[_first_pin["id"]])
+expect("pins are numbered oldest first, skipping unpinned notes",
+       _listed[_first_pin["id"]]["pin"]["number"] == 1 and _listed[_second_pin["id"]]["pin"]["number"] == 2
+       and _listed[_plain["id"]]["pin"] is None)
+expect("the screenshot is stored and served by URL, a note without one has none",
+       _listed[_first_pin["id"]]["screenshot"] == f"/api/notes/{_first_pin['id']}/screenshot"
+       and _listed[_second_pin["id"]]["screenshot"] == "")
+_shot_file = aws.note_screenshot(pin_db, pin_data, _first_pin["id"])
+expect("... as the PNG that was sent", _shot_file.read_bytes() == png_bytes((200, 40, 40)))
+for _bad_pin, _why in ((dict(_view, point=[1, 2]), "two numbers"),
+                       (dict(_view, point=[1, 2, float("nan")]), "NaN"),
+                       (dict(_view, camera={"position": [0, 0, 1]}), "no camera target"),
+                       (dict(_view, camera=dict(_view["camera"], fov=500)), "fov 500"),
+                       (dict(_view, level="../x"), "a made-up level"),
+                       (dict(_view, colour="red"), "an unknown field"),
+                       ("here", "not an object")):
+    try:
+        aws.add_note(pin_db, pin_asset["id"], "Other", "x", pin=_bad_pin, data_dir=pin_data)
+        expect(f"a bad pin is refused ({_why})", False)
+    except aws.WorkstationError as exc:
+        expect(f"a bad pin is refused ({_why})", exc.status == 400, str(exc))
+for _bad_shot, _status, _why in (("data:image/gif;base64,R0lGODlhAQABAAAAACw=", 400, "a GIF"),
+                                 ("data:image/png;base64," + base64.b64encode(b"<svg/>").decode(), 400,
+                                  "PNG by name, not by its bytes"),
+                                 ("data:image/png;base64,***", 400, "not base64"),
+                                 ("data:image/jpeg;base64," + base64.b64encode(
+                                     b"\xff\xd8\xff" + b"0" * 700_000).decode(), 413, "too large")):
+    try:
+        aws.add_note(pin_db, pin_asset["id"], "Other", "x", pin=_view, screenshot=_bad_shot,
+                     data_dir=pin_data)
+        expect(f"a bad screenshot is refused ({_why})", False)
+    except aws.WorkstationError as exc:
+        expect(f"a bad screenshot is refused ({_why})", exc.status == _status, str(exc))
+expect("... and nothing was stored for them",
+       len(aws.list_notes(pin_db, pin_asset["id"])) == 3)
+_pin_report = aws.render_report(pin_db, pin_data, pin_asset["id"])
+expect("the printable report shows the pin number and embeds the view (one self-contained file)",
+       "#1</span>" in _pin_report and "data:image/png;base64," in _pin_report
+       and "/api/notes/" not in _pin_report)
+pin_server = aws.build_server("127.0.0.1", 0, pin_db, pin_data, quiet=True)
+pin_port = pin_server.server_address[1]
+threading.Thread(target=pin_server.serve_forever, daemon=True).start()
+time.sleep(0.1)
+_status, _raw, _headers = Client(pin_port).call(f"/api/notes/{_first_pin['id']}/screenshot")
+expect("GET /api/notes/<id>/screenshot serves the image",
+       _status == 200 and _raw == png_bytes((200, 40, 40)) and _headers.get("Content-Type", "").startswith("image/png"),
+       (_status, _headers.get("Content-Type")))
+_status, _ = Client(pin_port).json(f"/api/notes/{_plain['id']}/screenshot")
+expect("... and 404 for a note without one", _status == 404)
+_status, _posted = Client(pin_port).json("/api/notes", method="POST", body={
+    "asset_id": pin_asset["id"], "category": "LOD", "note_text": "over HTTP", "pin": _view,
+    "screenshot": _shot})
+expect("POST /api/notes takes a pin and a screenshot",
+       _status == 201 and _posted["pin"]["number"] == 3 and _posted["screenshot"], _posted)
+_status, _posted_bad = Client(pin_port).json("/api/notes", method="POST", body={
+    "asset_id": pin_asset["id"], "category": "LOD", "note_text": "bad", "pin": {"point": "x"}})
+expect("... and answers a bad pin with 400", _status == 400, _posted_bad)
+_status, _ = Client(pin_port).json(f"/api/notes/{_first_pin['id']}", method="DELETE")
+expect("deleting a note deletes its screenshot",
+       _status == 200 and not _shot_file.exists())
+_left = aws.note_screenshot(pin_db, pin_data, _posted["id"])
+_status, _ = Client(pin_port).json(f"/api/assets/{pin_asset['id']}", method="DELETE")
+expect("deleting the asset deletes its notes' screenshots", _status == 200 and not _left.exists())
+pin_server.shutdown()
+pin_server.server_close()
+_old_db = WORK / "pins_old.db"
+_old_db.unlink(missing_ok=True)
+import sqlite3 as _sqlite3  # noqa: E402
+with _sqlite3.connect(_old_db) as _old:
+    _old.execute("CREATE TABLE reviews_and_notes (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                 " asset_id INTEGER NOT NULL, author TEXT NOT NULL DEFAULT '', category TEXT NOT NULL,"
+                 " note_text TEXT NOT NULL, created_at TEXT NOT NULL)")
+    _old.execute("INSERT INTO reviews_and_notes (asset_id, category, note_text, created_at)"
+                 " VALUES (1, 'Other', 'from 1.1', '2026-11-01T10:00:00+00:00')")
+aws.init_db(_old_db)
+with aws.open_db(_old_db) as _conn:
+    _cols = {row["name"] for row in _conn.execute("PRAGMA table_info(reviews_and_notes)")}
+    _kept = _conn.execute("SELECT note_text FROM reviews_and_notes").fetchone()[0]
+expect("an older library gains the pin columns and keeps its notes",
+       {"pin_json", "screenshot"} <= _cols and _kept == "from 1.1", _cols)
+
 print("25. versions (W1) and where a file came from (W8)")
 v_db, v_data = fresh("versions")
 v1 = aws.create_asset(v_db, v_data, "rock.obj", OBJ.encode())
