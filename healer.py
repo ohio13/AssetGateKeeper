@@ -9,12 +9,18 @@ the staged copy is deleted and the artist's file is untouched — byte for byte.
 
 What can be healed, and why only that:
 
-``.png``  name suffix (rename) and non-power-of-two (pad or resize). Both are
-          reversible in an afternoon and neither changes what the image means.
+``.png``  name suffix (rename) and non-power-of-two (resize by default; pad is
+          opt-in). Neither changes what the image means, and every heal keeps
+          the original (below).
           A rename also rewrites the ``.mtl``/``.gltf`` files that named the old
           filename, and only at the moment the rename is adopted.
 ``.obj``  zero-area faces are deleted. Deleting a face that contributes no pixels
           is the one mesh edit that cannot cost an artist anything.
+
+Every adopted heal keeps the files it replaced - the asset and any ``.mtl`` or
+``.gltf`` it repointed - in ``.agk-backups/<id>/`` with a ``heal.json`` that
+says what changed. ``undo_heal`` (``asset-gatekeeper <file> --undo-heal``) puts
+them back, and refuses if the healed file was edited since.
 
 What is deliberately *not* healed: triangle budgets (decimation destroys intent),
 material merging (changes shading), texture resolution (throwing away detail), and
@@ -27,12 +33,15 @@ unless healing is switched on.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
 import re
 import shutil
 import tempfile
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable, Optional, Sequence
 from urllib.parse import quote, unquote
@@ -47,11 +56,15 @@ LOG = logging.getLogger("assetgatekeeper.healer")
 # Staging folders live inside the watch directory (same filesystem => atomic
 # rename), so the watcher must ignore them. Keep in sync with IGNORED_PREFIXES.
 STAGING_PREFIX = ".agk-heal-"
+# Where every adopted heal keeps what it replaced. Also ignored by the watcher.
+BACKUP_DIRNAME = ".agk-backups"
+MANIFEST_NAME = "heal.json"
 
-# "resize" keeps UVs exactly: the content is resampled to the new canvas, so
-# u,v still address the same texel. "pad" only replicates a border, which
-# leaves the content occupying a smaller fraction of the image - about 2.3%
-# on a 1000->1024 pad - so it is opt-in and documented as UV-shifting.
+# "resize" (the default) keeps UVs exactly: the content is resampled to the new
+# canvas, so u,v still address the same texel. "pad" keeps every source pixel
+# but leaves the content occupying a smaller fraction of the image - a UV of
+# 0.5 lands 2.3% off on a 1000->1024 pad, and the padded edge is repeated
+# border - so it is opt-in and documented as UV-shifting.
 TEXTURE_MODES = ("resize", "pad")
 HEALABLE_MESH_SUFFIXES = {".obj"}
 
@@ -93,6 +106,12 @@ class HealResult:
 
     path: Path
     modifications: tuple[str, ...]
+    # The .agk-backups/<id> folder holding what was replaced (None for a dry run).
+    backup: Optional[Path] = None
+    # True when nothing was written: the heal was verified in staging only.
+    dry_run: bool = False
+    # Reference files the rename would repoint (dry run) or did repoint.
+    references: tuple[str, ...] = field(default=())
 
     @property
     def summary(self) -> str:
@@ -179,7 +198,7 @@ def _pad_to(img, width: int, height: int):
     return canvas
 
 
-def heal_texture_file(path: Path, mode: str = "pad") -> Optional[str]:
+def heal_texture_file(path: Path, mode: str = "resize") -> Optional[str]:
     """Make a texture's edges a power of two. Returns a change note, or None."""
     if Image is None:  # pragma: no cover - checked at startup by the gate
         raise HealError("Pillow is not installed")
@@ -352,6 +371,31 @@ def _project_boundary(root: Path) -> Optional[Path]:
     return root.parent if root.parent != root else None
 
 
+def project_root_for(folder: Path, levels: int = 6) -> Optional[Path]:
+    """The nearest folder at or above ``folder`` that marks a project root.
+
+    For healing one file: a texture's references usually live beside the
+    meshes, not beside the texture, so ``--heal`` searches (and repoints) the
+    whole project when it can find one. A ``.git``, ``.p4config``, ``*.uproject``,
+    ``*.hip`` or a ``rules.toml`` marks it. None when nothing does.
+    """
+    current = folder
+    for _ in range(levels + 1):
+        try:
+            if any((current / marker).exists()
+                   for marker in PROJECT_MARKERS + ANCESTOR_MARKERS):
+                return current
+            if any(next(current.glob(pattern), None) is not None
+                   for pattern in PROJECT_MARKER_GLOBS):
+                return current
+        except OSError:
+            return None
+        if current.parent == current:
+            break
+        current = current.parent
+    return None
+
+
 def _text_references(text: str, folder: Path, texture: Path, needles: set) -> bool:
     """Does ``text`` (a file in ``folder``) name ``texture`` by a path that resolves to it?"""
     target = os.path.normcase(str(texture))
@@ -381,7 +425,8 @@ class Healer:
 
     def __init__(self, budget, *, textures: bool = True, meshes: bool = True,
                  texture_mode: str = "resize", root: Optional[Path] = None,
-                 resolve_references: Optional[Callable[[Path], list]] = None) -> None:
+                 resolve_references: Optional[Callable[[Path], list]] = None,
+                 backups: bool = True, dry_run: bool = False) -> None:
         if texture_mode not in TEXTURE_MODES:
             raise HealError(f"texture_mode must be one of {', '.join(TEXTURE_MODES)}, "
                             f"got {texture_mode!r}")
@@ -400,6 +445,12 @@ class Healer:
         # binary scene only blocks a rename when it really points at *this*
         # texture; without it, any byte match on the name does.
         self.resolve_references = resolve_references
+        # Keep what every heal replaces, so it can be undone. Off only for a
+        # caller that heals a throwaway copy (the Art Workstation).
+        self.backups = backups
+        # Verify in staging and report, but write nothing.
+        self.dry_run = dry_run
+        self.last_refusal = ""
 
     # -- public ------------------------------------------------------------- #
 
@@ -409,6 +460,8 @@ class Healer:
         The original file is only replaced when the staged copy verifies as
         passing; every other outcome leaves the artist's bytes untouched.
         """
+        # Why the last heal changed nothing, in words for whoever asked for it.
+        self.last_refusal = ""
         staging_root = Path(tempfile.mkdtemp(dir=str(path.parent), prefix=STAGING_PREFIX))
         try:
             return self._heal_into(staging_root, path, checker)
@@ -463,6 +516,7 @@ class Healer:
             shutil.copy2(path, staged)
         except OSError as exc:
             LOG.debug("healing: cannot stage %s: %s", path.name, exc)
+            self.last_refusal = f"cannot copy it to stage the heal: {exc}"
             return None
 
         modifications: list[str] = []
@@ -500,6 +554,7 @@ class Healer:
                 note = heal_texture_file(staged, self.texture_mode)
             except (OSError, ValueError) as exc:   # corrupt/unreadable: not healable
                 LOG.debug("healing: texture failed (%s): %s", staged.name, exc)
+                self.last_refusal = f"the image cannot be read: {exc}"
                 return None
             if note:
                 modifications.append(note)
@@ -508,17 +563,21 @@ class Healer:
                 note = strip_degenerate_obj(staged, self.budget.degenerate_epsilon)
             except (OSError, ValueError) as exc:
                 LOG.debug("healing: cannot parse %s: %s", path.name, exc)
+                self.last_refusal = f"the mesh cannot be parsed: {exc}"
                 return None
             if note:
                 modifications.append(note)
 
         if not modifications:
+            self.last_refusal = ("nothing the healer can change would fix it (it renames and "
+                                 "resizes .png textures and strips zero-area .obj faces)")
             return None
 
         # Renaming is only safe when we are not about to clobber another asset.
         target = path.parent / staged.name
         if target.exists() and target.name != path.name:
             LOG.warning("healing: refusing to overwrite existing %s", target.name)
+            self.last_refusal = f"{target.name} already exists"
             return None
 
         # ... and when nothing *outside* the watched folder still names it. The
@@ -530,20 +589,37 @@ class Healer:
             if blocker:
                 advice = ("rename it in the DCC and re-export" if "binary" in blocker
                           else "rename it in the DCC, or run the gate on the project root "
-                               "so every reference is updated")
+                               "so every reference is updated (a rules.toml or .git at "
+                               "the project root lets --heal find it)")
                 LOG.warning("healing: not renaming %s - %s; %s", path.name, blocker, advice)
+                self.last_refusal = f"{blocker}; {advice}"
                 return None
 
         verdict = checker(staged)
         if getattr(verdict, "problems", ()):  # did not actually fix it: keep the original
             LOG.debug("healing: %s still fails after healing, discarding (%s)",
                       path.name, "; ".join(verdict.problems))
+            self.last_refusal = ("the healed copy would still fail - "
+                                 + "; ".join(verdict.problems)
+                                 + " - so it was thrown away")
             return None
+
+        if self.dry_run:
+            pending = self._prepare_reference_edits(path.parent, reference_renames,
+                                                    skip=(path,))
+            notes = list(modifications)
+            count = sum(item[2] for item in pending)
+            if count:
+                notes.append(f"repoint {count} reference{'s' if count != 1 else ''} "
+                             f"to {target.name}")
+            return HealResult(target, tuple(notes), dry_run=True,
+                              references=tuple(str(item[0]) for item in pending))
 
         try:
             return self._adopt(path, staged, modifications, reference_renames)
         except OSError as exc:
             LOG.warning("healing: could not replace %s: %s", path.name, exc)
+            self.last_refusal = f"could not replace it: {exc}"
             return None
 
     def _rename_for_suffix(self, staged: Path):
@@ -637,7 +713,7 @@ class Healer:
                         f"(over {OUTSIDE_SCAN_MAX_DIRS:,} folders)")
             dirnames[:] = sorted(
                 d for d in dirnames
-                if not d.startswith(STAGING_PREFIX)
+                if not d.startswith(STAGING_PREFIX) and d != BACKUP_DIRNAME
                 and d not in (".git", ".hg", ".svn", "__pycache__", "node_modules")
                 and (here / d).resolve() != root
                 and len(here.parts) - base_depth < OUTSIDE_SCAN_MAX_DEPTH)
@@ -689,10 +765,12 @@ class Healer:
 
         if self.root is not None and include_parent:
             for base, dirnames, filenames in os.walk(self.root, onerror=lambda _exc: None):
-                # Never edit our own staging folders, never descend into a VCS.
+                # Never edit our own staging or backup folders (a later rename
+                # would rewrite the backed-up .mtl, and undo would restore the
+                # edit), never descend into a VCS.
                 dirnames[:] = sorted(
                     name for name in dirnames
-                    if not name.startswith(STAGING_PREFIX)
+                    if not name.startswith(STAGING_PREFIX) and name != BACKUP_DIRNAME
                     and name not in (".git", ".hg", ".svn", "__pycache__"))
                 for name in filenames:
                     consider(Path(base) / name)
@@ -760,6 +838,55 @@ class Healer:
                     pass
         return updated
 
+    def _backup_base(self, original: Path) -> Path:
+        """The folder whose .agk-backups/ holds this heal: the watch root if the
+        asset is under it, else the asset's own folder."""
+        for candidate in (self.root, original.parent):
+            if candidate is None:
+                continue
+            try:
+                original.resolve().relative_to(Path(candidate).resolve())
+                return Path(candidate)
+            except ValueError:
+                continue
+        return original.parent
+
+    def _write_backup(self, original: Path, staged: Path, target: Path,
+                      modifications: list[str],
+                      pending: Sequence[tuple[Path, str, int]]) -> Path:
+        """Copy everything the adoption is about to replace, plus a manifest.
+
+        Written *before* the swap: if the copy fails, the heal is abandoned with
+        the artist's file untouched, the same as a failed verification.
+        """
+        base = self._backup_base(original)
+        folder = Path(tempfile.mkdtemp(
+            dir=str(_ensure_dir(base / BACKUP_DIRNAME)),
+            prefix=datetime.now().strftime("%Y%m%d-%H%M%S-%f-")))
+        files = []
+        for source in [original, *(item[0] for item in pending)]:
+            relative = _relative(source, base)
+            destination = folder / "files" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, destination)
+            files.append(relative)
+        manifest = {
+            "version": 1,
+            "healed_at": datetime.now(timezone.utc).isoformat(timespec="microseconds"),
+            "asset": _relative(original, base),
+            "healed": _relative(target, base),
+            "modifications": list(modifications),
+            "texture_mode": self.texture_mode,
+            "files": files,
+            # What the heal leaves on disk, so undo can tell whether anyone has
+            # edited the result since (and refuse rather than lose their work).
+            "after": {_relative(target, base): _digest_file(staged),
+                      **{_relative(item[0], base): hashlib.sha256(
+                          item[1].encode("utf-8")).hexdigest() for item in pending}},
+        }
+        (folder / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+        return folder
+
     def _adopt(self, original: Path, staged: Path, modifications: list[str],
                reference_renames: Optional[dict[str, str]] = None) -> HealResult:
         target = original.parent / staged.name
@@ -767,6 +894,9 @@ class Healer:
         # cannot read abandons the heal with the original still in place.
         pending = self._prepare_reference_edits(original.parent, reference_renames or {},
                                                 skip=(original, staged))
+        backup = None
+        if self.backups:
+            backup = self._write_backup(original, staged, target, modifications, pending)
         # Atomic swap on the same filesystem; the original is replaced only now,
         # after the staged copy passed inspection.
         os.replace(staged, target)
@@ -778,4 +908,140 @@ class Healer:
                                  f"{'s' if repointed != 1 else ''} to {target.name}")
         for note in modifications:
             LOG.info("healed  %s: %s", target.name, note)
-        return HealResult(target, tuple(modifications))
+        if backup is not None:
+            LOG.info("healed  %s: original kept in %s (undo: --undo-heal)",
+                     target.name, backup)
+        return HealResult(target, tuple(modifications), backup=backup,
+                          references=tuple(str(item[0]) for item in pending))
+
+
+# --------------------------------------------------------------------------- #
+# Backups and undo
+# --------------------------------------------------------------------------- #
+
+def _ensure_dir(path: Path) -> Path:
+    path.mkdir(parents=True, exist_ok=True)
+    return path
+
+
+def _relative(path: Path, base: Path) -> str:
+    try:
+        return path.resolve().relative_to(base.resolve()).as_posix()
+    except ValueError:
+        return path.name
+
+
+def _digest_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+@dataclass(frozen=True)
+class HealRecord:
+    """One adopted heal, read back from its manifest."""
+
+    folder: Path            # .agk-backups/<id>
+    base: Path              # the folder the manifest's paths are relative to
+    manifest: dict
+
+    @property
+    def asset(self) -> Path:
+        return self.base / self.manifest["asset"]
+
+    @property
+    def healed(self) -> Path:
+        return self.base / self.manifest["healed"]
+
+    @property
+    def undone(self) -> bool:
+        return bool(self.manifest.get("undone_at"))
+
+
+def find_heals(start: Path) -> list[HealRecord]:
+    """Every heal recorded in ``start``'s .agk-backups and its ancestors', newest first.
+
+    Ancestors too: a heal made while watching ``Content/`` is recorded there,
+    and an artist undoing one file passes ``Content/Props/rock.png``.
+    """
+    records: list[HealRecord] = []
+    folder = start if start.is_dir() else start.parent
+    for base in [folder, *folder.parents]:
+        backups = base / BACKUP_DIRNAME
+        if not backups.is_dir():
+            continue
+        for entry in backups.iterdir():
+            manifest_path = entry / MANIFEST_NAME
+            try:
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(manifest, dict) and "asset" in manifest and "healed" in manifest:
+                records.append(HealRecord(entry, base, manifest))
+    records.sort(key=lambda record: (record.manifest.get("healed_at", ""), record.folder.name),
+                 reverse=True)
+    return records
+
+
+def is_inside(path: Path, folder: Path) -> bool:
+    try:
+        path.resolve().relative_to(folder.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def _same_file(a: Path, b: Path) -> bool:
+    return os.path.normcase(str(a.resolve())) == os.path.normcase(str(b.resolve()))
+
+
+def undo_heal(path: Path) -> HealRecord:
+    """Put back what the latest heal of ``path`` replaced.
+
+    ``path`` may be the healed file or the name it had before (a rename).
+    Refuses - changing nothing - when any file the heal wrote has been edited
+    since: an undo must never throw away work done after the heal.
+    """
+    path = Path(path)
+    for record in find_heals(path):
+        if record.undone:
+            continue
+        if not (_same_file(record.healed, path) or _same_file(record.asset, path)):
+            continue
+        changed = []
+        for relative, expected in (record.manifest.get("after") or {}).items():
+            current = record.base / relative
+            if not current.is_file() or _digest_file(current) != expected:
+                changed.append(relative)
+        if changed:
+            later = [other for other in find_heals(path)
+                     if not other.undone and other.manifest.get("healed_at", "") >=
+                     record.manifest.get("healed_at", "") and other.folder != record.folder
+                     and set(other.manifest.get("files", [])) & set(changed)]
+            hint = (f" A later heal changed it: undo {later[-1].manifest['healed']} first."
+                    if later else "")
+            raise HealError(f"{', '.join(changed)} changed after it was healed; "
+                            f"nothing was undone.{hint} The originals are in "
+                            f"{record.folder / 'files'}")
+        for relative in record.manifest.get("files", []):
+            source = record.folder / "files" / relative
+            if not source.is_file():
+                raise HealError(f"the backup of {relative} is missing from {record.folder}; "
+                                "nothing was undone")
+        for relative in record.manifest["files"]:
+            destination = record.base / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            temporary = destination.with_name(destination.name + ".agk-edit")
+            shutil.copy2(record.folder / "files" / relative, temporary)
+            os.replace(temporary, destination)
+        if not _same_file(record.healed, record.asset) and record.healed.exists():
+            record.healed.unlink()          # the renamed copy must not survive
+        manifest = dict(record.manifest)
+        manifest["undone_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
+        (record.folder / MANIFEST_NAME).write_text(json.dumps(manifest, indent=2),
+                                                   encoding="utf-8")
+        return HealRecord(record.folder, record.base, manifest)
+    raise HealError(f"no heal of {path.name} to undo (looked in {BACKUP_DIRNAME} folders "
+                    f"from {path.parent} up)")

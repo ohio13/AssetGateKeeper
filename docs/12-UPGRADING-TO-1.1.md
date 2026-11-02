@@ -85,7 +85,11 @@ backslash paths. When the healer cannot prove a rename is safe it now leaves the
 file alone rather than shipping a broken reference - so a few assets that used to
 be "healed" will now fail with the real reason.
 
-`[healer] texture_mode = "resize"` is still the default; `pad` is unchanged.
+`[healer] texture_mode` defaults to `"resize"` from 1.1.1. In 1.1.0 the code
+defaulted to `"pad"` (this page said otherwise), which shifts UVs; set
+`texture_mode = "pad"` explicitly if you relied on it. 1.1.1 also keeps every
+healed original in `.agk-backups/` and adds `--heal`, `--undo-heal` and
+`--list-heals`.
 
 ## 5. The viewer no longer needs the internet
 

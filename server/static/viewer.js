@@ -859,7 +859,64 @@ function buildMaterialControls() {
   }
 }
 
+/* - healing: a fixed copy, never the original */
+
+const HEALABLE = /\.(png|obj)$/i;
+
+function resetHeal() {
+  const button = $("asset-heal");
+  const asset = state.asset;
+  state.healPreview = null;
+  button.hidden = !(asset && HEALABLE.test(asset.filename || "") && asset.kind !== "broken");
+  button.disabled = false;
+  button.textContent = "Check for fixes";
+  $("heal-result").hidden = true;
+  $("heal-result").innerHTML = "";
+}
+
+async function healSelected() {
+  const asset = state.asset;
+  if (!asset) return;
+  const button = $("asset-heal");
+  const result = $("heal-result");
+  button.disabled = true;
+  try {
+    if (!state.healPreview || state.healPreview.asset_id !== asset.id) {
+      const preview = await json(`/api/assets/${asset.id}/heal`);
+      if (!state.asset || state.asset.id !== asset.id) return;
+      state.healPreview = preview;
+      result.hidden = false;
+      if (preview.healable) {
+        result.innerHTML = '<div><strong>The healer can fix this:</strong></div>'
+          + `<ul>${preview.changes.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`
+          + `<div class="sub">Checked against ${escapeHtml(preview.budget)}. The fixed copy `
+          + "is added as a new asset; this one is not changed.</div>";
+        button.textContent = "Make fixed copy";
+        button.disabled = false;
+      } else {
+        result.innerHTML = `<div><strong>Nothing to fix here:</strong> ${escapeHtml(preview.reason)}.</div>`;
+        button.hidden = true;
+      }
+      return;
+    }
+    button.textContent = "Fixing…";
+    const made = await json(`/api/assets/${asset.id}/heal`, { method: "POST" });
+    await refreshAssets();
+    await selectAsset(made.copy_id);
+    $("status").textContent = `fixed copy of ${asset.filename}: ${made.asset.filename}`;
+  } catch (error) {
+    result.hidden = false;
+    result.innerHTML = `<div class="error">Could not fix it: ${escapeHtml(error.message)}</div>`;
+    button.disabled = false;
+    button.textContent = "Check for fixes";
+    state.healPreview = null;
+  }
+}
+
+$("asset-heal").addEventListener("click", () => { healSelected(); });
+
 function refreshCollisionExport() {
+  resetHeal();
   const link = $("collision-export");
   const token = state.token ? `?token=${encodeURIComponent(state.token)}` : "";
   for (const [id, path] of [["asset-report", "report"], ["asset-download", "file"]]) {
@@ -1419,10 +1476,22 @@ function showVerdict(assetOrId) {
       : '<div class="sub">No rule was broken.</div>')
     + (asset.verdict_tags ? `<div class="verdict-tags">Category: ${escapeHtml(asset.verdict_tags)}</div>` : "")
     + (asset.source ? `<div class="verdict-source">sent from ${escapeHtml(asset.source)}</div>` : "")
+    + (asset.healed_from
+      ? `<div class="verdict-healed">Fixed copy of <a href="?asset=${encodeURIComponent(asset.healed_from)}" `
+        + `data-asset="${escapeHtml(asset.healed_from)}">#${escapeHtml(asset.healed_from)}</a>, `
+        + `verified by the gate: ${escapeHtml(asset.heal_notes || "")}</div>` : "")
     + (asset.provenance_auth === "open"
       ? '<div class="verdict-trust">Not authenticated: this workstation was open to the network '
         + "with no token when it arrived, so anyone could have sent it.</div>" : "");
 }
+
+
+$("verdict-body").addEventListener("click", (event) => {
+  const link = event.target.closest("a[data-asset]");
+  if (!link) return;
+  event.preventDefault();
+  selectAsset(Number(link.dataset.asset));
+});
 
 
 /* - boot */

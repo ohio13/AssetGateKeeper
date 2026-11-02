@@ -668,6 +668,9 @@ expect("it has the material slider", 'id="max_material_slots"' in planner and 'm
 expect("it has the edge dropdown", all(f'value="{edge}"' in planner for edge in (512, 1024, 2048, 4096)))
 expect("it has the three checkboxes",
        all(f'id="{field}"' in planner for field in ("power_of_two", "naming", "auto_heal")))
+expect("the planner says what auto-heal does on every machine, and the per-asset way",
+       "every artist and build machine" in planner and "--undo-heal" in planner
+       and "--heal" in planner and "Check for fixes" in planner)
 expect("it posts to the save route", "/api/save-budget" in planner)
 
 status, body, _ = request(

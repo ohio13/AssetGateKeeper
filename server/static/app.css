@@ -230,6 +230,11 @@ body.rules-open { --rail: 430px; }
   border-bottom: 1px solid #8a3a3a; color: #f6c6c6; font-size: 12px; }
 .exposure-warning[hidden] { display: none; }
 .verdict-trust { margin-top: 6px; color: var(--warn); font-size: 11px; }
+.verdict-healed { margin-top: 6px; font-size: 11px; color: var(--muted); }
+.verdict-healed a { color: inherit; }
+.heal-result { margin-top: 8px; font-size: 12px; line-height: 1.45; }
+.heal-result ul { margin: 4px 0 6px 18px; padding: 0; }
+.heal-result .error { color: var(--warn); }
 
 /* ------------------------------------------------------- narrow screens */
 /* Below tablet width the three-column grid left no room for the viewport at all

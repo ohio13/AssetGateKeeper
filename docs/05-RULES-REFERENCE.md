@@ -66,14 +66,19 @@ just hides the check.
 
 | Key | Type | Default | Meaning |
 |---|---|---|---|
-| `enabled` | bool | false | master switch; `--auto-heal` turns it on for one run |
-| `textures` | bool | true | pad/resize textures |
-| `meshes` | bool | true | mesh repairs (currently: re-export/cleanup paths) |
-| `texture_mode` | string | `"pad"` | `pad` to the next power of two, `resize` to fit the budget |
+| `enabled` | bool | false | folder-wide healing; `--auto-heal` turns it on for one run. `--heal <file>` heals one file whatever this says |
+| `textures` | bool | true | `.png`: add a missing name suffix (and repoint what names it), make edges a power of two |
+| `meshes` | bool | true | `.obj`: delete zero-area faces |
+| `texture_mode` | string | `"resize"` | how a non-power-of-two `.png` reaches the next power of two: `resize` resamples it (UVs unchanged); `pad` repeats the edge (every pixel kept, but UVs shift - a UV of 0.5 lands 2.3 % off on 1000 -> 1024) |
+
+Healing never changes resolution, triangle counts or materials: a texture over the
+edge budget, or a mesh over its triangles, keeps failing.
 
 Healing is **adopt-only-if-clean**: the repaired file replaces the original only
 if it verifies as passing under the same budget. Otherwise the original is
-untouched and the failure stands. `--heal-dry-run` prints what would happen.
+untouched and the failure stands. Every adopted heal keeps the original in
+`.agk-backups/`; `asset-gatekeeper <file> --undo-heal` restores it, and
+`--heal --dry-run` prints what would happen without writing anything.
 
 ## [platforms.<name>]
 
@@ -183,7 +188,7 @@ pbr = true
 
 [healer]
 enabled = false
-texture_mode = "pad"
+texture_mode = "resize"
 
 [platforms.mobile]
 max_triangles = 15000

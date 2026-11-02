@@ -382,12 +382,29 @@ either way. Windows uses a WinRT toast with a tray-balloon fallback, Linux uses
 daemon thread, and text travels through environment variables rather than being
 interpolated into a PowerShell string — asset names are artist-controlled input.
 
-## Auto-healing: opt-in, and verified before it touches your file
+## Healing: opt-in, per asset, verified, and undoable
 
 The gate **fails and locks by default.** It never modifies an artist's asset on its
 own — automated resampling changes detail, mesh decimation destroys intent, and a
 tool that silently rewrites files during a submit is indistinguishable from
-corruption. Healing is a deliberate act:
+corruption. Healing is a deliberate act, and the usual one is a single asset:
+
+```bash
+asset-gatekeeper D:\Proj\Textures\bark.png --heal --dry-run   # what would change
+asset-gatekeeper D:\Proj\Textures\bark.png --heal             # do it
+asset-gatekeeper D:\Proj\Textures\bark.png --undo-heal        # put it back
+asset-gatekeeper D:\Proj --list-heals                          # what was healed here
+```
+
+`--heal` finds the project root (the nearest folder above the file with a `.git`,
+`.p4config`, `*.uproject`, `*.hip` or `rules.toml`), so the project's rules judge
+the result and the `.mtl`/`.gltf` files that name a renamed texture are repointed.
+The Art Workstation does the same from its **Check for fixes** button, as a new
+asset - it never writes the artist's disk.
+
+Folder-wide healing - every failing asset in a watched folder - is still there,
+off unless asked for, and it says at startup exactly what it may change and who
+turned it on:
 
 ```bash
 python asset_gatekeeper.py D:\Exports --auto-heal      # or [healer] enabled = true
@@ -397,7 +414,7 @@ What it will repair, and what it refuses to:
 
 | Problem | Healed? | How |
 | :--- | :--- | :--- |
-| `.png` not a power of two | yes | pad to the next POT (edge replication) or LANCZOS resize — `[healer] texture_mode` |
+| `.png` not a power of two | yes | LANCZOS resize to the next power of two (UVs unchanged); `texture_mode = "pad"` pads instead, which keeps every pixel but shifts UVs |
 | `.png` missing a naming suffix | yes | rename with the inferred suffix (`_Albedo`/`_Normal`/`_Roughness`) |
 | `.obj` zero-area faces | yes | delete the degenerate faces, rewrite the file |
 | Triangle budget exceeded | **no** | decimation is not a safe transformation |
@@ -413,8 +430,16 @@ the staged copy is deleted and the original is left byte-for-byte intact. It als
 refuses to rename onto a file that already exists, and it never recurses on its
 own staging folder.
 
+**Every heal can be undone.** Before an adopted heal replaces anything, the
+original - and every `.mtl`/`.gltf` it repoints - is copied to
+`.agk-backups/<time>/` under the watched folder (or the project root for
+`--heal`), with a `heal.json` saying what changed. `--undo-heal` puts it all back,
+deleting a renamed copy, and refuses - changing nothing - if the healed file has
+been edited since. The gate, the audit and the healer itself never look inside
+`.agk-backups/`; delete it when you no longer want the originals.
+
 ```
-15:41:07 PASSED WITH HEALING: padded 1000x1000 -> 1024x1024  stone_Albedo.png 1024x1024
+15:41:07 PASSED WITH HEALING: resized 1000x1000 -> 1024x1024  stone_Albedo.png 1024x1024
 15:41:07 PASSED WITH HEALING: Stripped 1 degenerate face     broken_glass.obj 12 tris / 1 mat
 15:41:07 FAILED: 4096x1024 exceeds the 2048x2048 maximum resolution  huge_Albedo.png   (unhealable: bytes untouched)
 ```
@@ -424,7 +449,7 @@ own staging folder.
 enabled = false        # the only safe default
 textures = true        # NPOT + suffix renames
 meshes = true          # zero-area .obj faces
-texture_mode = "pad"   # "pad" preserves every pixel; "resize" resamples
+texture_mode = "resize" # keeps UVs exact; "pad" keeps every pixel but shifts UVs
 ```
 
 `--no-auto-heal` exists so CI and the VCS hooks can pin healing **off** even when a
@@ -663,10 +688,12 @@ boxes, and clicks **Publish budgets**. That writes the `budgets` table; `/api/ru
 serves it in `rules.toml` shape, so every artist's next `--remote-rules` run picks
 it up — no TOML, no commit, no build step.
 
-Ticking **Enable auto-heal** is the interesting one: it reaches clients as
-`[healer] enabled = true` in the remote document, so healing can be switched on for
-a project centrally. It is still opt-in per run (`--no-auto-heal` beats it), and
-the client still only adopts a repair that verifies.
+Ticking **Enable auto-heal on every machine** is the one to think about: it
+reaches clients as `[healer] enabled = true` in the remote document, which turns
+folder-wide healing on for every artist and build machine reading those rules. The
+planner says so next to the box, each client says so at startup, `--no-auto-heal`
+still beats it, and every change is backed up and undoable. Most teams leave it
+off and heal single assets with `--heal` or the workstation's **Check for fixes**.
 
 > **Limits worth knowing:** the browser cannot send an `Authorization` header on a
 > typed URL, so the dashboard and planner accept `?token=` — that token lands in
@@ -870,6 +897,10 @@ python asset_gatekeeper.py [folder] [options]
 | `--require-indexed` | Also fail triangle-soup geometry (implies the transform audit) |
 | `--auto-heal` | Repair failing assets in place (opt-in; see above) |
 | `--no-auto-heal` | Force healing off, even if `rules.toml` enables it |
+| `--heal` | Repair this one file now (verified, original kept in `.agk-backups/`), even with healing off |
+| `--dry-run` | With `--heal`: say what would change, write nothing |
+| `--undo-heal` | Put back what the last heal of this file replaced |
+| `--list-heals` | List the heals recorded in a folder, newest first |
 | `--notify` / `--no-notify` | Native desktop toasts on failure/heal (on while watching, off in `--once`) |
 | `--notify-max N` | Maximum toasts per minute (default 6) |
 | `--allow-degenerate` | Permit zero-area triangles |

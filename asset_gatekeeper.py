@@ -178,7 +178,11 @@ IGNORED_SUFFIXES = (
 )
 # ".agk-heal-" is the healer's staging folder: it lives inside the watch dir so the
 # atomic rename is same-filesystem, and it must never be inspected as an asset.
-IGNORED_PREFIXES = ("~$", ".~", ".git", ".agk-heal-")
+# ".agk-backups" holds the originals every heal replaced.
+IGNORED_PREFIXES = ("~$", ".~", ".git", ".agk-heal-", ".agk-backups")
+# Folders whose *contents* are never assets. A name check on the file alone let a
+# recursive watch inspect (and try to heal) the healer's own staged copies.
+IGNORED_DIR_PREFIXES = (".agk-heal-", ".agk-backups")
 
 GLB_MAGIC = b"glTF"
 GLB_JSON_CHUNK = 0x4E4F534A  # 'JSON'
@@ -1014,8 +1018,10 @@ naming = true
 pbr = true
 
 [healer]
-# Off by default: the gate fails and locks. Turn this on only if you want
-# textures padded and degenerate faces stripped, verified before adoption.
+# Off by default: the gate fails and locks. On, it renames PNGs missing a
+# suffix, resizes non-power-of-two PNGs and strips zero-area .obj faces - each
+# verified before adoption, the original kept in .agk-backups/ (undo with
+# --undo-heal). To fix one asset instead: asset-gatekeeper <file> --heal
 enabled = {auto_heal}
 
 [platforms.mobile]
@@ -1215,6 +1221,10 @@ def walk_files(root: Path, recursive: bool = True, follow_symlinks: bool = False
     try:
         for directory, dirnames, filenames in os.walk(top, onerror=_walk_error,
                                                       followlinks=follow_symlinks):
+            # The healer's staging and backup folders are never part of the
+            # project: backups would read as orphaned textures in an audit.
+            dirnames[:] = [name for name in dirnames
+                           if not name.startswith(IGNORED_DIR_PREFIXES)]
             if follow_symlinks:
                 keep = []
                 for name in dirnames:
@@ -1468,7 +1478,8 @@ class HealSettings:
     enabled: bool = False
     textures: bool = True       # NPOT + missing-suffix renames
     meshes: bool = True         # zero-area faces, .obj only
-    texture_mode: str = "pad"   # pad preserves pixels; resize resamples
+    # resize keeps UVs exact; pad keeps every pixel but shifts UVs (opt-in)
+    texture_mode: str = "resize"
 
     @classmethod
     def from_mapping(cls, table: dict, where: str = "[healer]") -> "HealSettings":
@@ -1522,12 +1533,12 @@ def resolve_healer(root: Path, args: argparse.Namespace,
     return replace(from_source, enabled=bool(forced))
 
 
-def load_healer(budget: Budget, settings: HealSettings, root: Optional[Path] = None):
-    """Import the companion ``healer.py`` next to this file - only when asked.
-
-    Loaded by path rather than by import name so the tool still works when it is
-    copied alone into a studio's tools folder next to its healer.
-    """
+def healer_module():
+    """The companion ``healer.py``, loaded by path (once per process)."""
+    cached = sys.modules.get("agk_healer")
+    if cached is not None and getattr(cached, "__file__", None) == str(
+            Path(__file__).with_name("healer.py")):
+        return cached
     module_path = Path(__file__).with_name("healer.py")
     if not module_path.is_file():
         raise ConfigError(f"healing is enabled but {module_path.name} is missing "
@@ -1540,12 +1551,88 @@ def load_healer(budget: Budget, settings: HealSettings, root: Optional[Path] = N
     # sys.modules, and an unregistered module makes it raise AttributeError.
     sys.modules[spec.name] = module
     spec.loader.exec_module(module)
+    return module
+
+
+def load_healer(budget: Budget, settings: HealSettings, root: Optional[Path] = None,
+                **options):
+    """Import the companion ``healer.py`` next to this file - only when asked.
+
+    Loaded by path rather than by import name so the tool still works when it is
+    copied alone into a studio's tools folder next to its healer.
+    """
+    module = healer_module()
     try:
         return module.Healer(budget, textures=settings.textures, meshes=settings.meshes,
                              texture_mode=settings.texture_mode, root=root,
-                             resolve_references=resolve_references)
+                             resolve_references=resolve_references, **options)
     except module.HealError as exc:
         raise ConfigError(f"healer cannot start: {exc}") from exc
+
+
+def describe_auto_heal(watch_dir: Path, settings: HealSettings, args: argparse.Namespace,
+                       remote_document: Optional[dict]) -> None:
+    """Say, before the first file, exactly what folder-wide healing may change.
+
+    Healing rewrites artists' files; whoever turned it on (a flag, rules.toml, a
+    producer in the budget planner) is named, so nobody finds out from a diff.
+    """
+    if getattr(args, "auto_heal", None):
+        source = "--auto-heal"
+    elif remote_document is not None:
+        source = "the remote rules (AssetHealth budget planner)"
+    else:
+        source = f"[healer] in {RULES_FILENAME}"
+    changes = []
+    if settings.textures:
+        changes.append("rename PNGs missing a suffix (and repoint the .mtl/.gltf naming them)")
+        changes.append(f"{settings.texture_mode} non-power-of-two PNGs"
+                       + (" - pad shifts UVs" if settings.texture_mode == "pad" else ""))
+    if settings.meshes:
+        changes.append("strip zero-area faces from .obj")
+    LOG.warning("healing ON for every failing asset in %s (turned on by %s): may %s. "
+                "Each change is verified first; originals kept in %s "
+                "(undo one: asset-gatekeeper <file> --undo-heal).",
+                watch_dir, source, "; ".join(changes) or "change nothing",
+                watch_dir / ".agk-backups")
+
+
+def run_heal_history(target: Path, undo: bool) -> int:
+    """``--list-heals`` and ``--undo-heal``. Exit 0 done, 1 nothing to do, 2 refused."""
+    try:
+        module = healer_module()
+    except ConfigError as exc:
+        LOG.error("%s", exc)
+        return 2
+    if undo:
+        if target.is_dir():
+            LOG.error("--undo-heal takes the healed file (or its old name), not a folder; "
+                      "--list-heals shows what was healed there")
+            return 2
+        try:
+            record = module.undo_heal(target)
+        except module.HealError as exc:
+            LOG.error("not undone: %s", exc)
+            return 2 if "changed after" in str(exc) or "missing" in str(exc) else 1
+        LOG.info("undone  %s: restored %s from %s", record.manifest["healed"],
+                 ", ".join(record.manifest["files"]), record.folder)
+        return 0
+    records = module.find_heals(target)
+    if target.is_dir():
+        records = [record for record in records if module.is_inside(record.asset, target)]
+    else:
+        records = [record for record in records
+                   if module._same_file(record.healed, target)
+                   or module._same_file(record.asset, target)]
+    if not records:
+        print(f"no heals recorded under {target}")
+        return 1
+    for record in records:
+        state = "undone" if record.undone else "kept  "
+        print(f"{record.manifest.get('healed_at', '?')[:19].replace('T', ' ')}  {state}  {record.manifest['asset']}"
+              f"{' -> ' + record.manifest['healed'] if record.manifest['healed'] != record.manifest['asset'] else ''}"
+              f"  {'; '.join(record.manifest.get('modifications', []))}")
+    return 0
 
 
 def resolve_tagging(root: Path, args: argparse.Namespace,
@@ -3104,6 +3191,12 @@ class Gatekeeper:
             return verdict
         if result is None:
             return verdict          # nothing safe to do; the original is untouched
+        if getattr(result, "dry_run", False):
+            # Verified in staging, nothing written: still FAILED on disk, and
+            # the notes say what a real heal would do.
+            return Verdict(verdict.path, verdict.problems, verdict.metric, verdict.stats,
+                           (), verdict.warnings + tuple(
+                               f"--heal would: {note}" for note in result.modifications))
         healed = self._inspect(result.path)
         if healed.problems:         # belt and braces: never report a lie
             LOG.warning("healing %s did not satisfy the budget: %s",
@@ -3574,6 +3667,8 @@ def is_candidate(path: Path, exclude: Sequence[str] = ()) -> bool:
     """
     name = path.name
     if name.startswith(IGNORED_PREFIXES):
+        return False
+    if any(part.startswith(IGNORED_DIR_PREFIXES) for part in path.parts[:-1]):
         return False
     if name.lower().endswith(IGNORED_SUFFIXES):
         return False
@@ -4216,6 +4311,16 @@ def build_parser() -> argparse.ArgumentParser:
                              "[healer] enabled = true is set")
     parser.add_argument("--no-auto-heal", action="store_false", dest="auto_heal",
                         help="force healing off, even if rules.toml enables it (use in CI)")
+    parser.add_argument("--heal", action="store_true",
+                        help="repair this one file now, even with healing off: verified "
+                             "before adoption, the original kept in .agk-backups/")
+    parser.add_argument("--dry-run", action="store_true", dest="dry_run",
+                        help="with --heal: say what would change and write nothing")
+    parser.add_argument("--undo-heal", action="store_true", dest="undo_heal",
+                        help="put back what the last heal of this file replaced (refuses "
+                             "if the healed file was edited since)")
+    parser.add_argument("--list-heals", action="store_true", dest="list_heals",
+                        help="list the heals recorded in this folder, newest first")
     parser.add_argument("--remote-rules", metavar="URL", default=None,
                         help="fetch the budget from a central endpoint; cached locally for "
                              f"offline use (or set {REMOTE_RULES_ENV})")
@@ -4289,11 +4394,41 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                         max_triangles=None, max_edge=None, max_material_slots=None)
 
     root = Path(args.folder or ".").expanduser().resolve()
+    # Undo and the heal list read backups only: no budget, no trimesh. Before the
+    # existence check: undoing a rename names a file that no longer exists.
+    if getattr(args, "undo_heal", False) or getattr(args, "list_heals", False):
+        return run_heal_history(root, undo=args.undo_heal)
     if not root.exists():
         LOG.error("not found: %s", root)
         return 2
     # Single-file mode lets a DCC plugin gate one temporary export directly.
     watch_dir = root if root.is_dir() else root.parent
+
+    if getattr(args, "dry_run", False) and not getattr(args, "heal", False):
+        LOG.error("--dry-run goes with --heal")
+        return 2
+    if getattr(args, "heal", False):
+        if not root.is_file():
+            LOG.error("--heal repairs one file: pass the file, not a folder "
+                      "(folder-wide healing is --auto-heal)")
+            return 2
+        if getattr(args, "auto_heal", None) is False:
+            LOG.error("--heal and --no-auto-heal contradict each other")
+            return 2
+        # Heal against the project, not the file's folder: the project's rules
+        # judge the result, and the meshes that name a texture get repointed.
+        try:
+            project = healer_module().project_root_for(root.parent)
+        except ConfigError as exc:
+            LOG.error("%s", exc)
+            return 2
+        if project is not None:
+            heal_project = project
+            if not args.rules and not (root.parent / RULES_FILENAME).is_file() \
+                    and (project / RULES_FILENAME).is_file():
+                args.rules = str(project / RULES_FILENAME)
+        else:
+            heal_project = root.parent
 
     # Folder audit is a report, not a gate: it needs no budget and no deps
     # beyond the parser, so it runs before the dependency check on purpose.
@@ -4349,17 +4484,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         LOG.error("invalid healer settings: %s", exc)
         return 2
 
+    one_file = bool(getattr(args, "heal", False))
+    if one_file:
+        heal_settings = replace(heal_settings, enabled=True)
     healer = None
     if heal_settings.enabled:
         try:
-            healer = load_healer(budget, heal_settings, root=watch_dir)
+            healer = load_healer(budget, heal_settings,
+                                 root=heal_project if one_file else watch_dir,
+                                 dry_run=bool(getattr(args, "dry_run", False)))
         except ConfigError as exc:
             LOG.error("%s", exc)
             return 2
-        LOG.info("healing enabled  textures=%s meshes=%s mode=%s (opt-in)",
-                 "on" if heal_settings.textures else "off",
-                 "on" if heal_settings.meshes else "off",
-                 heal_settings.texture_mode)
+        if one_file:
+            LOG.info("heal    %s%s  mode=%s  project=%s", root.name,
+                     " (dry run: nothing is written)" if args.dry_run else "",
+                     heal_settings.texture_mode, heal_project)
+        else:
+            describe_auto_heal(watch_dir, heal_settings, args, remote_document)
 
     telemetry = None
     if server.telemetry_enabled:
@@ -4408,6 +4550,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         verdict = gatekeeper.check(root)
         reporter.report(verdict)
         reporter.close()
+        if one_file and not verdict.healed and not verdict.passed:
+            reason = getattr(healer, "last_refusal", "")
+            if not any(note.startswith("--heal would:") for note in verdict.warnings):
+                LOG.warning("not healed: %s. %s is unchanged.",
+                            reason or "the healer had nothing safe to do", root.name)
         return 0 if verdict.passed else 1
 
     if args.once:

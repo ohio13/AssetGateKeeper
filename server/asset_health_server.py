@@ -1808,10 +1808,17 @@ def render_planner(db_path: str | Path, project_id: int, project_name: str,
         <label class="check"><input type="checkbox" id="naming" name="naming"
           {"checked" if budget["naming"] else ""}> Require naming suffixes</label>
         <label class="check"><input type="checkbox" id="auto_heal" name="auto_heal"
-          {"checked" if budget["auto_heal"] else ""}> Enable auto-heal</label>
+          {"checked" if budget["auto_heal"] else ""}> Enable auto-heal on every machine</label>
       </div>
-      <div class="hint">Auto-heal lets client machines repair textures and zero-area
-        faces, and is adopted only when the repaired file verifies.</div>
+      <div class="hint">Publishing this <strong>on</strong> turns folder-wide healing on for
+        every artist and build machine that reads these rules: their gates will rename
+        PNGs missing a suffix (repointing the .mtl/.gltf that name them), resize
+        non-power-of-two PNGs and strip zero-area .obj faces, in their own folders. Each
+        change is verified first and the original kept in <code>.agk-backups/</code>
+        (undo: <code>asset-gatekeeper &lt;file&gt; --undo-heal</code>). Most teams leave it
+        off and fix single assets with <code>asset-gatekeeper &lt;file&gt; --heal</code> or
+        <strong>Check for fixes</strong> in the Art Workstation. CI pins it off with
+        <code>--no-auto-heal</code>.</div>
     </div>
 
     <div>

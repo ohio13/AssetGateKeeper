@@ -244,6 +244,17 @@ human's opinion stay distinguishable six months later.
   default budget, and says so; it is not a copy of the verdict that was sent.
   `GET /api/assets/<id>/report?download=1` saves it as a file instead.
 * **Download file** - the asset as uploaded, under its original name.
+* **Check for fixes** (on `.png` and `.obj` assets) asks the healer what it could
+  fix - a missing name suffix, a size that is not a power of two (resized, so UVs
+  stay put), zero-area `.obj` faces - and which budget it checked against: the
+  `rules.toml` the workstation was started with (`--rules`, or one in its working
+  folder), else the gate's defaults. Nothing is stored until you press **Make fixed
+  copy**: that adds the fixed file as a **new asset**, verified by the gate, marked
+  *Fixed copy of #N* with what changed and a link back. The original asset is not
+  changed, and nothing is written to anyone's disk - download the copy, or fix the
+  source with `asset-gatekeeper <file> --heal`. When there is nothing it can fix, it
+  says why (the copy would still be over the edge budget, the format is not one it
+  edits, ...).
 * **Delete asset** removes the asset, its files, LODs, collision and notes. It
   asks for a second click.
 
@@ -306,6 +317,7 @@ tab shows), `--allow-host NAME`, `--quiet`.
 | `GET /api/jobs/<id>` | a background job's state and progress |
 | `GET` · `POST /api/assets/<id>/collision` · `GET .../collision.obj` | read · set · export the proxy |
 | `GET /api/assets/<id>/references` · `/report` | reference check · printable report |
+| `GET` · `POST /api/assets/<id>/heal` | what a fix would change (nothing stored) · make the fixed copy as a new asset |
 | `GET /api/assets/<id>/notes` · `POST /api/notes` · `DELETE /api/notes/<id>` | notes |
 
 ## Troubleshooting

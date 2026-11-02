@@ -1148,6 +1148,79 @@ expect("the printable report opens", status == 200 and b"<html" in body.lower(),
 u_server.shutdown()
 u_server.server_close()
 
+print("24. healing: Check for fixes makes a verified copy, never touches the original")
+h_db, h_data = fresh("heal")
+_buf = _io.BytesIO()
+Image.new("RGB", (1000, 600), (110, 100, 90)).save(_buf, format="PNG")
+h_png = aws.create_asset(h_db, h_data, "bark.png", _buf.getvalue())
+h_original = (h_data / "assets" / str(h_png["id"]) / "bark.png").read_bytes()
+h_server = aws.build_server("127.0.0.1", 0, h_db, h_data, quiet=True)
+h_port = h_server.server_address[1]
+threading.Thread(target=h_server.serve_forever, daemon=True).start()
+time.sleep(0.1)
+h_client = Client(h_port)
+status, preview = h_client.json(f"/api/assets/{h_png['id']}/heal")
+expect("GET .../heal says what a fix would change", status == 200 and preview["healable"]
+       and "renamed bark.png -> bark_Albedo.png" in preview["changes"]
+       and "resized 1000x600 -> 1024x1024" in preview["changes"], preview)
+expect("... names the budget it checked against", "default budget" in preview["budget"], preview)
+expect("... and stores nothing",
+       len(aws.list_assets(h_db)) == 1
+       and (h_data / "assets" / str(h_png["id"]) / "bark.png").read_bytes() == h_original)
+status, made = h_client.json(f"/api/assets/{h_png['id']}/heal", "POST", b"")
+expect("POST .../heal makes the fixed copy as a new asset", status == 201
+       and made["asset"]["filename"] == "bark_Albedo.png" and made["copy_id"] != h_png["id"],
+       (status, made.get("error")))
+copy = aws.get_asset(h_db, made.get("copy_id", 0)) if status == 201 else {}
+expect("... linked to the original, with what changed",
+       copy.get("healed_from") == str(h_png["id"]) and "resized" in copy.get("heal_notes", ""), copy)
+expect("... verified by the gate, and says so",
+       copy.get("verdict_status") == "passed" and copy.get("source") == "workstation healer")
+expect("... measured as 1024x1024", copy.get("analyse_note", "").startswith("1024x1024"),
+       copy.get("analyse_note"))
+expect("the original is byte-identical",
+       (h_data / "assets" / str(h_png["id"]) / "bark.png").read_bytes() == h_original)
+status, again = h_client.json(f"/api/assets/{made.get('copy_id', 0)}/heal")
+expect("the fixed copy has nothing left to fix", status == 200 and not again["healable"]
+       and "already passes" in again["reason"], again)
+status, body = h_client.json(f"/api/assets/{made.get('copy_id', 0)}/heal", "POST", b"")
+expect("... and a second fix is refused", status == 409, (status, body))
+
+h_obj = aws.create_asset(h_db, h_data, "glass.obj",
+                         b"mtllib glass.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nv 2 0 0\nf 1 2 3\nf 1 2 4\n")
+aws.add_sidecar(h_db, h_data, h_obj["id"], "glass.mtl", b"newmtl g\n")
+status, made_obj = h_client.json(f"/api/assets/{h_obj['id']}/heal", "POST", b"")
+expect("an .obj's zero-area faces are fixed, and its .mtl comes with the copy",
+       status == 201 and "Stripped 1 degenerate face" in made_obj["changes"]
+       and aws.asset_files(h_data, aws.get_asset(h_db, made_obj["copy_id"])) == ["glass.mtl", "glass.obj"],
+       made_obj)
+h_glb = aws.create_asset(h_db, h_data, "x.glb", b"glTF-not-really")
+status, body = h_client.json(f"/api/assets/{h_glb['id']}/heal")
+expect("other formats say what the healer can fix", status == 200 and not body["healable"]
+       and ".png" in body["reason"], body)
+status, body = h_client.json(f"/api/assets/{h_glb['id']}/heal", "POST", b"")
+expect("... and refuse a POST", status == 422, (status, body))
+_dark = _io.BytesIO()
+Image.new("RGB", (1000, 1000), (0, 0, 0)).save(_dark, format="PNG")
+h_dark = aws.create_asset(h_db, h_data, "dark.png", _dark.getvalue())
+status, body = h_client.json(f"/api/assets/{h_dark['id']}/heal")
+expect("a fix that would still fail says why",
+       status == 200 and not body["healable"] and "luminance" in body["reason"], body)
+status, body = h_client.call(f"/api/assets/{h_png['id']}/heal", "POST", b"",
+                             headers={"Origin": "https://evil.example"})[:2]
+expect("another website cannot trigger a fix", status == 403, str(status))
+expect("no backups are left in the workstation's data folder",
+       not list(h_data.rglob(".agk-backups")) and not list(h_data.rglob(".agk-heal-*")))
+_rules_dir = WORK / "heal_rules"
+_rules_dir.mkdir(exist_ok=True)
+(_rules_dir / "rules.toml").write_text("[texture]\nmax_edge = 512\n", encoding="utf-8")
+status_budget = aws.heal_asset(h_db, h_data, h_png["id"], apply=False, rules_root=str(_rules_dir))
+expect("with a project rules.toml, the fix is checked against it (and says so)",
+       "rules.toml" in status_budget["budget"] and not status_budget["healable"]
+       and "512" in status_budget["reason"], status_budget)
+h_server.shutdown()
+h_server.server_close()
+
 import os  # noqa: E402
 import subprocess  # noqa: E402
 

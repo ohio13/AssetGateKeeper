@@ -1,3 +1,29 @@
+# Since v1.1.1 (unreleased, on `main`)
+
+* **Healing, made safe to use (audit 2026-11-02).**
+  * Non-power-of-two textures are now **resized** by default, as the docs always
+    said; the code padded, which shifted UVs (a marker at UV 0.5 moved 12 px on
+    1000 -> 1024). `texture_mode = "pad"` still pads, if you ask for it.
+  * Every adopted heal keeps the original - and every `.mtl`/`.gltf` it repointed -
+    in `.agk-backups/`, and `asset-gatekeeper <file> --undo-heal` puts it back
+    (refusing if anything was edited since, and naming the later heal to undo
+    first). `--list-heals` shows what was healed in a folder.
+  * Heal **one** asset: `asset-gatekeeper <file> --heal [--dry-run]`, against the
+    project's rules (found above the file), with healing otherwise off. When it
+    changes nothing it says why; before, that was only in `-v` output.
+  * Art Workstation: **Check for fixes** on `.png`/`.obj` assets makes a verified
+    fixed copy as a new asset; the original is untouched.
+  * Folder-wide `--auto-heal` says at startup what it may change and who turned it
+    on; the budget planner's switch spells out that it turns healing on for every
+    machine reading the rules.
+  * Fixed: a recursive watch could inspect the healer's own staged copies (a file
+    check looked only at the name, not the folder); the healer's backup folder is
+    skipped by scans, the audit and the reference repointing (a later rename would
+    otherwise have edited the backed-up `.mtl`).
+  * Docs: README, docs/03, 05, 06, 07 and 12 corrected - `--heal-dry-run` did not
+    exist, the healer never "resizes oversized" textures, and `pad` was the real
+    default in 1.1.0.
+
 # v1.1.1 (2026-11-02)
 
 * **Art Workstation, phase 1 (audit 2026-11-02).** The viewer no longer shows

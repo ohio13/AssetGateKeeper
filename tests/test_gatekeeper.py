@@ -713,26 +713,26 @@ expect("the verdict says HEALED", npot_verdict.status == "HEALED")
 expect("the tag reads PASSED WITH HEALING", npot_verdict.tag.startswith("PASSED WITH HEALING:"))
 expect("the file was rewritten to 1024x1024",
        Image.open(npot_png).size == (1024, 1024), str(Image.open(npot_png).size))
-expect("the note records the padding",
-       any("1000x1000 -> 1024x1024" in note for note in npot_verdict.heal_notes),
+expect("the note records the resize (the default mode)",
+       any("resized 1000x1000 -> 1024x1024" in note for note in npot_verdict.heal_notes),
        str(npot_verdict.heal_notes))
-expect("padding replicates edge pixels instead of black",
-       Image.open(npot_png).getpixel((1023, 5)) == (120, 90, 70),
-       str(Image.open(npot_png).getpixel((1023, 5))))
 expect("the healed file re-inspects as passing",
        agk.Gatekeeper(heal_budget).check(npot_png).passed)
 expect("staging folders are cleaned up",
        not any(p.name.startswith(STAGING) for p in npot_dir.iterdir()))
 
-resize_dir = heal_root / "resize"
-resize_dir.mkdir()
-resize_png = make_png(resize_dir / "stone_Albedo.png", (1000, 1000))
-resize_healer = agk.load_healer(heal_budget, agk.HealSettings(enabled=True, texture_mode="resize"))
-resize_verdict = agk.Gatekeeper(heal_budget, healer=resize_healer).check(resize_png)
-expect("resize mode is honoured",
-       resize_verdict.passed and "resized" in resize_verdict.heal_notes[0],
-       str(resize_verdict.heal_notes))
-expect("resize mode lands on the same size", Image.open(resize_png).size == (1024, 1024))
+pad_dir = heal_root / "pad"
+pad_dir.mkdir()
+pad_png = make_png(pad_dir / "stone_Albedo.png", (1000, 1000))
+pad_healer = agk.load_healer(heal_budget, agk.HealSettings(enabled=True, texture_mode="pad"))
+pad_verdict = agk.Gatekeeper(heal_budget, healer=pad_healer).check(pad_png)
+expect("pad mode is honoured when asked for",
+       pad_verdict.passed and "padded" in pad_verdict.heal_notes[0],
+       str(pad_verdict.heal_notes))
+expect("pad mode lands on the same size", Image.open(pad_png).size == (1024, 1024))
+expect("padding replicates edge pixels instead of black",
+       Image.open(pad_png).getpixel((1023, 5)) == (120, 90, 70),
+       str(Image.open(pad_png).getpixel((1023, 5))))
 
 # -- naming -------------------------------------------------------------------
 name_dir = heal_root / "naming"
@@ -890,6 +890,188 @@ with _capture_logs() as lines:
 expect("the reporter prints the healing line",
        any("PASSED WITH HEALING" in line for line in lines), str(lines[-1:]))
 expect("a healed asset counts as passed", reporter.passed == 1 and reporter.failed == 0)
+
+
+print("14b. healing: resize by default, backups, undo, one file at a time")
+import contextlib as _contextlib  # noqa: E402
+import io as _io  # noqa: E402
+expect("the default texture mode is resize (pad shifts UVs)",
+       agk.HealSettings().texture_mode == "resize", agk.HealSettings().texture_mode)
+expect("... and so is the healer's own default",
+       agk_healer.heal_texture_file.__defaults__ == ("resize",))
+
+
+def marker_png(path, size=(1000, 1000)):
+    """Grey, with a red square at UV (0.5, 0.5)."""
+    image = Image.new("RGB", size, (110, 100, 90))
+    for x in range(size[0] // 2 - 5, size[0] // 2 + 6):
+        for y in range(size[1] // 2 - 5, size[1] // 2 + 6):
+            image.putpixel((x, y), (255, 0, 0))
+    image.save(path)
+    return Path(path)
+
+
+def red(pixel):
+    return pixel[0] > 200 and pixel[1] < 80
+
+
+uv_dir = heal_root / "uv"
+uv_dir.mkdir()
+uv_png = marker_png(uv_dir / "marker_Albedo.png")
+uv_verdict = agk.Gatekeeper(heal_budget, healer=agk.load_healer(
+    heal_budget, agk.HealSettings(enabled=True), root=uv_dir)).check(uv_png)
+expect("a default heal keeps UV 0.5 on the marker (pad moved it 12 px)",
+       uv_verdict.healed and red(Image.open(uv_png).convert("RGB").getpixel((512, 512))),
+       str(Image.open(uv_png).convert("RGB").getpixel((512, 512))))
+uv_pad = marker_png(uv_dir / "padded_Albedo.png")
+agk.Gatekeeper(heal_budget, healer=agk.load_healer(
+    heal_budget, agk.HealSettings(enabled=True, texture_mode="pad"), root=uv_dir)).check(uv_pad)
+expect("... which is the documented reason pad is opt-in",
+       not red(Image.open(uv_pad).convert("RGB").getpixel((512, 512))))
+
+# -- backups and undo ----------------------------------------------------------
+undo_dir = heal_root / "undo"
+(undo_dir / "tex").mkdir(parents=True)
+(undo_dir / "rules.toml").write_text("[texture]\nmax_edge = 2048\n", encoding="utf-8")
+(undo_dir / "prop.mtl").write_text("newmtl a\nmap_Kd tex/wood.png\nmap_Bump tex/bump.png\n",
+                                   encoding="utf-8")
+(undo_dir / "prop.obj").write_text("mtllib prop.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n",
+                                   encoding="utf-8")
+undo_png = marker_png(undo_dir / "tex" / "wood.png")
+bump_png = marker_png(undo_dir / "tex" / "bump.png", (512, 512))
+undo_original = digest(undo_png)
+undo_mtl = digest(undo_dir / "prop.mtl")
+undo_healer = agk.load_healer(heal_budget, agk.HealSettings(enabled=True), root=undo_dir)
+undo_verdict = agk.Gatekeeper(heal_budget, healer=undo_healer).check(undo_png)
+healed_png = undo_dir / "tex" / "wood_Albedo.png"
+backups = list((undo_dir / ".agk-backups").glob("*/heal.json"))
+expect("an adopted heal is backed up (was: overwritten in place, no way back)",
+       undo_verdict.healed and len(backups) == 1, str(backups))
+manifest = json.loads(backups[0].read_text(encoding="utf-8")) if backups else {}
+expect("the backup holds the original bytes",
+       backups and digest(backups[0].parent / "files" / "tex" / "wood.png") == undo_original)
+expect("... and the .mtl as it was before the repoint",
+       backups and digest(backups[0].parent / "files" / "prop.mtl") == undo_mtl)
+expect("the manifest says what changed", manifest.get("asset") == "tex/wood.png"
+       and manifest.get("healed") == "tex/wood_Albedo.png"
+       and any("resized" in note for note in manifest.get("modifications", [])), manifest)
+expect("the gate does not see the backups as assets",
+       not agk.is_candidate(backups[0].parent / "files" / "tex" / "wood.png") if backups else False)
+expect("... nor the healer's staging copies",
+       not agk.is_candidate(undo_dir / ".agk-heal-x1" / "rock.png"))
+expect("a folder scan skips .agk-backups",
+       not any(".agk-backups" in str(path) for path in agk.walk_files(undo_dir)))
+with _contextlib.redirect_stdout(_io.StringIO()) as audit_out:
+    agk.run_audit(undo_dir)
+expect("the audit reports no orphaned textures from the backups",
+       "0 orphaned" in audit_out.getvalue(), audit_out.getvalue()[-200:])
+
+# A second rename in the same project must not rewrite the backed-up .mtl.
+(undo_dir / "prop2.mtl").write_text("newmtl b\nmap_Kd tex/wood.png\nmap_Bump tex/bump.png\n",
+                                    encoding="utf-8")
+backup_mtl_before = digest(backups[0].parent / "files" / "prop.mtl")
+bump_verdict = agk.Gatekeeper(heal_budget, healer=undo_healer).check(bump_png)
+expect("a later heal never edits a backup (undo would restore the edit)",
+       bump_verdict.healed and "bump_Albedo.png" in (undo_dir / "prop2.mtl").read_text(encoding="utf-8")
+       and "tex/bump.png" in (backups[0].parent / "files" / "prop.mtl").read_text(encoding="utf-8")
+       and digest(backups[0].parent / "files" / "prop.mtl") == backup_mtl_before,
+       str(bump_verdict.heal_notes))
+
+edited = undo_dir / "tex" / "wood_Albedo.png"
+saved = edited.read_bytes()
+edited.write_bytes(saved + b"\0")
+try:
+    agk_healer.undo_heal(undo_dir / "tex" / "wood.png")
+    expect("undo refuses when the healed file was edited since", False)
+except agk_healer.HealError as exc:
+    expect("undo refuses when the healed file was edited since", "changed after" in str(exc),
+           str(exc))
+expect("... and changes nothing", edited.read_bytes() == saved + b"\0"
+       and not (undo_dir / "tex" / "wood.png").exists())
+edited.write_bytes(saved)
+
+try:
+    agk_healer.undo_heal(undo_dir / "tex" / "wood.png")
+    expect("an older heal waits for the later one that edited the same .mtl", False)
+except agk_healer.HealError as exc:
+    expect("an older heal waits for the later one that edited the same .mtl",
+           "undo tex/bump_Albedo.png first" in str(exc), str(exc))
+agk_healer.undo_heal(undo_dir / "tex" / "bump_Albedo.png")
+expect("undoing the later heal first works", (undo_dir / "tex" / "bump.png").is_file())
+record = agk_healer.undo_heal(undo_dir / "tex" / "wood.png")
+expect("undo by the old name restores the original bytes",
+       digest(undo_dir / "tex" / "wood.png") == undo_original)
+expect("... removes the renamed copy", not healed_png.exists())
+expect("... and puts the .mtl back", digest(undo_dir / "prop.mtl") == undo_mtl)
+expect("the manifest records the undo", record.undone)
+try:
+    agk_healer.undo_heal(undo_dir / "tex" / "wood.png")
+    expect("a heal is undone once", False)
+except agk_healer.HealError as exc:
+    expect("a heal is undone once", "no heal of" in str(exc), str(exc))
+
+nobackup_dir = heal_root / "nobackup"
+nobackup_dir.mkdir()
+nobackup = agk.load_healer(heal_budget, agk.HealSettings(enabled=True), root=nobackup_dir,
+                           backups=False)
+agk.Gatekeeper(heal_budget, healer=nobackup).check(marker_png(nobackup_dir / "n_Albedo.png"))
+expect("backups=False (the workstation's throwaway copies) writes none",
+       not (nobackup_dir / ".agk-backups").exists())
+
+# -- the CLI: one file, dry run, undo, list ---------------------------------------
+cli_heal = heal_root / "cli"
+(cli_heal / "Textures").mkdir(parents=True)
+(cli_heal / "rules.toml").write_text("[texture]\nmax_edge = 2048\n", encoding="utf-8")
+(cli_heal / "crate.mtl").write_text("newmtl c\nmap_Kd Textures/bark.png\n", encoding="utf-8")
+bark = marker_png(cli_heal / "Textures" / "bark.png")
+bark_before = digest(bark)
+
+
+def gate_run(*argv):
+    completed = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"),
+                                *map(str, argv), "--no-color"],
+                               capture_output=True, text=True, encoding="utf-8", errors="replace")
+    return completed.returncode, completed.stdout + completed.stderr
+
+
+code, out = gate_run(bark, "--heal", "--dry-run")
+expect("--heal --dry-run says what it would do", "--heal would: resized 1000x1000" in out
+       and "--heal would: repoint 1 reference" in out, out[-400:])
+expect("... and writes nothing", digest(bark) == bark_before and code == 1
+       and not (cli_heal / ".agk-backups").exists())
+code, out = gate_run(bark, "--heal")
+expect("--heal heals one file, finding the project root above it",
+       code == 0 and "PASSED WITH HEALING" in out
+       and "Textures/bark_Albedo.png" in (cli_heal / "crate.mtl").read_text(encoding="utf-8"),
+       out[-400:])
+expect("... with the backup at the project root", (cli_heal / ".agk-backups").is_dir())
+code, out = gate_run(cli_heal, "--list-heals")
+expect("--list-heals lists it", code == 0 and "Textures/bark.png -> Textures/bark_Albedo.png" in out,
+       out[-300:])
+code, out = gate_run(cli_heal / "Textures" / "bark.png", "--undo-heal")
+expect("--undo-heal by the old name puts it back", code == 0 and digest(bark) == bark_before
+       and "Textures/bark.png" in (cli_heal / "crate.mtl").read_text(encoding="utf-8"),
+       out[-300:])
+code, out = gate_run(cli_heal / "Textures" / "bark.png", "--undo-heal")
+expect("... and says so when there is nothing to undo", code == 1 and "no heal of" in out, out[-200:])
+code, out = gate_run(cli_heal, "--heal")
+expect("--heal on a folder is refused with the alternative",
+       code == 2 and "--auto-heal" in out, out[-200:])
+code, out = gate_run(bark, "--dry-run")
+expect("--dry-run without --heal is refused", code == 2, out[-200:])
+code, out = gate_run(bark, "--heal", "--no-auto-heal")
+expect("--heal with --no-auto-heal is refused", code == 2, out[-200:])
+dark = cli_heal / "Textures" / "dark.png"
+Image.new("RGB", (1000, 1000), (0, 0, 0)).save(dark)
+code, out = gate_run(dark, "--heal")
+expect("a heal that changes nothing says why (was silent at INFO)",
+       code == 1 and "not healed: the healed copy would still fail" in out
+       and "luminance" in out and "dark.png is unchanged" in out, out[-400:])
+
+code, out = gate_run(cli_heal, "--once", "--recursive", "--auto-heal")
+expect("--auto-heal says at startup what it may change, and who turned it on",
+       "healing ON for every failing asset" in out and "turned on by --auto-heal" in out
+       and "resize non-power-of-two PNGs" in out and ".agk-backups" in out, out[:900])
 
 print("15. VCS hook integrations")
 

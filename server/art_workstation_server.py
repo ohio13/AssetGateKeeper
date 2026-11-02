@@ -37,6 +37,8 @@ Routes
     POST /api/assets/<id>/files?filename=...       -> add a file the asset references
     GET  /api/assets/<id>/files/<path>             -> serve it
     GET  /api/assets/<id>/preview   -> converted preview (FBX .glb, texture .png)
+    GET  /api/assets/<id>/heal      -> what "Fix" would change (dry run, nothing stored)
+    POST /api/assets/<id>/heal      -> make the fixed copy as a new asset (original kept)
     GET  /api/assets/<id>/collision
     POST /api/assets/<id>/collision -> {"kind": "box"|"sphere"|"hull", ...}
     GET  /api/assets/<id>/notes
@@ -57,6 +59,7 @@ import re
 import shutil
 import sqlite3
 import sys
+import tempfile
 import threading
 import urllib.parse
 import socketserver
@@ -197,7 +200,11 @@ CREATE TABLE IF NOT EXISTS assets (
     -- workstation's token), "local" (loopback-only server) or "open" (a
     -- server reachable from the network with no token: anyone could have
     -- typed it).
-    provenance_auth  TEXT NOT NULL DEFAULT ''
+    provenance_auth  TEXT NOT NULL DEFAULT '',
+    -- A copy made by the healer ("Fix" in the viewer): the asset it was made
+    -- from, and what was changed. The original is never modified.
+    healed_from      TEXT NOT NULL DEFAULT '',
+    heal_notes       TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS lod_versions (
@@ -311,7 +318,8 @@ def init_db(db_path: str | Path) -> None:
         # columns in place rather than asking anyone to drop their database.
         have = {row["name"] for row in connection.execute("PRAGMA table_info(assets)")}
         for column in ("verdict_status", "verdict_problems", "verdict_tags", "source",
-                       "kind", "analyse_note", "provenance_auth"):
+                       "kind", "analyse_note", "provenance_auth", "healed_from",
+                       "heal_notes"):
             if column not in have:
                 connection.execute(
                     f"ALTER TABLE assets ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
@@ -1023,6 +1031,110 @@ def add_sidecar(db_path: str | Path, data_dir: Path, asset_id: int, filename: st
     return get_asset(db_path, asset_id)
 
 
+# --- #
+# Healing: a fixed copy, never the original
+# --- #
+
+# What the healer can change: .png names and sizes, zero-area .obj faces.
+HEALABLE_SUFFIXES = (".png", ".obj")
+HEAL_PREFIX = "--heal would: "
+
+
+def heal_rules(rules_path: str = "", rules_root: str = "") -> tuple:
+    """The budget a fix is verified against, the healer settings, and a label.
+
+    The project's rules.toml when the workstation was started with one (the same
+    file the Rules & Budgets tab shows), else the gate's default budget. Said
+    out loud in every answer: a copy that passes the defaults may still fail a
+    stricter project.
+    """
+    path = Path(rules_path) if rules_path else Path(rules_root or ".") / agk.RULES_FILENAME
+    if path.is_file():
+        try:
+            document = agk.parse_rules(path)
+            return (agk.Budget.from_mapping(document),
+                    agk.HealSettings.from_mapping(document.get("healer", {})),
+                    f"{path.name} ({path})")
+        except (agk.ConfigError, ValueError, OSError) as exc:
+            raise WorkstationError(f"cannot read {path}: {exc}", 409) from exc
+    return agk.Budget(), agk.HealSettings(), "the gate's default budget (no rules.toml)"
+
+
+def heal_asset(db_path: str | Path, data_dir: Path, asset_id: int, apply: bool,
+               rules_path: str = "", rules_root: str = "") -> dict:
+    """Preview (``apply=False``) or make a healed copy of an asset.
+
+    The heal runs on a throwaway copy of the asset's folder, verified by the gate
+    with the budget from ``heal_rules``. Applying it stores the result as a *new*
+    asset linked to this one; the original - and the artist's disk - are never
+    written.
+    """
+    data_dir = Path(data_dir)
+    asset = get_asset(db_path, asset_id)
+    suffix = Path(asset["filename"]).suffix.lower()
+    budget, settings, label = heal_rules(rules_path, rules_root)
+    answer = {"asset_id": asset_id, "healable": False, "changes": [], "problems": [],
+              "budget": label, "texture_mode": settings.texture_mode, "reason": ""}
+    if suffix not in HEALABLE_SUFFIXES or asset.get("kind") == "broken":
+        answer["reason"] = ("the healer only fixes .png textures (name suffix, power of two) "
+                            "and .obj meshes (zero-area faces)")
+        if apply:
+            raise WorkstationError(answer["reason"], 422)
+        return answer
+    folder = _ensure_folder(db_path, data_dir, asset)
+    scratch = Path(tempfile.mkdtemp(prefix="agk-ws-heal-"))
+    try:
+        for relative in asset_files(data_dir, asset):
+            target = scratch / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(folder / relative, target)
+        staged = scratch / asset["filename"]
+        if not staged.is_file():
+            raise WorkstationError("the stored file is missing", 410)
+        before = agk.Gatekeeper(budget).check(staged)
+        answer["problems"] = list(before.problems)
+        if before.passed:
+            answer["reason"] = f"it already passes {label}"
+            if apply:
+                raise WorkstationError(answer["reason"], 409)
+            return answer
+        try:
+            healer = agk.load_healer(budget, settings, root=scratch, backups=False,
+                                     dry_run=not apply)
+        except agk.ConfigError as exc:
+            raise WorkstationError(str(exc), 503) from exc
+        verdict = agk.Gatekeeper(budget, healer=healer).check(staged)
+        if not apply:
+            answer["changes"] = [note[len(HEAL_PREFIX):] for note in verdict.warnings
+                                 if note.startswith(HEAL_PREFIX)]
+            answer["healable"] = bool(answer["changes"])
+            if not answer["healable"]:
+                answer["reason"] = healer.last_refusal or "the healer had nothing safe to do"
+            return answer
+        if not verdict.healed:
+            raise WorkstationError(
+                f"not fixed: {healer.last_refusal or 'the healer had nothing safe to do'}", 422)
+        healed = Path(verdict.path)
+        notes = "; ".join(verdict.heal_notes)
+        copy = create_asset(db_path, data_dir, healed.name, healed.read_bytes(),
+                            uploader="workstation healer",
+                            provenance={"verdict": "passed", "source": "workstation healer",
+                                        "tags": asset.get("verdict_tags", ""),
+                                        "problems": "", "auth": "server"})
+        for path in sorted(scratch.rglob("*")):
+            relative = path.relative_to(scratch).as_posix()
+            if (path.is_file() and path != healed
+                    and not relative.startswith((".agk", "agk-"))):
+                add_sidecar(db_path, data_dir, copy["id"], relative, path.read_bytes())
+        with _WRITE_LOCK, open_db(db_path) as connection:
+            connection.execute("UPDATE assets SET healed_from = ?, heal_notes = ? WHERE id = ?",
+                               (str(asset_id), notes, copy["id"]))
+        answer.update(healable=True, changes=list(verdict.heal_notes), copy_id=copy["id"])
+        return answer
+    finally:
+        shutil.rmtree(scratch, ignore_errors=True)
+
+
 def asset_detail(db_path: str | Path, data_dir: Path, asset_id: int) -> dict:
     """The asset as the viewer needs it: row + LODs + collision + notes + files."""
     asset = get_asset(db_path, asset_id)
@@ -1622,6 +1734,7 @@ ASSET_NOTES_RE = re.compile(r"^/api/assets/(\d+)/notes$")
 ASSET_COLLISION_RE = re.compile(r"^/api/assets/(\d+)/collision$")
 ASSET_REFERENCES_RE = re.compile(r"^/api/assets/(\d+)/references$")
 ASSET_REPORT_RE = re.compile(r"^/api/assets/(\d+)/report$")
+ASSET_HEAL_RE = re.compile(r"^/api/assets/(\d+)/heal$")
 COLLISION_OBJ_RE = re.compile(r"^/api/assets/(\d+)/collision\.obj$")
 NOTE_RE = re.compile(r"^/api/notes/(\d+)$")
 
@@ -1912,6 +2025,14 @@ class Handler(BaseHTTPRequestHandler):
                                              int(match.group(1))))
             return
 
+        match = ASSET_HEAL_RE.match(path)
+        if match:
+            self._json(200, heal_asset(server.db_path, Path(server.data_dir),
+                                       int(match.group(1)), apply=False,
+                                       rules_path=server.rules_path,
+                                       rules_root=server.rules_root))
+            return
+
         match = ASSET_COLLISION_RE.match(path)
         if match:
             collision = get_collision(server.db_path, int(match.group(1)))
@@ -2074,6 +2195,17 @@ class Handler(BaseHTTPRequestHandler):
                 # The detail view, so a client sees "missing" and can send the
                 # sidecars the file references straight after it.
                 self._json(201, asset_detail(server.db_path, Path(server.data_dir), asset["id"]))
+                return
+
+            match = ASSET_HEAL_RE.match(path)
+            if match:
+                result = heal_asset(server.db_path, Path(server.data_dir), int(match.group(1)),
+                                    apply=True, rules_path=server.rules_path,
+                                    rules_root=server.rules_root)
+                self._publish("asset", result["copy_id"])
+                result["asset"] = asset_detail(server.db_path, Path(server.data_dir),
+                                               result["copy_id"])
+                self._json(201, result)
                 return
 
             match = ASSET_SIDECARS_RE.match(path)

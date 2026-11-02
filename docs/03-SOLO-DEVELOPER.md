@@ -134,13 +134,17 @@ seconds earlier.
 ## Optional: the healer
 
 ```
-asset-gatekeeper assets --auto-heal
+asset-gatekeeper assets/bark.png --heal --dry-run    # what would change
+asset-gatekeeper assets/bark.png --heal              # fix that one file
+asset-gatekeeper assets/bark.png --undo-heal         # changed your mind
 ```
 
-It pads textures to a power of two, resizes oversized ones, and re-verifies the
-result. A file is only replaced if the repaired version passes; otherwise the
-original stays and the failure is reported. Run it once on a copy of the project
-before you let it near real assets.
+It resizes a non-power-of-two PNG to the next power of two, adds a missing name
+suffix (repointing the files that name it), strips zero-area faces from an .obj,
+and re-verifies the result. It does not shrink textures or meshes that are over
+budget. `--auto-heal` does the same for every failing asset in a folder. A file is only replaced if the repaired version passes; otherwise the
+original stays and the failure is reported - with the reason. Every adopted heal
+keeps the original in `.agk-backups/`, so `--undo-heal` can put it back.
 
 ## Optional: the number that matters
 

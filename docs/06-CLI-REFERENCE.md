@@ -26,7 +26,7 @@ violation is the tool working; a red build from a typo in `--preset` is the
 
 * **It watches by default.** Run it once with `--once` (scripts, CI).
 * **It only re-gates what changed** while watching; unchanged files are silent.
-* **It never writes to your assets** unless `--auto-heal` is on.
+* **It never writes to your assets** unless `--auto-heal` is on or you run `--heal` on a file - and then it keeps the originals in `.agk-backups/`.
 * **It finds `rules.toml` next to the folder** unless `--rules` says otherwise.
 * **It never follows symlinks** unless `--follow-symlinks`; dangling links are
   skipped and counted (a Windows 1920 symlink is not an asset problem).
@@ -117,8 +117,16 @@ unless `--allow-empty` says it is meant to be empty.
 
 | Flag | Effect |
 |---|---|
-| `--auto-heal` | repair, re-verify, adopt only if the repair passes |
+| `--auto-heal` | folder-wide: repair every failing asset, re-verify, adopt only if the repair passes (says at startup what it may change) |
 | `--no-auto-heal` | turn healing off for this run (default when the rules say `enabled = false`) |
+| `<file> --heal` | repair this one file now, against the project's rules; the original goes to `.agk-backups/` |
+| `<file> --heal --dry-run` | say what `--heal` would change, write nothing |
+| `<file> --undo-heal` | restore what the last heal of this file replaced (the healed name or the old one); refuses if it was edited since |
+| `<folder> --list-heals` | the heals recorded under a folder, newest first, and whether each was undone |
+
+When `--heal` changes nothing it says why: the healed copy would still fail (and
+which rule), nothing it can change would help, a file outside the project names
+the texture, or the new name is taken.
 
 ## Watching and notifications
 

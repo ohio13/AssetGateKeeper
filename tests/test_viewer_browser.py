@@ -9,6 +9,7 @@ Needs ``pip install playwright`` and ``python -m playwright install chromium``.
 Without them the suite says so and exits 0 (CI installs both and runs it).
 """
 import http.server
+import io
 import json
 import shutil
 import socketserver
@@ -429,6 +430,42 @@ with sync_playwright() as playwright:
     expect("... and the second click deletes it",
            page.locator(f'#asset-list .asset[data-id="{ids["ball"]}"]').count() == 0 and hint_visible(),
            status())
+
+    print("8d. Check for fixes: a verified copy, the original kept")
+    _npot = io.BytesIO()
+    Image.new("RGB", (100, 60), (110, 100, 90)).save(_npot, format="PNG")
+    ids["npot"] = aws.create_asset(db, data, "bark.png", _npot.getvalue())["id"]
+    page.goto(f"{BASE}/viewer?live=0&asset={ids['npot']}")
+    page.wait_for_function("() => document.getElementById('status').textContent === 'bark.png'",
+                           timeout=15000)
+    expect("a .png offers Check for fixes", page.locator("#asset-heal").is_visible())
+    stored_before = len(aws.list_assets(db))
+    page.click("#asset-heal")
+    page.wait_for_selector("#heal-result:not([hidden])", timeout=10000)
+    heal_text = page.locator("#heal-result").inner_text()
+    expect("... which lists what the healer would change, and the budget",
+           "renamed bark.png -> bark_Albedo.png" in heal_text and "resized 100x60 -> 128x64" in heal_text
+           and "default budget" in heal_text and "this one is not changed" in heal_text, heal_text)
+    expect("... and offers to make the copy",
+           page.locator("#asset-heal").inner_text() == "Make fixed copy")
+    expect("checking stored nothing", len(aws.list_assets(db)) == stored_before)
+    page.click("#asset-heal")
+    page.wait_for_function("() => document.getElementById('status').textContent"
+                           ".startsWith('fixed copy of bark.png')", timeout=15000)
+    verdict_text = page.locator("#verdict-body").inner_text()
+    expect("the fixed copy is selected, and says where it came from",
+           f"Fixed copy of #{ids['npot']}" in verdict_text and "PASSED" in verdict_text
+           and "bark_Albedo.png" in status(), verdict_text)
+    expect("... and has nothing left to fix", "Check for fixes" in page.locator("#asset-heal").inner_text())
+    expect("the original is still in the library",
+           page.locator(f'#asset-list .asset[data-id="{ids["npot"]}"]').count() == 1)
+    page.locator("#verdict-body a[data-asset]").click()
+    page.wait_for_function("() => document.getElementById('status').textContent === 'bark.png'",
+                           timeout=15000)
+    expect("the link goes back to the original", "bark.png" == status())
+    pick(ids["cube"])
+    expect("a .glb does not offer it (the healer cannot fix glTF)",
+           not page.locator("#asset-heal").is_visible())
 
     print("9. deleted while open")
     page.goto(f"{BASE}/viewer?asset={ids['embedded']}")
