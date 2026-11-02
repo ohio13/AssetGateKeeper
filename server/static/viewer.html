@@ -29,8 +29,18 @@
              accept=".glb,.gltf,.obj,.fbx,.ply,.stl,.dae,.png,.jpg,.jpeg,.tga,.bmp,.tif,.tiff,.exr,.hdr,.dds,.blend,.max,.ma,.mb,.abc,.usd,.usda,.usdc,.usdz,.bin,.mtl">
     </label>
     <span class="sub" id="stats"></span>
+    <span class="account" id="account"></span>
   </div>
 </header>
+<form class="signin" id="signin" hidden autocomplete="on">
+  <strong>Sign in to the Art Workstation</strong>
+  <input id="signin-user" name="username" placeholder="username" autocomplete="username" required>
+  <input id="signin-password" name="password" type="password" placeholder="password"
+         autocomplete="current-password" required>
+  <button type="submit" class="chip">Sign in</button>
+  <button type="button" class="chip" id="signin-cancel">Cancel</button>
+  <span class="sub" id="signin-message" role="alert"></span>
+</form>
 <div class="exposure-warning" id="exposure-warning" role="alert" hidden>
   Open to the network with no token: anyone who can reach this address can upload,
   edit notes, set verdicts and delete assets. Restart with <code>--token</code>
@@ -54,6 +64,8 @@
         <button type="button" class="filter is-active" data-filter="all">All</button>
         <button type="button" class="filter" data-filter="attention">Needs attention</button>
         <button type="button" class="filter" data-filter="passed">Passed</button>
+        <button type="button" class="filter" data-filter="to-review">To review</button>
+        <button type="button" class="filter" data-filter="approved">Approved</button>
       </div>
       <div id="asset-list" class="list">
         <div class="empty">Nothing uploaded yet.<br>Drop meshes, textures or source files anywhere.</div>
@@ -118,6 +130,31 @@
     <div id="verdict-panel">
       <h2>Gate verdict</h2>
       <div id="verdict-body"><div class="empty">No asset selected.</div></div>
+    </div>
+    <div id="review-panel">
+      <h2 class="section">Versions &amp; review</h2>
+      <div id="version-list" class="version-list"><div class="empty">No asset selected.</div></div>
+      <div class="field compare-tools" id="compare-tools" hidden>
+        <button id="compare-overlay" class="chip" type="button"
+                title="The previous version as an orange wireframe over this one">Overlay previous</button>
+        <button id="compare-side" class="chip" type="button"
+                title="The previous version beside this one">Side by side</button>
+      </div>
+      <div class="source-link" id="source-link" hidden>
+        <code id="source-text"></code>
+        <button id="source-copy" class="chip xs" type="button">Copy</button>
+      </div>
+      <div class="review-status" id="review-status"></div>
+      <div class="field review-form" id="review-form" hidden>
+        <input id="review-name" placeholder="your name" autocomplete="off">
+        <textarea id="review-note" rows="2" placeholder="Note for the artist (optional)"></textarea>
+        <div class="review-buttons">
+          <button id="review-approve" class="chip" type="button" data-status="approved">Approve</button>
+          <button id="review-changes" class="chip" type="button" data-status="changes_requested">Request changes</button>
+          <button id="review-reset" class="chip" type="button" data-status="in_review">Back to review</button>
+        </div>
+      </div>
+      <div class="review-history sub" id="review-history"></div>
     </div>
 
     <h2 class="section">LODs</h2>

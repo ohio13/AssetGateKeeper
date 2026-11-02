@@ -1,5 +1,7 @@
 """Sanity checks for asset_gatekeeper: new rules, fallbacks, edge cases."""
+import contextlib
 import hashlib
+import io
 import importlib.util
 import json
 import re
@@ -1168,6 +1170,66 @@ expect("a fetch failure fails closed", p4_hook.main(["4711", "jdoe"]) == 1)
 
 p4_hook.p4 = lambda *a, **k: "Change 9 by x@y\n\nAffected files ...\n\n... //depot/x/readme.txt#1 edit\n"
 expect("a changelist with no assets passes", p4_hook.main(["9", "x"]) == 0)
+
+# -- p4: sign-off in the Art Workstation (W2) and the review queue (W8) --------
+_ws = load_module("agk_ws_for_p4", Path("server") / "art_workstation_server.py")
+_ws_dir = heal_root / "p4_workstation"
+_ws_dir.mkdir()
+_ws.init_db(_ws_dir / "ws.db")
+_ws_server = _ws.build_server("127.0.0.1", 0, _ws_dir / "ws.db", _ws_dir / "data",
+                              token="p4tok", quiet=True)
+_ws_url = f"http://127.0.0.1:{_ws_server.server_address[1]}"
+threading.Thread(target=_ws_server.serve_forever, daemon=True).start()
+_P4_BYTES = {"//depot/art/creatures/boss_statue.gltf": b'{"asset":{"version":"2.0"}}',
+             "//depot/art/ui/ui_icon.png": b"\x89PNG-not-really"}
+p4_hook.p4 = lambda *a, **k: DESCRIBE
+p4_hook.fetch_revision = lambda cl, depot, dest: dest.write_bytes(_P4_BYTES[depot])
+p4_hook.gate = lambda path, extra: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+
+
+def p4_run(*extra):
+    with contextlib.redirect_stdout(io.StringIO()) as out, contextlib.redirect_stderr(out):
+        code = p4_hook.main(["4711", "jdoe", *extra])
+    return code, out.getvalue()
+
+
+code, out = p4_run("--require-approval")
+expect("--require-approval without a workstation refuses (fails closed)", code == 1
+       and "needs --workstation" in out, out[-200:])
+code, out = p4_run("--require-approval", "--workstation", _ws_url, "--workstation-token", "p4tok")
+expect("an asset nobody approved is refused, with the reason", code == 1
+       and "never been sent to the Art Workstation" in out, out[-300:])
+_ids = []
+for _depot, _bytes in _P4_BYTES.items():
+    _asset = _ws.create_asset(_ws_dir / "ws.db", _ws_dir / "data", Path(_depot).name, _bytes)
+    _ids.append(_asset["id"])
+_ws.set_review(_ws_dir / "ws.db", _ids[0], "approved", reviewer="Lead")
+_ws.set_review(_ws_dir / "ws.db", _ids[1], "changes_requested", reviewer="Lead")
+code, out = p4_run("--require-approval", "--workstation", _ws_url, "--workstation-token", "p4tok")
+expect("one approved and one with changes requested: refused, naming the second", code == 1
+       and "ui_icon.png" in out and "changes requested" in out
+       and "boss_statue" not in out.split("Submit rejected")[1].split("ui_icon")[0], out[-400:])
+_ws.set_review(_ws_dir / "ws.db", _ids[1], "approved", reviewer="Lead")
+code, out = p4_run("--require-approval", "--workstation", _ws_url, "--workstation-token", "p4tok")
+expect("both approved: the submit goes through", code == 0, out[-300:])
+code, out = p4_run("--require-approval", "--workstation", _ws_url, "--workstation-token", "wrong")
+expect("a wrong workstation token fails closed", code == 1 and "could not ask" in out, out[-200:])
+code, out = p4_run("--require-approval", "--workstation", "http://127.0.0.1:9", "--workstation-token", "x")
+expect("an unreachable workstation fails closed", code == 1 and "could not ask" in out, out[-200:])
+_P4_BYTES["//depot/art/creatures/boss_statue.gltf"] = b'{"asset":{"version":"2.0"},"v":2}'
+code, out = p4_run("--workstation", _ws_url, "--workstation-token", "p4tok", "--verbose")
+_sent = [a for a in _ws.list_assets(_ws_dir / "ws.db") if a["source_path"] == "//depot/art/creatures/boss_statue.gltf"]
+expect("--workstation sends a passing submit for review, with depot path and changelist",
+       code == 0 and _sent and _sent[0]["changelist"] == "4711" and "sent to the Art Workstation" in out,
+       (out[-300:], _sent))
+p4_hook.gate = fake_gate
+_before = len(_ws.list_assets(_ws_dir / "ws.db", all_versions=True))
+_P4_BYTES["//depot/art/creatures/boss_statue.gltf"] = b'{"asset":{"version":"2.0"},"v":3}'
+code, out = p4_run("--workstation", _ws_url, "--workstation-token", "p4tok")
+expect("a rejected submit sends nothing",
+       code == 1 and len(_ws.list_assets(_ws_dir / "ws.db", all_versions=True)) == _before)
+_ws_server.shutdown()
+_ws_server.server_close()
 
 # -- p4: the project's rules.toml comes from the depot -------------------------
 # The gate reads rules.toml next to the file it is given; the trigger gates a
@@ -2359,6 +2421,13 @@ _cert_dir.mkdir(exist_ok=True)
 (_cert_dir / "crash.py").write_text("print('  ok   one')\nraise SystemExit(0)\n", encoding="utf-8")
 (_cert_dir / "bad.py").write_text("print('  FAIL two')\nprint(\"FAILURES: ['two']\")\nraise SystemExit(1)\n",
                                   encoding="utf-8")
+(_cert_dir / "integration.py").write_text(
+    "print('12:00 2 asset(s): 0 passed, 1 failed')\nprint('3 passed, 0 failed, 1 skipped')\n",
+    encoding="utf-8")
+_integration = certify.run_suite("headless_integration", str(_cert_dir / "integration.py"), (), 60)
+expect("certify reads the integration suite's own summary, not a sweep log before it",
+       _integration["ok"] and _integration["passed"] == 3 and _integration["skipped"] == 1,
+       str(_integration))
 _good = certify.run_suite("good", str(_cert_dir / "good.py"), (), 60)
 _crash = certify.run_suite("crash", str(_cert_dir / "crash.py"), (), 60)
 _bad = certify.run_suite("bad", str(_cert_dir / "bad.py"), (), 60)

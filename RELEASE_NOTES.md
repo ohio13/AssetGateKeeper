@@ -1,5 +1,21 @@
 # Since v1.1.1 (unreleased, on `main`)
 
+* **Art Workstation review workflow (roadmap phase 1).**
+  * Versions: the same name (or depot path) uploaded again becomes the next
+    version; the inspector lists versions with what changed and can overlay or
+    put side by side the version before. Identical re-uploads add nothing.
+  * Sign-off: In review / Changes requested / Approved per version, with
+    history, library filters, and `GET /api/approvals/<sha256>`.
+  * Named reviewers: local accounts with roles (viewer, reviewer, lead), created
+    with `art-workstation --add-user`; the shared token keeps working for
+    scripts but can never sign off or delete.
+  * Where a file came from: depot path and changelist from the bulk uploader
+    (`--depot-root`, `--changelist`), AssetHealth and the Perforce trigger.
+  * Perforce trigger: `--workstation` queues passing submits for review;
+    `--require-approval` refuses unapproved content (fails closed).
+* **Certification:** `python tools/certify.py` runs every suite and writes a
+  dated report.
+
 * **Healing, made safe to use (audit 2026-11-02).**
   * Non-power-of-two textures are now **resized** by default, as the docs always
     said; the code padded, which shifted UVs (a marker at UV 0.5 moved 12 px on

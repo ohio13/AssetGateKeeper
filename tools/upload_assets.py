@@ -101,6 +101,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-sidecars", action="store_true",
                         help="do not send the files an asset references with it")
     parser.add_argument("--token", default="", help="bearer token, if --token mode is on")
+    parser.add_argument("--depot-root", default="", metavar="PATH",
+                        help="depot path of the folder being uploaded (e.g. //depot/Art/Props); "
+                             "each asset is recorded as <PATH>/<relative path>, shown in the "
+                             "inspector, and re-uploads become new versions of the same asset")
+    parser.add_argument("--changelist", default="", metavar="N",
+                        help="changelist the files come from, shown next to the depot path")
     parser.add_argument("--flat", action="store_true",
                         help="only look at the top level (default: recurse)")
     parser.add_argument("--ext", default=",".join(SUFFIXES),
@@ -170,7 +176,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{prefix}: FAILED {size:,} bytes is over the "
                   f"{MAX_UPLOAD_BYTES:,} byte upload limit", file=sys.stderr)
             continue
-        query = urllib.parse.urlencode({"filename": name})
+        try:
+            relative = path.relative_to(root).as_posix() if root.is_dir() else path.name
+        except ValueError:
+            relative = path.name
+        source_path = (f"{args.depot_root.rstrip('/')}/{relative}" if args.depot_root
+                       else relative)
+        query = urllib.parse.urlencode({"filename": name, "source_path": source_path,
+                                        "changelist": args.changelist})
         try:
             status, body = _request(f"{base_url}/api/assets?{query}", args.token,
                                     data=path.read_bytes())
@@ -178,12 +191,16 @@ def main(argv: list[str] | None = None) -> int:
             print(f"error: cannot reach {base_url}: {exc}", file=sys.stderr)
             print("       is the workstation running? start_workstation.bat", file=sys.stderr)
             return 2
-        if status == 201:
+        if status in (200, 201):
             uploaded += 1
             try:
                 asset = json.loads(body.decode("utf-8"))
             except (ValueError, UnicodeDecodeError):
                 asset = {}
+            if asset.get("unchanged"):
+                print(f"{prefix}: unchanged (same file as v{asset.get('version', '?')})")
+            elif int(asset.get("version") or 1) > 1:
+                print(f"{prefix}: new version v{asset['version']}")
             sent = []
             for written, target in sidecars_of.get(path, []):
                 if not isinstance(asset.get("id"), int):

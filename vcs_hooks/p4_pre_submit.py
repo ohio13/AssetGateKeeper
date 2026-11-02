@@ -38,11 +38,16 @@ Exit codes: 0 pass, 1 rejected (budget or hook error), 2 configuration problem.
 from __future__ import annotations
 
 import argparse
+import hashlib
+import json
 import os
 import shutil
 import subprocess
 import sys
 import tempfile
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
 from typing import Optional
 
@@ -203,6 +208,46 @@ def gate(path: Path, extra: list[str]) -> subprocess.CompletedProcess:
                           encoding="utf-8", errors="replace", timeout=600.0)
 
 
+def _workstation_call(base: str, token: str, path: str, data: bytes | None = None,
+                      timeout: float = 15.0) -> dict:
+    request = urllib.request.Request(base.rstrip("/") + path, data=data,
+                                     method="POST" if data is not None else "GET")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        return json.loads(response.read() or b"{}")
+
+
+def approval_problem(base: str, token: str, local: Path) -> str:
+    """Why this exact file may not be submitted yet, or "" when it is approved.
+
+    Fails closed: if the workstation cannot be asked, the submit is refused -
+    a gate that waves files through when its reviewer is down is not a gate.
+    """
+    digest = hashlib.sha256(local.read_bytes()).hexdigest()
+    try:
+        answer = _workstation_call(base, token, f"/api/approvals/{digest}")
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return f"could not ask the Art Workstation at {base} whether it is approved ({exc})"
+    if answer.get("approved"):
+        return ""
+    return ("not approved in the Art Workstation: "
+            + str(answer.get("reason") or "no approval for this exact file"))
+
+
+def send_for_review(base: str, token: str, local: Path, depot_path: str,
+                    changelist: str) -> str:
+    """Best effort: put a submitted asset in the workstation's review queue."""
+    query = urllib.parse.urlencode({"filename": local.name, "source_path": depot_path,
+                                    "changelist": changelist, "source": "perforce"})
+    try:
+        answer = _workstation_call(base, token, f"/api/assets?{query}", data=local.read_bytes(),
+                                   timeout=30)
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return f"not sent to the Art Workstation ({exc})"
+    return f"sent to the Art Workstation as {answer.get('filename')} v{answer.get('version')}"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="p4_pre_submit.py",
@@ -217,8 +262,22 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tickets", default="",
                         help="P4TICKETS file holding that user's ticket (p4 login -a)")
     parser.add_argument("--p4", dest="p4_exe", default="", help="path to p4 / p4.exe")
+    parser.add_argument("--workstation", default=os.environ.get("AGK_WORKSTATION", ""),
+                        metavar="URL",
+                        help="Art Workstation to send passing assets to for review (or "
+                             "AGK_WORKSTATION); never blocks a submit on its own")
+    parser.add_argument("--workstation-token",
+                        default=os.environ.get("AGK_WORKSTATION_TOKEN", ""),
+                        help="the workstation's --token (or AGK_WORKSTATION_TOKEN)")
+    parser.add_argument("--require-approval", action="store_true",
+                        default=os.environ.get("AGK_REQUIRE_APPROVAL", "") in ("1", "true", "yes"),
+                        help="also refuse any asset whose exact content is not Approved in "
+                             "the workstation (needs --workstation)")
     parser.add_argument("--verbose", action="store_true")
     options = parser.parse_args(argv)
+    if options.require_approval and not options.workstation:
+        log("AssetGatekeeper: --require-approval needs --workstation (or AGK_WORKSTATION)")
+        return 1
     configure_connection(options.port, options.p4user, options.tickets, options.p4_exe)
 
     # Built here, not inside gate(), so what a trigger passes to the gate is
@@ -243,6 +302,7 @@ def main(argv: list[str] | None = None) -> int:
 
     temp_root = Path(tempfile.mkdtemp(prefix="agk-p4-"))
     failures: list[str] = []
+    passed: list[tuple[Path, str]] = []
     rules_cache: dict = {}
     try:
         # Keep the depot's folder shape so relative texture/buffer references in a
@@ -269,8 +329,15 @@ def main(argv: list[str] | None = None) -> int:
                     log(f"AssetGatekeeper: no rules.toml above {depot_path}; shipped defaults")
             completed = gate(destination, per_file)
             if completed.returncode == 0:
+                if options.require_approval:
+                    problem = approval_problem(options.workstation, options.workstation_token,
+                                               destination)
+                    if problem:
+                        failures.append(f"{depot_path} ({action})\n    {problem}")
+                        continue
                 if options.verbose:
                     log(f"AssetGatekeeper: PASSED {depot_path}")
+                passed.append((destination, depot_path))
                 continue
             if completed.returncode == 2:
                 failures.append(f"{depot_path}: gate setup error\n{completed.stderr.strip()[:400]}")
@@ -282,6 +349,13 @@ def main(argv: list[str] | None = None) -> int:
                     verdict = line.strip()
             detail = verdict or (completed.stdout + completed.stderr).strip()[:400]
             failures.append(f"{depot_path} ({action})\n    {detail}")
+        # Only a submit that will go through is queued for review.
+        if not failures and options.workstation and not options.require_approval:
+            for local, depot_path in passed:
+                note = send_for_review(options.workstation, options.workstation_token,
+                                       local, depot_path, options.changelist)
+                if options.verbose:
+                    log(f"AssetGatekeeper: {depot_path}: {note}")
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)
 
@@ -289,10 +363,14 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     header = (f"Submit rejected by AssetGatekeeper: {len(failures)} of {len(candidates)} "
-              f"asset(s) exceed the studio budget.")
+              + ("asset(s) are over budget or not approved." if options.require_approval
+                 else "asset(s) exceed the studio budget."))
     body = "\n".join(f"  - {item}" for item in failures)
     hint = ("\nNothing was healed or modified. Fix the assets and resubmit, or ask a "
             "technical lead to change rules.toml.")
+    if options.require_approval:
+        hint += ("\nApproval: upload the file to the Art Workstation and ask a reviewer "
+                 "to approve that exact version.")
     log((header + "\n" + body + hint)[:MAX_MESSAGE])
     log(f"\n(submitted by {options.user or 'unknown'}, changelist {options.changelist})")
     return 1

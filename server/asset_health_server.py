@@ -1176,9 +1176,13 @@ def audit_page(db_path: str | Path, scan_root: str | Path, tag_names: list[str],
     return {"rows": rows[start:start + AUDIT_PAGE_SIZE], "groups": groups,
             "total": total, "pages": pages, "page": page, "counts": counts}
 
+REVIEW_WORDS = {"in_review": "In review", "changes_requested": "Changes requested",
+                "approved": "Approved"}
+
+
 def render_audit_page(data: dict, *, title: str, status_filter: str,
                       tag_names: list[str], selected: list[str],
-                      base_path: str) -> str:
+                      base_path: str, reviews: dict | None = None) -> str:
     """The full audit: every verdict, paginated, grouped by category."""
     def href(page: int, status: str = status_filter) -> str:
         params = [f"status={urllib.parse.quote(status)}", f"page={page}"]
@@ -1194,7 +1198,7 @@ def render_audit_page(data: dict, *, title: str, status_filter: str,
             f'<tr><td class="when">{_e(when)}</td>'
             f'<td class="file">{_e(entry.get("filename") or "")}'
             f'<div class="path">{_e((entry.get("filepath") or "")[:120])}</div></td>'
-            f'<td><span class="badge {state}">{_e(label)}</span></td>'
+            f'<td><span class="badge {state}">{_e(label)}</span>{_review_chip(entry, reviews)}</td>'
             f'<td class="act">{_send_button(entry)}</td></tr>')
 
     groups = "".join(
@@ -1255,6 +1259,8 @@ td.when{{color:#8b94a7;white-space:nowrap;width:150px}}
 .badge{{padding:1px 7px;border-radius:999px;font-size:10px;font-weight:700;letter-spacing:.05em}}
 .badge.failed{{background:rgba(255,107,107,.16);color:#ff6b6b}}
 .badge.passed{{background:rgba(62,207,142,.16);color:#3ecf8e}}
+.review{{font-size:11px;margin-top:4px;color:#8b94a7}}
+.review.approved{{color:#3ecf8e}} .review.changes_requested{{color:#e0af68}}
 button.send{{font-size:11px;padding:3px 8px}}
 .page{{display:inline-block;padding:3px 9px;border:1px solid #262f3d;border-radius:6px;margin-right:3px}}
 .page.active{{background:#1d2431;border-color:#7aa2f7}}
@@ -1279,6 +1285,18 @@ button.send{{font-size:11px;padding:3px 8px}}
 </main>
 <script src="/static/dashboard.js" defer></script>
 </body></html>"""
+
+def _review_chip(entry: dict, reviews: dict | None) -> str:
+    """The Art Workstation's sign-off for this file, when it has one (W2)."""
+    if not reviews:
+        return ""
+    status = (reviews.get(("path", str(entry.get("filepath") or "").replace("\\", "/").lower()))
+              or reviews.get(("name", str(entry.get("filename") or "").lower())))
+    if not status:
+        return ""
+    return (f'<div class="review {_e(status)}" title="Art Workstation sign-off">'
+            f'{_e(REVIEW_WORDS.get(status, status))}</div>')
+
 
 def _send_button(entry: dict) -> str:
     """The one-click hand-off to the Art Workstation, for a single row.
@@ -2852,9 +2870,37 @@ class Handler(BaseHTTPRequestHandler):
         title = "Passes" if path == "/audit/passes" else "All verdicts"
         body = render_audit_page(data, title=title, status_filter=status,
                                  tag_names=tag_names, selected=selected,
-                                 base_path=path)
+                                 base_path=path, reviews=self._workstation_reviews())
         self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
     # - workstation bridge
+    def _workstation_reviews(self) -> dict:
+        """Sign-off status per file from the Art Workstation, best effort (W2).
+
+        One short request per page; a workstation that is down or slow just
+        means no review column, never a slow or broken audit page.
+        """
+        base = self._workstation_url()
+        if not base:
+            return {}
+        request = urllib.request.Request(f"{base}/api/assets")
+        if self.server.workstation_token:
+            request.add_header("Authorization", f"Bearer {self.server.workstation_token}")
+        try:
+            with urllib.request.urlopen(request, timeout=2) as response:
+                assets = json.loads(response.read() or b"{}").get("assets", [])
+        except (OSError, ValueError, urllib.error.URLError):
+            return {}
+        found: dict = {}
+        for asset in assets:
+            status = asset.get("review_status") or ""
+            if not status:
+                continue
+            path = str(asset.get("source_path") or "").replace("\\", "/").lower()
+            if path:
+                found[("path", path)] = status
+            found.setdefault(("name", str(asset.get("filename") or "").lower()), status)
+        return found
+
     def _workstation_url(self) -> str:
         """Where to POST an asset: explicit flag, else the running one.
 
@@ -2986,6 +3032,8 @@ class Handler(BaseHTTPRequestHandler):
                 "tags": ", ".join(tags),
                 "source": "assethealth",
                 "verdict_id": verdict_id,
+                # Where the file came from (W8): the path the gate reported.
+                "source_path": str(row["filepath"] or ""),
             })
             request = urllib.request.Request(f"{base}/api/assets?{query}",
                                              data=source.read_bytes(), method="POST")

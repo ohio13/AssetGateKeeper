@@ -20,7 +20,9 @@ const state = {
   wireframe: false,
   collision: true,
   token: localStorage.getItem("aw_token") || "",
-  sceneObjects: { model: null, collision: null },
+  sceneObjects: { model: null, collision: null, ghost: null },
+  compare: null,        // null | "overlay" | "side": the previous version on screen
+  me: null,             // /api/me: accounts on? who is signed in, and what they can do
   originals: new Map(), // material -> {color, map, ...} for the exposure sliders
   meshMaterials: new Map(), // mesh -> the material(s) it was loaded with
   selectSeq: 0,         // the newest selectAsset call wins; older ones stop
@@ -49,6 +51,10 @@ async function api(path, options = {}) {
   if (state.token) headers["Authorization"] = `Bearer ${state.token}`;
   const response = await fetch(path, Object.assign({}, options, { headers }));
 
+  if (response.status === 401 && state.me && state.me.accounts) {
+    showSignIn("Sign in to continue.");
+    throw new Error("sign in to continue");
+  }
   if (response.status === 401) {
     const supplied = window.prompt("This workstation needs an access token:");
     if (supplied) {
@@ -151,6 +157,7 @@ function disposeObject(object) {
  * when a load fails, so nothing of the previous asset - model, collision box,
  * material sliders - can be left on screen under another asset's name. */
 function clearModel() {
+  clearGhost();
   disposeObject(state.sceneObjects.model);
   state.sceneObjects.model = null;
   disposeObject(state.sceneObjects.collision);
@@ -213,10 +220,13 @@ function frameObject(object) {
   grid.scale.setScalar(Math.max(radius / 4, 0.4));
 }
 
-async function loadModel(assetId, level) {
+/* Fetch and parse one asset's model (or one of its LODs) into an Object3D,
+ * without touching the scene: loadModel shows it, the version compare ghosts it. */
+async function fetchObject(asset, level) {
+  const assetId = asset.id;
   const lod = level === "source" ? null
-    : ((state.asset && state.asset.lods) || []).find((item) => item.level === level);
-  const fromPreview = level === "source" && previewType(state.asset) === "glb";
+    : ((asset && asset.lods) || []).find((item) => item.level === level);
+  const fromPreview = level === "source" && previewType(asset) === "glb";
   const path = level !== "source" ? `/api/assets/${assetId}/lods/${level}/file`
     : fromPreview ? `/api/assets/${assetId}/preview` : `/api/assets/${assetId}/file`;
   const response = await api(path);
@@ -225,7 +235,7 @@ async function loadModel(assetId, level) {
   // "<level>.gltf" whatever they were, so every LOD of an .obj failed with
   // "Unexpected token '#' ... is not valid JSON".
   const name = level !== "source" ? (lod ? lod.file_path : `${level}.glb`)
-    : fromPreview ? "preview.glb" : (state.asset ? state.asset.filename : "");
+    : fromPreview ? "preview.glb" : asset.filename;
   // Relative references (rock.bin, textures/wood.png) resolve inside the
   // asset's folder on the server. An empty base path asked for /rock.bin.
   const base = `/api/assets/${assetId}/files/`;
@@ -249,6 +259,12 @@ async function loadModel(assetId, level) {
       gltfLoader.parse(buffer, base, resolve, reject));
     object = gltf.scene;
   }
+  return object;
+}
+
+async function loadModel(assetId, level) {
+  if (!state.asset || state.asset.id !== assetId) return;
+  const object = await fetchObject(state.asset, level);
   if (!state.asset || state.asset.id !== assetId) {
     disposeObject(object);                 // the user moved on while this loaded
     return;
@@ -420,12 +436,15 @@ async function refreshAssets() {
   const visible = state.assets.filter((asset) => wanted === "all"
     ? true
     : wanted === "attention" ? (verdictOf(asset) === "failed" || asset.kind === "broken")
-      : verdictOf(asset) === "passed");
+      : wanted === "to-review" ? ["", "in_review"].includes(asset.review_status || "")
+        : wanted === "approved" ? asset.review_status === "approved"
+          : verdictOf(asset) === "passed");
   visible.forEach((asset) => {
     const element = document.createElement("div");
     element.className = "asset" + (state.asset && state.asset.id === asset.id ? " active" : "");
     element.dataset.id = asset.id;
     element.dataset.verdict = asset.kind === "broken" && !verdictOf(asset) ? "failed" : verdictOf(asset);
+    element.dataset.review = asset.review_status || "";
     // An unverified format (.blend, .max, .ma) has no triangle count at all.
     // Printing "0 tris" would read as a cheap mesh rather than an unmeasured
     // one, so it is named as unmeasured and its reason moved into the tooltip.
@@ -453,7 +472,11 @@ async function refreshAssets() {
       `<div class="name">${verdict}${escapeHtml(asset.filename)}</div>`
       + `<div class="meta">${geometry}</div>`
       + `<div class="meta">${asset.lod_count} LOD  ${asset.note_count} note`
-      + `${asset.note_count === 1 ? "" : "s"}</div>`;
+      + `${asset.note_count === 1 ? "" : "s"}`
+      + (asset.version_count > 1 ? `  <span class="ver">v${asset.version}</span>` : "")
+      + (asset.review_status ? `  <span class="review-chip ${escapeHtml(asset.review_status)}">`
+        + `${escapeHtml(REVIEW_LABELS[asset.review_status] || asset.review_status)}</span>` : "")
+      + "</div>";
     element.addEventListener("click", () => selectAsset(asset.id));
     list.appendChild(element);
   });
@@ -464,7 +487,7 @@ async function refreshAssets() {
     ? `  ${stats.unverified} unmeasured (not in the tri total)` : "";
   const broken = stats.broken ? `  ${stats.broken} broken` : "";
   $("stats").textContent =
-    `${stats.assets} assets  ${fmt(stats.triangles)} tris  ${stats.lods} LODs  `
+    `${stats.assets} asset${stats.assets === 1 ? "" : "s"}  ${fmt(stats.triangles)} tris  ${stats.lods} LODs  `
     + `${stats.notes} notes${unmeasured}${broken}`;
 }
 
@@ -488,6 +511,7 @@ async function selectAsset(id) {
   $("lod-progress").textContent = "";
   renderNotes();
   showVerdict(asset);
+  renderReview(asset);
   updateReadout();
   refreshCollisionExport();
   await refreshCollisionOverlay();
@@ -557,6 +581,7 @@ async function refreshSelected() {
   renderNotes();
   updateReadout();
   showVerdict(asset);
+  renderReview(asset);
   await refreshCollisionOverlay();
   refreshAssets().catch(() => {});
 }
@@ -572,6 +597,7 @@ function clearSelection() {
   $("lod-progress").textContent = "";
   renderNotes();
   showVerdict(null);
+  renderReview(null);
   updateReadout();
   refreshCollisionExport();
   refreshCollisionOverlay().catch(() => {});
@@ -1071,8 +1097,10 @@ async function uploadFiles(files) {
   const parts = [];
   if (done.length === 1) {
     const asset = done[0];
-    parts.push(`${asset.filename} uploaded`
-      + (asset.kind === "mesh" ? ` (${fmt(asset.triangle_count)} tris)` : ""));
+    parts.push(asset.unchanged
+      ? `${asset.filename} is unchanged - the same file as v${asset.version}, nothing added`
+      : `${asset.filename} uploaded${asset.version > 1 ? ` as v${asset.version}` : ""}`
+        + (asset.kind === "mesh" ? ` (${fmt(asset.triangle_count)} tris)` : ""));
   } else if (done.length) {
     parts.push(`${done.length} files uploaded`);
   }
@@ -1434,9 +1462,12 @@ function applyVerdictFilter() {
   const wanted = state.filter;
   for (const row of $("asset-list").querySelectorAll(".asset")) {
     const verdict = row.dataset.verdict || "";
+    const review = row.dataset.review || "";
     row.hidden = !(wanted === "all"
       || (wanted === "attention" && verdict === "failed")
-      || (wanted === "passed" && verdict === "passed"));
+      || (wanted === "passed" && verdict === "passed")
+      || (wanted === "to-review" && (review === "" || review === "in_review"))
+      || (wanted === "approved" && review === "approved"));
   }
 }
 
@@ -1494,12 +1525,272 @@ $("verdict-body").addEventListener("click", (event) => {
 });
 
 
+/* - versions, sign-off and accounts (W1, W2, W3, W8) */
+
+const REVIEW_LABELS = { in_review: "In review", changes_requested: "Changes requested",
+                        approved: "Approved" };
+// The version rows are narrow: a short word, the full one in the tooltip.
+const SHORT_REVIEW = { in_review: "In review", changes_requested: "Changes", approved: "Approved" };
+const can = (permission) => !state.me || (state.me.can || []).includes(permission);
+const shortTime = (iso) => String(iso || "").replace("T", " ").slice(0, 16);
+
+function signedDelta(value, previous, unit = "") {
+  const delta = Number(value || 0) - Number(previous || 0);
+  if (!delta) return "same";
+  const percent = previous ? Math.abs(delta / previous) * 100 : 0;
+  const share = !previous ? ""
+    : percent < 1 ? " (<1%)" : ` (${delta > 0 ? "+" : "-"}${Math.round(percent)}%)`;
+  return `${delta > 0 ? "+" : "-"}${fmt(Math.abs(delta))}${unit}${share}`;
+}
+
+function renderReview(asset) {
+  const versions = (asset && asset.versions) || [];
+  const list = $("version-list");
+  if (!asset) {
+    list.innerHTML = '<div class="empty">No asset selected.</div>';
+    $("compare-tools").hidden = true;
+    $("source-link").hidden = true;
+    $("review-status").innerHTML = "";
+    $("review-form").hidden = true;
+    $("review-history").innerHTML = "";
+    return;
+  }
+  const index = versions.findIndex((item) => item.id === asset.id);
+  const previous = index > 0 ? versions[index - 1] : null;
+  list.innerHTML = "";
+  versions.slice().reverse().forEach((item) => {
+    const row = document.createElement("button");
+    row.type = "button";
+    row.className = "version-row" + (item.id === asset.id ? " current" : "");
+    row.dataset.id = item.id;
+    const measured = item.kind === "mesh" ? `${fmt(item.triangle_count)} tris`
+      : (item.analyse_note || item.kind);
+    row.innerHTML = `<span class="v">v${item.version}</span>`
+      + `<span class="what">${escapeHtml(measured)}`
+      + (item.healed_from ? ' <span class="tag">healed</span>' : "")
+      + (item.review_status ? ` <span class="review-chip ${escapeHtml(item.review_status)}"`
+        + ` title="${escapeHtml(REVIEW_LABELS[item.review_status] || "")}">`
+        + `${escapeHtml(SHORT_REVIEW[item.review_status] || "")}</span>` : "")
+      + `</span><span class="when" title="${escapeHtml(shortTime(item.uploaded_at))}">`
+      + `${escapeHtml(shortTime(item.uploaded_at).slice(5))}</span>`;
+    row.addEventListener("click", () => { if (item.id !== asset.id) selectAsset(item.id); });
+    list.appendChild(row);
+  });
+  if (previous) {
+    const lines = [];
+    if (asset.kind === "mesh" || previous.kind === "mesh") {
+      lines.push(`triangles ${signedDelta(asset.triangle_count, previous.triangle_count)}`);
+      lines.push(`vertices ${signedDelta(asset.vertex_count, previous.vertex_count)}`);
+      lines.push(`material slots ${signedDelta(asset.material_slots, previous.material_slots)}`);
+    }
+    if (asset.kind === "texture" && asset.analyse_note !== previous.analyse_note) {
+      lines.push(`size ${escapeHtml(previous.analyse_note)} -> ${escapeHtml(asset.analyse_note)}`);
+    }
+    lines.push(`file ${signedDelta(asset.filesize, previous.filesize, " bytes")}`);
+    const delta = document.createElement("div");
+    delta.className = "version-delta";
+    delta.innerHTML = `<strong>v${asset.version} vs v${previous.version}:</strong> ${lines.join(" · ")}`;
+    list.appendChild(delta);
+  }
+  const comparable = previous && previewable(asset) && (asset.kind === "mesh")
+    && (previous.kind === "mesh");
+  $("compare-tools").hidden = !comparable;
+  $("compare-overlay").classList.toggle("active", state.compare === "overlay");
+  $("compare-side").classList.toggle("active", state.compare === "side");
+
+  const source = asset.source_path
+    ? `${asset.source_path}${asset.source_rev ? asset.source_rev : ""}`
+      + `${asset.changelist ? ` @${asset.changelist}` : ""}` : "";
+  $("source-link").hidden = !source;
+  // Break only after a slash: a path cut mid-name ("vase.ob / j") reads as two files.
+  $("source-text").dataset.raw = source;
+  $("source-text").textContent = source.replace(/\//g, "/\u200b");
+
+  const review = asset.review;
+  $("review-status").innerHTML = review
+    ? `<span class="review-chip ${escapeHtml(review.status)}">${escapeHtml(REVIEW_LABELS[review.status])}</span>`
+      + ` by ${escapeHtml(review.reviewer)}${review.verified ? "" : " (name typed, not signed in)"}`
+      + ` · ${escapeHtml(shortTime(review.created_at))}`
+      + (review.note ? `<div class="review-note">${renderMarkdown(review.note)}</div>` : "")
+    : '<span class="review-chip none">Not reviewed</span>';
+  $("review-form").hidden = !can("review");
+  $("review-name").hidden = !!(state.me && state.me.signed_in);
+  $("review-history").innerHTML = (asset.reviews || []).slice(1).map((item) =>
+    `<div>${escapeHtml(shortTime(item.created_at))} · ${escapeHtml(REVIEW_LABELS[item.status])}`
+    + ` by ${escapeHtml(item.reviewer)}</div>`).join("");
+}
+
+async function submitReview(status) {
+  const asset = state.asset;
+  if (!asset) return;
+  const body = { status, note: $("review-note").value.trim() };
+  if (!(state.me && state.me.signed_in)) {
+    body.reviewer = $("review-name").value.trim() || $("note-author").value.trim();
+    if (!body.reviewer) {
+      $("status").textContent = "type your name to sign off";
+      $("review-name").focus();
+      return;
+    }
+  }
+  try {
+    await json(`/api/assets/${asset.id}/review`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    $("review-note").value = "";
+    await refreshSelected();
+    $("status").textContent = `${asset.filename} v${asset.version}: ${REVIEW_LABELS[status]}`;
+  } catch (error) {
+    $("status").textContent = `could not sign off: ${error.message}`;
+  }
+}
+
+for (const button of document.querySelectorAll("#review-form button[data-status]")) {
+  button.addEventListener("click", () => submitReview(button.dataset.status));
+}
+
+$("source-copy").addEventListener("click", async () => {
+  const text = $("source-text").dataset.raw || "";
+  try {
+    await navigator.clipboard.writeText(text);
+    $("status").textContent = `copied ${text}`;
+  } catch (_) {
+    $("status").textContent = text;   // no clipboard permission: at least show it
+  }
+});
+
+function clearGhost() {
+  if (state.sceneObjects.ghost) {
+    disposeObject(state.sceneObjects.ghost);
+    state.sceneObjects.ghost = null;
+  }
+}
+
+async function compareWith(mode) {
+  const asset = state.asset;
+  if (!asset || !state.sceneObjects.model) return;
+  clearGhost();
+  if (state.compare === mode) {            // second click: off
+    state.compare = null;
+    frameObject(state.sceneObjects.model);
+    renderReview(asset);
+    return;
+  }
+  const versions = asset.versions || [];
+  const index = versions.findIndex((item) => item.id === asset.id);
+  const previous = index > 0 ? versions[index - 1] : null;
+  if (!previous) return;
+  state.compare = mode;
+  renderReview(asset);
+  $("status").textContent = `loading v${previous.version} to compare`;
+  try {
+    const other = await json(`/api/assets/${previous.id}`);
+    const object = await fetchObject(other, "source");
+    if (state.asset !== asset || state.compare !== mode) { disposeObject(object); return; }
+    // Overlay: an unlit wireframe that reads through the model. Side by side: a
+    // lit, solid orange copy, so its shape reads like the original's.
+    const ghost = mode === "overlay"
+      ? new THREE.MeshBasicMaterial({ color: 0xe0af68, wireframe: true, transparent: true,
+                                      opacity: 0.55 })
+      : new THREE.MeshStandardMaterial({ color: 0xe0af68, metalness: 0.05, roughness: 0.7 });
+    object.traverse((node) => {
+      if (node.isMesh && node.geometry && !node.geometry.attributes.normal) {
+        node.geometry.computeVertexNormals();
+      }
+    });
+    object.traverse((node) => { if (node.isMesh) node.material = ghost; });
+    if (mode === "side") {
+      const box = new THREE.Box3().setFromObject(state.sceneObjects.model);
+      const width = box.getSize(new THREE.Vector3()).x || 1;
+      object.position.x -= width * 1.5;
+    }
+    scene.add(object);
+    state.sceneObjects.ghost = object;
+    if (mode === "side") {
+      // frameObject frames what it is given: hand it a box around both models.
+      const frame = new THREE.Box3().setFromObject(state.sceneObjects.model)
+        .union(new THREE.Box3().setFromObject(object));
+      const proxy = new THREE.Mesh(new THREE.BoxGeometry(...frame.getSize(new THREE.Vector3()).toArray()));
+      proxy.position.copy(frame.getCenter(new THREE.Vector3()));
+      frameObject(proxy);
+      proxy.geometry.dispose();
+    }
+    $("status").textContent = mode === "overlay"
+      ? `v${previous.version} drawn as an orange wireframe over v${asset.version}`
+      : `v${previous.version} (orange, left) beside v${asset.version}`;
+  } catch (error) {
+    state.compare = null;
+    renderReview(asset);
+    $("status").textContent = `could not load v${previous.version}: ${error.message}`;
+  }
+}
+
+$("compare-overlay").addEventListener("click", () => { compareWith("overlay"); });
+$("compare-side").addEventListener("click", () => { compareWith("side"); });
+
+function showSignIn(message) {
+  $("signin").hidden = false;
+  $("signin-message").textContent = message || "";
+  $("signin-user").focus();
+}
+
+function renderAccount() {
+  const me = state.me;
+  const host = $("account");
+  if (!me || !me.accounts) {
+    host.innerHTML = "";
+    $("note-author").hidden = false;
+    return;
+  }
+  if (me.signed_in) {
+    host.innerHTML = `<span class="who">${escapeHtml(me.user.display_name || me.user.username)}`
+      + ` <span class="role">${escapeHtml(me.user.role)}</span></span>`
+      + '<button id="signout" class="chip xs" type="button">Sign out</button>';
+    $("signout").addEventListener("click", async () => {
+      await fetch("/api/session", { method: "DELETE" });
+      window.location.reload();
+    });
+  } else {
+    host.innerHTML = '<button id="signin-open" class="chip xs" type="button">Sign in</button>';
+    $("signin-open").addEventListener("click", () => showSignIn(""));
+  }
+  // Signed in, a note's author is the account; the typed name would be ignored.
+  $("note-author").hidden = !!me.signed_in;
+}
+
+$("signin").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  $("signin-message").textContent = "";
+  const response = await fetch("/api/session", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ username: $("signin-user").value.trim(),
+                           password: $("signin-password").value }),
+  });
+  $("signin-password").value = "";
+  if (!response.ok) {
+    let detail = response.statusText;
+    try { detail = (await response.json()).error || detail; } catch (_) { /* not JSON */ }
+    $("signin-message").textContent = detail;
+    return;
+  }
+  window.location.reload();
+});
+$("signin-cancel").addEventListener("click", () => { $("signin").hidden = true; });
+
+
 /* - boot */
 
 resize();
 animate();
 (async () => {
   try {
+    state.me = await (await fetch("/api/me")).json();
+    renderAccount();
+    if (state.me.accounts && !state.me.role) {
+      $("status").textContent = "sign in to see the library";
+      showSignIn("");
+      return;
+    }
     const health = await json("/api/health");
     $("status").textContent = health.auth ? "token mode" : "solo mode";
     $("exposure-warning").hidden = !(health.exposed && !health.auth);

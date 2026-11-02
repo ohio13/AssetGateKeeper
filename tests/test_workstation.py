@@ -1223,6 +1223,274 @@ h_server.server_close()
 
 import os  # noqa: E402
 import subprocess  # noqa: E402
+print("25. versions (W1) and where a file came from (W8)")
+v_db, v_data = fresh("versions")
+v1 = aws.create_asset(v_db, v_data, "rock.obj", OBJ.encode())
+v2 = aws.create_asset(v_db, v_data, "rock.obj", OBJ.encode() + b"\nv 9 9 9\n")
+expect("the same name uploaded again becomes v2 of the same asset (was a stranger)",
+       v2["version"] == 2 and v2["family_id"] == v1["family_id"], (v1["family_id"], v2))
+expect("... and the library shows the newest version once",
+       [a["id"] for a in aws.list_assets(v_db)] == [v2["id"]]
+       and aws.list_assets(v_db)[0]["version_count"] == 2)
+expect("... while every version is still there on request",
+       len(aws.list_assets(v_db, all_versions=True)) == 2)
+same = aws.create_asset(v_db, v_data, "rock.obj", OBJ.encode() + b"\nv 9 9 9\n")
+expect("re-sending the newest version's exact bytes adds nothing",
+       same.get("unchanged") and same["id"] == v2["id"]
+       and len(aws.list_assets(v_db, all_versions=True)) == 2)
+again_v1 = aws.create_asset(v_db, v_data, "rock.obj", OBJ.encode())
+expect("... but going back to v1's bytes is a new version (v3)", again_v1["version"] == 3)
+apart = aws.create_asset(v_db, v_data, "rock.obj", OBJ.encode() + b"\n# other\n", new_asset=True)
+expect("new_asset forces a separate asset", apart["family_id"] != v1["family_id"]
+       and apart["version"] == 1)
+detail = aws.asset_detail(v_db, v_data, v2["id"])
+expect("an asset's detail lists every version, oldest first",
+       [item["version"] for item in detail["versions"]] == [1, 2, 3], detail["versions"])
+expect("old links still open their own version",
+       aws.asset_detail(v_db, v_data, v1["id"])["version"] == 1)
+stats = aws.repository_stats(v_db)
+expect("stats count the newest version of each asset, not every re-export",
+       stats["assets"] == 2 and stats["versions"] == 4, stats)
+d_props = aws.create_asset(v_db, v_data, "rock.obj", OBJ.encode() + b"# props\n",
+                           source={"path": "//depot/Art/Props/rock.obj", "changelist": "1234"})
+d_env = aws.create_asset(v_db, v_data, "rock.obj", OBJ.encode() + b"# env\n",
+                         source={"path": "//depot/Art/Env/rock.obj"})
+expect("with depot paths, two rock.obj in different folders are different assets",
+       d_props["family_id"] != d_env["family_id"] and d_props["family_id"] != v1["family_id"])
+expect("the depot path and changelist are stored",
+       d_props["source_path"] == "//depot/Art/Props/rock.obj" and d_props["changelist"] == "1234")
+d_props2 = aws.create_asset(v_db, v_data, "rock.obj", OBJ.encode() + b"# props 2\n",
+                            source={"path": "//depot/Art/Props/rock.obj", "changelist": "1240"})
+expect("the next submit of that depot path is its v2", d_props2["version"] == 2
+       and d_props2["family_id"] == d_props["family_id"] and d_props2["changelist"] == "1240")
+expect("control characters never reach the stored path",
+       aws.create_asset(v_db, v_data, "x.obj", OBJ.encode() + b"#x\n",
+                        source={"path": "//depot/a\x1b[31m.obj"})["source_path"] == "//depot/a[31m.obj")
+aws.delete_asset(v_db, v_data, again_v1["id"])
+expect("deleting the newest version shows the one before it again",
+       any(a["id"] == v2["id"] for a in aws.list_assets(v_db)))
+# a library from before versions existed
+legacy_db = WORK / "legacy_versions.db"
+legacy_db.unlink(missing_ok=True)
+import sqlite3 as _sqlite3  # noqa: E402
+_legacy = _sqlite3.connect(legacy_db)
+_legacy.executescript("CREATE TABLE assets (id INTEGER PRIMARY KEY AUTOINCREMENT, filename TEXT NOT NULL,"
+                      " file_path TEXT NOT NULL, filesize INTEGER NOT NULL, triangle_count INTEGER NOT NULL,"
+                      " vertex_count INTEGER NOT NULL, material_slots INTEGER NOT NULL,"
+                      " uploader TEXT NOT NULL DEFAULT '', uploaded_at TEXT NOT NULL);"
+                      "INSERT INTO assets (filename, file_path, filesize, triangle_count, vertex_count,"
+                      " material_slots, uploaded_at) VALUES ('old.obj', 'old.obj', 1, 12, 8, 1, '2026-01-01');")
+_legacy.commit()
+_legacy.close()
+aws.init_db(legacy_db)
+_old = aws.list_assets(legacy_db)
+expect("an old library opens with every asset at v1 of its own family",
+       len(_old) == 1 and _old[0]["version"] == 1 and _old[0]["family_id"] == _old[0]["id"], _old)
+
+v_server = aws.build_server("127.0.0.1", 0, v_db, v_data, quiet=True)
+v_port = v_server.server_address[1]
+threading.Thread(target=v_server.serve_forever, daemon=True).start()
+time.sleep(0.1)
+vc = Client(v_port)
+status, up = vc.json("/api/assets?filename=crate.obj&source_path=//depot/Art/crate.obj&changelist=77",
+                     "POST", OBJ.encode())
+expect("the API takes source_path and changelist", status == 201
+       and up["source_path"] == "//depot/Art/crate.obj" and up["changelist"] == "77", up)
+status, again = vc.json("/api/assets?filename=crate.obj&source_path=//depot/Art/crate.obj", "POST",
+                        OBJ.encode())
+expect("an unchanged re-send answers 200 with unchanged: true", status == 200 and again["unchanged"],
+       (status, again.get("unchanged")))
+status, nv = vc.json(f"/api/assets?filename=crate_fixed.obj&version_of={up['id']}", "POST",
+                     OBJ.encode() + b"# fixed\n")
+expect("version_of adds a version under another file name", status == 201
+       and nv["family_id"] == up["family_id"] and nv["version"] == 2, nv)
+status, body = vc.json("/api/assets?filename=a.obj&version_of=x", "POST", OBJ.encode())
+expect("a bad version_of is a 400", status == 400, (status, body))
+status, every = vc.json("/api/assets?all_versions=1")
+expect("GET /api/assets?all_versions=1 lists every version",
+       len(every["assets"]) > len(vc.json("/api/assets")[1]["assets"]))
+
+print("26. sign-off (W2)")
+status, body = vc.json(f"/api/assets/{nv['id']}/review", "POST", {"status": "approved"})
+expect("without accounts, a sign-off needs a typed name", status == 400 and "reviewer" in body["error"],
+       body)
+status, review = vc.json(f"/api/assets/{nv['id']}/review", "POST",
+                         {"status": "changes_requested", "note": "seam on the **left**",
+                          "reviewer": "Alex"})
+expect("a typed-name sign-off is recorded, marked not verified",
+       status == 201 and review["status"] == "changes_requested" and review["verified"] is False
+       and review["reviewer"] == "Alex", review)
+status, body = vc.json(f"/api/assets/{nv['id']}/review", "POST",
+                       {"status": "shipped", "reviewer": "Alex"})
+expect("an unknown status is refused", status == 400)
+vc.json(f"/api/assets/{nv['id']}/review", "POST", {"status": "approved", "reviewer": "Alex"})
+d = aws.asset_detail(v_db, v_data, nv["id"])
+expect("the newest decision wins and the history stays",
+       d["review"]["status"] == "approved" and [r["status"] for r in d["reviews"]]
+       == ["approved", "changes_requested"], d["reviews"])
+expect("the library shows each asset's review status",
+       next(a for a in aws.list_assets(v_db) if a["id"] == nv["id"])["review_status"] == "approved")
+expect("the version list carries review status too",
+       next(item for item in d["versions"] if item["id"] == nv["id"])["review_status"] == "approved")
+expect("stats count assets by review status", aws.repository_stats(v_db)["reviews"].get("approved") == 1)
+import hashlib as _hashlib  # noqa: E402
+_approved = _hashlib.sha256(OBJ.encode() + b"# fixed\n").hexdigest()
+status, approval = vc.json(f"/api/approvals/{_approved}")
+expect("GET /api/approvals/<sha256> says an approved file is approved",
+       status == 200 and approval["approved"] and approval["reviewer"] == "Alex", approval)
+status, approval = vc.json(f"/api/approvals/{_hashlib.sha256(OBJ.encode()).hexdigest()}")
+expect("... and why another file is not", status == 200 and not approval["approved"]
+       and "not been reviewed" in approval["reason"], approval)
+status, approval = vc.json(f"/api/approvals/{'0' * 64}")
+expect("... including a file it has never seen", not approval["approved"]
+       and "never been sent" in approval["reason"])
+status, _ = vc.call(f"/api/assets/{nv['id']}/review", "POST", b'{"status":"approved","reviewer":"x"}',
+                    headers={"Origin": "https://evil.example", "Content-Type": "text/plain"})[:2]
+expect("another website cannot sign off", status == 403)
+
+print("27. named reviewers (W3)")
+a_db, a_data = fresh("accounts")
+for _bad, _why in ((("ab", "viewer", "short"), "short password"),
+                   (("a b", "viewer", "long enough pw"), "space in the name"),
+                   (("lead1", "boss", "long enough pw"), "unknown role")):
+    try:
+        aws.add_account(a_db, *_bad)
+        expect(f"a bad account is refused ({_why})", False)
+    except aws.WorkstationError:
+        expect(f"a bad account is refused ({_why})", True)
+_proc = subprocess.run([sys.executable, str(ROOT / "server" / "art_workstation_server.py"),
+                        "--db", str(a_db), "--data", str(a_data), "--add-user", "lead1",
+                        "--role", "lead", "--password-stdin"],
+                       input="lead-password-1\n", capture_output=True, text=True, timeout=60)
+expect("--add-user creates an account from the command line",
+       _proc.returncode == 0 and "added lead1 (lead)" in _proc.stdout, _proc.stdout + _proc.stderr)
+aws.add_account(a_db, "rev1", "reviewer", "rev-password-1", display_name="Rita Reviewer")
+aws.add_account(a_db, "view1", "viewer", "view-password-1")
+_stored = aws.list_accounts(a_db)
+expect("passwords are never stored as typed",
+       "lead-password-1" not in (a_db.read_bytes() if a_db.exists() else b"").decode("latin-1"))
+a_asset = aws.create_asset(a_db, a_data, "crate.obj", OBJ.encode())
+a_server = aws.build_server("127.0.0.1", 0, a_db, a_data, token="svc-token", quiet=True)
+a_port = a_server.server_address[1]
+threading.Thread(target=a_server.serve_forever, daemon=True).start()
+time.sleep(0.1)
+
+
+class Browser(Client):
+    """A client that keeps the session cookie, like a browser tab."""
+
+    def __init__(self, port):
+        super().__init__(port)
+        self.cookie = ""
+
+    def call(self, path, method="GET", body=None, headers=None):
+        merged = dict(headers or {})
+        if self.cookie:
+            merged["Cookie"] = self.cookie
+        status, raw, response_headers = super().call(path, method, body, merged)
+        cookie = response_headers.get("Set-Cookie", "")
+        if cookie.startswith(aws.SESSION_COOKIE + "="):
+            self.cookie = cookie.split(";", 1)[0]
+        return status, raw, response_headers
+
+
+anon = Browser(a_port)
+status, me = anon.json("/api/me")
+expect("/api/me says accounts are on and nobody is signed in",
+       status == 200 and me["accounts"] and not me["signed_in"] and me["role"] is None, me)
+status, _ = anon.json("/api/assets")
+expect("with accounts on, the library needs a sign-in", status == 401)
+status, raw, headers = anon.call("/api/session", "POST", {"username": "rev1", "password": "wrong-pass"})
+expect("a wrong password is refused without saying which part was wrong",
+       status == 401 and b"wrong username or password" in raw)
+status, raw, headers = anon.call("/api/session", "POST", {"username": "nobody", "password": "wrong-pass"})
+expect("... and an unknown user gets the same answer", status == 401 and b"wrong username or password" in raw)
+rita = Browser(a_port)
+status, raw, headers = rita.call("/api/session", "POST", {"username": "REV1", "password": "rev-password-1"})
+cookie_header = headers.get("Set-Cookie", "")
+expect("signing in sets an HttpOnly, SameSite=Strict session cookie (usernames ignore case)",
+       status == 200 and "HttpOnly" in cookie_header and "SameSite=Strict" in cookie_header, cookie_header)
+status, me = rita.json("/api/me")
+expect("/api/me names the signed-in reviewer and what they can do",
+       me["signed_in"] and me["user"]["display_name"] == "Rita Reviewer" and "review" in me["can"]
+       and "delete" not in me["can"], me)
+status, note = rita.json("/api/notes", "POST", {"asset_id": a_asset["id"], "category": "Geometry",
+                                                "note_text": "ok", "author": "Somebody Else"})
+expect("a signed-in note is written by the account, whatever name is typed",
+       status == 201 and note["author"] == "Rita Reviewer", note)
+status, review = rita.json(f"/api/assets/{a_asset['id']}/review", "POST",
+                           {"status": "approved", "reviewer": "Somebody Else"})
+expect("a signed-in sign-off is verified and carries the account's name",
+       status == 201 and review["verified"] and review["reviewer"] == "Rita Reviewer", review)
+status, body = rita.json(f"/api/assets/{a_asset['id']}", "DELETE")
+expect("a reviewer cannot delete assets", status == 403 and "reviewer" in body["error"], body)
+vera = Browser(a_port)
+vera.call("/api/session", "POST", {"username": "view1", "password": "view-password-1"})
+status, body = vera.json(f"/api/assets/{a_asset['id']}/review", "POST", {"status": "approved"})
+expect("a viewer cannot sign off", status == 403, body)
+status, _ = vera.json("/api/notes", "POST", {"asset_id": a_asset["id"], "category": "Other",
+                                             "note_text": "looks fine"})
+expect("... but can write notes", status == 201)
+status, _ = vera.call("/api/assets?filename=v.obj", "POST", OBJ.encode())[:2]
+expect("... and cannot upload", status == 403)
+service = Client(a_port, token="svc-token")
+status, up = service.json("/api/assets?filename=from_script.obj", "POST", OBJ.encode() + b"#s\n")
+expect("with accounts on, the token still uploads (scripts, AssetHealth, P4)", status == 201, up)
+status, body = service.json(f"/api/assets/{a_asset['id']}/review", "POST",
+                            {"status": "approved", "reviewer": "bot"})
+expect("... but the token can never sign off", status == 403, body)
+status, _ = service.json(f"/api/assets/{a_asset['id']}", "DELETE")
+expect("... or delete", status == 403)
+lena = Browser(a_port)
+lena.call("/api/session", "POST", {"username": "lead1", "password": "lead-password-1"})
+status, _ = lena.json(f"/api/assets/{up['id']}", "DELETE")
+expect("a lead can delete", status == 200)
+status, _ = rita.call("/api/session", "DELETE")[:2]
+status, _ = rita.json("/api/assets")
+expect("signing out ends the session", status == 401)
+aws.set_account(a_db, "lead1", password="lead-password-2")
+status, _ = lena.json("/api/assets")
+expect("a new password signs the account out everywhere", status == 401)
+_flood = Browser(a_port)
+for _ in range(aws.LOGIN_FAILURES):
+    _flood.call("/api/session", "POST", {"username": "view1", "password": "guess-guess"})
+status, raw, _ = _flood.call("/api/session", "POST", {"username": "view1", "password": "view-password-1"})
+expect("after repeated failures, sign-in is paused (429) even with the right password",
+       status == 429, (status, raw[:80]))
+status, _ = anon.call("/api/session", "POST", {"username": "view1", "password": "x" * 12},
+                      headers={"Origin": "https://evil.example"})[:2]
+expect("another website cannot sign anyone in", status == 403)
+_listed = subprocess.run([sys.executable, str(ROOT / "server" / "art_workstation_server.py"),
+                          "--db", str(a_db), "--list-users"], capture_output=True, text=True, timeout=60)
+expect("--list-users lists accounts and roles", "rev1" in _listed.stdout and "reviewer" in _listed.stdout
+       and "password" not in _listed.stdout.lower(), _listed.stdout)
+for _name in ("lead1", "rev1", "view1"):
+    aws.remove_account(a_db, _name)
+status, _ = Client(a_port, token="svc-token").json("/api/assets")
+expect("with every account removed, the server is back in token mode", status == 200)
+a_server.shutdown()
+a_server.server_close()
+
+print("28. the bulk uploader and the P4 trigger record where files came from (W8)")
+_bulk = WORK / "bulk_depot"
+(_bulk / "Props").mkdir(parents=True, exist_ok=True)
+(_bulk / "Props" / "barrel.obj").write_text(OBJ)
+_bulk_run = subprocess.run([sys.executable, str(ROOT / "tools" / "upload_assets.py"), str(_bulk),
+                            "--workstation", f"http://127.0.0.1:{v_port}",
+                            "--depot-root", "//depot/Art", "--changelist", "991"],
+                           capture_output=True, text=True, timeout=120)
+_barrel = next((a for a in aws.list_assets(v_db) if a["filename"] == "barrel.obj"), {})
+expect("--depot-root records //depot/Art/<relative path> and the changelist",
+       _barrel.get("source_path") == "//depot/Art/Props/barrel.obj" and _barrel.get("changelist") == "991",
+       (_barrel, _bulk_run.stdout[-200:], _bulk_run.stderr[-200:]))
+_bulk_again = subprocess.run([sys.executable, str(ROOT / "tools" / "upload_assets.py"), str(_bulk),
+                              "--workstation", f"http://127.0.0.1:{v_port}", "--depot-root", "//depot/Art"],
+                             capture_output=True, text=True, timeout=120)
+expect("running it again reports the file unchanged", "unchanged" in _bulk_again.stdout,
+       _bulk_again.stdout[-200:])
+v_server.shutdown()
+v_server.server_close()
+
 
 
 def startup_stderr(*extra):

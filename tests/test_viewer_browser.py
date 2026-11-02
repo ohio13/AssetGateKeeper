@@ -117,6 +117,8 @@ _blob = base64.b64decode(_doc["buffers"][0]["uri"].split(",", 1)[1])
 _doc["buffers"][0]["uri"] = "rock.bin"
 (WORK / "rock.gltf").write_text(json.dumps(_doc))
 (WORK / "rock.bin").write_bytes(_blob)
+# The same geometry under another name: a .gltf uploaded without its .bin.
+(WORK / "boulder.gltf").write_text(json.dumps(_doc))
 
 # An .obj with its .mtl and texture.
 _obj = (WORK / "ball.obj").read_text().replace("v ", "mtllib crate.mtl\nusemtl planks\nv ", 1)
@@ -329,8 +331,12 @@ with sync_playwright() as playwright:
                            timeout=15000)
     page.wait_for_timeout(500)
     names = page.locator("#asset-list").inner_text()
-    expect("several files upload in one go", "second.glb" in names and names.count("rock_Albedo.png") == 2,
-           status())
+    expect("several files upload in one go; the unchanged one is not duplicated (W1)",
+           "second.glb" in names and names.count("rock_Albedo.png") == 1, status())
+    page.set_input_files("#upload", str(WORK / "rock_Albedo.png"))
+    page.wait_for_function("() => !document.getElementById('status').textContent.startsWith('uploading')",
+                           timeout=15000)
+    expect("re-uploading the same file says it is unchanged", "unchanged" in status(), status())
 
     print("8. collision")
     pick(ids["cube"])
@@ -356,7 +362,7 @@ with sync_playwright() as playwright:
     expect("a .gltf dropped with its .bin loads (was 'could not read mesh: rock.bin')",
            not hint_visible() and "1 file added alongside" in status(), status())
     expect("the .bin is not a second asset", "rock.bin" not in page.locator("#asset-list").inner_text())
-    upload([WORK / "rock.gltf"])
+    upload([WORK / "boulder.gltf"])
     expect("a .gltf alone says what it is waiting for",
            "waiting for its files" in page.locator("#hint-title").inner_text()
            and "rock.bin" in page.locator("#hint-body").inner_text(),
@@ -457,8 +463,11 @@ with sync_playwright() as playwright:
            f"Fixed copy of #{ids['npot']}" in verdict_text and "PASSED" in verdict_text
            and "bark_Albedo.png" in status(), verdict_text)
     expect("... and has nothing left to fix", "Check for fixes" in page.locator("#asset-heal").inner_text())
-    expect("the original is still in the library",
-           page.locator(f'#asset-list .asset[data-id="{ids["npot"]}"]').count() == 1)
+    expect("the fixed copy is v2 of the same asset, and v1 is kept (W1)",
+           page.locator("#version-list .version-row").count() == 2
+           and "healed" in page.locator("#version-list").inner_text()
+           and "v2 vs v1" in page.locator("#version-list").inner_text(),
+           page.locator("#version-list").inner_text())
     page.locator("#verdict-body a[data-asset]").click()
     page.wait_for_function("() => document.getElementById('status').textContent === 'bark.png'",
                            timeout=15000)
@@ -466,6 +475,68 @@ with sync_playwright() as playwright:
     pick(ids["cube"])
     expect("a .glb does not offer it (the healer cannot fix glTF)",
            not page.locator("#asset-heal").is_visible())
+
+    print("8e. versions, compare, sign-off and the depot path (W1, W2, W8)")
+    _ball = (WORK / "ball.obj").read_bytes()
+    ids["vase1"] = aws.create_asset(db, data, "vase.obj", _ball,
+                                    source={"path": "//depot/Art/vase.obj", "changelist": "501"})["id"]
+    ids["vase2"] = aws.create_asset(db, data, "vase.obj", _ball + b"\nf 1 2 3\n",
+                                    source={"path": "//depot/Art/vase.obj", "changelist": "502"})["id"]
+    page.goto(f"{BASE}/viewer?live=0&asset={ids['vase2']}")
+    page.wait_for_function("() => document.getElementById('status').textContent === 'vase.obj'",
+                           timeout=15000)
+    versions_text = page.locator("#version-list").inner_text()
+    expect("the inspector lists both versions and what changed",
+           page.locator("#version-list .version-row").count() == 2 and "v2 vs v1" in versions_text
+           and "triangles +1" in versions_text, versions_text)
+    expect("the library card says v2", "v2" in page.locator(
+        f'#asset-list .asset[data-id="{ids["vase2"]}"]').inner_text())
+    expect("the depot path and changelist are shown, with a copy button",
+           page.locator("#source-text").get_attribute("data-raw") == "//depot/Art/vase.obj @502"
+           and page.locator("#source-copy").is_visible(), page.locator("#source-text").get_attribute("data-raw"))
+    page.click("#compare-overlay")
+    page.wait_for_function("() => document.getElementById('status').textContent.includes('wireframe over')",
+                           timeout=15000)
+    expect("Overlay previous draws v1 over v2", "active" in (page.locator("#compare-overlay").get_attribute("class") or ""),
+           status())
+    page.click("#compare-side")
+    page.wait_for_function("() => document.getElementById('status').textContent.includes('beside')",
+                           timeout=15000)
+    expect("Side by side switches to v1 beside v2",
+           "active" in (page.locator("#compare-side").get_attribute("class") or "")
+           and "active" not in (page.locator("#compare-overlay").get_attribute("class") or ""), status())
+    page.click("#compare-side")
+    page.wait_for_timeout(300)
+    expect("a second click turns the compare off",
+           "active" not in (page.locator("#compare-side").get_attribute("class") or ""))
+    page.fill("#review-name", "Alex")
+    page.fill("#review-note", "seam on the **left**")
+    page.click("#review-changes")
+    page.wait_for_function("() => document.getElementById('status').textContent.includes('Changes requested')",
+                           timeout=15000)
+    page.click("#review-approve")
+    page.wait_for_function("() => document.getElementById('status').textContent.includes('Approved')",
+                           timeout=15000)
+    review_text = page.locator("#review-status").inner_text()
+    expect("signing off shows who, and that the name was typed, not signed in",
+           "Approved" in review_text and "Alex" in review_text and "not signed in" in review_text, review_text)
+    expect("the history keeps the earlier decision",
+           "Changes requested" in page.locator("#review-history").inner_text())
+    page.click("button.filter[data-filter='approved']")
+    page.wait_for_timeout(300)
+    expect("the Approved filter shows it",
+           page.locator(f'#asset-list .asset[data-id="{ids["vase2"]}"]').is_visible())
+    page.click("button.filter[data-filter='to-review']")
+    page.wait_for_timeout(300)
+    expect("... and To review does not",
+           not page.locator(f'#asset-list .asset[data-id="{ids["vase2"]}"]').is_visible())
+    page.click("button.filter[data-filter='all']")
+    page.locator("#version-list .version-row").nth(1).click()
+    page.wait_for_function("(id) => document.querySelector('#version-list .version-row.current')"
+                           " && document.querySelector('#version-list .version-row.current').dataset.id == id",
+                           arg=str(ids["vase1"]), timeout=15000)
+    expect("clicking v1 opens v1, with its own changelist",
+           page.locator("#source-text").get_attribute("data-raw") == "//depot/Art/vase.obj @501")
 
     print("9. deleted while open")
     page.goto(f"{BASE}/viewer?asset={ids['embedded']}")
@@ -511,6 +582,50 @@ with sync_playwright() as playwright:
     scroll_width = page.evaluate("() => document.documentElement.scrollWidth")
     expect("... with no sideways scrolling", scroll_width <= 390, scroll_width)
     page.set_viewport_size({"width": 1440, "height": 900})
+
+    print("9c. named reviewers (W3)")
+    acc_db, acc_data = WORK / "accounts.db", WORK / "accounts_data"
+    acc_db.unlink(missing_ok=True)
+    aws.init_db(acc_db)
+    aws.add_account(acc_db, "lead1", "lead", "lead-password-1", display_name="Lena Lead")
+    acc_asset = aws.create_asset(acc_db, acc_data, "crate.obj", (WORK / "ball.obj").read_bytes())
+    acc_server = aws.build_server("127.0.0.1", 0, acc_db, acc_data, quiet=True)
+    threading.Thread(target=acc_server.serve_forever, daemon=True).start()
+    ACC = f"http://127.0.0.1:{acc_server.server_address[1]}"
+    page.set_viewport_size({"width": 1440, "height": 900})
+    page.goto(f"{ACC}/viewer?live=0")
+    page.wait_for_selector("#signin:not([hidden])", timeout=10000)
+    expect("with accounts on, the page asks to sign in and shows no library",
+           page.locator("#asset-list .asset").count() == 0 and "sign in" in status())
+    page.fill("#signin-user", "lead1")
+    page.fill("#signin-password", "not-the-password")
+    page.click("#signin button[type=submit]")
+    page.wait_for_function("() => document.getElementById('signin-message').textContent.length > 0",
+                           timeout=10000)
+    expect("a wrong password says so on the form",
+           "wrong username or password" in page.locator("#signin-message").inner_text())
+    page.fill("#signin-password", "lead-password-1")
+    page.click("#signin button[type=submit]")
+    page.wait_for_selector("#asset-list .asset", timeout=15000)
+    expect("signed in: the account and role are shown, the typed-name fields are gone",
+           "Lena Lead" in page.locator("#account").inner_text() and "lead" in page.locator("#account").inner_text()
+           and not page.locator("#note-author").is_visible(), page.locator("#account").inner_text())
+    page.locator(f'#asset-list .asset[data-id="{acc_asset["id"]}"]').click()
+    page.wait_for_function("() => document.getElementById('status').textContent === 'crate.obj'", timeout=15000)
+    expect("a lead sees the sign-off buttons without a name field",
+           page.locator("#review-approve").is_visible() and not page.locator("#review-name").is_visible())
+    page.click("#review-approve")
+    page.wait_for_function("() => document.getElementById('status').textContent.includes('Approved')",
+                           timeout=15000)
+    expect("the sign-off carries the account's name, verified",
+           "Lena Lead" in page.locator("#review-status").inner_text()
+           and "not signed in" not in page.locator("#review-status").inner_text(),
+           page.locator("#review-status").inner_text())
+    page.click("#signout")
+    page.wait_for_selector("#signin:not([hidden])", timeout=10000)
+    expect("Sign out returns to the sign-in form", page.locator("#asset-list .asset").count() == 0)
+    acc_server.shutdown()
+    acc_server.server_close()
 
     print("10. another website")
     other = browser.new_page()

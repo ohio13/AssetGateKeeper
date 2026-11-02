@@ -141,6 +141,22 @@ triangle FBX is refused with the reason in the submit output; a depot
 same changelist does not loosen its own gate; a 6-influence skin is refused;
 and a trigger pointing at a missing script refuses the submit (fails closed).
 
+### Sign-off before submit, and a review queue
+
+Two optional trigger flags connect the submit to the
+[Art Workstation](07-ART-WORKSTATION.md#versions-sign-off-and-where-a-file-came-from):
+
+* `--workstation http://review-pc:8100 --workstation-token <its --token>` sends
+  every asset of a submit that passes to the workstation for review, with its
+  depot path and changelist. It never blocks a submit on its own.
+* `--require-approval` (with `--workstation`) also refuses any asset whose exact
+  content has not been **Approved** there. The rejection names the file and its
+  review state. If the workstation cannot be reached, the submit is refused
+  (fails closed). Artists upload the file and ask a reviewer before submitting.
+
+Both can come from the environment instead: `AGK_WORKSTATION`,
+`AGK_WORKSTATION_TOKEN`, `AGK_REQUIRE_APPROVAL=1`.
+
 ### Validating a depot path from anywhere
 
 ```

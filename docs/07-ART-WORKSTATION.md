@@ -235,6 +235,88 @@ nothing in a note is run as HTML.
 They are deliberately not free text in the verdict: a machine's finding and a
 human's opinion stay distinguishable six months later.
 
+## Versions, sign-off and where a file came from
+
+### Versions
+
+Uploading a file with the same name - or, when the sender gives one, the same
+depot path - adds the **next version** of that asset instead of a second card.
+The library shows the newest version (with a `v3` mark); **Versions & review**
+in the inspector lists every version with its triangles and time, and what
+changed from the one before (triangles, vertices, material slots, texture size,
+file size).
+
+* **Overlay previous** draws the version before as an orange wireframe over this
+  one; **Side by side** puts it, solid orange, to the left. A second click turns
+  it off.
+* Sending the exact bytes of the newest version again adds nothing: the upload
+  says *unchanged* (the bulk uploader prints it per file).
+* A fixed copy from **Check for fixes** becomes the next version, marked
+  *healed*.
+* Each version keeps its own verdict, LODs, collision, notes and sign-off. Links
+  (`?asset=<id>`) always open that exact version.
+* Totals on the stats line count the newest version of each asset only.
+* API: `POST /api/assets?filename=` takes `version_of=<id>` (add a version under
+  another name) and `new_asset=1` (force a separate asset);
+  `GET /api/assets?all_versions=1` lists every version.
+
+### Sign-off
+
+Each version is *In review*, *Changes requested* or *Approved*. **Approve**,
+**Request changes** and **Back to review** take an optional note; every decision
+is kept, newest first. The library's **To review** and **Approved** filters use
+it.
+
+* With accounts (below), the decision carries the signed-in reviewer's name and
+  is *verified*. Without accounts, a name must be typed and the panel says
+  *name typed, not signed in* - a sign-off anyone could have made.
+* The Perforce trigger can refuse any asset whose **exact content** has not been
+  approved: `--require-approval --workstation <url>` (see
+  [10 CI and version control](10-CI-AND-VERSION-CONTROL.md#perforce-helix-core)).
+  It asks `GET /api/approvals/<sha256>`, and refuses the submit if the
+  workstation cannot be reached.
+
+### Named reviewers (accounts)
+
+With no accounts the workstation works as before. The first account turns
+accounts on: every reviewer signs in on the page, and notes, uploads and
+sign-offs carry the account's name instead of a typed one. You create accounts
+on the server's machine; each password is typed at a hidden prompt:
+
+```
+art-workstation --add-user lena --role lead
+art-workstation --add-user rita --role reviewer
+art-workstation --list-users
+art-workstation --set-password rita          # also signs rita out everywhere
+art-workstation --set-role rita --role lead
+art-workstation --remove-user rita           # the last one turns accounts off
+```
+
+| Role | Can |
+|---|---|
+| viewer | see everything, write notes |
+| reviewer | + upload, LODs, collision, fixes, sign-off |
+| lead | + delete assets |
+| the `--token` (scripts) | read, upload, LODs, collision, fixes - never sign off or delete |
+
+Passwords are at least 10 characters and stored as salted PBKDF2 hashes. A
+session lasts 7 days in an HttpOnly, SameSite=Strict cookie. Ten wrong
+passwords from one address pause sign-in for five minutes. Keep `--token` set
+once accounts are on: the bulk uploader, AssetHealth's **Send to workstation**
+and the Perforce trigger use it. Single sign-on (OIDC/SAML) is in AssetHealth's
+`enterprise/` module and is not wired into the workstation yet.
+
+### Where a file came from
+
+An asset sent with a depot path shows it in the inspector with its changelist -
+`//depot/Art/Props/vase.obj @502` - and a **Copy** button. The bulk uploader
+takes `--depot-root //depot/Art/Props --changelist 502` (each file is recorded
+as the depot root plus its path below the uploaded folder; without
+`--depot-root` the relative path is recorded). AssetHealth sends the path the
+gate reported; the Perforce trigger, with `--workstation`, sends each passing
+submit for review with its depot path and changelist. A depot path also decides
+versions: two `rock.obj` files in different folders are different assets.
+
 ## The Asset section: report, download, delete
 
 * **Printable report** opens one self-contained HTML page - facts, a gate check,
@@ -267,6 +349,7 @@ textures, worked out from what is on disk at the time of the request.
   `127.0.0.1` by default and nothing else can reach it.
 * **Token mode** (`--token`, or `AUTH_TOKEN`) is for a shared machine: every
   `/api` call needs `Authorization: Bearer <token>` or `?token=`.
+* **Accounts** (above) are for a team: each reviewer signs in, with a role.
 * **Open to the network with no token** - `--host 0.0.0.0` without a token -
   works, but it is the one configuration where anyone on the network can upload,
   set verdicts and delete. The server prints a `WARNING` at start-up, the page
@@ -319,6 +402,9 @@ tab shows), `--allow-host NAME`, `--quiet`.
 | `GET /api/assets/<id>/references` · `/report` | reference check · printable report |
 | `GET` · `POST /api/assets/<id>/heal` | what a fix would change (nothing stored) · make the fixed copy as a new asset |
 | `GET /api/assets/<id>/notes` · `POST /api/notes` · `DELETE /api/notes/<id>` | notes |
+| `GET` · `POST /api/assets/<id>/review` | sign-off history · a decision (`status`, `note`, `reviewer` without accounts) |
+| `GET /api/approvals/<sha256>` | is this exact file approved? (the Perforce trigger) |
+| `GET /api/me` · `POST` · `DELETE /api/session` | who is signed in · sign in · sign out |
 
 ## Troubleshooting
 

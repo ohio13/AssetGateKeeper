@@ -97,7 +97,10 @@ def run_suite(name: str, script: str, extra: tuple, timeout: float) -> dict:
         else:
             skipped += 1
     summary = SUMMARY.search(output)
-    integration = INTEGRATION.search(output) if name == "headless_integration" else None
+    # The LAST "N passed, M failed" line is the suite's own summary; earlier ones
+    # are the gate's per-sweep logs it prints along the way.
+    summaries = list(INTEGRATION.finditer(output)) if name == "headless_integration" else []
+    integration = summaries[-1] if summaries else None
     if integration:
         passed, failed = int(integration.group(1)), int(integration.group(2))
         skipped = int(integration.group(3) or 0)

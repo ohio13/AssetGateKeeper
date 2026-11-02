@@ -521,6 +521,12 @@ expect("the pass/fail status travelled", item["verdict_status"] == "failed", str
 expect("the exact rule violation travelled",
        "triangle budget exceeded" in item["verdict_problems"], item["verdict_problems"][:120])
 expect("the provenance is labelled", item["source"] == "assethealth", item["source"])
+expect("the file's path travelled, for versions and the inspector (W8)",
+       item["source_path"].replace("\\", "/") == str(gate_asset).replace("\\", "/"), item["source_path"])
+aws.set_review(ws_db, item["id"], "approved", reviewer="Lena")
+audit_page = bridge.get("/audit/full")[1].decode("utf-8", "replace")
+expect("the audit page shows the workstation's sign-off for that file (W2)",
+       'class="review approved"' in audit_page, audit_page[:120])
 
 status, body = bridge.post("/api/send-to-workstation", {"verdicts": [verdict_id] * 11})
 expect("a batch of eleven is refused", status == 400 and b"10" in body, body[:140])

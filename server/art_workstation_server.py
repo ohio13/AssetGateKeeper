@@ -50,7 +50,10 @@ Routes
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import html
+import secrets
 import json
 import math
 import os
@@ -61,6 +64,7 @@ import sqlite3
 import sys
 import tempfile
 import threading
+import time
 import urllib.parse
 import socketserver
 from datetime import datetime, timezone
@@ -240,6 +244,37 @@ CREATE TABLE IF NOT EXISTS collisions (
     UNIQUE (asset_id)
 );
 
+-- Sign-off (W2): one row per decision, newest wins. "verified" is 1 when a
+-- signed-in account made it, 0 when the name was only typed (no accounts).
+CREATE TABLE IF NOT EXISTS reviews (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    asset_id   INTEGER NOT NULL REFERENCES assets(id) ON DELETE CASCADE,
+    status     TEXT    NOT NULL,
+    note       TEXT    NOT NULL DEFAULT '',
+    reviewer   TEXT    NOT NULL DEFAULT '',
+    verified   INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT    NOT NULL
+);
+
+-- Named reviewers (W3). No row = no accounts: the server behaves as before
+-- (solo on loopback, or one shared token).
+CREATE TABLE IF NOT EXISTS accounts (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    username      TEXT    NOT NULL UNIQUE COLLATE NOCASE,
+    display_name  TEXT    NOT NULL DEFAULT '',
+    role          TEXT    NOT NULL,
+    password_hash TEXT    NOT NULL,
+    created_at    TEXT    NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS sessions (
+    token_hash TEXT    PRIMARY KEY,
+    account_id INTEGER NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
+    created_at TEXT    NOT NULL,
+    expires_at TEXT    NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_reviews_asset ON reviews(asset_id, id DESC);
 CREATE INDEX IF NOT EXISTS idx_lod_asset   ON lod_versions(asset_id);
 CREATE INDEX IF NOT EXISTS idx_notes_asset ON reviews_and_notes(asset_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_coll_asset  ON collisions(asset_id);
@@ -323,6 +358,23 @@ def init_db(db_path: str | Path) -> None:
             if column not in have:
                 connection.execute(
                     f"ALTER TABLE assets ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        # Versions (W1) and where the file came from (W8). An old library gets
+        # one family per asset, each at version 1.
+        for column, kind in (("family_id", "INTEGER NOT NULL DEFAULT 0"),
+                             ("version", "INTEGER NOT NULL DEFAULT 1"),
+                             ("family_key", "TEXT NOT NULL DEFAULT ''"),
+                             ("sha256", "TEXT NOT NULL DEFAULT ''"),
+                             ("source_path", "TEXT NOT NULL DEFAULT ''"),
+                             ("source_rev", "TEXT NOT NULL DEFAULT ''"),
+                             ("changelist", "TEXT NOT NULL DEFAULT ''")):
+            if column not in have:
+                connection.execute(f"ALTER TABLE assets ADD COLUMN {column} {kind}")
+        connection.execute("UPDATE assets SET family_id = id WHERE family_id = 0")
+        connection.execute("UPDATE assets SET family_key = lower(filename) WHERE family_key = ''")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_assets_family"
+                           " ON assets(family_id, version)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_assets_key ON assets(family_key)")
+        connection.execute("CREATE INDEX IF NOT EXISTS idx_assets_sha ON assets(sha256)")
         lod_columns = {row["name"] for row in connection.execute("PRAGMA table_info(lod_versions)")}
         if "origin" not in lod_columns:
             # "generated" by the decimator, or "uploaded": an artist's own LOD file.
@@ -628,13 +680,40 @@ def resolve_inside(root: Path, relative: str) -> Path | None:
 # Queries
 # --- #
 
-def list_assets(db_path: str | Path) -> list[dict]:
+LATEST_REVIEW = ("(SELECT r.status FROM reviews r WHERE r.asset_id = a.id"
+                 " ORDER BY r.id DESC LIMIT 1)")
+
+
+def list_assets(db_path: str | Path, all_versions: bool = False) -> list[dict]:
+    """The library: the newest version of each asset (every version with
+    ``all_versions``), with LOD, note and version counts and its review status."""
+    where = "" if all_versions else (
+        " WHERE a.version = (SELECT MAX(b.version) FROM assets b"
+        " WHERE b.family_id = a.family_id)")
     with open_db(db_path) as connection:
         rows = connection.execute(
             "SELECT a.*,"
             "       (SELECT COUNT(*) FROM lod_versions l WHERE l.asset_id = a.id) AS lod_count,"
-            "       (SELECT COUNT(*) FROM reviews_and_notes n WHERE n.asset_id = a.id) AS note_count"
-            " FROM assets a ORDER BY a.uploaded_at DESC, a.id DESC").fetchall()
+            "       (SELECT COUNT(*) FROM reviews_and_notes n WHERE n.asset_id = a.id) AS note_count,"
+            "       (SELECT COUNT(*) FROM assets v WHERE v.family_id = a.family_id) AS version_count,"
+            f"       COALESCE({LATEST_REVIEW}, '') AS review_status"
+            f" FROM assets a{where} ORDER BY a.uploaded_at DESC, a.id DESC").fetchall()
+    return [dict(row) for row in rows]
+
+
+VERSION_FIELDS = ("id", "version", "filename", "uploaded_at", "uploader", "kind", "filesize",
+                  "triangle_count", "vertex_count", "material_slots", "analyse_note",
+                  "sha256", "healed_from", "heal_notes", "source_path", "source_rev",
+                  "changelist")
+
+
+def list_versions(db_path: str | Path, family_id: int) -> list[dict]:
+    """Every version of one asset, oldest first, each with its review status."""
+    columns = ", ".join(f"a.{name}" for name in VERSION_FIELDS)
+    with open_db(db_path) as connection:
+        rows = connection.execute(
+            f"SELECT {columns}, COALESCE({LATEST_REVIEW}, '') AS review_status"
+            " FROM assets a WHERE a.family_id = ? ORDER BY a.version", (family_id,)).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -937,13 +1016,33 @@ def _record_facts(db_path: str | Path, asset_id: int, file_path: str, facts: dic
                     (asset_id, json.dumps({"min": low, "max": high}), utc_now()))
 
 
+def _clean_source(source: dict | None) -> tuple[str, str, str]:
+    """Depot path, revision and changelist as sent (W8), trimmed and bounded."""
+    source = source or {}
+
+    def text(key: str, limit: int) -> str:
+        value = str(source.get(key, "") or "").strip()
+        return "".join(ch for ch in value if ch >= " ")[:limit]
+
+    return text("path", 512), text("rev", 32), text("changelist", 32)
+
+
 def create_asset(db_path: str | Path, data_dir: Path, filename: str, payload: bytes,
-                 uploader: str = "", provenance: dict | None = None) -> dict:
+                 uploader: str = "", provenance: dict | None = None,
+                 version_of: int | None = None, new_asset: bool = False,
+                 source: dict | None = None) -> dict:
     """Store an uploaded file in its own folder, measure it, seed its collision.
 
     Each asset lives in ``assets/<id>/`` with the name it was uploaded under, so
     a .gltf's .bin and textures can be added next to it (add_sidecar) and its
     relative references resolve - in the measurement and in the browser.
+
+    Versions (W1): a file with the same depot path - or, without one, the same
+    name - becomes the next version of that asset instead of a stranger in the
+    library. ``version_of`` names the asset explicitly (a healed copy);
+    ``new_asset`` forces a separate one. Re-sending the exact bytes of the
+    newest version adds nothing: it returns that version (``unchanged``), with
+    a newly sent verdict recorded on it.
     """
     name = safe_filename(filename)
     suffix = Path(name).suffix.lower()
@@ -952,19 +1051,61 @@ def create_asset(db_path: str | Path, data_dir: Path, filename: str, payload: by
             f"{suffix} is not an asset format - refusing to store it", 415)
     if not payload:
         raise WorkstationError("empty upload", 400)
+    digest = hashlib.sha256(payload).hexdigest()
+    source_path, source_rev, changelist = _clean_source(source)
+    extra = provenance or {}
+    verdict_fields = (str(extra.get("verdict", "")), str(extra.get("problems", "")),
+                      str(extra.get("tags", "")), str(extra.get("source", "")),
+                      str(extra.get("auth", "")) if (extra.get("verdict") or extra.get("source"))
+                      else "")
 
     with _WRITE_LOCK, open_db(db_path) as connection:
-        extra = provenance or {}
+        family_id, key = 0, (source_path or name).lower()
+        if version_of is not None:
+            parent = connection.execute("SELECT family_id, family_key FROM assets WHERE id = ?",
+                                        (int(version_of),)).fetchone()
+            if parent is None:
+                raise WorkstationError(f"no asset {version_of}", 404)
+            family_id, key = int(parent["family_id"]), parent["family_key"]
+        elif not new_asset:
+            latest = connection.execute(
+                "SELECT id, family_id, sha256 FROM assets WHERE family_key = ?"
+                " ORDER BY version DESC, id DESC LIMIT 1", (key,)).fetchone()
+            if latest is not None:
+                if latest["sha256"] == digest:
+                    if verdict_fields[0] or verdict_fields[3]:
+                        connection.execute(
+                            "UPDATE assets SET verdict_status = ?, verdict_problems = ?,"
+                            " verdict_tags = ?, source = ?, provenance_auth = ? WHERE id = ?",
+                            (*verdict_fields, latest["id"]))
+                    if source_path or changelist:
+                        connection.execute(
+                            "UPDATE assets SET source_path = COALESCE(NULLIF(?, ''), source_path),"
+                            " source_rev = COALESCE(NULLIF(?, ''), source_rev),"
+                            " changelist = COALESCE(NULLIF(?, ''), changelist) WHERE id = ?",
+                            (source_path, source_rev, changelist, latest["id"]))
+                    unchanged = dict(connection.execute(
+                        "SELECT * FROM assets WHERE id = ?", (latest["id"],)).fetchone())
+                    unchanged["unchanged"] = True
+                    return unchanged
+                family_id = int(latest["family_id"])
+        version = 1
+        if family_id:
+            version = int(connection.execute(
+                "SELECT COALESCE(MAX(version), 0) FROM assets WHERE family_id = ?",
+                (family_id,)).fetchone()[0]) + 1
         cursor = connection.execute(
             "INSERT INTO assets (filename, file_path, filesize, triangle_count,"
             " vertex_count, material_slots, uploader, uploaded_at,"
-            " verdict_status, verdict_problems, verdict_tags, source, provenance_auth)"
-            " VALUES (?, '', ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?)",
-            (name, len(payload), uploader, utc_now(),
-             str(extra.get("verdict", "")), str(extra.get("problems", "")),
-             str(extra.get("tags", "")), str(extra.get("source", "")),
-             str(extra.get("auth", "")) if (extra.get("verdict") or extra.get("source")) else ""))
+            " verdict_status, verdict_problems, verdict_tags, source, provenance_auth,"
+            " family_id, version, family_key, sha256, source_path, source_rev, changelist)"
+            " VALUES (?, '', ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (name, len(payload), uploader, utc_now(), *verdict_fields,
+             family_id, version, key, digest, source_path, source_rev, changelist))
         asset_id = int(cursor.lastrowid or 0)
+        if not family_id:
+            connection.execute("UPDATE assets SET family_id = ? WHERE id = ?",
+                               (asset_id, asset_id))
 
     assets_dir, _ = asset_paths(data_dir)
     folder = assets_dir / str(asset_id)
@@ -1120,7 +1261,11 @@ def heal_asset(db_path: str | Path, data_dir: Path, asset_id: int, apply: bool,
                             uploader="workstation healer",
                             provenance={"verdict": "passed", "source": "workstation healer",
                                         "tags": asset.get("verdict_tags", ""),
-                                        "problems": "", "auth": "server"})
+                                        "problems": "", "auth": "server"},
+                            version_of=asset_id,
+                            source={"path": asset.get("source_path", ""),
+                                    "rev": asset.get("source_rev", ""),
+                                    "changelist": asset.get("changelist", "")})
         for path in sorted(scratch.rglob("*")):
             relative = path.relative_to(scratch).as_posix()
             if (path.is_file() and path != healed
@@ -1145,7 +1290,233 @@ def asset_detail(db_path: str | Path, data_dir: Path, asset_id: int) -> dict:
     asset["files"] = asset_files(Path(data_dir), asset)
     stored = resolve_inside(Path(data_dir), asset["file_path"])
     asset["missing"] = missing_references(stored) if stored is not None and stored.is_file() else []
+    asset["versions"] = list_versions(db_path, int(asset["family_id"] or asset["id"]))
+    asset["reviews"] = list_reviews(db_path, asset_id)
+    asset["review"] = asset["reviews"][0] if asset["reviews"] else None
     return asset
+
+
+# --- #
+# Sign-off (W2)
+# --- #
+
+REVIEW_STATUSES = ("in_review", "changes_requested", "approved")
+REVIEW_LABELS = {"in_review": "In review", "changes_requested": "Changes requested",
+                 "approved": "Approved"}
+
+
+def list_reviews(db_path: str | Path, asset_id: int) -> list[dict]:
+    """Every sign-off decision on one version, newest first."""
+    with open_db(db_path) as connection:
+        rows = connection.execute(
+            "SELECT id, asset_id, status, note, reviewer, verified, created_at FROM reviews"
+            " WHERE asset_id = ? ORDER BY id DESC", (asset_id,)).fetchall()
+    return [dict(row, verified=bool(row["verified"])) for row in rows]
+
+
+def set_review(db_path: str | Path, asset_id: int, status: str, note: str = "",
+               reviewer: str = "", verified: bool = False) -> dict:
+    """Record a decision on one version. Every change is kept, newest wins."""
+    get_asset(db_path, asset_id)
+    if status not in REVIEW_STATUSES:
+        raise WorkstationError(f"status must be one of {', '.join(REVIEW_STATUSES)}", 400)
+    note = str(note or "").strip()[:2000]
+    reviewer = str(reviewer or "").strip()[:80]
+    if not verified and not reviewer:
+        raise WorkstationError("reviewer is required when nobody is signed in", 400)
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        cursor = connection.execute(
+            "INSERT INTO reviews (asset_id, status, note, reviewer, verified, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (asset_id, status, note, reviewer, 1 if verified else 0, utc_now()))
+        review_id = int(cursor.lastrowid or 0)
+    return next(row for row in list_reviews(db_path, asset_id) if row["id"] == review_id)
+
+
+def approval_for(db_path: str | Path, sha256: str) -> dict:
+    """Is this exact file content approved? For the Perforce trigger (W2).
+
+    Content, not name: an approved rock.fbx says nothing about the different
+    rock.fbx someone is submitting now.
+    """
+    digest = str(sha256 or "").strip().lower()
+    if not re.fullmatch(r"[0-9a-f]{64}", digest):
+        raise WorkstationError("sha256 must be 64 hex characters", 400)
+    with open_db(db_path) as connection:
+        rows = connection.execute(
+            "SELECT a.id, a.filename, a.version, a.family_id FROM assets a WHERE a.sha256 = ?"
+            " ORDER BY a.id DESC", (digest,)).fetchall()
+    for row in rows:
+        reviews = list_reviews(db_path, int(row["id"]))
+        if reviews and reviews[0]["status"] == "approved":
+            return {"approved": True, "asset_id": row["id"], "filename": row["filename"],
+                    "version": row["version"], "reviewer": reviews[0]["reviewer"],
+                    "verified": reviews[0]["verified"], "at": reviews[0]["created_at"]}
+    if rows:
+        reviews = list_reviews(db_path, int(rows[0]["id"]))
+        return {"approved": False, "asset_id": rows[0]["id"], "filename": rows[0]["filename"],
+                "version": rows[0]["version"],
+                "status": reviews[0]["status"] if reviews else "",
+                "reason": (f"{rows[0]['filename']} v{rows[0]['version']} is "
+                           f"{REVIEW_LABELS.get(reviews[0]['status'], 'not reviewed').lower()}"
+                           if reviews else
+                           f"{rows[0]['filename']} v{rows[0]['version']} has not been reviewed")}
+    return {"approved": False, "reason": "this file has never been sent to the Art Workstation"}
+
+
+# --- #
+# Named reviewers (W3): local accounts, the same PBKDF2 format AssetHealth uses
+# --- #
+
+ROLES = ("viewer", "reviewer", "lead")
+PERMISSIONS = {
+    # what each kind of caller may do; "service" is the shared token once
+    # accounts exist (the bulk uploader, AssetHealth's bridge, the P4 trigger)
+    "viewer": {"read", "note"},
+    "reviewer": {"read", "note", "upload", "edit", "review"},
+    "lead": {"read", "note", "upload", "edit", "review", "delete"},
+    "service": {"read", "upload", "edit"},
+    "open": {"read", "note", "upload", "edit", "review", "delete"},
+}
+PBKDF2_ROUNDS = 240_000
+MIN_PASSWORD = 10
+SESSION_DAYS = 7
+SESSION_COOKIE = "agk_ws_session"
+_DUMMY_HASH = ""
+
+
+def _b64(raw: bytes) -> str:
+    import base64
+    return base64.b64encode(raw).decode("ascii")
+
+
+def hash_password(password: str) -> str:
+    salt = secrets.token_bytes(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, PBKDF2_ROUNDS)
+    return f"pbkdf2_sha256${PBKDF2_ROUNDS}${_b64(salt)}${_b64(digest)}"
+
+
+def verify_password(password: str, stored: str) -> bool:
+    import base64
+    try:
+        algorithm, rounds, salt, expected = stored.split("$")
+        if algorithm != "pbkdf2_sha256":
+            return False
+        candidate = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"),
+                                        base64.b64decode(salt), int(rounds))
+        return hmac.compare_digest(candidate, base64.b64decode(expected))
+    except (ValueError, TypeError):
+        return False
+
+
+def account_count(db_path: str | Path) -> int:
+    with open_db(db_path) as connection:
+        return int(connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0])
+
+
+def add_account(db_path: str | Path, username: str, role: str, password: str,
+                display_name: str = "") -> dict:
+    username = str(username or "").strip()
+    if not re.fullmatch(r"[\w.@-]{2,64}", username):
+        raise WorkstationError("username: 2-64 letters, digits, . _ - or @", 400)
+    if role not in ROLES:
+        raise WorkstationError(f"role must be one of {', '.join(ROLES)}", 400)
+    if len(password or "") < MIN_PASSWORD:
+        raise WorkstationError(f"password must be at least {MIN_PASSWORD} characters", 400)
+    try:
+        with _WRITE_LOCK, open_db(db_path) as connection:
+            connection.execute(
+                "INSERT INTO accounts (username, display_name, role, password_hash, created_at)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (username, str(display_name or username).strip()[:80], role,
+                 hash_password(password), utc_now()))
+    except sqlite3.IntegrityError as exc:
+        raise WorkstationError(f"{username} already exists", 409) from exc
+    return next(row for row in list_accounts(db_path) if row["username"].lower() == username.lower())
+
+
+def list_accounts(db_path: str | Path) -> list[dict]:
+    with open_db(db_path) as connection:
+        rows = connection.execute("SELECT id, username, display_name, role, created_at"
+                                  " FROM accounts ORDER BY username").fetchall()
+    return [dict(row) for row in rows]
+
+
+def set_account(db_path: str | Path, username: str, role: str | None = None,
+                password: str | None = None) -> dict:
+    if role is not None and role not in ROLES:
+        raise WorkstationError(f"role must be one of {', '.join(ROLES)}", 400)
+    if password is not None and len(password) < MIN_PASSWORD:
+        raise WorkstationError(f"password must be at least {MIN_PASSWORD} characters", 400)
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        row = connection.execute("SELECT id FROM accounts WHERE username = ?",
+                                 (username,)).fetchone()
+        if row is None:
+            raise WorkstationError(f"no account {username}", 404)
+        if role is not None:
+            connection.execute("UPDATE accounts SET role = ? WHERE id = ?", (role, row["id"]))
+        if password is not None:
+            connection.execute("UPDATE accounts SET password_hash = ? WHERE id = ?",
+                               (hash_password(password), row["id"]))
+            # A new password signs every browser out.
+            connection.execute("DELETE FROM sessions WHERE account_id = ?", (row["id"],))
+    return next(item for item in list_accounts(db_path) if item["id"] == row["id"])
+
+
+def remove_account(db_path: str | Path, username: str) -> None:
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        removed = connection.execute("DELETE FROM accounts WHERE username = ?",
+                                     (username,)).rowcount
+    if not removed:
+        raise WorkstationError(f"no account {username}", 404)
+
+
+def sign_in(db_path: str | Path, username: str, password: str) -> tuple[str, dict]:
+    """Check a password; on success a new session token (stored hashed)."""
+    global _DUMMY_HASH
+    with open_db(db_path) as connection:
+        row = connection.execute("SELECT * FROM accounts WHERE username = ?",
+                                 (str(username or "").strip(),)).fetchone()
+    if row is None:
+        # Spend the same time as a real check, so a timing probe cannot tell
+        # which usernames exist.
+        _DUMMY_HASH = _DUMMY_HASH or hash_password(secrets.token_hex(8))
+        verify_password(str(password or ""), _DUMMY_HASH)
+        raise WorkstationError("wrong username or password", 401)
+    if not verify_password(str(password or ""), row["password_hash"]):
+        raise WorkstationError("wrong username or password", 401)
+    token = secrets.token_urlsafe(32)
+    now = datetime.now(timezone.utc)
+    expires = now.timestamp() + SESSION_DAYS * 86400
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        connection.execute("DELETE FROM sessions WHERE expires_at < ?", (utc_now(),))
+        connection.execute(
+            "INSERT INTO sessions (token_hash, account_id, created_at, expires_at)"
+            " VALUES (?, ?, ?, ?)",
+            (hashlib.sha256(token.encode()).hexdigest(), row["id"], utc_now(),
+             datetime.fromtimestamp(expires, timezone.utc).isoformat(timespec="seconds")))
+    return token, {"username": row["username"], "display_name": row["display_name"],
+                   "role": row["role"]}
+
+
+def session_account(db_path: str | Path, token: str) -> dict | None:
+    if not token:
+        return None
+    with open_db(db_path) as connection:
+        row = connection.execute(
+            "SELECT a.username, a.display_name, a.role, s.expires_at FROM sessions s"
+            " JOIN accounts a ON a.id = s.account_id WHERE s.token_hash = ?",
+            (hashlib.sha256(token.encode()).hexdigest(),)).fetchone()
+    if row is None or row["expires_at"] < utc_now():
+        return None
+    return {"username": row["username"], "display_name": row["display_name"],
+            "role": row["role"]}
+
+
+def sign_out(db_path: str | Path, token: str) -> None:
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        connection.execute("DELETE FROM sessions WHERE token_hash = ?",
+                           (hashlib.sha256(str(token).encode()).hexdigest(),))
 
 
 def delete_asset(db_path: str | Path, data_dir: Path, asset_id: int) -> None:
@@ -1497,15 +1868,23 @@ def repository_stats(db_path: str | Path) -> dict:
     excluded from the triangle total and counted separately. A total that
     quietly included them would understate the project's cost.
     """
+    # The newest version of each asset is the project; older versions are history
+    # and would double-count every re-export.
+    latest = ("SELECT * FROM assets a WHERE a.version = (SELECT MAX(b.version)"
+              " FROM assets b WHERE b.family_id = a.family_id)")
     with open_db(db_path) as connection:
-        assets = connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
+        assets = connection.execute(f"SELECT COUNT(*) FROM ({latest})").fetchone()[0]
+        versions = connection.execute("SELECT COUNT(*) FROM assets").fetchone()[0]
         unverified = connection.execute(
-            "SELECT COUNT(*) FROM assets WHERE kind = 'unverified'").fetchone()[0]
+            f"SELECT COUNT(*) FROM ({latest}) WHERE kind = 'unverified'").fetchone()[0]
         broken = connection.execute(
-            "SELECT COUNT(*) FROM assets WHERE kind = 'broken'").fetchone()[0]
+            f"SELECT COUNT(*) FROM ({latest}) WHERE kind = 'broken'").fetchone()[0]
         triangles = connection.execute(
-            "SELECT COALESCE(SUM(triangle_count), 0) FROM assets"
+            f"SELECT COALESCE(SUM(triangle_count), 0) FROM ({latest})"
             " WHERE kind NOT IN ('unverified', 'broken')").fetchone()[0]
+        reviews = connection.execute(
+            f"SELECT COALESCE({LATEST_REVIEW}, '') AS status, COUNT(*) AS n"
+            f" FROM ({latest}) a GROUP BY status").fetchall()
         lods = connection.execute("SELECT COUNT(*) FROM lod_versions").fetchone()[0]
         notes = connection.execute("SELECT COUNT(*) FROM reviews_and_notes").fetchone()[0]
         by_category = connection.execute(
@@ -1513,6 +1892,8 @@ def repository_stats(db_path: str | Path) -> dict:
             " GROUP BY category ORDER BY n DESC").fetchall()
     return {
         "assets": int(assets),
+        "versions": int(versions),
+        "reviews": {row["status"] or "none": row["n"] for row in reviews},
         # measured + unverified + broken == assets; triangles covers measured only.
         "measured": int(assets) - int(unverified) - int(broken),
         "unverified": int(unverified),
@@ -1736,6 +2117,10 @@ ASSET_REFERENCES_RE = re.compile(r"^/api/assets/(\d+)/references$")
 ASSET_REPORT_RE = re.compile(r"^/api/assets/(\d+)/report$")
 ASSET_HEAL_RE = re.compile(r"^/api/assets/(\d+)/heal$")
 COLLISION_OBJ_RE = re.compile(r"^/api/assets/(\d+)/collision\.obj$")
+ASSET_REVIEW_RE = re.compile(r"^/api/assets/(\d+)/reviews?$")
+APPROVAL_RE = re.compile(r"^/api/approvals/([0-9a-fA-F]{64})$")
+LOGIN_WINDOW = 300          # seconds
+LOGIN_FAILURES = 10         # per address per window, then 429
 NOTE_RE = re.compile(r"^/api/notes/(\d+)$")
 
 
@@ -1814,10 +2199,101 @@ class Handler(BaseHTTPRequestHandler):
         expected = self.server.token  # type: ignore[attr-defined]
         if not expected:
             return True              # solo mode: loopback, no ceremony
-        import hmac
-
         presented = self._token()
         return bool(presented) and hmac.compare_digest(presented, expected)
+
+    def _cookie(self, name: str) -> str:
+        from http.cookies import CookieError, SimpleCookie
+        jar = SimpleCookie()
+        try:
+            jar.load(self.headers.get("Cookie", ""))
+        except CookieError:
+            return ""
+        return jar[name].value if name in jar else ""
+
+    def _principal(self) -> dict | None:
+        """Who is calling, and with which role - or None (401).
+
+        No accounts: as before - everyone on a solo server, or whoever holds
+        the token - with every permission. Accounts: a signed-in session
+        carries its account's role; the shared token still works for scripts
+        (the bulk uploader, AssetHealth's bridge, the Perforce trigger) as the
+        "service" role, which can upload but never sign off or delete.
+        """
+        server = self.server  # type: ignore[attr-defined]
+        if account_count(server.db_path):
+            account = session_account(server.db_path, self._cookie(SESSION_COOKIE))
+            if account is not None:
+                return {"kind": "account", "name": account["username"],
+                        "display": account["display_name"], "role": account["role"]}
+            if server.token and self._authorised() and self._token():
+                return {"kind": "service", "name": "token", "display": "", "role": "service"}
+            return None
+        if not self._authorised():
+            return None
+        return {"kind": "token" if server.token else "open", "name": "", "display": "",
+                "role": "open"}
+
+    def _forbidden(self, who: dict, permission: str) -> bool:
+        if permission in PERMISSIONS.get(who["role"], set()):
+            return False
+        verbs = {"upload": "upload", "edit": "change LODs, collision or fixes",
+                 "review": "sign off", "delete": "delete", "note": "write notes",
+                 "read": "read"}
+        self._json(403, {"error": f"your role ({who['role']}) cannot "
+                                  f"{verbs.get(permission, permission)}",
+                         "role": who["role"]})
+        return True
+
+    @staticmethod
+    def _permission_for(method: str, path: str) -> str:
+        if method == "DELETE":
+            return "delete" if ASSET_RE.match(path) else "edit"
+        if path in ("/api/assets",) or ASSET_SIDECARS_RE.match(path):
+            return "upload"
+        if path == "/api/notes":
+            return "note"
+        if ASSET_REVIEW_RE.match(path):
+            return "review"
+        return "edit"
+
+    def _login(self) -> None:
+        server = self.server  # type: ignore[attr-defined]
+        address = self.client_address[0] if self.client_address else ""
+        now = time.monotonic()
+        failures = server.login_failures.setdefault(address, [])
+        failures[:] = [moment for moment in failures if now - moment < LOGIN_WINDOW]
+        if len(failures) >= LOGIN_FAILURES:
+            self._drain_request_body()
+            self._json(429, {"error": "too many failed sign-ins; wait a few minutes"})
+            return
+        payload = self._json_body()
+        if payload is None:
+            return
+        try:
+            token, account = sign_in(server.db_path, str(payload.get("username", "")),
+                                     str(payload.get("password", "")))
+        except WorkstationError as exc:
+            failures.append(now)
+            self._json(exc.status, {"error": str(exc)})
+            return
+        cookie = (f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; "
+                  f"Max-Age={SESSION_DAYS * 86400}")
+        self._send(200, json.dumps({"user": account}).encode("utf-8"),
+                   "application/json; charset=utf-8", {"Set-Cookie": cookie})
+
+    def _me(self) -> None:
+        server = self.server  # type: ignore[attr-defined]
+        who = self._principal()
+        accounts = bool(account_count(server.db_path))
+        self._json(200, {
+            "accounts": accounts,
+            "signed_in": bool(who and who["kind"] == "account"),
+            "user": ({"username": who["name"], "display_name": who["display"],
+                      "role": who["role"]} if who and who["kind"] == "account" else None),
+            "role": who["role"] if who else None,
+            "can": sorted(PERMISSIONS.get(who["role"], set())) if who else [],
+        })
 
     def _body(self, limit: int) -> bytes | None:
         header = self.headers.get("Content-Length")
@@ -1924,9 +2400,16 @@ class Handler(BaseHTTPRequestHandler):
             if path.startswith("/static/"):
                 self._static(path[len("/static/"):])
                 return
-            if not self._authorised():
-                self._json(401, {"error": "unauthorised", "detail": "Bearer token required"})
+            if path == "/api/me":
+                self._me()
                 return
+            who = self._principal()
+            if who is None:
+                self._json(401, {"error": "unauthorised",
+                                 "detail": "sign in" if account_count(self.server.db_path)
+                                 else "Bearer token required"})
+                return
+            self._who = who
             self._api_get(path)
         except WorkstationError as exc:
             self._json(exc.status, {"error": str(exc)})
@@ -1939,6 +2422,7 @@ class Handler(BaseHTTPRequestHandler):
         server = self.server  # type: ignore[attr-defined]
         if path == "/api/health":
             self._json(200, {"ok": True, "auth": bool(server.token),
+                             "accounts": bool(account_count(server.db_path)),
                              "exposed": bool(getattr(server, "exposed", False)),
                              "stats": repository_stats(server.db_path)})
             return
@@ -1949,7 +2433,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, describe_rules(server))
             return
         if path == "/api/assets":
-            self._json(200, {"assets": list_assets(server.db_path)})
+            every = (self._query().get("all_versions", ["0"])[0] or "") in ("1", "true", "yes")
+            self._json(200, {"assets": list_assets(server.db_path, all_versions=every)})
             return
 
         match = ASSET_RE.match(path)
@@ -2023,6 +2508,16 @@ class Handler(BaseHTTPRequestHandler):
         if match:
             self._json(200, asset_references(server.db_path, Path(server.data_dir),
                                              int(match.group(1))))
+            return
+
+        match = ASSET_REVIEW_RE.match(path)
+        if match:
+            self._json(200, {"reviews": list_reviews(server.db_path, int(match.group(1)))})
+            return
+
+        match = APPROVAL_RE.match(path)
+        if match:
+            self._json(200, approval_for(server.db_path, match.group(1)))
             return
 
         match = ASSET_HEAL_RE.match(path)
@@ -2162,10 +2657,35 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urllib.parse.urlsplit(self.path).path
         try:
-            if not self._authorised():
-                self._json(401, {"error": "unauthorised", "detail": "Bearer token required"})
+            if path == "/api/session":
+                self._login()
+                return
+            who = self._principal()
+            if who is None:
+                self._drain_request_body()
+                self._json(401, {"error": "unauthorised",
+                                 "detail": "sign in" if account_count(self.server.db_path)
+                                 else "Bearer token required"})
+                return
+            if self._forbidden(who, self._permission_for("POST", path)):
+                self._drain_request_body()
                 return
             server = self.server  # type: ignore[attr-defined]
+
+            match = ASSET_REVIEW_RE.match(path)
+            if match:
+                payload = self._json_body()
+                if payload is None:
+                    return
+                signed = who["kind"] == "account"
+                review = set_review(server.db_path, int(match.group(1)),
+                                    str(payload.get("status", "")), str(payload.get("note", "")),
+                                    reviewer=(who["display"] or who["name"]) if signed
+                                    else str(payload.get("reviewer", "")),
+                                    verified=signed)
+                self._publish("review", int(match.group(1)))
+                self._json(201, review)
+                return
 
             if path == "/api/assets":
                 raw = self._body(MAX_UPLOAD_BYTES)
@@ -2188,13 +2708,26 @@ class Handler(BaseHTTPRequestHandler):
                     "auth": ("token" if server.token
                              else "open" if getattr(server, "exposed", False) else "local"),
                 }
-                asset = create_asset(server.db_path, Path(server.data_dir), filename, raw,
-                                     uploader=query.get("uploader", [""])[0],
-                                     provenance=provenance)
+                version_of = (query.get("version_of", [""])[0] or "").strip()
+                if version_of and not version_of.isdigit():
+                    raise WorkstationError("version_of must be an asset id", 400)
+                uploader = query.get("uploader", [""])[0]
+                if who["kind"] == "account":
+                    uploader = who["display"] or who["name"]
+                asset = create_asset(
+                    server.db_path, Path(server.data_dir), filename, raw, uploader=uploader,
+                    provenance=provenance,
+                    version_of=int(version_of) if version_of else None,
+                    new_asset=(query.get("new_asset", [""])[0] or "") in ("1", "true", "yes"),
+                    source={"path": query.get("source_path", [""])[0],
+                            "rev": query.get("source_rev", [""])[0],
+                            "changelist": query.get("changelist", [""])[0]})
                 self._publish("asset", asset["id"])
                 # The detail view, so a client sees "missing" and can send the
                 # sidecars the file references straight after it.
-                self._json(201, asset_detail(server.db_path, Path(server.data_dir), asset["id"]))
+                detail = asset_detail(server.db_path, Path(server.data_dir), asset["id"])
+                detail["unchanged"] = bool(asset.get("unchanged"))
+                self._json(200 if detail["unchanged"] else 201, detail)
                 return
 
             match = ASSET_HEAL_RE.match(path)
@@ -2232,7 +2765,9 @@ class Handler(BaseHTTPRequestHandler):
                     raise WorkstationError("asset_id must be an integer", 400)
                 note = add_note(server.db_path, asset_id, str(payload.get("category", "")),
                                 str(payload.get("note_text", "")),
-                                str(payload.get("author", "")))
+                                # signed in: the account, never a typed name
+                                (who["display"] or who["name"]) if who["kind"] == "account"
+                                else str(payload.get("author", "")))
                 self._publish("notes", asset_id)
                 self._json(201, note)
                 return
@@ -2331,10 +2866,19 @@ class Handler(BaseHTTPRequestHandler):
             return
         path = urllib.parse.urlsplit(self.path).path
         try:
-            if not self._authorised():
+            server = self.server  # type: ignore[attr-defined]
+            if path == "/api/session":
+                sign_out(server.db_path, self._cookie(SESSION_COOKIE))
+                self._send(200, b'{"signed_out": true}', "application/json; charset=utf-8",
+                           {"Set-Cookie": f"{SESSION_COOKIE}=; Path=/; HttpOnly; "
+                                          "SameSite=Strict; Max-Age=0"})
+                return
+            who = self._principal()
+            if who is None:
                 self._json(401, {"error": "unauthorised"})
                 return
-            server = self.server  # type: ignore[attr-defined]
+            if self._forbidden(who, self._permission_for("DELETE", path)):
+                return
             match = ASSET_RE.match(path)
             if match:
                 delete_asset(server.db_path, Path(server.data_dir), int(match.group(1)))
@@ -2405,6 +2949,7 @@ class WorkstationServer(socketserver.ThreadingTCPServer):
         # Reachable from other machines: anything but a loopback address.
         self.exposed = bound not in ("127.0.0.1", "localhost", "::1") and not bound.startswith("127.")
         self.broadcaster = Broadcaster()   # /api/events
+        self.login_failures: dict[str, list[float]] = {}
         self.jobs = JobRunner(self.broadcaster.publish)
         self.stopping = False
         super().__init__(address, Handler)
@@ -2474,7 +3019,67 @@ def build_parser() -> argparse.ArgumentParser:
                              "and this machine's own name (repeatable). Requests whose "
                              "Host names anything else are refused, which is what stops a "
                              "DNS-rebinding page from driving the viewer")
+    accounts = parser.add_argument_group(
+        "accounts (named reviewers; with none, the server works as before)")
+    accounts.add_argument("--add-user", metavar="NAME",
+                          help="create an account and exit; asks for the password twice")
+    accounts.add_argument("--role", choices=ROLES, default="reviewer",
+                          help="with --add-user or --set-role: viewer (read + notes), "
+                               "reviewer (+ upload, LODs, fixes, sign-off) or lead (+ delete)")
+    accounts.add_argument("--set-password", metavar="NAME",
+                          help="change an account's password (signs it out everywhere) and exit")
+    accounts.add_argument("--set-role", metavar="NAME", help="change an account's role and exit")
+    accounts.add_argument("--remove-user", metavar="NAME", help="delete an account and exit")
+    accounts.add_argument("--list-users", action="store_true", help="list accounts and exit")
+    accounts.add_argument("--password-stdin", action="store_true",
+                          help="read the password from standard input instead of prompting "
+                               "(for provisioning scripts)")
     return parser
+
+
+def _read_password(args) -> str:
+    if args.password_stdin:
+        return sys.stdin.readline().rstrip("\r\n")
+    import getpass
+    first = getpass.getpass("password (10+ characters): ")
+    if getpass.getpass("again: ") != first:
+        raise WorkstationError("the two passwords do not match", 400)
+    return first
+
+
+def manage_accounts(args, db_path: Path) -> int:
+    """--add-user / --set-password / --set-role / --remove-user / --list-users."""
+    try:
+        if args.list_users:
+            rows = list_accounts(db_path)
+            if not rows:
+                print("no accounts: the workstation is in solo/token mode")
+            for row in rows:
+                print(f"{row['username']:<24}{row['role']:<10}{row['created_at']}")
+            return 0
+        if args.add_user:
+            account = add_account(db_path, args.add_user, args.role, _read_password(args))
+            print(f"added {account['username']} ({account['role']})")
+            if len(list_accounts(db_path)) == 1:
+                print("accounts are now on: every reviewer signs in; scripts (the bulk "
+                      "uploader, AssetHealth, the P4 trigger) need --token")
+            return 0
+        if args.set_password:
+            set_account(db_path, args.set_password, password=_read_password(args))
+            print(f"password changed for {args.set_password}; its sessions were signed out")
+            return 0
+        if args.set_role:
+            account = set_account(db_path, args.set_role, role=args.role)
+            print(f"{account['username']} is now {account['role']}")
+            return 0
+        remove_account(db_path, args.remove_user)
+        print(f"removed {args.remove_user}")
+        if not list_accounts(db_path):
+            print("no accounts left: the workstation is back in solo/token mode")
+        return 0
+    except WorkstationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -2491,6 +3096,9 @@ def main(argv: list[str] | None = None) -> int:
     if not (STATIC_DIR / "viewer.html").is_file():
         print(f"warning: {STATIC_DIR / 'viewer.html'} is missing; /viewer will 404",
               file=sys.stderr)
+    if any((args.add_user, args.set_password, args.set_role, args.remove_user,
+            args.list_users)):
+        return manage_accounts(args, db_path)
 
     def _moved(old: int, new: int, exc: BaseException) -> None:
         print(f"note: port {old} is busy ({exc.__class__.__name__}), using {new}",
