@@ -1,4 +1,4 @@
-# Since v1.1.0 (unreleased, on `main`)
+# v1.1.1 (2026-11-02)
 
 * **Art Workstation, phase 1 (audit 2026-11-02).** The viewer no longer shows
   the previous asset when a load fails; embedded glTF buffers, every LOD and

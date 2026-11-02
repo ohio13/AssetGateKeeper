@@ -559,7 +559,7 @@ expect("the Blender panel wraps a long reason instead of cutting it to '159,200 
 child = blender_addon.child_environment({"PYTHONHOME": "C:/Houdini/python313", "PATH": "x"})
 expect("the Blender add-on drops an inherited PYTHONHOME before running the engine",
        "PYTHONHOME" not in child and child.get("PATH") == "x", child)
-expect("the Blender add-on reports version 1.1.0", blender_addon.bl_info["version"] == (1, 1, 0))
+expect("the Blender add-on reports version 1.1.1", blender_addon.bl_info["version"] == (1, 1, 1))
 
 print("9b. ASCII FBX, collision meshes and LOD groups (files exported by Unreal 5.3.2)")
 UE_FIXTURES = ROOT / "tests" / "fixtures" / "fbx_ue"

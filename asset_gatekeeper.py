@@ -65,7 +65,7 @@ from __future__ import annotations
 
 # Single source of truth for the version: pyproject.toml reads it from here
 # (setuptools parses this literal statically), so it cannot drift.
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 import argparse
 import array

@@ -23,7 +23,7 @@ import bpy
 bl_info = {
     "name": "AssetGatekeeper Pre-flight",
     "author": "AssetGatekeeper contributors",
-    "version": (1, 1, 0),
+    "version": (1, 1, 1),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar > Asset Gatekeeper",
     "description": "Live triangle/material/texture budget for the selection, before export",
