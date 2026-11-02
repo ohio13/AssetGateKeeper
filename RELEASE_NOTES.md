@@ -4,6 +4,15 @@
   the previous asset when a load fails; embedded glTF buffers, every LOD and
   Geometry -> Textured work; other websites can no longer write to it; collision
   export, filenames and API errors fixed. A Chromium test suite runs in CI.
+* **Art Workstation, phase 4.** Generated LODs are about 17x faster (1.3M
+  triangles: 12 s, was 201 s), land within 2 % of their target, never exceed a
+  triangle cap the mesh can get under, and sit where the source does (glTF node
+  transforms applied - also to the seeded collision box). A level that cannot
+  reach its target is kept and flagged. Started on the network with no token, the
+  server prints a warning, the page shows a red banner, and verdicts that arrive
+  are marked "not authenticated". Phone-width layout. The inspector links the
+  printable report and the original file. Non-English names no longer break the
+  collision export. docs/07 rewritten to match the product.
 * **Art Workstation, phase 3.** LODs can be generated from the viewer (presets,
   background job with progress), artists can upload their own LOD files (also by
   naming them `<asset>_LOD1`...), and levels can be deleted one at a time; generation

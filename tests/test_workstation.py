@@ -284,8 +284,9 @@ status, created = client.json(f"/api/assets/{new_id}/lods", method="POST",
                               body={"ratios": [0.5], "max_tris": [4]})
 expect("LOD generation over HTTP works", status == 201 and created["lods"][0]["level"] == "LOD1",
        str(status))
-expect("the hard cap was honoured", created["lods"][0]["triangle_count"] <= 12,
-       str(created["lods"][0]["triangle_count"]))
+expect("a cap the mesh cannot reach is kept but flagged, never silently exceeded",
+       created["lods"][0]["triangle_count"] <= 4 or created["lods"][0]["warning"],
+       str(created["lods"][0]))
 status, _ = client.json(f"/api/assets/{new_id}/lods", method="POST", body={"ratios": [2.0]})
 expect("a bad ratio is a 400", status == 400, str(status))
 status, _ = client.json("/api/notes", method="POST",
@@ -651,6 +652,7 @@ um_server.server_close()
 print("19. phase 1 fixes (found by driving the viewer in a browser, 2026-11-02)")
 import math  # noqa: E402
 import socket  # noqa: E402
+from base64 import b64decode as _b64decode  # noqa: E402
 
 # Filenames keep their extension; Unicode stems survive.
 expect("a Unicode stem keeps its name and extension", aws.safe_filename("岩.obj") == "岩.obj",
@@ -1068,6 +1070,106 @@ status, _ = c3.json(f"/api/assets/{ball_asset['id']}/lods/LOD3", "DELETE")
 expect("deleting a LOD that is not there is a 404", status == 404, status)
 p3_server.shutdown()
 p3_server.server_close()
+
+print("22. phase 4: LOD accuracy, speed and placement")
+import trimesh as _tm  # noqa: E402
+p4_dir = WORK / "phase4"
+p4_dir.mkdir()
+_tm.creation.icosphere(subdivisions=6).export(p4_dir / "ball82k.glb")
+started = time.time()
+p4_lods = lod_manager.generate(p4_dir / "ball82k.glb", p4_dir / "out", (0.5, 0.25, 0.125))
+elapsed = time.time() - started
+expect("each level lands at its target, within 2% over and never far under (was up to +34%)",
+       all(lod.target_triangles * 0.9 <= lod.triangle_count <= lod.target_triangles * 1.02
+           for lod in p4_lods), [(lod.target_triangles, lod.triangle_count) for lod in p4_lods])
+expect("an 82k-triangle ladder takes seconds, not minutes", elapsed < 30, f"{elapsed:.1f}s")
+capped = lod_manager.generate(p4_dir / "ball82k.glb", p4_dir / "capped", (0.5, 0.25), [5000, 900])
+expect("a --max-tris cap is a ceiling (was overshot by 17-46%)",
+       capped[0].triangle_count <= 5000 and capped[1].triangle_count <= 900,
+       [(lod.target_triangles, lod.triangle_count) for lod in capped])
+
+doc = json.loads(json.dumps({"nodes": [{"children": [1], "translation": [10, 0, 0]},
+                                       {"mesh": 0, "scale": [2, 2, 2]}],
+                             "scenes": [{"nodes": [0]}], "scene": 0}))
+lod_manager.write_gltf(p4_dir / "raw.gltf", lod_manager.load_mesh(p4_dir / "ball82k.glb"), "raw")
+placed = json.loads((p4_dir / "raw.gltf").read_text())
+placed.update(doc)
+(p4_dir / "placed.gltf").write_text(json.dumps(placed))
+placed_lods = lod_manager.generate(p4_dir / "placed.gltf", p4_dir / "placed_out", (0.5,))
+lod_bounds = lod_manager.load_mesh(placed_lods[0].path).bounds()
+expect("a LOD sits where the node puts the source (was at the raw mesh's place and size)",
+       abs(lod_bounds[0][0] - 8.0) < 0.05 and abs(lod_bounds[1][0] - 12.0) < 0.05, lod_bounds)
+lod_doc = json.loads(Path(placed_lods[0].path).read_text())
+accessor = lod_doc["accessors"][0]
+import array as _array  # noqa: E402
+_raw = _b64decode(lod_doc["buffers"][0]["uri"].split(",", 1)[1])
+_floats = _array.array("f")
+_floats.frombytes(_raw[:accessor["count"] * 12])
+expect("LOD accessor min/max equal the stored float32 data (validator-clean)",
+       accessor["min"][0] == min(_floats[0::3]) and accessor["max"][1] == max(_floats[1::3]))
+p4_db, p4_data = fresh("phase4_ws")
+placed_asset = aws.create_asset(p4_db, p4_data, "placed.gltf", (p4_dir / "placed.gltf").read_bytes())
+seeded = aws.get_collision(p4_db, placed_asset["id"])["data"]
+expect("the seeded collision box follows the node transform too",
+       abs(seeded["min"][0] - 8.0) < 0.05 and abs(seeded["max"][0] - 12.0) < 0.05, seeded)
+
+print("23. phase 4: network exposure and verdict provenance")
+for bind, token, expected in (("127.0.0.1", "", "local"), ("0.0.0.0", "", "open"),
+                              ("0.0.0.0", "t0ken", "token")):
+    e_db, e_data = fresh(f"exposure_{expected}")
+    e_server = aws.build_server(bind, 0, e_db, e_data, token=token, quiet=True)
+    e_port = e_server.server_address[1]
+    threading.Thread(target=e_server.serve_forever, daemon=True).start()
+    time.sleep(0.1)
+    e_client = Client(e_port, token=token)
+    status, health = e_client.json("/api/health")
+    expect(f"health says whether {bind} is reachable from the network",
+           health.get("exposed") is (bind != "127.0.0.1"), health)
+    status, body = e_client.json("/api/assets?filename=v.obj&verdict=passed&source=ci", "POST",
+                                 OBJ.encode())
+    expect(f"a verdict sent to a {expected!r} server is recorded as {expected!r}",
+           body.get("provenance_auth") == expected, body.get("provenance_auth"))
+    e_server.shutdown()
+    e_server.server_close()
+
+u_db, u_data = fresh("unicode_export")
+u_asset = aws.create_asset(u_db, u_data, "岩石_rock.obj", OBJ.encode())
+u_server = aws.build_server("127.0.0.1", 0, u_db, u_data, quiet=True)
+u_port = u_server.server_address[1]
+threading.Thread(target=u_server.serve_forever, daemon=True).start()
+time.sleep(0.1)
+status, body, headers = Client(u_port).call(f"/api/assets/{u_asset['id']}/collision.obj")
+expect("a non-English asset's collision export downloads (was a 500)", status == 200, str(status))
+expect("... named after the asset, RFC 5987-encoded",
+       "filename*=UTF-8''" in (headers.get("Content-Disposition") or ""),
+       str(headers.get("Content-Disposition")))
+status, body, headers = Client(u_port).call(f"/api/assets/{u_asset['id']}/report")
+expect("the printable report opens", status == 200 and b"<html" in body.lower(), str(status))
+u_server.shutdown()
+u_server.server_close()
+
+import os  # noqa: E402
+import subprocess  # noqa: E402
+
+
+def startup_stderr(*extra):
+    process = subprocess.Popen(
+        [sys.executable, str(ROOT / "server" / "art_workstation_server.py"), "--port", "0",
+         "--port-auto", "--db", str(WORK / "warn.db"), "--data", str(WORK / "warn_data"), *extra],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+        env={key: value for key, value in os.environ.items() if key != "AUTH_TOKEN"})
+    try:
+        process.wait(timeout=4)
+    except subprocess.TimeoutExpired:
+        process.terminate()
+    return process.communicate(timeout=10)[1]
+
+
+expect("starting on the network without a token prints a warning",
+       "WARNING: listening on the network with no token" in startup_stderr("--host", "0.0.0.0"))
+expect("... and not on loopback", "WARNING" not in startup_stderr("--host", "127.0.0.1"))
+expect("... and not with a token",
+       "WARNING" not in startup_stderr("--host", "0.0.0.0", "--token", "s3cret"))
 
 print()
 print("FAILURES:", failures if failures else "none")

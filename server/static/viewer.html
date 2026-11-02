@@ -31,6 +31,11 @@
     <span class="sub" id="stats"></span>
   </div>
 </header>
+<div class="exposure-warning" id="exposure-warning" role="alert" hidden>
+  Open to the network with no token: anyone who can reach this address can upload,
+  edit notes, set verdicts and delete assets. Restart with <code>--token</code>
+  (or bind 127.0.0.1).
+</div>
 
 <main class="layout">
 
@@ -160,8 +165,11 @@
 
     <h2 class="section">Asset</h2>
     <div class="field">
+      <a id="asset-report" class="chip" href="#" target="_blank" rel="noopener" hidden
+         title="One self-contained HTML page: facts, gate check, references, LODs, collision, notes">Printable report</a>
+      <a id="asset-download" class="chip" href="#" hidden title="The file as uploaded">Download file</a>
       <button id="asset-delete" class="chip danger" type="button" disabled>Delete asset</button>
-      <div class="sub">Removes the file, its LODs, collision and notes.</div>
+      <div class="sub">Delete removes the file, its LODs, collision and notes.</div>
     </div>
   </section>
 

@@ -414,6 +414,12 @@ with sync_playwright() as playwright:
     expect("deleting the LOD on screen goes back to the source",
            page.locator("#lod-list .lod-row[data-level='LOD4']").count() == 0
            and readout().startswith("source"), readout())
+    report_href = page.locator("#asset-report").get_attribute("href") or ""
+    expect("the inspector links the printable report",
+           page.locator("#asset-report").is_visible() and report_href.endswith(f"/api/assets/{ids['ball']}/report"),
+           report_href)
+    report = page.request.get(BASE + report_href)
+    expect("... and it opens", report.status == 200 and "ball.obj" in report.text(), str(report.status))
     page.click("#asset-delete")
     expect("Delete asset asks for a second click", "Click again" in page.locator("#asset-delete").inner_text()
            and page.locator(f'#asset-list .asset[data-id="{ids["ball"]}"]').count() == 1)
@@ -435,6 +441,39 @@ with sync_playwright() as playwright:
            hint_visible() and "No asset selected" in page.locator("#collision-info").inner_text()
            and page.locator("#lod-buttons button").count() == 0,
            page.locator("#collision-info").inner_text())
+
+    print("9b. open to the network, and on a phone")
+    open_server = aws.build_server("0.0.0.0", 0, db, data, quiet=True)
+    open_port = open_server.server_address[1]
+    threading.Thread(target=open_server.serve_forever, daemon=True).start()
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{open_port}/api/assets?filename=claimed.glb&verdict=passed&source=ci",
+        data=(WORK / "cube.glb").read_bytes(), method="POST")
+    claimed = json.loads(urllib.request.urlopen(request).read())
+    page.goto(f"http://127.0.0.1:{open_port}/viewer?live=0&asset={claimed['id']}")
+    page.wait_for_function("() => document.getElementById('status').textContent === 'claimed.glb'",
+                           timeout=15000)
+    expect("an open, tokenless workstation says so on every page",
+           page.locator("#exposure-warning").is_visible(), page.locator("#exposure-warning").inner_text()[:80])
+    expect("a verdict that arrived while it was open is marked unauthenticated",
+           "Not authenticated" in page.locator("#verdict-panel").inner_text(),
+           page.locator("#verdict-panel").inner_text().replace("\n", " | "))
+    open_server.shutdown()
+    open_server.server_close()
+    page.goto(f"{BASE}/viewer?live=0&asset={ids['cube']}")
+    page.wait_for_function("() => document.getElementById('status').textContent === 'cube.glb'",
+                           timeout=15000)
+    expect("a loopback workstation shows no exposure warning", not page.locator("#exposure-warning").is_visible())
+    page.set_viewport_size({"width": 390, "height": 844})
+    page.wait_for_timeout(600)
+    canvas = page.locator("#canvas-host").bounding_box()
+    expect("on a phone the 3D view is on screen and usable (it disappeared)",
+           canvas is not None and canvas["width"] >= 360 and canvas["height"] >= 300
+           and canvas["y"] + canvas["height"] <= 844,
+           canvas)
+    scroll_width = page.evaluate("() => document.documentElement.scrollWidth")
+    expect("... with no sideways scrolling", scroll_width <= 390, scroll_width)
+    page.set_viewport_size({"width": 1440, "height": 900})
 
     print("10. another website")
     other = browser.new_page()

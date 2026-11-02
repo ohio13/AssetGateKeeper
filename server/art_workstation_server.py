@@ -192,7 +192,12 @@ CREATE TABLE IF NOT EXISTS assets (
     verdict_tags     TEXT NOT NULL DEFAULT '',
     source           TEXT NOT NULL DEFAULT '',
     kind             TEXT NOT NULL DEFAULT 'mesh',
-    analyse_note     TEXT NOT NULL DEFAULT ''
+    analyse_note     TEXT NOT NULL DEFAULT '',
+    -- How far the verdict above can be trusted: "token" (sent with this
+    -- workstation's token), "local" (loopback-only server) or "open" (a
+    -- server reachable from the network with no token: anyone could have
+    -- typed it).
+    provenance_auth  TEXT NOT NULL DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS lod_versions (
@@ -306,7 +311,7 @@ def init_db(db_path: str | Path) -> None:
         # columns in place rather than asking anyone to drop their database.
         have = {row["name"] for row in connection.execute("PRAGMA table_info(assets)")}
         for column in ("verdict_status", "verdict_problems", "verdict_tags", "source",
-                       "kind", "analyse_note"):
+                       "kind", "analyse_note", "provenance_auth"):
             if column not in have:
                 connection.execute(
                     f"ALTER TABLE assets ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
@@ -370,18 +375,31 @@ def mesh_bounds(path: Path) -> tuple[list[float], list[float]] | None:
 
         document = agk.read_gltf_document(path)
         accessors = document.get("accessors", [])
+        # Placed by each mesh's node, as the viewer draws it: the accessor box
+        # alone put the seeded collision box somewhere else for any model with
+        # a translated or scaled node.
+        placements = lod_manager._mesh_placements(document)
         low = [float("inf")] * 3
         high = [float("-inf")] * 3
-        for mesh in document.get("meshes", []):
+        for mesh_index, mesh in enumerate(document.get("meshes", [])):
+            matrix = placements.get(mesh_index)
             for primitive in mesh.get("primitives", []):
                 position = primitive.get("attributes", {}).get("POSITION")
                 if not isinstance(position, int) or position >= len(accessors):
                     continue
                 accessor = accessors[position]
                 if "min" in accessor and "max" in accessor and len(accessor["min"]) >= 3:
-                    for axis in range(3):
-                        low[axis] = min(low[axis], float(accessor["min"][axis]))
-                        high[axis] = max(high[axis], float(accessor["max"][axis]))
+                    box_low = [float(v) for v in accessor["min"][:3]]
+                    box_high = [float(v) for v in accessor["max"][:3]]
+                    corners = [(x, y, z) for x in (box_low[0], box_high[0])
+                               for y in (box_low[1], box_high[1]) for z in (box_low[2], box_high[2])]
+                    if matrix is not None:
+                        corners = [tuple(sum(matrix[r][c] * (point + (1.0,))[c] for c in range(4))
+                                         for r in range(3)) for point in corners]
+                    for point in corners:
+                        for axis in range(3):
+                            low[axis] = min(low[axis], point[axis])
+                            high[axis] = max(high[axis], point[axis])
         if low[0] == float("inf"):
             return None
         return low, high
@@ -646,6 +664,9 @@ def list_lods(db_path: str | Path, asset_id: int) -> list[dict]:
             warning = f"heavier than {previous['level']} ({tris:,} > {int(previous['triangle_count']):,})"
         elif previous is not None and tris == int(previous["triangle_count"]):
             warning = f"same triangle count as {previous['level']}"
+        elif row.get("origin") != "uploaded" and tris > int(row["target_triangles"]) * 1.02:
+            warning = (f"over its {int(row['target_triangles']):,}-triangle target "
+                       f"({tris:,}): the mesh cannot be reduced that far without collapsing")
         row["warning"] = warning
         previous = row
     return rows
@@ -929,11 +950,12 @@ def create_asset(db_path: str | Path, data_dir: Path, filename: str, payload: by
         cursor = connection.execute(
             "INSERT INTO assets (filename, file_path, filesize, triangle_count,"
             " vertex_count, material_slots, uploader, uploaded_at,"
-            " verdict_status, verdict_problems, verdict_tags, source)"
-            " VALUES (?, '', ?, 0, 0, 0, ?, ?, ?, ?, ?, ?)",
+            " verdict_status, verdict_problems, verdict_tags, source, provenance_auth)"
+            " VALUES (?, '', ?, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?)",
             (name, len(payload), uploader, utc_now(),
              str(extra.get("verdict", "")), str(extra.get("problems", "")),
-             str(extra.get("tags", "")), str(extra.get("source", ""))))
+             str(extra.get("tags", "")), str(extra.get("source", "")),
+             str(extra.get("auth", "")) if (extra.get("verdict") or extra.get("source")) else ""))
         asset_id = int(cursor.lastrowid or 0)
 
     assets_dir, _ = asset_paths(data_dir)
@@ -1804,6 +1826,7 @@ class Handler(BaseHTTPRequestHandler):
         server = self.server  # type: ignore[attr-defined]
         if path == "/api/health":
             self._json(200, {"ok": True, "auth": bool(server.token),
+                             "exposed": bool(getattr(server, "exposed", False)),
                              "stats": repository_stats(server.db_path)})
             return
         if path == "/api/stats":
@@ -1875,7 +1898,7 @@ class Handler(BaseHTTPRequestHandler):
             stem = safe_filename(asset["filename"]).rsplit(".", 1)[0]
             self._send(200, body, "text/plain; charset=utf-8",
                        {"Content-Disposition":
-                        f'attachment; filename="{stem}_collision.obj"'})
+                        content_disposition("attachment", f"{stem}_collision.obj")})
             return
 
         match = ASSET_REPORT_RE.match(path)
@@ -2039,6 +2062,10 @@ class Handler(BaseHTTPRequestHandler):
                     "problems": (query.get("problems", [""])[0] or "").strip(),
                     "tags": (query.get("tags", [""])[0] or "").strip(),
                     "source": (query.get("source", [""])[0] or "").strip(),
+                    # Anyone who can reach an open server can claim "source=ci";
+                    # record how much this claim is worth.
+                    "auth": ("token" if server.token
+                             else "open" if getattr(server, "exposed", False) else "local"),
                 }
                 asset = create_asset(server.db_path, Path(server.data_dir), filename, raw,
                                      uploader=query.get("uploader", [""])[0],
@@ -2242,6 +2269,9 @@ class WorkstationServer(socketserver.ThreadingTCPServer):
         # written and never gates an upload - it is a reference card for artists.
         self.rules_path = str(rules_path or "")
         self.rules_root = str(rules_root or Path.cwd())
+        bound = str(address[0] or "")
+        # Reachable from other machines: anything but a loopback address.
+        self.exposed = bound not in ("127.0.0.1", "localhost", "::1") and not bound.startswith("127.")
         self.broadcaster = Broadcaster()   # /api/events
         self.jobs = JobRunner(self.broadcaster.publish)
         self.stopping = False
@@ -2357,6 +2387,11 @@ def main(argv: list[str] | None = None) -> int:
     rules_shown = Path(args.rules).resolve() if args.rules else Path.cwd() / agk.RULES_FILENAME
     print(f"  rules      {rules_shown}  (GET /api/rules, read-only)")
     print(f"  auth       {'bearer token required' if args.token else 'solo mode (no token)'}")
+    if httpd.exposed and not args.token:
+        print("WARNING: listening on the network with no token. Anyone who can reach "
+              f"{host}:{port} can upload, edit notes, set verdicts and delete assets.\n"
+              "         Restart with --token <secret> (or AUTH_TOKEN), or bind 127.0.0.1.",
+              file=sys.stderr)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -861,6 +861,12 @@ function buildMaterialControls() {
 
 function refreshCollisionExport() {
   const link = $("collision-export");
+  const token = state.token ? `?token=${encodeURIComponent(state.token)}` : "";
+  for (const [id, path] of [["asset-report", "report"], ["asset-download", "file"]]) {
+    const anchor = $(id);
+    anchor.hidden = !state.asset;
+    if (state.asset) anchor.href = `/api/assets/${state.asset.id}/${path}${token}`;
+  }
   if (!state.asset) {
     link.style.display = "none";
     return;
@@ -1412,7 +1418,10 @@ function showVerdict(assetOrId) {
       ? `<ul class="verdict-problems">${problems.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`
       : '<div class="sub">No rule was broken.</div>')
     + (asset.verdict_tags ? `<div class="verdict-tags">Category: ${escapeHtml(asset.verdict_tags)}</div>` : "")
-    + (asset.source ? `<div class="verdict-source">sent from ${escapeHtml(asset.source)}</div>` : "");
+    + (asset.source ? `<div class="verdict-source">sent from ${escapeHtml(asset.source)}</div>` : "")
+    + (asset.provenance_auth === "open"
+      ? '<div class="verdict-trust">Not authenticated: this workstation was open to the network '
+        + "with no token when it arrived, so anyone could have sent it.</div>" : "");
 }
 
 
@@ -1424,6 +1433,7 @@ animate();
   try {
     const health = await json("/api/health");
     $("status").textContent = health.auth ? "token mode" : "solo mode";
+    $("exposure-warning").hidden = !(health.exposed && !health.auth);
     await refreshAssets();
 
     // ?live=0 turns the stream off: headless screenshots and kiosk displays never

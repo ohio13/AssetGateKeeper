@@ -39,6 +39,11 @@ if str(REPO_ROOT) not in sys.path:
 
 import asset_gatekeeper as agk  # noqa: E402 - the validated glTF/GLB reader
 
+try:                       # numpy ships with trimesh, which the gate already uses;
+    import numpy as np     # without it the same algorithm runs in pure Python
+except ImportError:        # pragma: no cover - environment dependent
+    np = None
+
 DEFAULT_RATIOS = (0.5, 0.25, 0.125)
 LEVEL_NAMES = ("LOD1", "LOD2", "LOD3", "LOD4")
 
@@ -126,20 +131,87 @@ def load_obj(path: Path) -> Mesh:
     return Mesh(positions, faces)
 
 
+def _node_matrix(node: dict) -> list:
+    """A glTF node's local transform as a row-major 4x4 (spec: matrix or TRS)."""
+    matrix = node.get("matrix")
+    if isinstance(matrix, list) and len(matrix) == 16:
+        return [[float(matrix[col * 4 + row]) for col in range(4)] for row in range(4)]
+    tx, ty, tz = (node.get("translation") or [0, 0, 0])[:3]
+    qx, qy, qz, qw = (node.get("rotation") or [0, 0, 0, 1])[:4]
+    sx, sy, sz = (node.get("scale") or [1, 1, 1])[:3]
+    rotation = [
+        [1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - qz * qw), 2 * (qx * qz + qy * qw)],
+        [2 * (qx * qy + qz * qw), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - qx * qw)],
+        [2 * (qx * qz - qy * qw), 2 * (qy * qz + qx * qw), 1 - 2 * (qx * qx + qy * qy)],
+    ]
+    scale = (sx, sy, sz)
+    return [[rotation[r][0] * scale[0], rotation[r][1] * scale[1], rotation[r][2] * scale[2],
+             (tx, ty, tz)[r]] for r in range(3)] + [[0.0, 0.0, 0.0, 1.0]]
+
+
+def _multiply(a: list, b: list) -> list:
+    return [[sum(a[i][k] * b[k][j] for k in range(4)) for j in range(4)] for i in range(4)]
+
+
+def _mesh_placements(document: dict) -> dict:
+    """mesh index -> world matrix of the first node that uses it.
+
+    LODs used to ignore nodes entirely, so a scaled or offset model's LODs sat at
+    a different size and place from the source. Each mesh is placed once - the
+    gate counts a mesh used by several nodes once, and the LOD percentages are
+    against that count - with its first node's transform.
+    """
+    nodes = document.get("nodes") or []
+    scenes = document.get("scenes") or []
+    if scenes:
+        index = document.get("scene", 0)
+        scene = scenes[index] if isinstance(index, int) and 0 <= index < len(scenes) else scenes[0]
+        roots = list(scene.get("nodes") or [])
+    else:
+        children = {child for node in nodes for child in (node.get("children") or [])}
+        roots = [i for i in range(len(nodes)) if i not in children]
+    identity = [[1.0 if r == c else 0.0 for c in range(4)] for r in range(4)]
+    placements: dict = {}
+    stack = [(root, identity, 0) for root in reversed(roots)]
+    while stack:
+        index, parent, depth = stack.pop()
+        if not isinstance(index, int) or not 0 <= index < len(nodes) or depth > 64:
+            continue
+        node = nodes[index]
+        world = _multiply(parent, _node_matrix(node))
+        mesh = node.get("mesh")
+        if isinstance(mesh, int) and mesh not in placements:
+            placements[mesh] = world
+        for child in reversed(node.get("children") or []):
+            stack.append((child, world, depth + 1))
+    return placements
+
+
 def load_gltf(path: Path) -> Mesh:
-    """Decode every TRIANGLES primitive of a .gltf/.glb into one mesh.
+    """Decode every TRIANGLES primitive of a .gltf/.glb into one mesh, placed.
 
     Reuses the gate's accessor reader, which already handles GLB chunks, data
-    URIs, sibling .bin files and interleaved byteStride buffers.
+    URIs, sibling .bin files and interleaved byteStride buffers. Node transforms
+    are applied (see :func:`_mesh_placements`); a mirrored node keeps its faces
+    pointing outward.
     """
     try:
         document = agk.read_gltf_document(path)
     except Exception as exc:  # AssetError and friends
         raise LodError(f"cannot read {path.name}: {exc}") from exc
 
+    placements = _mesh_placements(document)
     positions: list[tuple[float, float, float]] = []
     faces: list[tuple[int, int, int]] = []
-    for mesh in document.get("meshes", []):
+    for mesh_index, mesh in enumerate(document.get("meshes", [])):
+        matrix = placements.get(mesh_index)
+        flip = False
+        if matrix is not None:
+            m = matrix
+            determinant = (m[0][0] * (m[1][1] * m[2][2] - m[1][2] * m[2][1])
+                           - m[0][1] * (m[1][0] * m[2][2] - m[1][2] * m[2][0])
+                           + m[0][2] * (m[1][0] * m[2][1] - m[1][1] * m[2][0]))
+            flip = determinant < 0
         for primitive in mesh.get("primitives", []):
             mode = primitive.get("mode", 4)
             if mode != 4:                      # strips/fans are rare in exports
@@ -150,7 +222,15 @@ def load_gltf(path: Path) -> Mesh:
             try:
                 raw_positions = agk.read_accessor(path, document, int(attributes["POSITION"]))
                 offset = len(positions)
-                positions.extend((float(p[0]), float(p[1]), float(p[2])) for p in raw_positions)
+                if matrix is None:
+                    positions.extend((float(p[0]), float(p[1]), float(p[2])) for p in raw_positions)
+                else:
+                    m = matrix
+                    positions.extend((
+                        m[0][0] * p[0] + m[0][1] * p[1] + m[0][2] * p[2] + m[0][3],
+                        m[1][0] * p[0] + m[1][1] * p[1] + m[1][2] * p[2] + m[1][3],
+                        m[2][0] * p[0] + m[2][1] * p[1] + m[2][2] * p[2] + m[2][3])
+                        for p in ((float(q[0]), float(q[1]), float(q[2])) for q in raw_positions))
                 if "indices" in primitive:
                     indices = agk.read_accessor(path, document, int(primitive["indices"]))
                     flat = [int(item[0]) for item in indices]
@@ -159,7 +239,8 @@ def load_gltf(path: Path) -> Mesh:
             except Exception as exc:
                 raise LodError(f"cannot decode a primitive of {path.name}: {exc}") from exc
             for i in range(0, len(flat) - 2, 3):
-                faces.append((offset + flat[i], offset + flat[i + 1], offset + flat[i + 2]))
+                a, b, c = offset + flat[i], offset + flat[i + 1], offset + flat[i + 2]
+                faces.append((a, c, b) if flip else (a, b, c))
 
     if not positions or not faces:
         raise LodError(f"{path.name} contains no triangle geometry")
@@ -251,13 +332,144 @@ def _score(triangles: int, target: int) -> float:
     return float(target - triangles) * 1.5
 
 
-def decimate_to(mesh: Mesh, target_triangles: int, samples: int = 26) -> Mesh:
-    """Sample cell sizes across the bounding diagonal and keep the closest result.
+def _cluster_arrays(positions, faces, cell: float, count_only: bool = False):
+    """numpy version of :func:`cluster`: same grid, same averaging, same dedupe.
 
-    A sampled sweep rather than a bisection: clustering is *mostly* monotonic in
-    cell size, but the crossings are cliffs, and a bisection happily walks into
-    one and reports the same coarse mesh for two different targets.
+    One pass is a handful of array operations instead of a Python loop per
+    vertex, so the search below can afford ~60 trial cell sizes on a million
+    triangles (the loop version took 201 s for 26).
     """
+    low = positions.min(axis=0)
+    keys = np.floor((positions - low) / cell).astype(np.int64)
+    span = keys.max(axis=0) + 1
+    if float(span[0]) * float(span[1]) * float(span[2]) < 9.0e18:
+        flat = (keys[:, 0] * span[1] + keys[:, 1]) * span[2] + keys[:, 2]
+        _, inverse = np.unique(flat, return_inverse=True)
+    else:                                            # pragma: no cover - absurd extents
+        _, inverse = np.unique(keys, axis=0, return_inverse=True)
+    inverse = inverse.reshape(-1)
+    remapped = inverse[faces]
+    keep = ((remapped[:, 0] != remapped[:, 1]) & (remapped[:, 1] != remapped[:, 2])
+            & (remapped[:, 0] != remapped[:, 2]))
+    remapped = remapped[keep]
+    if remapped.size == 0:
+        return 0 if count_only else (positions[:0], remapped)
+    ordered = np.sort(remapped, axis=1)
+    clusters = int(inverse.max()) + 1
+    if float(clusters) ** 3 < 9.0e18:
+        # One int64 per face: a 1-D unique is several times faster than axis=0.
+        packed = (ordered[:, 0] * clusters + ordered[:, 1]) * clusters + ordered[:, 2]
+        _, first = np.unique(packed, return_index=True)
+    else:                                            # pragma: no cover - > 2M clusters
+        _, first = np.unique(ordered, axis=0, return_index=True)
+    if count_only:
+        return int(first.size)
+    remapped = remapped[np.sort(first)]                  # keep each face's winding
+    counts = np.bincount(inverse, minlength=clusters).astype(np.float64)
+    merged = np.stack([np.bincount(inverse, weights=positions[:, axis], minlength=clusters)
+                       for axis in range(3)], axis=1) / counts[:, None]
+    used, renumbered = np.unique(remapped, return_inverse=True)
+    return merged[used], renumbered.reshape(-1, 3)
+
+
+def _pick(results: list, target: int, hard: bool):
+    """Choose among (cell, triangles) trials.
+
+    A LOD target is a budget, so the result should not exceed it: the closest
+    count at or under the target wins. A ratio gets 2% of slack (a budget
+    written as "half" is not broken by one triangle); a cap from ``--max-tris``
+    gets none. Only when nothing usable is under the line - clustering has
+    cliffs, and a mesh of loose triangles can jump from far above to nearly
+    nothing - does the closest overshoot win, and never for a hard cap.
+    """
+    ceiling = target if hard else int(target * 1.02)
+    under = [item for item in results if 0 < item[1] <= ceiling]
+    if under:
+        best = max(under, key=lambda item: item[1])
+        if hard or best[1] >= target * 0.5:
+            return best
+    usable = [item for item in results if item[1] > 0]
+    if hard:
+        # Nothing reaches the cap without collapsing the mesh: return the closest
+        # result anyway; the server flags the level as over its target rather
+        # than refusing the whole ladder.
+        return min(usable, key=lambda item: item[1]) if usable else None
+    return min(usable, key=lambda item: _score(item[1], target)) if usable else None
+
+
+def decimate_to(mesh: Mesh, target_triangles: int, samples: int = 26, hard: bool = False,
+                cache: dict | None = None) -> Mesh:
+    """Find the grid cell size whose clustering lands at (or just under) the target.
+
+    A sampled sweep, then a bisection inside the bracket where the count crosses
+    the target: clustering is *mostly* monotonic in cell size, but the crossings
+    are cliffs, so the sweep finds the right neighbourhood and the bisection
+    walks to the edge of the cliff instead of jumping over it. ``hard`` makes the
+    target a ceiling that is never exceeded (a platform cap).
+    """
+    target = max(1, min(target_triangles, mesh.triangles))
+    if target >= mesh.triangles:
+        return mesh
+    if np is None:                                   # pragma: no cover - no numpy
+        return _decimate_to_python(mesh, target, samples)
+
+    # The levels of one ladder share the welded arrays and every trial count:
+    # LOD2's search starts where LOD1's left off.
+    cache = cache if cache is not None else {}
+    diagonal = mesh.diagonal()
+    weld_cell = diagonal * 1e-5
+    if "welded" not in cache:
+        positions = np.asarray(mesh.positions, dtype=np.float64)
+        faces = np.asarray(mesh.faces, dtype=np.int64)
+        # Weld first: exporters split vertices per face corner (see the Python path).
+        cache["welded"] = _cluster_arrays(positions, faces, weld_cell)
+        cache["counts"] = {}
+    positions, faces = cache["welded"]
+    counts = cache["counts"]
+
+    def count_at(cell: float) -> int:
+        if cell not in counts:
+            counts[cell] = _cluster_arrays(positions, faces, cell, count_only=True)
+        return counts[cell]
+    welded_count = len(faces)
+    if welded_count <= target:
+        return Mesh([tuple(p) for p in positions.tolist()], [tuple(f) for f in faces.tolist()])
+
+    trials = [(weld_cell, welded_count)]
+    cells = [weld_cell * (10.0 ** (5.0 * i / (samples - 1))) for i in range(1, samples)]
+    for cell in cells:
+        count = count_at(cell)
+        trials.append((cell, count))
+        if count < target / 4:
+            break
+    trials += [(cell, count) for cell, count in counts.items() if (cell, count) not in trials]
+    # Bisect between the last cell above the target and the first at/under it.
+    above = [item for item in trials if item[1] > target]
+    below = [item for item in trials if 0 < item[1] <= target]
+    if above and below:
+        low_cell = max(above, key=lambda item: item[0])[0]
+        high_cell = min((item for item in below if item[0] > low_cell),
+                        key=lambda item: item[0], default=below[0])[0]
+        for _ in range(20):
+            middle = math.sqrt(low_cell * high_cell)
+            count = count_at(middle)
+            trials.append((middle, count))
+            if count > target:
+                low_cell = middle
+            else:
+                high_cell = middle
+            if high_cell / low_cell < 1.001:
+                break
+    chosen = _pick(trials, target, hard)
+    if chosen is None:
+        raise LodError(f"no cell size reaches {target:,} triangles or fewer without "
+                       "collapsing the mesh")
+    merged, kept = _cluster_arrays(positions, faces, chosen[0])
+    return Mesh([tuple(p) for p in merged.tolist()], [tuple(f) for f in kept.tolist()])
+
+
+def _decimate_to_python(mesh: Mesh, target_triangles: int, samples: int = 26) -> Mesh:
+    """The original pure-Python sweep, kept for installs without numpy."""
     target = max(1, min(target_triangles, mesh.triangles))
     if target >= mesh.triangles:
         return mesh
@@ -325,7 +537,12 @@ def _gltf_document(mesh: Mesh, name: str, stem: str, buffer_entry: dict,
     buffer is the whole scene graph. The caller supplies ``buffer_entry``
     because that is the only part that differs between .gltf and .glb.
     """
+    # min/max as the float32 values actually stored: float64 bounds of the
+    # source differ in the last digits, and the glTF validator reports
+    # ACCESSOR_MIN_MISMATCH / ACCESSOR_MAX_MISMATCH on every level.
     low, high = mesh.bounds()
+    low = list(array.array("f", low))
+    high = list(array.array("f", high))
     scene_name = name or stem
     return {
         "asset": {"version": "2.0", "generator": "engine/lod_manager.py"},
@@ -468,15 +685,22 @@ def generate(source: Path, out_dir: Path, ratios: Sequence[float] = DEFAULT_RATI
     """
     mesh = load_mesh(source)
     planned: list[tuple[str, int, float, Mesh]] = []
+    shared: dict = {}
     plan = plan_targets(mesh.triangles, ratios, max_triangles)
+    caps = list(max_triangles or [])
     for index, (level, target, ratio) in enumerate(plan):
         if progress is not None:
             progress(level, index, len(plan))
+        # A cap that is the tighter constraint is a platform ceiling: never over it.
+        hard = index < len(caps) and bool(caps[index]) and int(caps[index]) <= target
         if target >= mesh.triangles:
             # Nothing to gain: still emit the level so the viewer shows it as 100%.
             reduced = mesh
         else:
-            reduced = decimate_to(mesh, target)
+            try:
+                reduced = decimate_to(mesh, target, hard=hard, cache=shared)
+            except LodError as exc:
+                raise LodError(f"{level}: {exc}") from exc
         if reduced.triangles == 0:
             # Clustering can collapse a mesh with no connected geometry. A 0-tri
             # LOD loads as a hole in the viewer, so refuse instead of shipping it.
