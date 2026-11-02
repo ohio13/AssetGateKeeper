@@ -120,7 +120,7 @@ No package, no shelf file:
 
 ```python
 import sys
-sys.path.append(r"C:\Tools\AssetGatekeeper\plugins")
+sys.path.append(r"C:\Tools\AssetGatekeeper\plugins\maya")   # the maya folder itself
 import maya_preflight as p
 p.show()
 ```

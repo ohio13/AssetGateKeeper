@@ -2,7 +2,7 @@
 
 Run from the script editor:
 
-    import sys; sys.path.append(r"<studio>/AssetGatekeeper/plugins")
+    import sys; sys.path.append(r"<studio>/AssetGatekeeper/plugins/maya")
     import maya_preflight as p; p.show()
 
 Or drop it on a shelf button. It counts faces with ``polyEvaluate`` (the same
