@@ -1010,6 +1010,32 @@ try:
 except agk_healer.HealError as exc:
     expect("a heal is undone once", "no heal of" in str(exc), str(exc))
 
+crlf_dir = heal_root / "crlf"
+crlf_dir.mkdir()
+(crlf_dir / "lf.mtl").write_bytes(b"newmtl a\nmap_Kd stone.png\n")
+(crlf_dir / "crlf.mtl").write_bytes(b"newmtl b\r\nmap_Kd stone.png\r\n")
+agk.Gatekeeper(heal_budget, healer=agk.load_healer(
+    heal_budget, agk.HealSettings(enabled=True), root=crlf_dir)).check(
+    marker_png(crlf_dir / "stone.png", (512, 512)))
+expect("repointing keeps an LF .mtl LF (Windows wrote CRLF)",
+       (crlf_dir / "lf.mtl").read_bytes() == b"newmtl a\nmap_Kd stone_Albedo.png\n",
+       (crlf_dir / "lf.mtl").read_bytes())
+expect("... and a CRLF one CRLF (Linux wrote LF)",
+       (crlf_dir / "crlf.mtl").read_bytes() == b"newmtl b\r\nmap_Kd stone_Albedo.png\r\n",
+       (crlf_dir / "crlf.mtl").read_bytes())
+crlf_obj = crlf_dir / "glass.obj"
+crlf_obj.write_bytes(b"# made in caf\xe9 tools\r\nusemtl verre_\xe9\r\nv 0 0 0\r\nv 1 0 0\r\n"
+                     b"v 0 1 0\r\nv 2 0 0\r\nf 1 2 3\r\nf 1 2 4\r\n")
+agk.Gatekeeper(agk.Budget(check_references=False), healer=agk.load_healer(
+    heal_budget, agk.HealSettings(enabled=True), root=crlf_dir)).check(crlf_obj)
+expect("stripping faces keeps CRLF and non-UTF-8 bytes (were rewritten)",
+       crlf_obj.read_bytes() == b"# made in caf\xe9 tools\r\nusemtl verre_\xe9\r\nv 0 0 0\r\n"
+                                b"v 1 0 0\r\nv 0 1 0\r\nv 2 0 0\r\nf 1 2 3\r\n",
+       crlf_obj.read_bytes())
+crlf_record = agk_healer.undo_heal(crlf_dir / "stone.png")
+expect("... so the undo of a repoint verifies and restores",
+       crlf_record.undone and (crlf_dir / "crlf.mtl").read_bytes() == b"newmtl b\r\nmap_Kd stone.png\r\n")
+
 nobackup_dir = heal_root / "nobackup"
 nobackup_dir.mkdir()
 nobackup = agk.load_healer(heal_budget, agk.HealSettings(enabled=True), root=nobackup_dir,

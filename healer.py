@@ -275,8 +275,14 @@ def _face_area(vertices: list[tuple[float, float, float]]) -> float:
 
 
 def strip_degenerate_obj(path: Path, epsilon: float = 1e-8) -> Optional[str]:
-    """Delete zero-area faces from an OBJ in place. Returns a note, or None."""
-    text = path.read_text(encoding="utf-8", errors="replace")
+    """Delete zero-area faces from an OBJ in place. Returns a note, or None.
+
+    Every line that is kept is written back byte for byte: line endings as they
+    were (text mode turned LF into CRLF on Windows) and non-UTF-8 bytes as they
+    were (``errors="replace"`` turned a Latin-1 material name into U+FFFD).
+    """
+    with open(path, encoding="utf-8", errors="surrogateescape", newline="") as handle:
+        text = handle.read()
     lines, positions, faces = _obj_positions_and_faces(text)
     doomed: set[int] = set()
     for line_index, refs in faces:
@@ -292,7 +298,8 @@ def strip_degenerate_obj(path: Path, epsilon: float = 1e-8) -> Optional[str]:
     if not doomed:
         return None
     kept = [line for index, line in enumerate(lines) if index not in doomed]
-    path.write_text("".join(kept), encoding="utf-8")
+    with open(path, "w", encoding="utf-8", errors="surrogateescape", newline="") as handle:
+        handle.write("".join(kept))
     return f"Stripped {len(doomed)} degenerate face{'s' if len(doomed) != 1 else ''}"
 
 
@@ -810,7 +817,11 @@ class Healer:
                     LOG.debug("healing: not rewriting references in %s (too large)",
                               candidate.name)
                     continue
-                text = candidate.read_text(encoding="utf-8")
+                # newline="": keep CRLF/LF exactly. Text mode turned an artist's
+                # LF .mtl into CRLF on Windows (and CRLF into LF elsewhere), and
+                # made every undo of a repoint refuse on Windows.
+                with open(candidate, encoding="utf-8", newline="") as handle:
+                    text = handle.read()
             except (OSError, UnicodeDecodeError):
                 continue                 # binary or unreadable: not ours to edit
             updated, count = rewrite_reference_names(text, renames)
@@ -825,7 +836,8 @@ class Healer:
         for path, text, count in pending:
             temporary = path.with_name(path.name + ".agk-edit")
             try:
-                temporary.write_text(text, encoding="utf-8")
+                with open(temporary, "w", encoding="utf-8", newline="") as handle:
+                    handle.write(text)
                 os.replace(temporary, path)
                 updated += count
                 LOG.info("healed  %s: repointed %d reference(s)", path.name, count)

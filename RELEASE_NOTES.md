@@ -20,6 +20,10 @@
     check looked only at the name, not the folder); the healer's backup folder is
     skipped by scans, the audit and the reference repointing (a later rename would
     otherwise have edited the backed-up `.mtl`).
+  * Fixed: the healer rewrote files in text mode. Repointing a reference turned an
+    artist's LF `.mtl`/`.gltf` into CRLF on Windows (and CRLF into LF elsewhere), and
+    stripping `.obj` faces also replaced any non-UTF-8 byte (a Latin-1 material
+    name) with U+FFFD. Every kept line is now written back byte for byte.
   * Docs: README, docs/03, 05, 06, 07 and 12 corrected - `--heal-dry-run` did not
     exist, the healer never "resizes oversized" textures, and `pad` was the real
     default in 1.1.0.
