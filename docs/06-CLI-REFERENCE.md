@@ -28,6 +28,12 @@ violation is the tool working; a red build from a typo in `--preset` is the
 * **It only re-gates what changed** while watching; unchanged files are silent.
 * **It never writes to your assets** unless `--auto-heal` is on or you run `--heal` on a file - and then it keeps the originals in `.agk-backups/`.
 * **It finds `rules.toml` next to the folder** unless `--rules` says otherwise.
+* **A `--once` run reuses what it already knows.** Verdicts are kept in
+  `<folder>/.agk-cache.json`; a file that has not changed since - nor any file it
+  references, nor the rules, nor the gate itself - gets its last verdict back
+  without being read. `--no-cache` turns it off, `--cache FILE` moves it.
+  `--jobs N` checks N files at a time (`0` = one per CPU); the verdicts and their
+  order are the same as one at a time.
 * **It never follows symlinks** unless `--follow-symlinks`; dangling links are
   skipped and counted (a Windows 1920 symlink is not an asset problem).
 
@@ -79,6 +85,8 @@ Reported as: `tag 'charcter' is not a known tag; closest match is 'character'`.
 |---|---|
 | `--json` | machine-readable verdicts on stdout |
 | `--report junit:FILE` / `sarif:FILE` | with `--once` or one file, also write a JUnit or SARIF report for CI (repeatable; see [10](10-CI-AND-VERSION-CONTROL.md#reports-your-ci-server-shows-per-asset)) |
+| `--cache FILE` · `--no-cache` | with `--once`: where the verdict cache lives (default `<folder>/.agk-cache.json`), or no cache at all |
+| `--jobs N` | with `--once`: check N files at a time in separate processes (`0` = one per CPU; healing always runs one at a time) |
 | `--no-color` | plain text (CI logs, redirected output) |
 | `-v` | verbose |
 | `--init [--yes]` | write a commented starter `rules.toml` |

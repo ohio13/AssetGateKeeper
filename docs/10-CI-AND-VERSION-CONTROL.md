@@ -73,6 +73,29 @@ asset-gatekeeper Assets --once --recursive --report junit:gate.xml --report sari
 Reports are written by `--once` runs and single-file runs; a watch ignores the
 flag.
 
+### Big repositories: keep the cache between runs
+
+A `--once` run keeps each verdict in `.agk-cache.json` next to the assets.
+Unchanged files - with the files they reference, under the same rules and the
+same gate version - are not read again, so a nightly audit of a large depot
+checks only what changed since last night. `--jobs N` checks the rest in
+parallel.
+
+```
+asset-gatekeeper Assets --once --recursive --jobs 0 --cache .ci-cache/agk.json
+```
+
+On GitHub Actions, keep the file with `actions/cache` (key on the commit, with a
+fallback to the last cache: an old entry is harmless, it is re-checked when its
+file changed). On Jenkins or TeamCity, keep it in the agent's workspace or the
+build cache. What invalidates an entry: the file's size and time (when its bytes
+really changed - a checkout that only touches times is hashed and kept), a
+referenced `.mtl`, texture or `.bin` that changed or appeared, any rule, the
+gate's code or version, and an exception reaching its last 14 days. With
+healing on, cached failures are always re-checked.
+
+Do not commit `.agk-cache.json`; add it to `.gitignore` (or `p4ignore`).
+
 ### Post the verdicts while you are there
 
 ```
@@ -227,6 +250,7 @@ worker.
 
 ```
 [ ] the gate runs with --once --json --no-color
+[ ] big repositories keep .agk-cache.json between runs (--cache), and it is not committed
 [ ] exit code 2 is treated differently from 1
 [ ] verdicts are uploaded as an artifact
 [ ] telemetry is posted (so /analytics has CI data too)

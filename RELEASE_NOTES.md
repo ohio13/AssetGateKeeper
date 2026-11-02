@@ -1,5 +1,13 @@
 # Since v1.1.1 (unreleased, on `main`)
 
+* **Big repositories (roadmap phase 4).**
+  * `--once` keeps verdicts in `.agk-cache.json`: a file that has not changed -
+    nor anything it references, the rules or the gate - is not read again (600
+    heavy glTF/GLB: 16 s, then 0.7 s). `--no-cache`, `--cache FILE`; the GitHub
+    workflow keeps it between runs with `actions/cache`.
+  * `--jobs N` checks files in parallel processes (`0` = one per CPU), with the
+    same verdicts in the same order.
+
 * **Inspection views and textured FBX (roadmap phase 3).**
   * Viewer: **UV check** (numbered checker; pink where a mesh has no UVs), **Texel**
     (density heat map against the mesh's median), **Normals** and **Scale** (a

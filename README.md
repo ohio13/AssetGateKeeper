@@ -902,6 +902,9 @@ python asset_gatekeeper.py [folder] [options]
 | `--undo-heal` | Put back what the last heal of this file replaced |
 | `--list-heals` | List the heals recorded in a folder, newest first |
 | `--report FORMAT:FILE` | With `--once` or one file: also write `junit:gate.xml` (Jenkins, TeamCity, Horde) or `sarif:gate.sarif` (GitHub annotations); repeatable |
+| `--cache FILE` | With `--once`: where the verdict cache lives (default `<folder>/.agk-cache.json`). An unchanged file - and unchanged files it references - reuses its last verdict; a rule, gate or version change re-checks everything |
+| `--no-cache` | With `--once`: check every file and leave the cache alone |
+| `--jobs N` | With `--once`: check N files at a time in separate processes (`0` = one per CPU). Verdicts and their order are the same as one at a time; healing always runs one at a time |
 | `--notify` / `--no-notify` | Native desktop toasts on failure/heal (on while watching, off in `--once`) |
 | `--notify-max N` | Maximum toasts per minute (default 6) |
 | `--allow-degenerate` | Permit zero-area triangles |

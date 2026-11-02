@@ -97,10 +97,21 @@ jobs:
           cat audit.txt >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
+      # Unchanged files (and their textures) reuse last run's verdict; any rule
+      # or gate change re-checks everything. An old cache is never wrong, only slower.
+      - name: Restore the verdict cache
+        if: steps.target.outputs.found == 'true'
+        uses: actions/cache@v4
+        with:
+          path: .agk-ci-cache
+          key: agk-verdicts-${{ github.sha }}
+          restore-keys: agk-verdicts-
+
       - name: Gate every asset
         if: steps.target.outputs.found == 'true'
         run: >-
           asset-gatekeeper "${{ steps.target.outputs.dir }}" --once --no-color
+          --jobs 0 --cache .agk-ci-cache/verdicts.json
           --report junit:gate-junit.xml --report sarif:gate.sarif
 
       # Each failing asset becomes an annotation on the pull request. Needs

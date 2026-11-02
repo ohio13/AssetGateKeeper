@@ -1430,6 +1430,143 @@ for _badarg in ("junit", "xml:out.xml", "junit:"):
 expect("a plain run keeps no verdicts in memory (a watch runs for weeks)",
        agk.Reporter(color=False).keep_verdicts is False)
 
+print("14g. incremental cache and --jobs (G4)")
+cache_dir = scratch / "cache_run"
+if cache_dir.exists():
+    shutil.rmtree(cache_dir)
+(cache_dir / "Props").mkdir(parents=True)
+for _name in ("crate_1mtl.obj", "crate_1mtl.mtl", "crate_4mtl.obj", "crate_4mtl.mtl",
+              "boss_statue.gltf", "prop_crate.glb", "bark_Albedo.png", "ui_icon.png"):
+    shutil.copy(DROP / _name, cache_dir / "Props" / _name)
+(cache_dir / "Props" / "wood.obj").write_text(
+    "mtllib wood.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\nvt 0 0\nvt 1 0\nvt 0 1\nusemtl wood\nf 1/1 2/2 3/3\n",
+    encoding="utf-8")
+(cache_dir / "Props" / "wood.mtl").write_text("newmtl wood\nmap_Kd wood_Albedo.png\n", encoding="utf-8")
+make_png(cache_dir / "Props" / "wood_Albedo.png", (64, 64))
+_cache_file = cache_dir / agk.CACHE_FILENAME
+
+
+def _cached_run(budget=None, healer=None, gatekeeper_args=None):
+    """One --once run in-process; returns (verdicts by name, files inspected, cache)."""
+    keeper = agk.Gatekeeper(budget or agk.Budget(), healer=healer, tag_root=cache_dir,
+                            **(gatekeeper_args or {}))
+    cache = agk.VerdictCache(_cache_file, cache_dir, agk.rules_fingerprint(keeper),
+                             reuse_failures=healer is None)
+    reporter = agk.Reporter(color=False, root=cache_dir)
+    reporter.keep_verdicts = True
+    inspected = []
+    real = agk.Gatekeeper._inspect
+
+    def counting(self, path):
+        inspected.append(path.name)
+        return real(self, path)
+    with patch.object(agk.Gatekeeper, "_inspect", counting), \
+            _contextlib.redirect_stderr(_io.StringIO()):
+        agk.run_once(cache_dir, keeper, reporter, True, cache=cache)
+    return {v.path.name: v for v in reporter.verdicts}, sorted(inspected), cache
+
+
+_first, _seen1, _ = _cached_run()
+expect("first run checks every asset and writes the cache",
+       len(_seen1) == 8 and _cache_file.is_file(), _seen1)
+_second, _seen2, _c2 = _cached_run()
+expect("second run reads no unchanged file", _seen2 == [] and _c2.hits == 8, _seen2)
+expect("... and gives the very same verdicts (status, problems, numbers, notes)",
+       {n: (v.status, v.problems, v.metric, v.stats, v.warnings) for n, v in _first.items()}
+       == {n: (v.status, v.problems, v.metric, v.stats, v.warnings) for n, v in _second.items()})
+expect("... failures included (a cached failure still fails the run)",
+       any(not v.passed for v in _second.values()))
+_t = time.time() + 30
+os.utime(cache_dir / "Props" / "boss_statue.gltf", (_t, _t))
+_, _seen3, _ = _cached_run()
+expect("a file only touched (a fresh checkout) is hashed, found identical, not re-checked",
+       _seen3 == [], _seen3)
+(cache_dir / "Props" / "crate_nomtl_copy.obj").write_bytes((DROP / "crate_nomtl.obj").read_bytes())
+_target = cache_dir / "Props" / "crate_1mtl.obj"
+_target.write_bytes(_target.read_bytes() + b"\n# edited\n")
+_, _seen4, _ = _cached_run()
+expect("editing one file re-checks exactly that file (and the new one)",
+       _seen4 == ["crate_1mtl.obj", "crate_nomtl_copy.obj"], _seen4)
+time.sleep(0.01)
+make_png(cache_dir / "Props" / "wood_Albedo.png", (128, 128))
+_, _seen5, _ = _cached_run()
+expect("changing a texture an .obj's .mtl names re-checks that .obj (and the texture)",
+       _seen5 == ["wood.obj", "wood_Albedo.png"], _seen5)
+(cache_dir / "Props" / "wood_Albedo.png").unlink()
+_v6, _seen6, _ = _cached_run()
+expect("deleting that texture re-checks the .obj, which now fails its reference",
+       _seen6 == ["wood.obj"] and not _v6["wood.obj"].passed
+       and any("wood_Albedo.png" in reason for reason in _v6["wood.obj"].problems),
+       (_seen6, _v6["wood.obj"].problems))
+_v7, _seen7, _ = _cached_run(budget=agk.Budget(max_triangles=10))
+expect("changing a rule re-checks everything, with the new rule applied",
+       len(_seen7) == 8 and not _v7["crate_nomtl_copy.obj"].passed, _seen7)
+_, _seen8, _ = _cached_run(budget=agk.Budget(max_triangles=10))
+expect("... and the run after that reuses again", _seen8 == [], _seen8)
+with patch.object(agk, "__version__", "9.9.9"):
+    _, _seen9, _c9 = _cached_run(budget=agk.Budget(max_triangles=10))
+expect("a new gate version re-checks everything", len(_seen9) == 8 and _c9.reset_reason, _seen9)
+_cache_file.write_text("{ not json", encoding="utf-8")
+_v10, _seen10, _c10 = _cached_run()
+expect("a corrupt cache file is set aside with a note, never a crash",
+       len(_seen10) == 8 and "unreadable" in _c10.reset_reason, _c10.reset_reason)
+
+
+class _NoHealer:
+    last_refusal = ""
+
+    def heal(self, path, inspect):
+        return None
+
+
+_, _seen11, _ = _cached_run(healer=_NoHealer())
+expect("with healing on, failures are re-checked so the healer gets its chance; passes are reused",
+       _seen11 and set(_seen11) == {n for n, v in _v10.items() if not v.passed}, _seen11)
+_doc = json.loads(_cache_file.read_text(encoding="utf-8"))
+(cache_dir / "Props" / "crate_nomtl_copy.obj").unlink()
+_cached_run()
+_doc2 = json.loads(_cache_file.read_text(encoding="utf-8"))
+expect("entries for files that are gone are dropped",
+       "Props/crate_nomtl_copy.obj" in _doc["entries"]
+       and "Props/crate_nomtl_copy.obj" not in _doc2["entries"])
+_exc_soon = agk.BudgetException(path="Props/*", rule="max_triangles", allow=99999,
+                                 reason="hero", owner="alex", expires=agk.date(2026, 12, 10))
+_fp = [agk.rules_fingerprint(agk.Gatekeeper(agk.Budget(), exceptions=[_exc_soon], today=_day))
+       for _day in (agk.date(2026, 11, 1), agk.date(2026, 11, 2), agk.date(2026, 12, 1),
+                    agk.date(2026, 12, 2))]
+expect("an exception far from its end date keeps the cache; inside the 14-day window it turns over daily",
+       _fp[0] == _fp[1] and _fp[2] != _fp[3], _fp)
+
+_gate_cli = [sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(cache_dir),
+             "--once", "--recursive", "--no-color"]
+
+
+def _lines(run):
+    return [line.split("  ", 1)[-1] for line in (run.stdout + run.stderr).splitlines()
+            if "PASSED" in line or "FAILED" in line or "ERROR" in line]
+
+
+_cache_file.unlink()
+_one = subprocess.run(_gate_cli + ["--jobs", "1", "--no-cache"], capture_output=True, text=True,
+                      encoding="utf-8", errors="replace")
+expect("--no-cache writes no cache file", not _cache_file.exists())
+_four = subprocess.run(_gate_cli + ["--jobs", "4", "--no-cache"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+expect("--jobs 4 gives the same verdicts, in the same order, and exit code as --jobs 1",
+       _lines(_one) == _lines(_four) and len(_lines(_one)) == 7 and _one.returncode == _four.returncode == 1,
+       (_lines(_one), _lines(_four), _four.stderr[-300:]))
+_cold = subprocess.run(_gate_cli + ["--jobs", "2"], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace")
+_warm = subprocess.run(_gate_cli, capture_output=True, text=True, encoding="utf-8", errors="replace")
+expect("CLI: the second run says how much it reused, and prints the same verdicts",
+       "7 reused, 0 checked" in _warm.stdout + _warm.stderr and _lines(_warm) == _lines(_one)
+       and _warm.returncode == 1, (_warm.stdout + _warm.stderr)[-400:])
+_elsewhere = scratch / "ci-cache-dir" / "verdicts.json"
+if _elsewhere.parent.exists():
+    shutil.rmtree(_elsewhere.parent)
+subprocess.run(_gate_cli + ["--cache", str(_elsewhere)], capture_output=True, text=True)
+expect("--cache FILE puts it where CI keeps its caches, creating the folder", _elsewhere.is_file())
+
 print("15. VCS hook integrations")
 
 p4_hook = load_module("agk_p4_hook", Path("vcs_hooks") / "p4_pre_submit.py")

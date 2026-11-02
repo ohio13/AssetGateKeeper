@@ -73,6 +73,7 @@ import base64
 import difflib
 import fnmatch
 import getpass
+import hashlib
 import json
 import logging
 import math
@@ -4286,10 +4287,245 @@ def describe_budget(budget: Budget) -> str:
     )
 
 
+# --- #
+# Incremental runs (G4): a verdict cache, and checks in parallel
+# --- #
+
+CACHE_FILENAME = ".agk-cache.json"
+CACHE_FORMAT = 1
+
+
+def _file_state(path: Path) -> Optional[list]:
+    """[size, mtime_ns] of a file, or None when it is not there."""
+    try:
+        info = path.stat()
+    except OSError:
+        return None
+    if not os.path.isfile(path):
+        return None
+    return [info.st_size, info.st_mtime_ns]
+
+
+def _sha256_of(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def dependency_paths(path: Path) -> list[Path]:
+    """Every file a verdict on ``path`` can depend on, besides the file itself.
+
+    The .mtl and maps of an .obj, a .gltf's buffers and images, and for an FBX
+    every place an engine would look for each texture (so a texture that turns
+    up in the fallback location invalidates the cached "missing reference").
+    """
+    if path.suffix.lower() in FBX_SUFFIXES:
+        try:
+            references = read_fbx(path).references
+        except AssetError:
+            return []
+        found: list[Path] = []
+        for _written, candidates in references:
+            for candidate in candidates:
+                normalised = candidate.replace("\\", "/")
+                found.append(path.parent / normalised)
+                found.append(path.parent / normalised.rsplit("/", 1)[-1])
+        return found
+    return [target for _written, target in resolve_references(path)]
+
+
+def _verdict_to_json(verdict: Verdict, root: Path) -> dict:
+    return {"problems": list(verdict.problems), "metric": verdict.metric,
+            "stats": [list(item) for item in verdict.stats],
+            "warnings": list(verdict.warnings)}
+
+
+def _verdict_from_json(path: Path, data: dict) -> Verdict:
+    return Verdict(path, tuple(data.get("problems", ())), data.get("metric", ""),
+                   tuple(tuple(item) for item in data.get("stats", ())), (),
+                   tuple(data.get("warnings", ())))
+
+
+def rules_fingerprint(gatekeeper: "Gatekeeper") -> str:
+    """Everything outside the file that decides its verdict, as one hash.
+
+    The rules (budget, tag budgets, CLI overrides, tag mode, exceptions), the
+    gate's own code and version, and the mesh library's version. An exception
+    within its warning window says "ends in N days", so the fingerprint also
+    carries those day counts: the cache turns over on those days, not otherwise.
+    """
+    today = gatekeeper.today or date.today()
+    exceptions = []
+    for item in gatekeeper.exceptions:
+        left = (item.expires - today).days
+        exceptions.append((repr(item), min(max(left, -1), EXCEPTION_WARN_DAYS + 1)))
+    try:
+        code = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    except OSError:
+        code = ""
+    try:
+        mesh_library = getattr(importlib.import_module("trimesh"), "__version__", "")
+    except Exception:
+        mesh_library = "none"
+    parts = [__version__, code, mesh_library, repr(gatekeeper.budget),
+             repr(sorted((name, repr(budget)) for name, budget in gatekeeper.tag_budgets.items())),
+             repr(sorted(gatekeeper.overrides.items())), gatekeeper.tag_mode,
+             repr(gatekeeper.tag_similarity), repr(exceptions), repr(gatekeeper.want_memory),
+             str(gatekeeper.root), str(gatekeeper.tag_root)]
+    return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
+
+
+class VerdictCache:
+    """``.agk-cache.json``: reuse the verdict of a file that has not changed.
+
+    An entry is reused when the rules fingerprint matches and the file - and
+    every file its verdict depends on (``dependency_paths``) - has the same size
+    and modification time as last run. A file whose time changed but whose bytes
+    did not (a fresh checkout) is hashed, found identical and reused. Verdicts
+    that are unreadable or healed are never stored; with healing on, a stored
+    failure is re-checked so the healer gets its chance.
+    """
+
+    def __init__(self, path: Path, root: Path, fingerprint: str,
+                 reuse_failures: bool = True) -> None:
+        self.path = path
+        self.root = root
+        self.fingerprint = fingerprint
+        self.reuse_failures = reuse_failures
+        self.entries: dict[str, dict] = {}
+        self.seen: set[str] = set()
+        self.hits = 0
+        self.misses = 0
+        self.dirty = False
+        self.reset_reason = ""
+        try:
+            document = json.loads(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            return
+        except (OSError, ValueError) as exc:
+            self.reset_reason = f"unreadable ({exc.__class__.__name__}), starting fresh"
+            self.dirty = True
+            return
+        if not isinstance(document, dict) or document.get("format") != CACHE_FORMAT:
+            self.reset_reason = "from another version, starting fresh"
+            self.dirty = True
+            return
+        if document.get("fingerprint") != fingerprint:
+            self.reset_reason = "rules or gate changed, re-checking everything"
+            self.dirty = True
+            return
+        entries = document.get("entries")
+        self.entries = entries if isinstance(entries, dict) else {}
+
+    def _key(self, path: Path) -> str:
+        try:
+            return path.relative_to(self.root).as_posix()
+        except ValueError:
+            return path.as_posix()
+
+    def lookup(self, path: Path) -> Optional[Verdict]:
+        key = self._key(path)
+        self.seen.add(key)
+        entry = self.entries.get(key)
+        state = _file_state(path)
+        if not isinstance(entry, dict) or state is None:
+            self.misses += 1
+            return None
+        verdict_data = entry.get("verdict") or {}
+        if verdict_data.get("problems") and not self.reuse_failures:
+            self.misses += 1
+            return None
+        if entry.get("state") != state:
+            try:
+                same_bytes = entry.get("sha256") == _sha256_of(path)
+            except OSError:
+                same_bytes = False
+            if not same_bytes:
+                self.misses += 1
+                return None
+            entry["state"] = state          # touched, not changed
+            self.dirty = True
+        for name, recorded in (entry.get("deps") or {}).items():
+            if _file_state(Path(name) if os.path.isabs(name) else self.root / name) != recorded:
+                self.misses += 1
+                return None
+        self.hits += 1
+        return _verdict_from_json(path, verdict_data)
+
+    def store(self, path: Path, verdict: Verdict) -> None:
+        key = self._key(path)
+        self.seen.add(key)
+        if verdict.unreadable or verdict.healed or verdict.path != path:
+            self.entries.pop(key, None)
+            self.dirty = True
+            return
+        state = _file_state(path)
+        if state is None:
+            return
+        try:
+            sha = _sha256_of(path)
+            deps = {}
+            for dependency in dependency_paths(path):
+                deps[self._key(dependency)] = _file_state(dependency)
+        except (OSError, AssetError):
+            return
+        self.entries[key] = {"state": state, "sha256": sha, "deps": deps,
+                             "verdict": _verdict_to_json(verdict, self.root)}
+        self.dirty = True
+
+    def save(self) -> None:
+        stale = set(self.entries) - self.seen
+        for key in stale:
+            del self.entries[key]
+        if not (self.dirty or stale):
+            return
+        document = {"format": CACHE_FORMAT, "tool": f"asset-gatekeeper {__version__}",
+                    "fingerprint": self.fingerprint, "entries": self.entries}
+        temporary = self.path.with_name(self.path.name + ".tmp")
+        try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            temporary.write_text(json.dumps(document, separators=(",", ":")), encoding="utf-8")
+            os.replace(temporary, self.path)
+        except OSError as exc:
+            LOG.warning("could not write the cache %s: %s", self.path, exc)
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+
+
+_POOL_GATEKEEPER: Optional["Gatekeeper"] = None
+
+
+def _pool_start(gatekeeper: "Gatekeeper") -> None:
+    global _POOL_GATEKEEPER
+    _POOL_GATEKEEPER = gatekeeper
+
+
+def _pool_check(path: Path) -> Verdict:
+    assert _POOL_GATEKEEPER is not None
+    try:
+        return _POOL_GATEKEEPER.check(path)
+    except Exception as exc:    # one bad file must not take down the whole run
+        return Verdict(path, (f"could not be checked ({exc.__class__.__name__}: {exc})",),
+                       unreadable=True)
+
+
+def resolve_jobs(requested: Optional[int]) -> int:
+    if requested is None:
+        return 1
+    if requested == 0:
+        return max(1, os.cpu_count() or 1)
+    return requested
+
+
 def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
              recursive: bool, exclude: Sequence[str] = (),
              follow_symlinks: bool = False, allow_empty: bool = False,
-             totals: Sequence["MemoryTotal"] = ()) -> int:
+             totals: Sequence["MemoryTotal"] = (), cache: Optional[VerdictCache] = None,
+             jobs: int = 1) -> int:
     unreadable: list[str] = []
     candidates = sorted(p for p in walk_files(root, recursive=recursive,
                                               follow_symlinks=follow_symlinks,
@@ -4312,13 +4548,52 @@ def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
         return 1
 
     checked: list[Verdict] = []
+    ready: list[tuple[Path, Optional[Verdict]]] = []
     for path in candidates:
         if wait_until_stable(path):
-            verdict = gatekeeper.check(path)
-            checked.append(verdict)
-            reporter.report(verdict)
+            ready.append((path, cache.lookup(path) if cache is not None else None))
         else:
             LOG.warning("%s is still being written by another process; skipped", path.name)
+
+    pending = [path for path, cached in ready if cached is None]
+    futures: dict[Path, object] = {}
+    pool = None
+    if jobs > 1 and len(pending) > 1:
+        try:
+            from concurrent.futures import ProcessPoolExecutor
+            pool = ProcessPoolExecutor(max_workers=min(jobs, len(pending)),
+                                       initializer=_pool_start, initargs=(gatekeeper,))
+            futures = {path: pool.submit(_pool_check, path) for path in pending}
+        except Exception as exc:   # no processes on this machine: one at a time
+            LOG.warning("--jobs %d unavailable (%s); checking one file at a time", jobs, exc)
+            if pool is not None:
+                pool.shutdown(cancel_futures=True)
+            pool, futures = None, {}
+    try:
+        # Reported in path order whatever finishes first, so two runs - and
+        # --jobs 1 against --jobs 8 - print and report the same thing.
+        for path, cached in ready:
+            if cached is not None:
+                verdict = cached
+            elif path in futures:
+                try:
+                    verdict = futures[path].result()  # type: ignore[attr-defined]
+                except Exception as exc:          # a worker died (out of memory)
+                    verdict = Verdict(path, (f"could not be checked ({exc.__class__.__name__})",),
+                                      unreadable=True)
+            else:
+                verdict = gatekeeper.check(path)
+            if cached is None and cache is not None:
+                cache.store(path, verdict)
+            checked.append(verdict)
+            reporter.report(verdict)
+    finally:
+        if pool is not None:
+            pool.shutdown()
+        if cache is not None:
+            cache.save()
+    if cache is not None:
+        LOG.info("cache   %d reused, %d checked (%s)", cache.hits, cache.misses, cache.path.name)
 
     over = check_totals(totals, checked) if totals else []
     for verdict in over:
@@ -4922,6 +5197,14 @@ def build_parser() -> argparse.ArgumentParser:
                              "(without it, an empty folder fails the run: a wrong path "
                              "is the usual reason)")
     parser.add_argument("--recursive", action="store_true", help="include subfolders")
+    parser.add_argument("--cache", metavar="FILE", default=None,
+                        help=f"with --once: where the verdict cache lives (default "
+                             f"<folder>/{CACHE_FILENAME}); unchanged files reuse their verdict")
+    parser.add_argument("--no-cache", action="store_true", dest="no_cache",
+                        help="with --once: check every file and leave the cache alone")
+    parser.add_argument("--jobs", type=_non_negative_int, default=None, metavar="N",
+                        help="with --once: check N files at a time in separate processes "
+                             "(0 = one per CPU; default 1; healing always runs one at a time)")
     parser.add_argument("--follow-symlinks", action="store_true",
                         help="descend into symlinked/junctioned folders. Off by default: "
                              "a link re-counts the same tree and a self-link never ends. "
@@ -5165,9 +5448,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return 0 if verdict.passed else 1
 
     if args.once:
+        jobs = resolve_jobs(args.jobs)
+        if jobs > 1 and healer is not None:
+            LOG.warning("--jobs %d ignored: healing rewrites files, so it runs one file at "
+                        "a time", jobs)
+            jobs = 1
+        cache = None
+        if not args.no_cache:
+            cache_path = Path(args.cache).expanduser() if args.cache else watch_dir / CACHE_FILENAME
+            cache = VerdictCache(cache_path, watch_dir, rules_fingerprint(gatekeeper),
+                                 reuse_failures=healer is None)
+            if cache.reset_reason:
+                LOG.info("cache   %s: %s", cache_path.name, cache.reset_reason)
         status = run_once(watch_dir, gatekeeper, reporter, args.recursive, budget.exclude,
                           follow_symlinks=getattr(args, "follow_symlinks", False),
-                          allow_empty=getattr(args, "allow_empty", False), totals=totals)
+                          allow_empty=getattr(args, "allow_empty", False), totals=totals,
+                          cache=cache, jobs=jobs)
         if args.report:
             write_reports(args.report, reporter.verdicts, watch_dir)
     else:
