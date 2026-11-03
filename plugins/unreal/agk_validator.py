@@ -150,7 +150,8 @@ def texture_problems(facts: dict, budget, engine, exceptions=(), game_path: str 
 # --- the editor side: everything below needs ``unreal`` --- #
 
 def static_mesh_facts(mesh, unreal) -> dict:
-    facts = {"triangles": 0, "material_slots": 0, "uv_channels": None,
+    # None = could not be read: never taken as 0 (a 0 passes every budget).
+    facts = {"triangles": None, "material_slots": 0, "uv_channels": None,
              "lods": int(mesh.get_num_lods()) if hasattr(mesh, "get_num_lods") else 1}
     try:
         facts["triangles"] = int(mesh.get_num_triangles(0))
@@ -189,7 +190,11 @@ def asset_problems(asset, unreal) -> tuple:
     budget, exceptions = load_rules(engine)
     path = asset.get_path_name()
     if isinstance(asset, unreal.StaticMesh):
-        return True, mesh_problems(static_mesh_facts(asset, unreal), budget, exceptions, path)
+        facts = static_mesh_facts(asset, unreal)
+        if facts["triangles"] is None:
+            return True, ["could not read the triangle count from Unreal, so this mesh was "
+                          "NOT checked - fails until it can be"]
+        return True, mesh_problems(facts, budget, exceptions, path)
     if isinstance(asset, unreal.Texture2D):
         return True, texture_problems(texture_facts(asset), budget, engine, exceptions, path)
     return False, []

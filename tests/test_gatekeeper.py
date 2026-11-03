@@ -1231,6 +1231,18 @@ expect("... under budget it passes and says how much is used",
        _tot.returncode == 0 and "Props/*: ~10.7 MB of 12 MB (2 assets)" in _tot.stdout + _tot.stderr,
        (_tot.stdout + _tot.stderr)[-300:])
 
+shutil.copy(Path("tests") / "fixtures" / "fbx" / "cube_subd3.fbx", mem_dir / "Props" / "hero.fbx")
+_tot = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(mem_dir),
+                       "--once", "--recursive", "--no-color"], capture_output=True, text=True,
+                      encoding="utf-8", errors="replace")
+_tot_out = _tot.stdout + _tot.stderr
+expect("a total that holds an FBX (no memory estimate) fails and names it, never counts it as 0 MB",
+       _tot.returncode == 1 and "1 not measured" in _tot_out and "hero.fbx" in _tot_out
+       and "cannot check the 12 MB budget" in _tot_out, _tot_out[-500:])
+expect("... and the FBX itself says it was not measured",
+       "not measured for FBX yet" in _tot_out)
+(mem_dir / "Props" / "hero.fbx").unlink()
+
 
 def uv_plane(path, size_m):
     half = size_m / 2
@@ -1401,7 +1413,7 @@ _sarif = json.loads((rep_dir / "out" / "gate.sarif").read_text(encoding="utf-8")
 _results = _sarif["runs"][0]["results"]
 expect("SARIF 2.1.0: one result per problem of each failing asset, with its path",
        _sarif["version"] == "2.1.0" and _results
-       and all(r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "Props/boss & statue's.gltf"
+       and all(r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == "Props/boss%20%26%20statue%27s.gltf"
                for r in _results) and all(r["ruleId"] == "agk/budget" for r in _results), _results[:1])
 expect("... and passing assets add nothing to it", len(_results) == len(
     [c for c in _failed[0].find("failure").text.splitlines() if c]))
@@ -1412,6 +1424,10 @@ _angle_xml = _ET.fromstring(agk.junit_report([_angle], rep_dir))
 expect("names and reasons with < > & stay well-formed XML (no such file on Windows, so built here)",
        _angle_xml.find(".//testcase").get("name") == "a<b>.gltf"
        and _angle_xml.find(".//failure").get("message") == "x < y & z")
+_total_sarif = json.loads(agk.sarif_report([agk.Verdict(Path("[total] Props/*"), ("over",))], rep_dir))
+expect("SARIF: a folder total points at rules.toml, not at '[total] Props/*' (not a URI)",
+       _total_sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+       == "rules.toml")
 expect("an unreadable asset is a JUnit error, not a failure",
        _junit_err.get("errors") == "1" and _junit_err.find(".//error") is not None)
 _single = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"),
@@ -1443,7 +1459,9 @@ for _name in ("crate_1mtl.obj", "crate_1mtl.mtl", "crate_4mtl.obj", "crate_4mtl.
     encoding="utf-8")
 (cache_dir / "Props" / "wood.mtl").write_text("newmtl wood\nmap_Kd wood_Albedo.png\n", encoding="utf-8")
 make_png(cache_dir / "Props" / "wood_Albedo.png", (64, 64))
-_cache_file = cache_dir / agk.CACHE_FILENAME
+_cache_file = scratch / "cache_run.json"   # outside the checked folder, as the CLI insists
+if _cache_file.exists():
+    _cache_file.unlink()
 
 
 def _cached_run(budget=None, healer=None, gatekeeper_args=None):
@@ -1546,25 +1564,52 @@ def _lines(run):
             if "PASSED" in line or "FAILED" in line or "ERROR" in line]
 
 
-_cache_file.unlink()
-_one = subprocess.run(_gate_cli + ["--jobs", "1", "--no-cache"], capture_output=True, text=True,
-                      encoding="utf-8", errors="replace")
-expect("--no-cache writes no cache file", not _cache_file.exists())
-_four = subprocess.run(_gate_cli + ["--jobs", "4", "--no-cache"], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
+_cache_home = scratch / "agk-cache-home"
+if _cache_home.exists():
+    shutil.rmtree(_cache_home)
+_cli_env = dict(os.environ, AGK_CACHE_DIR=str(_cache_home))
+_default_cache = agk.default_cache_path(cache_dir)
+with patch.dict(os.environ, {"AGK_CACHE_DIR": str(_cache_home)}):
+    _default_cache = agk.default_cache_path(cache_dir)
+expect("the default cache lives outside the checked folder, one file per folder",
+       not agk.cache_inside(cache_dir, _default_cache) and _default_cache.parent == _cache_home
+       and agk.default_cache_path(cache_dir) != agk.default_cache_path(scratch), _default_cache)
+
+
+def _gate(*extra):
+    return subprocess.run(_gate_cli + list(extra), capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", env=_cli_env)
+
+
+_one = _gate("--jobs", "1", "--no-cache")
+expect("--no-cache writes no cache file", not _cache_home.exists())
+_four = _gate("--jobs", "4", "--no-cache")
 expect("--jobs 4 gives the same verdicts, in the same order, and exit code as --jobs 1",
        _lines(_one) == _lines(_four) and len(_lines(_one)) == 7 and _one.returncode == _four.returncode == 1,
        (_lines(_one), _lines(_four), _four.stderr[-300:]))
-_cold = subprocess.run(_gate_cli + ["--jobs", "2"], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace")
-_warm = subprocess.run(_gate_cli, capture_output=True, text=True, encoding="utf-8", errors="replace")
+_cold = _gate("--jobs", "2")
+_warm = _gate()
 expect("CLI: the second run says how much it reused, and prints the same verdicts",
        "7 reused, 0 checked" in _warm.stdout + _warm.stderr and _lines(_warm) == _lines(_one)
-       and _warm.returncode == 1, (_warm.stdout + _warm.stderr)[-400:])
+       and _warm.returncode == 1 and _default_cache.is_file(), (_warm.stdout + _warm.stderr)[-400:])
+# A cache committed with the assets must count for nothing (audit 2026-11-02:
+# an entry with the over-budget file's hash and no problems passed it in CI).
+_forged = json.loads(_default_cache.read_text(encoding="utf-8"))
+for _entry in _forged["entries"].values():
+    _entry["verdict"]["problems"] = []
+(cache_dir / agk.CACHE_FILENAME).write_text(json.dumps(_forged), encoding="utf-8")
+_planted = _gate("--cache", str(cache_dir / agk.CACHE_FILENAME))
+expect("--cache inside the checked folder is refused (exit 2), never read",
+       _planted.returncode == 2 and "inside the folder being checked" in _planted.stdout + _planted.stderr,
+       (_planted.stdout + _planted.stderr)[-300:])
+_ignored = _gate()
+expect("... and a cache file planted in the folder is simply not the cache: the failures stay",
+       _ignored.returncode == 1 and _lines(_ignored) == _lines(_one))
+(cache_dir / agk.CACHE_FILENAME).unlink()
 _elsewhere = scratch / "ci-cache-dir" / "verdicts.json"
 if _elsewhere.parent.exists():
     shutil.rmtree(_elsewhere.parent)
-subprocess.run(_gate_cli + ["--cache", str(_elsewhere)], capture_output=True, text=True)
+_gate("--cache", str(_elsewhere))
 expect("--cache FILE puts it where CI keeps its caches, creating the folder", _elsewhere.is_file())
 
 _json_run = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"),
@@ -1666,7 +1711,7 @@ expect("--require-approval without a workstation refuses (fails closed)", code =
        and "needs --workstation" in out, out[-200:])
 code, out = p4_run("--require-approval", "--workstation", _ws_url, "--workstation-token", "p4tok")
 expect("an asset nobody approved is refused, with the reason", code == 1
-       and "never been sent to the Art Workstation" in out, out[-300:])
+       and "may never have been sent" in out, out[-300:])
 _ids = []
 for _depot, _bytes in _P4_BYTES.items():
     _asset = _ws.create_asset(_ws_dir / "ws.db", _ws_dir / "data", Path(_depot).name, _bytes)
@@ -1696,8 +1741,62 @@ _P4_BYTES["//depot/art/creatures/boss_statue.gltf"] = b'{"asset":{"version":"2.0
 code, out = p4_run("--workstation", _ws_url, "--workstation-token", "p4tok")
 expect("a rejected submit sends nothing",
        code == 1 and len(_ws.list_assets(_ws_dir / "ws.db", all_versions=True)) == _before)
+# A changelist that only edits a .bin changes an approved .gltf: with
+# --require-approval it needs a reviewed version holding those bytes too.
+_saved_p4, _saved_fetch = p4_hook.p4, p4_hook.fetch_revision
+_bin_v1 = b"\x00" * 48
+p4_hook.p4 = lambda *a, **k: ("Change 4712 by jdoe@ws\n\n\tbin\n\nAffected files ...\n\n"
+                               "... //depot/art/creatures/statue.bin#2 edit\n")
+_bin_bytes = {"now": b"\x01" * 48}
+p4_hook.fetch_revision = lambda cl, depot, dest: dest.write_bytes(_bin_bytes["now"])
+with contextlib.redirect_stdout(io.StringIO()) as _bin_out, contextlib.redirect_stderr(_bin_out):
+    _bin_code = p4_hook.main(["4712", "jdoe", "--require-approval", "--workstation", _ws_url,
+                              "--workstation-token", "p4tok"])
+expect("--require-approval: a changelist that only edits a .bin is checked, and refused unreviewed",
+       _bin_code == 1 and "statue.bin" in _bin_out.getvalue(), _bin_out.getvalue()[-300:])
+_statue = _ws.create_asset(_ws_dir / "ws.db", _ws_dir / "data", "statue.gltf", b'{"asset":{"version":"2.0"},"s":1}')
+_ws.add_sidecar(_ws_dir / "ws.db", _ws_dir / "data", _statue["id"], "statue.bin", _bin_bytes["now"])
+_ws.set_review(_ws_dir / "ws.db", _statue["id"], "approved", reviewer="Lead")
+with contextlib.redirect_stdout(io.StringIO()) as _bin_out, contextlib.redirect_stderr(_bin_out):
+    _bin_code = p4_hook.main(["4712", "jdoe", "--require-approval", "--workstation", _ws_url,
+                              "--workstation-token", "p4tok"])
+expect("... and goes through once a reviewed, approved version holds those exact bytes",
+       _bin_code == 0, _bin_out.getvalue()[-300:])
+p4_hook.p4, p4_hook.fetch_revision = _saved_p4, _saved_fetch
 _ws_server.shutdown()
 _ws_server.server_close()
+
+# -- p4: [[exceptions]] at submit time (audit 2026-11-02: never matched) -------
+p4_exc = load_module("agk_p4_exc", Path("vcs_hooks") / "p4_pre_submit.py")
+_EXC_RULES = (b'[mesh]\nmax_triangles = 50000\nmax_material_slots = 4\n\n[[exceptions]]\n'
+              b'path = "creatures/*"\nrule = "max_triangles"\nallow = 80000\n'
+              b'reason = "hero boss"\nowner = "lena"\nexpires = 2099-01-01\n')
+
+
+def _exc_p4(*args, **kwargs):
+    if "describe" in args:
+        return ("Change 77 by lena@ws\n\n\tboss\n\nAffected files ...\n\n"
+                "... //depot/art/creatures/boss_statue.gltf#3 edit\n"
+                "... //depot/art/props/statue_copy.gltf#1 add\n")
+    if "print" in args and args[-1] == "//depot/art/rules.toml#head":
+        Path(args[args.index("-o") + 1]).write_bytes(_EXC_RULES)
+        return ""
+    raise RuntimeError("no such file")
+
+
+p4_exc.p4 = _exc_p4
+p4_exc.fetch_revision = lambda cl, depot, dest: dest.write_bytes((DROP / "boss_statue.gltf").read_bytes())
+with contextlib.redirect_stdout(io.StringIO()) as _exc_out, contextlib.redirect_stderr(_exc_out):
+    _exc_code = p4_exc.main(["77", "lena"])
+_exc_text = _exc_out.getvalue()
+expect("P4: an [[exceptions]] path in the depot's rules.toml applies at submit (creatures/* passes)",
+       _exc_code == 1 and "statue_copy.gltf" in _exc_text
+       and "creatures/boss_statue.gltf" not in _exc_text.split("Submit rejected")[1], _exc_text[-500:])
+with patch.dict(os.environ, {"AGK_REQUIRE_APPROVAL": "True"}):
+    with contextlib.redirect_stdout(io.StringIO()) as _ra_out, contextlib.redirect_stderr(_ra_out):
+        _ra_code = p4_exc.main(["77", "lena"])
+expect("AGK_REQUIRE_APPROVAL=True (any case) turns approval on, never silently off",
+       _ra_code == 1 and "needs --workstation" in _ra_out.getvalue(), _ra_out.getvalue()[-200:])
 
 # -- p4: the project's rules.toml comes from the depot -------------------------
 # The gate reads rules.toml next to the file it is given; the trigger gates a

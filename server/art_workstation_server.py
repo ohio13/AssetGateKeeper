@@ -327,9 +327,10 @@ class Broadcaster:
 class WorkstationError(Exception):
     """A request that should become a 4xx with a readable message."""
 
-    def __init__(self, message: str, status: int = 400) -> None:
+    def __init__(self, message: str, status: int = 400, extra: dict | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.extra = extra or {}
 
 
 import contextlib  # noqa: E402 - kept next to its only use
@@ -1063,7 +1064,7 @@ def _clean_source(source: dict | None) -> tuple[str, str, str]:
 def create_asset(db_path: str | Path, data_dir: Path, filename: str, payload: bytes,
                  uploader: str = "", provenance: dict | None = None,
                  version_of: int | None = None, new_asset: bool = False,
-                 source: dict | None = None) -> dict:
+                 source: dict | None = None, ask: bool = False) -> dict:
     """Store an uploaded file in its own folder, measure it, seed its collision.
 
     Each asset lives in ``assets/<id>/`` with the name it was uploaded under, so
@@ -1076,6 +1077,11 @@ def create_asset(db_path: str | Path, data_dir: Path, filename: str, payload: by
     ``new_asset`` forces a separate one. Re-sending the exact bytes of the
     newest version adds nothing: it returns that version (``unchanged``), with
     a newly sent verdict recorded on it.
+
+    ``ask`` (the viewer): a different file that matches only by NAME is not
+    made a version silently - two unrelated rock.obj files used to merge into
+    one asset (audit 2026-11-02). It is a 409 carrying the existing asset, and
+    the viewer asks "new version or separate asset?" and sends again.
     """
     name = safe_filename(filename)
     suffix = Path(name).suffix.lower()
@@ -1104,6 +1110,14 @@ def create_asset(db_path: str | Path, data_dir: Path, filename: str, payload: by
             latest = connection.execute(
                 "SELECT id, family_id, sha256 FROM assets WHERE family_key = ?"
                 " ORDER BY version DESC, id DESC LIMIT 1", (key,)).fetchone()
+            if latest is not None and ask and not source_path and latest["sha256"] != digest:
+                existing = dict(connection.execute(
+                    "SELECT id, filename, version FROM assets WHERE id = ?",
+                    (latest["id"],)).fetchone())
+                raise WorkstationError(
+                    f"{name} is already in the library (v{existing['version']}): send it as "
+                    "its next version (version_of) or as a separate asset (new_asset)", 409,
+                    {"choice": "version_or_new", "existing": existing})
             if latest is not None:
                 if latest["sha256"] == digest:
                     if verdict_fields[0] or verdict_fields[3]:
@@ -1195,6 +1209,14 @@ def add_sidecar(db_path: str | Path, data_dir: Path, asset_id: int, filename: st
     target = resolve_inside(folder, relative)
     if target is None:
         raise WorkstationError("that path is outside the asset's folder", 400)
+    if target.is_file() and target.read_bytes() == payload:
+        return get_asset(db_path, asset_id)          # already there, byte for byte
+    if _sealed(db_path, asset):
+        # A reviewed (or superseded) version is a record of what was looked at:
+        # its files never change. A different .bin for an approved rock.gltf
+        # used to overwrite it in place - approval intact, old bytes gone
+        # (audit 2026-11-02). The change goes into the next version instead.
+        return _continue_in_new_version(db_path, data_dir, asset, relative, payload)
     if not target.exists() and len(asset_files(data_dir, asset)) > MAX_SIDECARS:
         raise WorkstationError(f"an asset keeps at most {MAX_SIDECARS} files", 413)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1203,6 +1225,59 @@ def add_sidecar(db_path: str | Path, data_dir: Path, asset_id: int, filename: st
     facts = analyse_asset(stored, folder / PREVIEW_DIR)
     _record_facts(db_path, asset_id, asset["file_path"], facts, seed_collision=False)
     return get_asset(db_path, asset_id)
+
+
+def _sealed(db_path: str | Path, asset: dict) -> bool:
+    """Has this version been reviewed, or has a newer one replaced it?"""
+    with open_db(db_path) as connection:
+        reviewed = connection.execute("SELECT 1 FROM reviews WHERE asset_id = ? LIMIT 1",
+                                      (asset["id"],)).fetchone()
+        newer = connection.execute(
+            "SELECT 1 FROM assets WHERE family_id = ? AND version > ? LIMIT 1",
+            (asset["family_id"], asset["version"])).fetchone()
+    return bool(reviewed or newer)
+
+
+def _continue_in_new_version(db_path: str | Path, data_dir: Path, asset: dict,
+                             relative: str, payload: bytes) -> dict:
+    """Put a changed file of a sealed version into the version after it.
+
+    The rest of a batch (a .bin, then its textures) arrives one file at a time,
+    all addressed to the sealed version: they follow into the same new version
+    while it is the newest, unreviewed, and has the same primary file.
+    """
+    with open_db(db_path) as connection:
+        newest = connection.execute(
+            "SELECT * FROM assets WHERE family_id = ? ORDER BY version DESC, id DESC LIMIT 1",
+            (asset["family_id"],)).fetchone()
+        newest = dict(newest) if newest is not None else None
+        newest_reviewed = newest is not None and connection.execute(
+            "SELECT 1 FROM reviews WHERE asset_id = ? LIMIT 1", (newest["id"],)).fetchone()
+    if (newest is not None and int(newest["id"]) != int(asset["id"]) and not newest_reviewed
+            and newest["sha256"] == asset["sha256"] and newest["filename"] == asset["filename"]):
+        target_id = int(newest["id"])
+    else:
+        old_folder = asset_folder(Path(data_dir), asset)
+        primary = (old_folder / asset["filename"]) if old_folder is not None else None
+        if primary is None or not primary.is_file():
+            raise WorkstationError("this version is reviewed and its file is missing; upload "
+                                   "the asset again as a new version", 409)
+        created = create_asset(db_path, data_dir, asset["filename"], primary.read_bytes(),
+                               uploader=asset.get("uploader", ""), version_of=int(asset["id"]),
+                               source={"path": asset.get("source_path", ""),
+                                       "rev": asset.get("source_rev", ""),
+                                       "changelist": asset.get("changelist", "")})
+        target_id = int(created["id"])
+        new_folder = asset_folder(Path(data_dir), created)
+        for other in asset_files(data_dir, asset):
+            if other in (asset["filename"], relative) or new_folder is None:
+                continue
+            destination = new_folder / other
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(old_folder / other, destination)
+    result = add_sidecar(db_path, data_dir, target_id, relative, payload)
+    result["continued_from"] = int(asset["id"])
+    return result
 
 
 # --- #
@@ -1366,35 +1441,92 @@ def set_review(db_path: str | Path, asset_id: int, status: str, note: str = "",
     return next(row for row in list_reviews(db_path, asset_id) if row["id"] == review_id)
 
 
-def approval_for(db_path: str | Path, sha256: str) -> dict:
+_HASHES: dict = {}
+
+
+def _file_sha256(path: Path) -> str:
+    """sha256 of a stored file, remembered while its size and time stay the same."""
+    info = path.stat()
+    key = (str(path), info.st_size, info.st_mtime_ns)
+    if key not in _HASHES:
+        if len(_HASHES) > 50_000:
+            _HASHES.clear()
+        _HASHES[key] = hashlib.sha256(path.read_bytes()).hexdigest()
+    return _HASHES[key]
+
+
+def approval_for(db_path: str | Path, sha256: str, data_dir: Path | None = None) -> dict:
     """Is this exact file content approved? For the Perforce trigger (W2).
 
     Content, not name: an approved rock.fbx says nothing about the different
-    rock.fbx someone is submitting now.
+    rock.fbx someone is submitting now. The content may be an asset or one of
+    the files it carries (a .bin, a .mtl, a texture), so a changelist that only
+    edits rock.bin is asked about too.
+
+    Every version holding those bytes counts, and the NEWEST decision among
+    them wins: approved once under one name and sent back under another is not
+    approved (audit 2026-11-02: the first approval found used to win). With
+    accounts on, only signed-in decisions count; a typed name proves nothing.
     """
     digest = str(sha256 or "").strip().lower()
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise WorkstationError("sha256 must be 64 hex characters", 400)
     with open_db(db_path) as connection:
-        rows = connection.execute(
-            "SELECT a.id, a.filename, a.version, a.family_id FROM assets a WHERE a.sha256 = ?"
-            " ORDER BY a.id DESC", (digest,)).fetchall()
-    for row in rows:
-        reviews = list_reviews(db_path, int(row["id"]))
-        if reviews and reviews[0]["status"] == "approved":
-            return {"approved": True, "asset_id": row["id"], "filename": row["filename"],
-                    "version": row["version"], "reviewer": reviews[0]["reviewer"],
-                    "verified": reviews[0]["verified"], "at": reviews[0]["created_at"]}
-    if rows:
-        reviews = list_reviews(db_path, int(rows[0]["id"]))
-        return {"approved": False, "asset_id": rows[0]["id"], "filename": rows[0]["filename"],
-                "version": rows[0]["version"],
-                "status": reviews[0]["status"] if reviews else "",
-                "reason": (f"{rows[0]['filename']} v{rows[0]['version']} is "
-                           f"{REVIEW_LABELS.get(reviews[0]['status'], 'not reviewed').lower()}"
-                           if reviews else
-                           f"{rows[0]['filename']} v{rows[0]['version']} has not been reviewed")}
-    return {"approved": False, "reason": "this file has never been sent to the Art Workstation"}
+        matches = {int(row["id"]): (dict(row), "") for row in connection.execute(
+            "SELECT id, filename, version, file_path FROM assets WHERE sha256 = ?", (digest,))}
+        accounts_on = connection.execute("SELECT COUNT(*) FROM accounts").fetchone()[0] > 0
+        reviewed = [dict(row) for row in connection.execute(
+            "SELECT DISTINCT a.id, a.filename, a.version, a.file_path FROM assets a"
+            " JOIN reviews r ON r.asset_id = a.id")] if data_dir is not None else []
+    for asset in reviewed:
+        if int(asset["id"]) in matches:
+            continue
+        for relative in asset_files(Path(data_dir), asset):
+            if relative == asset["filename"]:
+                continue
+            folder = asset_folder(Path(data_dir), asset)
+            try:
+                if folder is not None and _file_sha256(folder / relative) == digest:
+                    matches[int(asset["id"])] = (asset, relative)
+                    break
+            except OSError:
+                continue
+    if not matches:
+        return {"approved": False, "reason": (
+            "this file has never been sent to the Art Workstation" if data_dir is None else
+            "no version in the Art Workstation holds this exact file, or none holding it "
+            "has been reviewed (it may never have been sent)")}
+    marks = ",".join("?" * len(matches))
+    with open_db(db_path) as connection:
+        decisions = [dict(row, verified=bool(row["verified"])) for row in connection.execute(
+            f"SELECT id, asset_id, status, reviewer, verified, created_at FROM reviews"
+            f" WHERE asset_id IN ({marks}) ORDER BY id DESC", tuple(matches))]
+    counted = [row for row in decisions if row["verified"] or not accounts_on]
+
+    def named(asset_id: int) -> str:
+        asset, relative = matches[asset_id]
+        return (f"{asset['filename']} v{asset['version']}"
+                + (f" (as its file {relative})" if relative else ""))
+
+    if not counted:
+        newest_id = max(matches)
+        asset = matches[newest_id][0]
+        reason = (f"{named(newest_id)} was approved only under a typed name; with accounts "
+                  "on, a signed-in reviewer must approve it" if decisions
+                  else f"{named(newest_id)} has not been reviewed")
+        return {"approved": False, "asset_id": newest_id, "filename": asset["filename"],
+                "version": asset["version"], "status": decisions[0]["status"] if decisions else "",
+                "reason": reason}
+    newest = counted[0]
+    asset, relative = matches[int(newest["asset_id"])]
+    answer = {"asset_id": newest["asset_id"], "filename": asset["filename"],
+              "version": asset["version"], "file": relative, "reviewer": newest["reviewer"],
+              "verified": newest["verified"], "at": newest["created_at"]}
+    if newest["status"] == "approved":
+        return dict(answer, approved=True)
+    return dict(answer, approved=False, status=newest["status"],
+                reason=f"{named(int(newest['asset_id']))} is "
+                       f"{REVIEW_LABELS.get(newest['status'], newest['status']).lower()}")
 
 
 # --- #
@@ -2591,7 +2723,7 @@ class Handler(BaseHTTPRequestHandler):
             self._who = who
             self._api_get(path)
         except WorkstationError as exc:
-            self._json(exc.status, {"error": str(exc)})
+            self._json(exc.status, {"error": str(exc), **exc.extra})
         except BrokenPipeError:
             pass
         except Exception as exc:                    # never kill the handler thread
@@ -2701,7 +2833,7 @@ class Handler(BaseHTTPRequestHandler):
 
         match = APPROVAL_RE.match(path)
         if match:
-            self._json(200, approval_for(server.db_path, match.group(1)))
+            self._json(200, approval_for(server.db_path, match.group(1), Path(server.data_dir)))
             return
 
         match = ASSET_HEAL_RE.match(path)
@@ -2903,6 +3035,7 @@ class Handler(BaseHTTPRequestHandler):
                     provenance=provenance,
                     version_of=int(version_of) if version_of else None,
                     new_asset=(query.get("new_asset", [""])[0] or "") in ("1", "true", "yes"),
+                    ask=(query.get("ask", [""])[0] or "") in ("1", "true", "yes"),
                     source={"path": query.get("source_path", [""])[0],
                             "rev": query.get("source_rev", [""])[0],
                             "changelist": query.get("changelist", [""])[0]})
@@ -3041,7 +3174,7 @@ class Handler(BaseHTTPRequestHandler):
 
             self._json(404, {"error": "not found", "path": path})
         except WorkstationError as exc:
-            self._json(exc.status, {"error": str(exc)})
+            self._json(exc.status, {"error": str(exc), **exc.extra})
         except BrokenPipeError:
             pass
         except Exception as exc:
@@ -3092,7 +3225,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             self._json(404, {"error": "not found", "path": path})
         except WorkstationError as exc:
-            self._json(exc.status, {"error": str(exc)})
+            self._json(exc.status, {"error": str(exc), **exc.extra})
         except BrokenPipeError:
             pass
         except Exception as exc:

@@ -119,13 +119,18 @@ def check_static_mesh(mesh, budget) -> list:
 
     triangles = 0
     sections = 0
+    read_any = False
     lod_count = mesh.get_num_lods() if hasattr(mesh, "get_num_lods") else 1
     for lod in range(max(1, lod_count)):
         try:
             triangles = max(triangles, int(mesh.get_num_triangles(lod)))
             sections = max(sections, int(mesh.get_num_sections(lod)))
+            read_any = True
         except Exception:  # pragma: no cover - API drift between UE versions
             continue
+    if not read_any:
+        # Not "0 triangles, within budget": an unreadable mesh is unchecked.
+        return ["could not read the triangle count from Unreal, so this mesh was NOT checked"]
 
     if triangles > budget.max_triangles:
         problems.append(f"{triangles:,} triangles exceeds the {budget.max_triangles:,} budget")

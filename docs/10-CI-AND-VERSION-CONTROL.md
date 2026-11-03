@@ -75,18 +75,19 @@ flag.
 
 ### Big repositories: keep the cache between runs
 
-A `--once` run keeps each verdict in `.agk-cache.json` next to the assets.
+A `--once` run keeps each verdict in a cache file outside the asset folder.
 Unchanged files - with the files they reference, under the same rules and the
 same gate version - are not read again, so a nightly audit of a large depot
 checks only what changed since last night. `--jobs N` checks the rest in
 parallel.
 
 ```
-asset-gatekeeper Assets --once --recursive --jobs 0 --cache .ci-cache/agk.json
+asset-gatekeeper Assets --once --recursive --jobs 0 --cache "$RUNNER_TEMP/agk-cache/verdicts.json"
 ```
 
-On GitHub Actions, keep the file with `actions/cache` (key on the commit, with a
-fallback to the last cache: an old entry is harmless, it is re-checked when its
+On GitHub Actions, keep it with `actions/cache/restore` and `actions/cache/save`
+(`if: always()`, so a failing run is cached too), keyed on the commit with a
+fallback to the last cache (the shipped workflow does this): an old entry is harmless, it is re-checked when its
 file changed). On Jenkins or TeamCity, keep it in the agent's workspace or the
 build cache. What invalidates an entry: the file's size and time (when its bytes
 really changed - a checkout that only touches times is hashed and kept), a
@@ -94,7 +95,9 @@ referenced `.mtl`, texture or `.bin` that changed or appeared, any rule, the
 gate's code or version, and an exception reaching its last 14 days. With
 healing on, cached failures are always re-checked.
 
-Do not commit `.agk-cache.json`; add it to `.gitignore` (or `p4ignore`).
+Keep the cache out of the checkout (the runner's temp folder, or the agent's own
+cache): the gate refuses a `--cache` inside the folder it checks, because a cache
+file committed with the assets could otherwise pass anything.
 
 ### Post the verdicts while you are there
 
@@ -195,9 +198,13 @@ Two optional trigger flags connect the submit to the
   content has not been **Approved** there. The rejection names the file and its
   review state. If the workstation cannot be reached, the submit is refused
   (fails closed). Artists upload the file and ask a reviewer before submitting.
+  The files an asset carries (`.bin`, `.mtl`, `.tif`, `.dds`, `.exr`, `.hdr`)
+  are checked too: a changelist that only edits `rock.bin` needs a reviewed,
+  approved version holding that exact `rock.bin`. Use it with accounts on: a
+  typed-name approval stops counting once accounts exist.
 
 Both can come from the environment instead: `AGK_WORKSTATION`,
-`AGK_WORKSTATION_TOKEN`, `AGK_REQUIRE_APPROVAL=1`.
+`AGK_WORKSTATION_TOKEN`, `AGK_REQUIRE_APPROVAL=1` (`true`, `yes` and `on` work too, in any case).
 
 ### Validating a depot path from anywhere
 
@@ -250,7 +257,7 @@ worker.
 
 ```
 [ ] the gate runs with --once --json --no-color
-[ ] big repositories keep .agk-cache.json between runs (--cache), and it is not committed
+[ ] big repositories keep the verdict cache between runs (--cache outside the checkout)
 [ ] exit code 2 is treated differently from 1
 [ ] verdicts are uploaded as an artifact
 [ ] telemetry is posted (so /analytics has CI data too)

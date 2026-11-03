@@ -93,7 +93,7 @@ from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
 from typing import Callable, Optional, Sequence
-from urllib.parse import unquote
+from urllib.parse import quote, unquote
 
 # --- #
 # Optional dependencies - fail with a readable message instead of a traceback.
@@ -1159,8 +1159,24 @@ def check_totals(totals: Sequence[MemoryTotal], verdicts: Sequence[Verdict]) -> 
         members = [verdict for verdict in verdicts if total.matches(verdict.path)]
         used = sum(int(dict(verdict.stats).get("memory_kb", 0)) for verdict in members) * 1024
         limit = int(total.max_mb * 1024 * 1024)
-        LOG.info("total   %s: ~%s of %g MB (%d asset%s)", total.path, _mb(used), total.max_mb,
-                 len(members), "" if len(members) == 1 else "s")
+        # An asset with no estimate (an FBX mesh, a mesh that could not be read)
+        # must not count as 0 MB: a total that silently leaves it out can pass a
+        # folder that is over. Such a total fails, naming them.
+        unmeasured = [verdict for verdict in members
+                      if "memory_kb" not in dict(verdict.stats)]
+        LOG.info("total   %s: ~%s of %g MB (%d asset%s%s)", total.path, _mb(used), total.max_mb,
+                 len(members), "" if len(members) == 1 else "s",
+                 f", {len(unmeasured)} not measured" if unmeasured else "")
+        if unmeasured:
+            names = ", ".join(verdict.path.name for verdict in unmeasured[:5])
+            more = f" and {len(unmeasured) - 5} more" if len(unmeasured) > 5 else ""
+            failed.append(Verdict(Path(f"[total] {total.path}"),
+                                  (f"cannot check the {total.max_mb:g} MB budget for {total.path}: "
+                                   f"{len(unmeasured)} asset(s) have no memory estimate "
+                                   f"({names}{more}; FBX meshes are not estimated yet) - "
+                                   "narrow the path or convert them",),
+                                  f"~{_mb(used)}+?", (("memory_kb", used // 1024),)))
+            continue
         if used > limit:
             failed.append(Verdict(Path(f"[total] {total.path}"),
                                   (f"~{_mb(used)} estimated GPU memory across {len(members)} "
@@ -3472,6 +3488,9 @@ class Gatekeeper:
         self.budget = budget
         self.exceptions = tuple(exceptions)
         self.today = today
+        # file -> the path [[exceptions]] see it under (the P4 trigger's temp copy
+        # stands for a depot file: --exception-path)
+        self.exception_paths: dict = {}
         # Measure mesh memory even without a per-asset budget: [[totals]] add it up.
         self.want_memory = False
         self.healer = healer
@@ -3496,8 +3515,9 @@ class Gatekeeper:
         notes: list[str] = []
         expired: list[str] = []
         changes: dict[str, object] = {}
+        seen_as = self.exception_paths.get(path, path)
         for exception in self.exceptions:
-            if not exception.matches(path):
+            if not exception.matches(seen_as):
                 continue
             if exception.active(today):
                 changes[exception.rule] = exception.allow
@@ -3687,8 +3707,7 @@ class Gatekeeper:
         want_memory = self.budget.max_mesh_mb > 0 or self.want_memory
         want_texel = self.budget.texel_density_max > 0
         if (want_memory or want_texel) and path.suffix.lower() in FBX_SUFFIXES:
-            if self.budget.max_mesh_mb or want_texel:
-                warnings.append("mesh memory and texel density are not measured for FBX yet")
+            warnings.append("mesh memory and texel density are not measured for FBX yet")
         elif want_memory or want_texel:
             try:
                 facts = mesh_facts(path, self.budget.texel_texture)
@@ -4297,6 +4316,40 @@ def describe_budget(budget: Budget) -> str:
 
 CACHE_FILENAME = ".agk-cache.json"
 CACHE_FORMAT = 1
+CACHE_DIR_ENV = "AGK_CACHE_DIR"
+
+
+def default_cache_path(root: Path) -> Path:
+    """Where a folder's verdict cache lives when --cache does not say.
+
+    Never inside the folder being checked: a cache file committed with the
+    assets could carry a "passed" for any file whose hash it names, and a CI
+    run on a fresh checkout would believe it. One file per folder, in the
+    user's cache directory (``%LOCALAPPDATA%\\AssetGatekeeper\\cache`` on
+    Windows, ``~/.cache/asset-gatekeeper`` elsewhere, or ``$AGK_CACHE_DIR``).
+    """
+    base = os.environ.get(CACHE_DIR_ENV)
+    if not base:
+        if os.name == "nt" and os.environ.get("LOCALAPPDATA"):
+            base = str(Path(os.environ["LOCALAPPDATA"]) / "AssetGatekeeper" / "cache")
+        else:
+            base = str(Path(os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache")
+                       / "asset-gatekeeper")
+    try:
+        resolved = str(root.resolve())
+    except OSError:
+        resolved = str(root.absolute())
+    key = hashlib.sha256(resolved.lower().encode("utf-8")).hexdigest()[:20]
+    return Path(base) / f"{root.name or 'root'}-{key}.json"
+
+
+def cache_inside(root: Path, cache: Path) -> bool:
+    """Is the cache file somewhere the assets' authors can write it (the tree)?"""
+    try:
+        cache.resolve().relative_to(root.resolve())
+        return True
+    except (ValueError, OSError):
+        return False
 
 
 def _file_state(path: Path) -> Optional[list]:
@@ -5056,8 +5109,12 @@ def sarif_report(verdicts: Sequence[Verdict], root: Optional[Path] = None) -> st
     for verdict in verdicts:
         if verdict.passed:
             continue
+        name = _relative_name(verdict.path, root)
+        # A URI, not a path: spaces, '#' and non-ASCII are percent-encoded. A folder
+        # total is not a file; it is reported against the rules file that set it.
+        target = RULES_FILENAME if name.startswith("[total] ") else name
         location = {"physicalLocation": {"artifactLocation": {
-            "uri": _relative_name(verdict.path, root), "uriBaseId": "%SRCROOT%"}}}
+            "uri": quote(target.replace("\\", "/"), safe="/"), "uriBaseId": "%SRCROOT%"}}}
         for problem in verdict.problems or ("could not be checked",):
             results.append({
                 "ruleId": "agk/unreadable" if verdict.unreadable else "agk/budget",
@@ -5202,8 +5259,9 @@ def build_parser() -> argparse.ArgumentParser:
                              "is the usual reason)")
     parser.add_argument("--recursive", action="store_true", help="include subfolders")
     parser.add_argument("--cache", metavar="FILE", default=None,
-                        help=f"with --once: where the verdict cache lives (default "
-                             f"<folder>/{CACHE_FILENAME}); unchanged files reuse their verdict")
+                        help="with --once: where the verdict cache lives, outside the folder "
+                             "(default: one file per folder in the user's cache directory, "
+                             f"or ${CACHE_DIR_ENV}); unchanged files reuse their verdict")
     parser.add_argument("--no-cache", action="store_true", dest="no_cache",
                         help="with --once: check every file and leave the cache alone")
     parser.add_argument("--jobs", type=_non_negative_int, default=None, metavar="N",
@@ -5218,6 +5276,10 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --once or a single file: also write junit:gate.xml (Jenkins, "
                              "TeamCity, Horde) or sarif:gate.sarif (GitHub code scanning); "
                              "repeatable")
+    parser.add_argument("--exception-path", metavar="PATH", default=None,
+                        help="with one file: the path [[exceptions]] match it as, relative to "
+                             "the rules file's folder (the Perforce trigger passes the depot "
+                             "path; its temp copy is laid out differently)")
     parser.add_argument("--json", action="store_true",
                         help="one JSON object per file on stdout (used by the DCC plugins)")
     parser.add_argument("--no-color", action="store_true", help="disable ANSI colour")
@@ -5439,6 +5501,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         if not is_candidate(root):
             LOG.error("not a tracked asset type: %s", root.name)
             return 2
+        if getattr(args, "exception_path", None) and exceptions:
+            relative = str(args.exception_path).replace("\\", "/").lstrip("/")
+            if ".." in relative.split("/"):
+                LOG.error("--exception-path must not contain '..'")
+                return 2
+            virtual = Path("/agk-exception-root")
+            gatekeeper.exceptions = tuple(replace(item, base=virtual) for item in exceptions)
+            gatekeeper.exception_paths[root] = virtual / relative
         verdict = gatekeeper.check(root)
         reporter.report(verdict)
         reporter.close()
@@ -5459,7 +5529,14 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             jobs = 1
         cache = None
         if not args.no_cache:
-            cache_path = Path(args.cache).expanduser() if args.cache else watch_dir / CACHE_FILENAME
+            cache_path = (Path(args.cache).expanduser() if args.cache
+                          else default_cache_path(watch_dir))
+            if cache_inside(watch_dir, cache_path):
+                LOG.error("--cache %s is inside the folder being checked: anyone who can "
+                          "commit there could write a cache that passes any file. Put it "
+                          "outside (CI: the runner's temp folder), or use --no-cache",
+                          cache_path)
+                return 2
             cache = VerdictCache(cache_path, watch_dir, rules_fingerprint(gatekeeper),
                                  reuse_failures=healer is None)
             if cache.reset_reason:

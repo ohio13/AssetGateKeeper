@@ -299,8 +299,11 @@ beside the model places nothing; press **Pin to model** again to cancel.
 
 ### Versions
 
-Uploading a file with the same name - or, when the sender gives one, the same
-depot path - adds the **next version** of that asset instead of a second card.
+Uploading a file with the same depot path (the bulk uploader, AssetHealth and
+the Perforce trigger send one) adds the **next version** of that asset instead
+of a second card. Dropping a *different* file whose name is already in the
+library asks first: **New version**, **Separate asset** or **Cancel** - two
+unrelated `rock.obj` files are never merged silently.
 The library shows the newest version (with a `v3` mark); **Versions & review**
 in the inspector lists every version with its triangles and time, and what
 changed from the one before (triangles, vertices, material slots, texture size,
@@ -311,13 +314,18 @@ file size).
   it off.
 * Sending the exact bytes of the newest version again adds nothing: the upload
   says *unchanged* (the bulk uploader prints it per file).
+* A version that has been reviewed, or that a newer version has replaced, is
+  **frozen**: its files never change. A changed `.bin`, `.mtl` or texture sent
+  for it goes into a new version (with the same primary file and the other
+  files copied), and the rest of that batch follows into the same new version.
 * A fixed copy from **Check for fixes** becomes the next version, marked
   *healed*.
 * Each version keeps its own verdict, LODs, collision, notes and sign-off. Links
   (`?asset=<id>`) always open that exact version.
 * Totals on the stats line count the newest version of each asset only.
 * API: `POST /api/assets?filename=` takes `version_of=<id>` (add a version under
-  another name) and `new_asset=1` (force a separate asset);
+  another name), `new_asset=1` (force a separate asset) and `ask=1` (a 409 with
+  `choice` and `existing` instead of versioning a different file by name);
   `GET /api/assets?all_versions=1` lists every version.
 
 ### Sign-off
@@ -334,7 +342,13 @@ it.
   approved: `--require-approval --workstation <url>` (see
   [10 CI and version control](10-CI-AND-VERSION-CONTROL.md#perforce-helix-core)).
   It asks `GET /api/approvals/<sha256>`, and refuses the submit if the
-  workstation cannot be reached.
+  workstation cannot be reached. The answer covers the files an asset carries
+  too (a `.bin`, `.mtl` or texture of a reviewed version), so a changelist that
+  only edits `rock.bin` is checked.
+* When the same bytes have several versions (sent under two names), the
+  **newest decision** among them wins: approved once and sent back later is not
+  approved. Once accounts exist, only signed-in decisions count; earlier
+  typed-name approvals have to be given again by a reviewer who signs in.
 
 ### Named reviewers (accounts)
 

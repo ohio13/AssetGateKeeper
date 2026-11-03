@@ -52,6 +52,10 @@ from pathlib import Path
 from typing import Optional
 
 ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg"}
+#: Files an asset carries that the gate does not measure on their own. With
+#: --require-approval they still need an approved version holding these exact
+#: bytes: a changelist that only edits rock.bin changes an approved rock.gltf.
+APPROVAL_ONLY_SUFFIXES = {".bin", ".mtl", ".tif", ".tiff", ".dds", ".exr", ".hdr"}
 # Actions that put bytes into the depot. "delete" and "move/delete" carry none.
 CONTENT_ACTIONS = {"add", "edit", "branch", "move/add", "integrate", "merge"}
 
@@ -154,7 +158,8 @@ def fetch_revision(changelist: str, depot_path: str, destination: Path) -> None:
 RULES_FILENAME = "rules.toml"
 
 
-def depot_rules_for(depot_path: str, destination_root: Path, cache: dict) -> Optional[Path]:
+def depot_rules_for(depot_path: str, destination_root: Path,
+                    cache: dict) -> tuple[Optional[Path], Optional[str]]:
     """The nearest ``rules.toml`` above a depot file, fetched at ``#head``.
 
     The asset is gated from a temp copy, and the gate reads ``rules.toml`` from
@@ -163,6 +168,9 @@ def depot_rules_for(depot_path: str, destination_root: Path, cache: dict) -> Opt
     time. The project's file is fetched from the depot instead, at its
     *submitted* head revision: a rules.toml edited in the same changelist does
     not loosen its own gate.
+
+    Returns the local copy and the depot folder it came from: ``[[exceptions]]``
+    paths are relative to that folder, and the temp copy's layout is not.
     """
     folder = depot_path.rsplit("/", 1)[0]
     walked = []
@@ -179,11 +187,11 @@ def depot_rules_for(depot_path: str, destination_root: Path, cache: dict) -> Opt
             folder = folder.rsplit("/", 1)[0]
             continue
         if target.is_file():
-            found = target
+            found = (target, folder)
             break
         folder = folder.rsplit("/", 1)[0]
     else:
-        found = None
+        found = (None, None)
     for item in walked:
         cache[item] = found
     return found
@@ -270,7 +278,8 @@ def main(argv: list[str] | None = None) -> int:
                         default=os.environ.get("AGK_WORKSTATION_TOKEN", ""),
                         help="the workstation's --token (or AGK_WORKSTATION_TOKEN)")
     parser.add_argument("--require-approval", action="store_true",
-                        default=os.environ.get("AGK_REQUIRE_APPROVAL", "") in ("1", "true", "yes"),
+                        default=os.environ.get("AGK_REQUIRE_APPROVAL", "").strip().lower()
+                        in ("1", "true", "yes", "on"),
                         help="also refuse any asset whose exact content is not Approved in "
                              "the workstation (needs --workstation)")
     parser.add_argument("--verbose", action="store_true")
@@ -293,8 +302,9 @@ def main(argv: list[str] | None = None) -> int:
         log(f"AssetGatekeeper: cannot read changelist {options.changelist}: {exc}")
         return 1
 
+    wanted = ASSET_SUFFIXES | (APPROVAL_ONLY_SUFFIXES if options.require_approval else set())
     candidates = [(path, action) for path, action in files
-                  if action in CONTENT_ACTIONS and Path(path).suffix.lower() in ASSET_SUFFIXES]
+                  if action in CONTENT_ACTIONS and Path(path).suffix.lower() in wanted]
     if not candidates:
         if options.verbose:
             log(f"AssetGatekeeper: no tracked assets in changelist {options.changelist}")
@@ -320,11 +330,21 @@ def main(argv: list[str] | None = None) -> int:
                 failures.append(f"{depot_path}: could not fetch from depot ({exc})")
                 continue
 
+            if Path(depot_path).suffix.lower() not in ASSET_SUFFIXES:
+                # Not measured by the gate; only its approval is in question.
+                problem = approval_problem(options.workstation, options.workstation_token,
+                                           destination)
+                if problem:
+                    failures.append(f"{depot_path} ({action})\n    {problem}")
+                continue
             per_file = list(extra)
             if not options.rules:
-                rules_file = depot_rules_for(depot_path, temp_root, rules_cache)
+                rules_file, rules_folder = depot_rules_for(depot_path, temp_root, rules_cache)
                 if rules_file is not None:
                     per_file += ["--rules", str(rules_file)]
+                    # [[exceptions]] name paths below the rules file's folder; the
+                    # temp copy is laid out differently, so say where it really is.
+                    per_file += ["--exception-path", depot_path[len(rules_folder):].lstrip("/")]
                 elif options.verbose:
                     log(f"AssetGatekeeper: no rules.toml above {depot_path}; shipped defaults")
             completed = gate(destination, per_file)

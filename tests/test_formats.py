@@ -665,6 +665,13 @@ with patch.dict(os.environ, {"ASSETGATEKEEPER_RULES": ""}):
     _validator.log.clear()
     _result, _errors = _validator.validate_loaded_asset(_light, [])
     expect("a mesh within budget is VALID", _result == "VALID" and _validator.log == [("pass", None)])
+
+    class _Unreadable(_UeMesh):
+        def get_num_triangles(self, lod):
+            raise RuntimeError("API drift")
+    _result, _errors = _validator.validate_loaded_asset(_Unreadable("/Game/Props/SM_Odd", 0, 1), [])
+    expect("a mesh whose triangle count cannot be read fails, never passes as 0 triangles",
+           _result == "INVALID" and "NOT checked" in _errors[0], (_result, _errors))
     _saved_engine = agk_validator.engine_module
 
     def _no_engine():

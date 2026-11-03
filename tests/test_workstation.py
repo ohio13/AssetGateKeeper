@@ -1493,6 +1493,57 @@ expect("engine/lod_shippable.py runs on its own",
        _cli.returncode == 0 and "LOD2:" in _cli.stdout and (WORK / "ship_cli" / "LOD2_globe.glb").is_file(),
        _cli.stdout + _cli.stderr)
 
+print("32. audit fixes: approved versions are frozen, the newest decision wins")
+import hashlib as _hashlib  # noqa: E402
+f_db, f_data = fresh("frozen")
+_cube = _trimesh.creation.box()
+_files = _trimesh.Scene(_cube).export(file_type="gltf")
+_gltf_name = next(name for name in _files if name.endswith(".gltf"))
+_bin_name = next(name for name in _files if name.endswith(".bin"))
+_v1 = aws.create_asset(f_db, f_data, "rock.gltf", _files[_gltf_name])
+aws.add_sidecar(f_db, f_data, _v1["id"], _bin_name, _files[_bin_name])
+_v1_bin = f_data / "assets" / str(_v1["id"]) / _bin_name
+_old_bin = _v1_bin.read_bytes()
+aws.add_sidecar(f_db, f_data, _v1["id"], _bin_name, _old_bin[:-4] + b"\x00\x00\x80\x3f")
+expect("an unreviewed newest version still takes a changed file in place (an artist iterating)",
+       _v1_bin.read_bytes() != _old_bin
+       and len(aws.list_versions(f_db, _v1["id"])) == 1)
+_v1_bin.write_bytes(_old_bin)
+aws.set_review(f_db, _v1["id"], "approved", reviewer="Lead")
+_new_bin = _old_bin[:-4] + b"\x00\x00\x00\x40"
+_after = aws.add_sidecar(f_db, f_data, _v1["id"], _bin_name, _new_bin)
+expect("a changed .bin for an APPROVED version goes into a new version, never over the old one",
+       _after.get("continued_from") == _v1["id"] and _after["version"] == 2
+       and _v1_bin.read_bytes() == _old_bin
+       and (f_data / "assets" / str(_after["id"]) / _bin_name).read_bytes() == _new_bin, _after)
+_tex = aws.add_sidecar(f_db, f_data, _v1["id"], "rock_Albedo.png", png_bytes((10, 20, 30)))
+expect("... and the rest of that batch follows into the same new version (not v3)",
+       _tex["id"] == _after["id"] and sorted(v["version"] for v in aws.list_versions(f_db, _v1["id"])) == [1, 2],
+       [v["version"] for v in aws.list_versions(f_db, _v1["id"])])
+_bin_sha = _hashlib.sha256(_new_bin).hexdigest()
+_old_sha = _hashlib.sha256(_old_bin).hexdigest()
+_ans_new = aws.approval_for(f_db, _bin_sha, f_data)
+_ans_old = aws.approval_for(f_db, _old_sha, f_data)
+expect("approval is asked about the files an asset carries: the new .bin is not approved",
+       _ans_new["approved"] is False and "none holding it has been reviewed" in _ans_new["reason"],
+       _ans_new)
+expect("... the approved version's .bin is approved, and says which file it is",
+       _ans_old["approved"] is True and _ans_old["file"] == _bin_name, _ans_old)
+_same = aws.create_asset(f_db, f_data, "other_name.gltf", _files[_gltf_name], new_asset=True)
+aws.set_review(f_db, _same["id"], "changes_requested", reviewer="Rita")
+_gltf_sha = _hashlib.sha256(_files[_gltf_name]).hexdigest()
+_ans = aws.approval_for(f_db, _gltf_sha, f_data)
+expect("the same bytes approved once and later sent back under another name: NOT approved",
+       _ans["approved"] is False and "changes requested" in _ans["reason"], _ans)
+aws.set_review(f_db, _same["id"], "approved", reviewer="Rita")
+expect("... until the newest decision is an approval", aws.approval_for(f_db, _gltf_sha, f_data)["approved"])
+aws.add_account(f_db, "lead9", "lead", "lead-password-9")
+_ans = aws.approval_for(f_db, _gltf_sha, f_data)
+expect("with accounts on, approvals under a typed name stop counting (fails closed)",
+       _ans["approved"] is False and "typed name" in _ans["reason"], _ans)
+aws.set_review(f_db, _same["id"], "approved", reviewer="Lead Nine", verified=True)
+expect("... and a signed-in approval counts", aws.approval_for(f_db, _gltf_sha, f_data)["approved"])
+
 print("25. versions (W1) and where a file came from (W8)")
 v_db, v_data = fresh("versions")
 v1 = aws.create_asset(v_db, v_data, "rock.obj", OBJ.encode())
@@ -1613,7 +1664,7 @@ expect("... and why another file is not", status == 200 and not approval["approv
        and "not been reviewed" in approval["reason"], approval)
 status, approval = vc.json(f"/api/approvals/{'0' * 64}")
 expect("... including a file it has never seen", not approval["approved"]
-       and "never been sent" in approval["reason"])
+       and "never have been sent" in approval["reason"])
 status, _ = vc.call(f"/api/assets/{nv['id']}/review", "POST", b'{"status":"approved","reviewer":"x"}',
                     headers={"Origin": "https://evil.example", "Content-Type": "text/plain"})[:2]
 expect("another website cannot sign off", status == 403)

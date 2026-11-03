@@ -1,7 +1,36 @@
 # Since v1.1.1 (unreleased, on `main`)
 
+* **Independent audit of this round (2 Nov), all fixed and tested.**
+  * The verdict cache lived in the folder being checked, so a committed
+    `.agk-cache.json` could pass an over-budget file in CI. It now lives in the
+    user's cache directory (CI: the runner's temp folder), and a `--cache`
+    inside the checked folder is refused.
+  * A changed `.bin` sent for an approved `.gltf` overwrote the approved
+    version's file, approval intact. Reviewed or superseded versions are now
+    frozen; the change becomes a new version. `--require-approval` checks
+    `.bin`/`.mtl`/texture edits too.
+  * `GET /api/approvals` answered with the first approval found; the newest
+    decision across every version with those bytes now wins, and with accounts
+    on only signed-in decisions count.
+  * Perforce: `[[exceptions]]` never matched at submit (the temp copy's layout);
+    the trigger now passes the depot path (`--exception-path`).
+    `AGK_REQUIRE_APPROVAL=True` turned approval off; any case works now.
+  * `[[totals]]` counted an FBX as 0 MB; it now fails the total, naming it.
+  * Dropping a different file with a name already in the library merged it as a
+    version; the viewer now asks (New version / Separate asset).
+  * The budget planner's Save and its exception buttons always sent `Bearer
+    undefined` (`data--token`): every save with a token was a 401. This bug
+    predates 1.1.
+  * Unreal: a mesh whose triangle count could not be read passed as 0
+    triangles, in the new validator and in the older import hook; it now fails
+    as not checked.
+  * The alert digest walked timestamps to the second and could lose or repeat a
+    failure; it walks verdict ids now. SARIF paths are percent-encoded URIs and
+    a folder total points at `rules.toml`.
+
 * **Big repositories (roadmap phase 4).**
-  * `--once` keeps verdicts in `.agk-cache.json`: a file that has not changed -
+  * `--once` keeps verdicts in a cache outside the folder (refused inside it):
+    a file that has not changed -
     nor anything it references, the rules or the gate - is not read again (600
     heavy glTF/GLB: 16 s, then 0.7 s). `--no-cache`, `--cache FILE`; the GitHub
     workflow keeps it between runs with `actions/cache`.

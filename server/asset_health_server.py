@@ -1031,6 +1031,32 @@ def send_digest(db_path: str | Path, notifier: "Notifier", people: "list[Person]
             " (SELECT group_concat(p.message, char(10)) FROM problems p WHERE p.verdict_id = v.id)"
             " AS reasons FROM verdicts v WHERE v.passed = 0 AND v.received_at > ?"
             " ORDER BY v.id", (since,)).fetchall()
+    return _send_digest_rows(rows, notifier, people, workstation_url)
+
+
+def send_digest_after(db_path: str | Path, notifier: "Notifier", people: "list[Person] | tuple",
+                      after_id: int, workstation_url: str = "") -> tuple[int, int]:
+    """The digest of every failure with an id above ``after_id``: (messages, last id).
+
+    Ids, not timestamps: received_at has whole seconds, so a window boundary
+    in the middle of a second lost or repeated failures (audit 2026-11-02).
+    """
+    with open_db(db_path) as connection:
+        rows = connection.execute(
+            "SELECT v.id, v.filename, v.filepath, v.username, v.hostname,"
+            " (SELECT group_concat(p.message, char(10)) FROM problems p WHERE p.verdict_id = v.id)"
+            " AS reasons FROM verdicts v WHERE v.passed = 0 AND v.id > ?"
+            " ORDER BY v.id", (int(after_id),)).fetchall()
+    last = max([int(row["id"]) for row in rows], default=int(after_id))
+    return _send_digest_rows(rows, notifier, people, workstation_url), last
+
+
+def latest_verdict_id(db_path: str | Path) -> int:
+    with open_db(db_path) as connection:
+        return int(connection.execute("SELECT COALESCE(MAX(id), 0) FROM verdicts").fetchone()[0])
+
+
+def _send_digest_rows(rows, notifier, people, workstation_url: str) -> int:
     groups: dict = {}
     for row in rows:
         person = person_for(people, row["username"], row["hostname"])
@@ -1042,7 +1068,7 @@ def send_digest(db_path: str | Path, notifier: "Notifier", people: "list[Person]
 
 def _digest_loop(server) -> None:
     """Sleep until HH:MM local time, send the digest, repeat."""
-    last = _utc_now()
+    last = latest_verdict_id(server.db_path)     # only what arrives from now on
     while not server.stopping:
         hour, minute = server.digest_at
         now = datetime.now()
@@ -1053,13 +1079,11 @@ def _digest_loop(server) -> None:
             time.sleep(min(30.0, max(0.5, (target - datetime.now()).total_seconds())))
         if server.stopping:
             return
-        started = _utc_now()
         try:
-            send_digest(server.db_path, server.notifier, server.people, last,
-                        server.workstation_url)
+            _sent, last = send_digest_after(server.db_path, server.notifier, server.people,
+                                            last, server.workstation_url)
         except Exception as exc:     # a digest must never take the server down
             print(f"asset_health: digest failed ({type(exc).__name__}): {exc}", file=sys.stderr)
-        last = started
 
 
 def alert_scope(project_id: int | None) -> str:
@@ -2027,7 +2051,7 @@ def render_planner(db_path: str | Path, project_id: int, project_name: str,
     <code>--remote-rules</code> on its next run. No TOML, no build step.</div>
   <nav><a href="/dashboard?project_id={project_id}">&larr; Back to the dashboard</a></nav>
 
-  <form class="form" id="budget-form" data-project="{project_id}" data--token="{_e(token)}">
+  <form class="form" id="budget-form" data-project="{project_id}" data-token="{_e(token)}">
     <div class="field">
       <label for="project">Project</label>
       <select id="project" disabled>{options}</select>
@@ -2091,7 +2115,7 @@ def render_planner(db_path: str | Path, project_id: int, project_name: str,
     <div class="notice" id="notice"></div>
   </form>
 
-  <section class="form" id="exceptions" data-project="{project_id}" data--token="{_e(token)}">
+  <section class="form" id="exceptions" data-project="{project_id}" data-token="{_e(token)}">
     <h2>Exceptions</h2>
     <div class="hint">A named, dated waiver for some paths: "the boss may use 80,000
       triangles until alpha". Each needs a reason, an owner and an end date; the day

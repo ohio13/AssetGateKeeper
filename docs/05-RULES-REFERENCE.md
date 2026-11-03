@@ -211,6 +211,11 @@ format = "astc8x8"
   relative to the folder holding `rules.toml`, `*` crossing folders). A total
   over budget fails the run - even when every file passes - and is a failing
   case named `[total] <path>` in `--report junit`. Each total's use is printed.
+  An asset under the path with no memory estimate (an FBX mesh, for now) fails
+  the total, naming it, instead of counting as 0 MB: narrow the path or convert it.
+* **At submit time** the Perforce trigger matches `[[exceptions]]` paths against
+  the depot path below the folder of the `rules.toml` it used, as a local run
+  does (`--exception-path`).
 * These are **estimates** in the engine's terms; check a few against the
   engine's own numbers (Unreal: Size Map, `memreport`) before tightening a
   budget on them. `max_texture_mb` and `max_mesh_mb` can be relaxed per asset

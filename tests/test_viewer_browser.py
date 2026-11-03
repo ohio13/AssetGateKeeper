@@ -338,6 +338,30 @@ with sync_playwright() as playwright:
                            timeout=15000)
     expect("re-uploading the same file says it is unchanged", "unchanged" in status(), status())
 
+    print("7b. a different file with a name already in the library (audit 2026-11-02)")
+    (WORK / "dup").mkdir(exist_ok=True)
+    (WORK / "dup" / "second.glb").write_bytes((WORK / "one_tri.glb").read_bytes())
+    page.set_input_files("#upload", str(WORK / "dup" / "second.glb"))
+    page.wait_for_selector("#version-choice:not([hidden])", timeout=10000)
+    expect("the viewer asks: next version, or a separate asset?",
+           "already in the library" in page.locator("#version-choice").inner_text())
+    page.click("#vc-new")
+    page.wait_for_function("() => !document.getElementById('status').textContent.startsWith('uploading')",
+                           timeout=15000)
+    page.wait_for_timeout(500)
+    expect("Separate asset keeps both in the library",
+           page.locator("#asset-list").inner_text().count("second.glb") == 2,
+           page.locator("#asset-list").inner_text()[:300])
+    (WORK / "dup" / "second.glb").write_bytes((WORK / "ball_LOD3.glb").read_bytes()[:-4] + b"    ")
+    page.set_input_files("#upload", str(WORK / "dup" / "second.glb"))
+    page.wait_for_selector("#version-choice:not([hidden])", timeout=10000)
+    page.click("#vc-version")
+    page.wait_for_function("() => !document.getElementById('status').textContent.startsWith('uploading')",
+                           timeout=15000)
+    page.wait_for_timeout(500)
+    expect("New version makes it the next version of the newest same-named asset",
+           "v2" in status() or "version" in status(), status())
+
     print("8. collision")
     pick(ids["cube"])
     page.select_option("#collision-kind", "hull")

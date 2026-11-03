@@ -714,6 +714,14 @@ expect("the digest sends one message per person", sent == 2 and len(_digest) == 
 expect("... listing that person's failures with links",
        any(text.startswith("<@U012LENA> - 2 assets failed") and "third.gltf" in text
            and "viewer?find=" in text for text in _digest), _digest)
+_newest = ahs.latest_verdict_id(g7_db)
+with patch("urllib.request.urlopen", side_effect=fake_post):
+    posted.clear()
+    _sent_after, _last = ahs.send_digest_after(g7_db, _digest_notifier, people, 0, "")
+    _again, _last2 = ahs.send_digest_after(g7_db, _digest_notifier, people, _last, "")
+    _digest_notifier.close(timeout=5.0)
+expect("the daily digest walks verdict ids: everything once, nothing twice, none lost in a second",
+       _sent_after == 2 and _last == _newest and _again == 0 and _last2 == _last, (_sent_after, _last, _again))
 expect("in digest mode, a failure sends nothing at once",
        ahs.build_server("127.0.0.1", 0, g7_db, quiet=True, notifier=None,
                         digest_at=(9, 0)).digest_at == (9, 0))
@@ -742,6 +750,8 @@ PLAN_AUTH = {"Authorization": f"Bearer {plan_tok}"}
 status, _, _ = request(pport, f"/budget-planner?project_id={plan_pid}")
 expect("the planner needs a token", status == 401, str(status))
 status, body, _ = request(pport, f"/budget-planner?project_id={plan_pid}&token={plan_tok}")
+expect("the planner's forms carry the token as data-token (data--token reached JS as dataset.Token: every save was a 401)",
+       b'data-token="' in body and b"data--token" not in body)
 planner = body.decode("utf-8")
 expect("the planner renders", status == 200 and "Budget planner" in planner, str(status))
 expect("it has the triangle slider",

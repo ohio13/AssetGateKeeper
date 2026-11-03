@@ -318,3 +318,11 @@ body.rules-open { --rail: 430px; }
 .lod-row .kind { grid-column: 2 / -1; color: var(--muted); font-size: 11px; margin-top: -4px; }
 label.check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted);
   text-transform: none; letter-spacing: 0; font-weight: 400; }
+
+/* same name, different file: version or separate asset? */
+.version-choice { position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%);
+  z-index: 5; max-width: min(520px, calc(100% - 32px)); background: var(--panel-2);
+  border: 1px solid var(--accent); border-radius: 10px; padding: 12px 14px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, .45); display: grid; gap: 10px; }
+.version-choice[hidden] { display: none; }
+.version-choice .row { display: flex; gap: 8px; flex-wrap: wrap; }

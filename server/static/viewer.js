@@ -75,8 +75,12 @@ async function api(path, options = {}) {
   }
   if (!response.ok) {
     let detail = response.statusText;
-    try { detail = (await response.json()).error || detail; } catch (_) { /* not JSON */ }
-    throw new Error(detail);
+    let body = null;
+    try { body = await response.json(); detail = body.error || detail; } catch (_) { /* not JSON */ }
+    const error = new Error(detail);
+    error.status = response.status;
+    error.body = body;
+    throw error;
   }
   return response;
 }
@@ -1423,17 +1427,53 @@ renderer.domElement.addEventListener("pointerup", (event) => {
 
 /* - upload */
 
-async function uploadFile(file) {
-  const query = new URLSearchParams({
+/* A different file with a name already in the library: ask, never merge
+ * silently - two unrelated rock.obj files used to become v1 and v2 of one
+ * asset, and one of them vanished from the library (audit 2026-11-02). */
+function askVersionChoice(name, existing) {
+  const box = $("version-choice");
+  $("version-choice-text").textContent =
+    `${name} is already in the library (v${existing.version}). Is this file its next version, `
+    + "or a different asset with the same name?";
+  box.hidden = false;
+  return new Promise((resolve) => {
+    const done = (answer) => {
+      box.hidden = true;
+      ["vc-version", "vc-new", "vc-cancel"].forEach((id) => { $(id).onclick = null; });
+      resolve(answer);
+    };
+    $("vc-version").onclick = () => done("version");
+    $("vc-new").onclick = () => done("new");
+    $("vc-cancel").onclick = () => done("cancel");
+  });
+}
+
+async function uploadFile(file, choice = null) {
+  const params = {
     filename: file.name,
     uploader: $("note-author").value.trim() || "anonymous",
-  });
-  const response = await api(`/api/assets?${query}`, {
-    method: "POST",
-    headers: { "Content-Type": "application/octet-stream" },
-    body: file,
-  });
-  return response.json();
+  };
+  if (choice && choice.version_of) params.version_of = String(choice.version_of);
+  else if (choice && choice.new_asset) params.new_asset = "1";
+  else params.ask = "1";
+  const query = new URLSearchParams(params);
+  try {
+    const response = await api(`/api/assets?${query}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/octet-stream" },
+      body: file,
+    });
+    return response.json();
+  } catch (error) {
+    const body = error.body || {};
+    if (!choice && error.status === 409 && body.choice === "version_or_new" && body.existing) {
+      const answer = await askVersionChoice(file.name, body.existing);
+      if (answer === "cancel") throw new Error("upload cancelled");
+      return uploadFile(file, answer === "version" ? { version_of: body.existing.id }
+                                                   : { new_asset: true });
+    }
+    throw error;
+  }
 }
 
 async function uploadSidecar(assetId, file, written) {
