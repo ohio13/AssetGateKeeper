@@ -265,7 +265,10 @@ with sync_playwright() as playwright:
     expect("a note can be added to an unmeasured asset", page.locator("#note-submit").is_enabled())
     page.fill("#note-text", "needs a re-export")
     page.locator("#note-submit").click()
-    page.wait_for_timeout(600)
+    for _ in range(50):                    # wait for it, not a fixed time (slow CI runners)
+        if "needs a re-export" in notes_of(ids["blend"]):
+            break
+        page.wait_for_timeout(100)
     expect("... and it is saved", "needs a re-export" in notes_of(ids["blend"]), notes_of(ids["blend"]))
     pick(ids["junk"])
     expect("a corrupt .glb is called broken, not unverified",
@@ -657,9 +660,10 @@ with sync_playwright() as playwright:
     import io as _io
     from PIL import Image as _Image
     _shot_image = _Image.open(_io.BytesIO(_shot_bytes))
+    _small = _shot_image.convert("L").resize((32, 32))
     expect("... the screenshot is a JPEG of the view, at most 800 px wide, not a blank frame",
            _shot_type.startswith("image/jpeg") and _shot_image.width <= 800
-           and len(set(_shot_image.convert("L").resize((32, 32)).getdata())) > 4,
+           and len(set((getattr(_small, "get_flattened_data", None) or _small.getdata)())) > 4,
            (_shot_type, _shot_image.size))
     _tip = marker_tip()
     expect("the numbered pin sits where the model was clicked",
