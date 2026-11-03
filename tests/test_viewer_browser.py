@@ -207,6 +207,17 @@ with sync_playwright() as playwright:
     def hint_visible():
         return page.locator("#viewport-hint").is_visible()
 
+    def until(condition, timeout=15000):
+        """Wait for a page condition instead of a fixed time (CI runners vary).
+        On timeout carry on: the expect() that follows reports what it saw."""
+        try:
+            page.wait_for_function(condition, timeout=timeout)
+        except Exception:
+            pass
+
+    LOD_SHOWN = ("(level) => { const s = document.getElementById('status').textContent;"
+                 " return s.startsWith('error') || (s.includes(level) && !s.startsWith('loading')); }")
+
     def pick(asset_id):
         # Wait for *this* asset: the status bar names it once it has settled.
         name = page.locator(f'#asset-list .asset[data-id="{asset_id}"] .name').inner_text()
@@ -228,11 +239,11 @@ with sync_playwright() as playwright:
     expect("a .gltf with an embedded data: buffer loads (CSP refused it)",
            status() == "embedded.gltf" and not hint_visible(), status())
     page.locator("#lod-buttons button[data-level='LOD1']").click()
-    page.wait_for_timeout(800)
+    until(f"() => ({LOD_SHOWN})('LOD1')")
     expect("a .gltf LOD loads", not status().startswith("error"), status())
     pick(ids["ball"])
     page.locator("#lod-buttons button[data-level='LOD1']").click()
-    page.wait_for_timeout(800)
+    until(f"() => ({LOD_SHOWN})('LOD1')")
     expect("an .obj LOD loads (was parsed as glTF)", not status().startswith("error")
            and "LOD1" in readout(), (status(), readout()))
 
@@ -246,7 +257,7 @@ with sync_playwright() as playwright:
            and ".glb converted from this FBX" in warning.inner_text(), warning.inner_text()[:80])
     expect("its numbers are the gate's, from the FBX (768 tris)", "768 tris" in readout(), readout())
     page.locator("#lod-buttons button[data-level='LOD1']").click()
-    page.wait_for_timeout(800)
+    until(f"() => ({LOD_SHOWN})('LOD1')")
     expect("an FBX LOD loads and keeps the warning", warning.is_visible()
            and not status().startswith("error") and "LOD1" in readout(), (status(), readout()))
     pick(ids["cube"])
@@ -369,9 +380,12 @@ with sync_playwright() as playwright:
     pick(ids["cube"])
     page.select_option("#collision-kind", "hull")
     page.click("#collision-derive")
-    page.wait_for_timeout(800)
-    with urllib.request.urlopen(f"{BASE}/api/assets/{ids['cube']}/collision.obj") as response:
-        hull_obj = response.read().decode()
+    for _ in range(100):                   # until the server has the hull (not a fixed time)
+        with urllib.request.urlopen(f"{BASE}/api/assets/{ids['cube']}/collision.obj") as response:
+            hull_obj = response.read().decode()
+        if sum(line.startswith("f ") for line in hull_obj.splitlines()) == 12:
+            break
+        page.wait_for_timeout(100)
     expect("a hull rebuilt from the mesh exports (was 413)",
            sum(line.startswith("f ") for line in hull_obj.splitlines()) == 12,
            sum(line.startswith("f ") for line in hull_obj.splitlines()))
@@ -441,7 +455,7 @@ with sync_playwright() as playwright:
            "LOD3 of ball.obj" in status() and page.locator("#asset-list .asset").count() == count_before,
            status())
     page.locator("#lod-buttons button[data-level='LOD4']").click()
-    page.wait_for_timeout(600)
+    until(f"() => ({LOD_SHOWN})('LOD4')")
     expect("viewing an uploaded LOD says so", "your LOD (uploaded)" in readout(), readout())
     page.locator("#lod-list .lod-row[data-level='LOD4'] .del").click()
     # Wait for the result, not a fixed time: 800 ms was too short on a busy CI runner.
@@ -755,7 +769,8 @@ with sync_playwright() as playwright:
                            timeout=15000)
     request = urllib.request.Request(f"{BASE}/api/assets/{ids['embedded']}", method="DELETE")
     urllib.request.urlopen(request).read()
-    page.wait_for_timeout(2500)
+    until("() => document.getElementById('viewport-hint').offsetParent !== null"
+          " && document.getElementById('collision-info').textContent.includes('No asset selected')")
     expect("deleting the open asset clears the screen",
            hint_visible() and "No asset selected" in page.locator("#collision-info").inner_text()
            and page.locator("#lod-buttons button").count() == 0,

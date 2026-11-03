@@ -1,5 +1,13 @@
 # Since v1.1.1 (unreleased, on `main`)
 
+* **Check for fixes searched the system temp folder (found 3 Nov).** The
+  Workstation heals a throwaway copy of the asset, and the healer looked for
+  other files referencing the texture in that copy's parent - the system temp
+  folder. With more than 5,000 folders there it refused the fix ("could not
+  finish checking"); with fewer it could take a minute, or refuse because some
+  other program's FBX named the texture. It now searches only the copy (0.02 s).
+  Since 1.1.1 (b957b56).
+
 * **Independent audit of this round (2 Nov), all fixed and tested.**
   * The verdict cache lived in the folder being checked, so a committed
     `.agk-cache.json` could pass an over-budget file in CI. It now lives in the

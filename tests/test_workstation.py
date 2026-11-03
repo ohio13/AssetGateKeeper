@@ -1221,6 +1221,31 @@ expect("with a project rules.toml, the fix is checked against it (and says so)",
 h_server.shutdown()
 h_server.server_close()
 
+print("24b. Check for fixes never searches the system temp folder (found 3 Nov)")
+import tempfile as _tempfile  # noqa: E402
+# A temp folder like a real workstation's: more folders than the healer's
+# outside search allows. It sits in the system temp folder, where no project
+# marker is above it, as the Workstation's throwaway copies do.
+_crowded = Path(_tempfile.mkdtemp(prefix="agk-crowded-temp-"))
+for _n in range(5_100):
+    (_crowded / f"dir{_n}").mkdir()
+t_db2, t_data2 = fresh("heal_temp")
+_npot = _io.BytesIO()
+Image.new("RGB", (100, 60), (110, 100, 90)).save(_npot, format="PNG")
+_bark = aws.create_asset(t_db2, t_data2, "bark.png", _npot.getvalue())
+_saved_tempdir = _tempfile.tempdir
+_tempfile.tempdir = str(_crowded)
+try:
+    _t0 = time.monotonic()
+    _preview = aws.heal_asset(t_db2, t_data2, _bark["id"], False)
+    _took = time.monotonic() - _t0
+finally:
+    _tempfile.tempdir = _saved_tempdir
+    shutil.rmtree(_crowded, ignore_errors=True)
+expect("a crowded temp folder neither blocks the fix nor slows it down",
+       _preview["healable"] and "resized 100x60 -> 128x64" in _preview["changes"] and _took < 5,
+       (_preview, round(_took, 2)))
+
 print("29. textured FBX previews (W7)")
 t_db, t_data = fresh("fbx_textured")
 _fx = ROOT / "tests" / "fixtures" / "fbx"

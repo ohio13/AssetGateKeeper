@@ -482,7 +482,8 @@ class Healer:
     def __init__(self, budget, *, textures: bool = True, meshes: bool = True,
                  texture_mode: str = "resize", root: Optional[Path] = None,
                  resolve_references: Optional[Callable[[Path], list]] = None,
-                 backups: bool = True, dry_run: bool = False, jpg: bool = False) -> None:
+                 backups: bool = True, dry_run: bool = False, jpg: bool = False,
+                 search_outside: bool = True) -> None:
         if texture_mode not in TEXTURE_MODES:
             raise HealError(f"texture_mode must be one of {', '.join(TEXTURE_MODES)}, "
                             f"got {texture_mode!r}")
@@ -498,6 +499,11 @@ class Healer:
         # Shared/Textures - instead of only the texture's folder and its parent,
         # which missed most real layouts and broke the rename quietly.
         self.root = Path(root) if root else None
+        # False when ``root`` already holds everything that can reference the
+        # file: the Art Workstation heals a throwaway copy of one asset's folder,
+        # and the "project boundary" above that copy is the system temp folder -
+        # thousands of other programs' files, searched on every Check for fixes.
+        self.search_outside = search_outside
         # The gate's own reference resolver (FBX and GLB included). With it, a
         # binary scene only blocks a rename when it really points at *this*
         # texture; without it, any byte match on the name does.
@@ -707,8 +713,9 @@ class Healer:
         match on the file name is enough to refuse (false positives only cost a
         heal, a false negative costs a broken asset).
         """
-        roots = [root for root in (self.root, _project_boundary(self.root.resolve())
-                                   if self.root is not None else None) if root is not None]
+        outside = (_project_boundary(self.root.resolve())
+                   if self.root is not None and self.search_outside else None)
+        roots = [root for root in (self.root, outside) if root is not None]
         if not roots:
             roots = [texture.parent, texture.parent.parent]
         needles = {texture.name.encode("utf-8"), quote(texture.name).encode("utf-8")}
@@ -752,7 +759,7 @@ class Healer:
         not block the heal. An incomplete search is treated as a match: the
         safe answer to "might this orphan a mesh?" is not "probably not".
         """
-        if self.root is None:
+        if self.root is None or not self.search_outside:
             return ""
         try:
             root = self.root.resolve()

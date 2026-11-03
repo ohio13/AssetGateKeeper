@@ -1348,8 +1348,10 @@ def heal_asset(db_path: str | Path, data_dir: Path, asset_id: int, apply: bool,
                 raise WorkstationError(answer["reason"], 409)
             return answer
         try:
+            # The copy holds every file of the asset; nothing outside it - the
+            # system temp folder - can reference it, so do not search there.
             healer = agk.load_healer(budget, settings, root=scratch, backups=False,
-                                     dry_run=not apply)
+                                     dry_run=not apply, search_outside=False)
         except agk.ConfigError as exc:
             raise WorkstationError(str(exc), 503) from exc
         verdict = agk.Gatekeeper(budget, healer=healer).check(staged)

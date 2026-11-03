@@ -68,7 +68,7 @@ produced, either in development or in a real studio run - not a guess.
 |---|---|---|
 | `pip install .` fails building a wheel | the build backend imported a module that reconfigures stdout | fixed in 1.0.0; upgrade |
 | `%~dp0` in a `.bat` swallow the next argument | `%~dp0` ends in a backslash and escapes the closing quote | use `"%~dp0."` |
-| `python` is 2.7 | old Windows image | `py -3` |
+| `pip install` says `You are using pip version 18.1`, then `ImportError: No module named util` (or the tests fail with `SyntaxError` on an f-string) | `python` on the PATH is Python 2.7 - often left by an older tool - not your Python 3 | check with `python --version` and `where.exe python`; use `py -3 -m pip ...` / `py -3 tools\certify.py`, or in PowerShell `Set-Alias python "<path to Python 3.11>\python.exe"` for the session. The `.bat` launchers already prefer `py -3` |
 | `trimesh` installed but still "unverified" | installed into a different interpreter than the one running the gate | `asset-gatekeeper --doctor` prints the interpreter it uses |
 
 ## Getting help
