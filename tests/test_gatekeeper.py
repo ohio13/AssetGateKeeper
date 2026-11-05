@@ -1173,6 +1173,33 @@ expect("a 1,000-vertex static mesh with one UV set: 24 bytes a vertex + 16-bit i
        agk.mesh_memory_bytes(1000, 1500, 1, False) == 1000 * 24 + 1500 * 3 * 2)
 expect("... skinned, two UV sets, over 65,535 vertices: 36 bytes + 32-bit indices",
        agk.mesh_memory_bytes(70000, 100000, 2, True) == 70000 * 36 + 100000 * 3 * 4)
+expect("Unreal adds a lightmap UV set and a depth-only index buffer: 28 bytes + 2 index buffers",
+       agk.mesh_memory_bytes(1000, 1500, 1, False, lightmap_uv=True, depth_index_buffer=True)
+       == 1000 * 28 + 1500 * 3 * 2 * 2)
+_n2_budget = agk.Budget()
+expect("... and those are the defaults (Unreal's own import settings)",
+       _n2_budget.mesh_lightmap_uv and _n2_budget.mesh_depth_index_buffer)
+# N2, 4 Nov 2026: five OBJ meshes in UE 5.3.2, Size Map in KB, vertex and
+# triangle counts identical to the gate's. The old formula was 37-53% low.
+_n2_unreal = {(570, 1000): 26.12, (2650, 5000): 132.776, (6260, 12000): 332.445,
+              (12340, 24000): 629.982, (24470, 48000): 1.259 * 1024}
+_n2_error = {key: agk.mesh_memory_bytes(key[0], key[1], 1, False, False, True, True) / 1024 / kb - 1
+             for key, kb in _n2_unreal.items()}
+expect("calibrated: all five N2 meshes within 10% of Unreal's Size Map (they are within 7%)",
+       all(abs(error) < 0.07 for error in _n2_error.values()),
+       {key: f"{error:+.1%}" for key, error in _n2_error.items()})
+_n2_rules = scratch / "n2_rules.toml"
+_n2_rules.write_text("[mesh]\nmax_mb = 1\nlightmap_uv = false\ndepth_index_buffer = false\n")
+_n2_off = agk.Budget.from_mapping(agk.parse_rules(_n2_rules))
+expect("an engine without them (Unity, Godot) switches both off in rules.toml",
+       not _n2_off.mesh_lightmap_uv and not _n2_off.mesh_depth_index_buffer)
+_n2_rules.write_text("[mesh]\nlightmap_uv = \"yes\"\n")
+try:
+    agk.Budget.from_mapping(agk.parse_rules(_n2_rules))
+    _n2_refused = False
+except agk.ConfigError:
+    _n2_refused = True
+expect("... and a value that is not true/false is refused, not guessed", _n2_refused)
 Image.new("RGB", (2048, 2048), (120, 90, 70)).save(mem_dir / "Props" / "wall_Albedo.png")
 Image.new("RGB", (2048, 2048), (128, 128, 255)).save(mem_dir / "Props" / "wall_Normal.png")
 _mb_budget = agk.Budget(max_texture_mb=4, pbr_check=False)
@@ -1899,6 +1926,116 @@ os.environ["AGK_GATEKEEPER"] = str(ROOT_MODULE_DIR / "asset_gatekeeper.py")
 expect("AGK_GATEKEEPER overrides the script path",
        p4_hook.gatekeeper_command()[-1].endswith("asset_gatekeeper.py"))
 del os.environ["AGK_GATEKEEPER"]
+
+# -- p4: a mesh and its texture in one changelist (the developer, 4 Nov 2026) ----------
+# P4V submitted crate.obj + crate.mtl + T_Crate_Albedo.png together and the
+# trigger refused the .obj: "missing reference 'T_Crate_Albedo.png'". Each file
+# was gated the moment it was fetched, so the .obj went before its texture.
+p4_ref = load_module("agk_p4_ref", Path("vcs_hooks") / "p4_pre_submit.py")
+_ref_dir = heal_root / "p4_refs"
+_ref_dir.mkdir()
+_CUBE_V = "v 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\nv 0 0 1\nv 1 0 1\nv 1 1 1\nv 0 1 1\n"
+_CUBE_T = "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\n"
+_CUBE_F = ("f 1/1 2/2 3/3\nf 1/1 3/3 4/4\nf 5/1 7/3 6/2\nf 5/1 8/4 7/3\nf 1/1 5/2 6/3\nf 1/1 6/3 2/4\n"
+           "f 2/1 6/2 7/3\nf 2/1 7/3 3/4\nf 3/1 7/2 8/3\nf 3/1 8/3 4/4\nf 4/1 8/2 5/3\nf 4/1 5/3 1/4\n")
+_REF_BYTES = {
+    "//depot/art/props/crate.obj":
+        ("mtllib crate.mtl\nusemtl wood\n" + _CUBE_V + _CUBE_T + _CUBE_F).encode(),
+    "//depot/art/props/crate.mtl": b"newmtl wood\nKd 1 1 1\nmap_Kd T_Crate_Albedo.png\n",
+}
+_png_buffer = io.BytesIO()
+Image.new("RGB", (64, 64), (128, 100, 80)).save(_png_buffer, "PNG")
+_REF_BYTES["//depot/art/props/T_Crate_Albedo.png"] = _png_buffer.getvalue()
+_head = {}          # what is already in the depot: path -> bytes
+_head_asked = []
+
+
+def _describe(paths):
+    lines = "".join(f"... {path}#1 add\n" for path in paths)
+    return f"Change 20 by artist@artist_ws\n\n\tcrate\n\nAffected files ...\n\n{lines}"
+
+
+def _fake_p4_for(paths):
+    def fake(*args, **kwargs):
+        if "describe" in args:
+            return _describe(paths)
+        if "print" in args:
+            spec = args[-1]
+            depot = spec.rsplit("#", 1)[0] if spec.endswith("#head") else spec
+            _head_asked.append(spec)
+            if spec.endswith("#head") and depot in _head:
+                Path(args[args.index("-o") + 1]).write_bytes(_head[depot])
+                return ""
+            raise RuntimeError(f"{spec} - no such file(s).")
+        return ""
+    return fake
+
+
+p4_ref.fetch_revision = lambda cl, depot, dest: dest.write_bytes(_REF_BYTES[depot])
+# Alphabetical, as P4V lists them: .mtl, .obj, then the texture.
+_all_three = ["//depot/art/props/crate.mtl", "//depot/art/props/crate.obj",
+              "//depot/art/props/T_Crate_Albedo.png"]
+p4_ref.p4 = _fake_p4_for(_all_three)
+_out = io.StringIO()
+with contextlib.redirect_stdout(_out):
+    _exit = p4_ref.main(["20", "artist"])
+expect("an .obj submitted with its .mtl and texture passes (was refused: 'missing reference')",
+       _exit == 0, _out.getvalue()[-600:])
+
+# The texture was submitted last week; this change only edits the .obj and .mtl.
+_head["//depot/art/props/T_Crate_Albedo.png"] = _REF_BYTES["//depot/art/props/T_Crate_Albedo.png"]
+_head_asked.clear()
+p4_ref.p4 = _fake_p4_for(_all_three[:2])
+_out = io.StringIO()
+with contextlib.redirect_stdout(_out):
+    _exit = p4_ref.main(["21", "artist"])
+expect("... and so does one whose texture is already in the depot (fetched at #head)",
+       _exit == 0 and "//depot/art/props/T_Crate_Albedo.png#head" in _head_asked,
+       (_out.getvalue()[-400:], _head_asked))
+
+# A texture that is in neither the change nor the depot is a real broken link.
+_head.clear()
+p4_ref.p4 = _fake_p4_for(_all_three[:2])
+_out = io.StringIO()
+with contextlib.redirect_stdout(_out):
+    _exit = p4_ref.main(["22", "artist"])
+expect("... but a texture that exists nowhere is still refused as a missing reference",
+       _exit == 1 and "missing reference" in _out.getvalue(), _out.getvalue()[-400:])
+
+# A reference that climbs out of the depot is never fetched from anywhere.
+expect("a reference outside the depot layout maps to no depot path",
+       p4_ref.depot_path_of(_ref_dir / "x.png", _ref_dir / "agk-p4-root") is None
+       and p4_ref.depot_path_of(_ref_dir / "root" / "_rules" / "1" / "rules.toml", _ref_dir / "root") is None
+       and p4_ref.depot_path_of(_ref_dir / "root" / "depot" / "a.png", _ref_dir / "root") == "//depot/a.png")
+
+# Sent for review (N16): the revision is shown, and the texture travels with
+# its mesh instead of becoming an asset of its own.
+_ws_ref = load_module("agk_ws_for_p4_ref", Path("server") / "art_workstation_server.py")
+_ws_ref_dir = heal_root / "p4_ref_workstation"
+_ws_ref_dir.mkdir()
+_ws_ref.init_db(_ws_ref_dir / "ws.db")
+_ws_ref_server = _ws_ref.build_server("127.0.0.1", 0, _ws_ref_dir / "ws.db", _ws_ref_dir / "data",
+                                      token="reftok", quiet=True)
+threading.Thread(target=_ws_ref_server.serve_forever, daemon=True).start()
+_ws_ref_url = f"http://127.0.0.1:{_ws_ref_server.server_address[1]}"
+p4_ref.p4 = _fake_p4_for(_all_three)
+_out = io.StringIO()
+with contextlib.redirect_stdout(_out):
+    _exit = p4_ref.main(["23", "artist", "--workstation", _ws_ref_url,
+                         "--workstation-token", "reftok", "--verbose"])
+_ref_assets = _ws_ref.list_assets(_ws_ref_dir / "ws.db")
+_ref_names = sorted(row["filename"] for row in _ref_assets)
+expect("sent for review, the .obj arrives with its .mtl and texture, not three assets",
+       _exit == 0 and _ref_names == ["crate.obj"], (_ref_names, _out.getvalue()[-500:]))
+_ref_crate = next((row for row in _ref_assets if row["filename"] == "crate.obj"), {})
+expect("... showing its revision as well as the changelist (was '//depot/...  @18')",
+       _ref_crate.get("source_rev") == "#1" and str(_ref_crate.get("changelist")) == "23"
+       and _ref_crate.get("source_path") == "//depot/art/props/crate.obj", _ref_crate)
+_ref_detail = _ws_ref.asset_detail(_ws_ref_dir / "ws.db", _ws_ref_dir / "data",
+                                   int(_ref_crate["id"])) if _ref_crate else {}
+expect("... and nothing it references is missing",
+       _ref_detail.get("missing") == [], _ref_detail.get("missing"))
+_ws_ref_server.shutdown()
 
 # -- git: pre-commit against a real repository --------------------------------
 git_dir = heal_root / "gitrepo"

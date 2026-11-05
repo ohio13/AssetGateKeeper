@@ -1176,7 +1176,7 @@ async function healSelected() {
         result.innerHTML = '<div><strong>The healer can fix this:</strong></div>'
           + `<ul>${preview.changes.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`
           + `<div class="sub">Checked against ${escapeHtml(preview.budget)}. The fixed copy `
-          + "is added as a new asset; this one is not changed.</div>";
+          + "becomes the next version of this asset; this version is not changed.</div>";
         button.textContent = "Make fixed copy";
         button.disabled = false;
       } else {
@@ -1486,7 +1486,14 @@ async function uploadSidecar(assetId, file, written) {
   return response.json();
 }
 
-const REFERENCING = [".gltf", ".obj", ".fbx", ".mtl"];
+// Upload order for a multi-file drop: the files that are assets in their own
+// right first, then the .mtl they name, then everything else. Windows hands a
+// drop over alphabetically, so "crate.mtl" used to go up before "crate.obj"
+// and became an asset of its own - and took the texture with it (the developer's
+// 4 Nov test: the crates, the boulder and its shippable LOD lost their
+// textures, and approving the .obj could not cover its .mtl at submit).
+const UPLOAD_RANK = { ".gltf": 0, ".obj": 0, ".fbx": 0, ".glb": 0, ".mtl": 1 };
+const uploadRank = (name) => (suffixOf(name) in UPLOAD_RANK ? UPLOAD_RANK[suffixOf(name)] : 2);
 const baseName = (uri) => String(uri || "").split(/[\\/]/).pop().toLowerCase();
 
 /* Upload one or more files, one after another, and say what happened to each.
@@ -1503,9 +1510,15 @@ async function uploadFiles(files) {
   const lodsAdded = [];
   let lodTarget = null;
   const total = pending.length;
+  // Every file in this drop, by name. A file an asset takes as a sidecar stays
+  // available to the next asset too (two crates sharing one checker texture),
+  // and is only uploaded as an asset of its own if nothing took it.
+  const dropped = new Map(pending.map((file) => [file.name.toLowerCase(), file]));
+  const taken = new Set();
   const take = (name) => {
-    const index = pending.findIndex((file) => file.name.toLowerCase() === name);
-    return index < 0 ? null : pending.splice(index, 1)[0];
+    const file = dropped.get(name) || null;
+    if (file) taken.add(file);
+    return file;
   };
   const attachMissing = async (asset) => {
     // Repeat: an .mtl that arrives names textures of its own.
@@ -1541,6 +1554,7 @@ async function uploadFiles(files) {
     const target = sameStem(state.asset) ? state.asset : (state.assets || []).find(sameStem);
     if (!target) continue;
     pending.splice(pending.indexOf(file), 1);
+    taken.add(file);
     $("status").textContent = `adding ${file.name} as LOD${match[2]} of ${target.filename}`;
     try {
       await uploadLodFile(file, `LOD${match[2]}`, target);
@@ -1550,11 +1564,12 @@ async function uploadFiles(files) {
       refused.push(`${file.name}: ${error.message}`);
     }
   }
-  // 3. Files that can reference others go first, so their sidecars find them.
-  pending.sort((a, b) => Number(!REFERENCING.includes(suffixOf(a.name)))
-    - Number(!REFERENCING.includes(suffixOf(b.name))));
+  // 3. Meshes first, then .mtl, then the rest, so sidecars find their asset.
+  //    (Array.sort is stable: within a rank the drop order is kept.)
+  pending.sort((a, b) => uploadRank(a.name) - uploadRank(b.name));
   while (pending.length) {
     const file = pending.shift();
+    if (taken.has(file)) continue;          // already went in as a sidecar
     $("status").textContent = total > 1
       ? `uploading ${total - pending.length}/${total}: ${file.name}` : `uploading ${file.name}`;
     try {

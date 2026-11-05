@@ -125,6 +125,12 @@ _obj = (WORK / "ball.obj").read_text().replace("v ", "mtllib crate.mtl\nusemtl p
 (WORK / "crate.obj").write_text(_obj)
 (WORK / "crate.mtl").write_text("newmtl planks\nKd 0.8 0.5 0.2\nmap_Kd planks_Albedo.png\n")
 (WORK / "planks_Albedo.png").write_bytes(png(32, 32))
+# Two crates sharing one texture, for the Windows drop order (alphabetical).
+for _name in ("crate_b", "crate_c"):
+    (WORK / f"{_name}.obj").write_text(
+        (WORK / "ball.obj").read_text().replace("v ", f"mtllib {_name}.mtl\nusemtl planks\nv ", 1))
+    (WORK / f"{_name}.mtl").write_text("newmtl planks\nKd 0.8 0.5 0.2\nmap_Kd shared_Albedo.png\n")
+(WORK / "shared_Albedo.png").write_bytes(png(32, 32))
 
 from PIL import Image  # noqa: E402
 Image.new("RGB", (32, 32), (90, 120, 60)).save(WORK / "stone_Albedo.tga")
@@ -416,6 +422,25 @@ with sync_playwright() as playwright:
            "planks" in page.locator("#materials").inner_text(), page.locator("#materials").inner_text())
     expect("... and the texture is not a separate asset",
            "planks_Albedo.png" not in page.locator("#asset-list").inner_text())
+    # The developer's 4 Nov test: Windows hands a drop over alphabetically, .mtl before
+    # .obj, and the .mtl and texture became assets of their own.
+    upload([WORK / "crate_b.mtl", WORK / "crate_b.obj", WORK / "crate_c.mtl",
+            WORK / "crate_c.obj", WORK / "shared_Albedo.png"])
+    _library = page.locator("#asset-list").inner_text()
+    expect("dropped in Windows order (.mtl first), the .mtl files are not assets of their own",
+           "crate_b.mtl" not in _library and "crate_c.mtl" not in _library, _library)
+    expect("... nor is the texture the two crates share",
+           "shared_Albedo.png" not in _library, _library)
+    with urllib.request.urlopen(f"{BASE}/api/assets") as response:
+        _rows = json.loads(response.read())
+    _rows = _rows.get("assets", _rows) if isinstance(_rows, dict) else _rows
+    _crates = {row["filename"]: row["id"] for row in _rows if row["filename"] in ("crate_b.obj", "crate_c.obj")}
+    _waiting = {}
+    for _name, _id in _crates.items():
+        with urllib.request.urlopen(f"{BASE}/api/assets/{_id}") as response:
+            _waiting[_name] = json.loads(response.read()).get("missing")
+    expect("... and BOTH crates got their .mtl and the shared texture (nothing missing)",
+           len(_crates) == 2 and all(value == [] for value in _waiting.values()), _waiting)
 
     print("8c. LODs: generate, upload, warnings, delete")
     page.goto(f"{BASE}/viewer?live=0")
@@ -499,7 +524,8 @@ with sync_playwright() as playwright:
     heal_text = page.locator("#heal-result").inner_text()
     expect("... which lists what the healer would change, and the budget",
            "renamed bark.png -> bark_Albedo.png" in heal_text and "resized 100x60 -> 128x64" in heal_text
-           and "default budget" in heal_text and "this one is not changed" in heal_text, heal_text)
+           and "default budget" in heal_text and "next version of this asset" in heal_text
+           and "this version is not changed" in heal_text, heal_text)
     expect("... and offers to make the copy",
            page.locator("#asset-heal").inner_text() == "Make fixed copy")
     expect("checking stored nothing", len(aws.list_assets(db)) == stored_before)

@@ -39,7 +39,17 @@ def import_mesh(path, name):
     task.set_editor_property("save", False)
     task.set_editor_property("replace_existing", True)
     unreal.AssetToolsHelpers.get_asset_tools().import_asset_tasks([task])
-    return unreal.EditorAssetLibrary.load_asset(f"{FOLDER}/{name}")
+    # UE 5.3 imports OBJ through Interchange, which ignores destination_name
+    # ("Interchange do not use the DestinationName parameter"): the asset is
+    # named after the source file. Load what the task says it imported.
+    for imported in (task.get_editor_property("imported_object_paths") or []):
+        asset = unreal.EditorAssetLibrary.load_asset(str(imported))
+        if isinstance(asset, unreal.StaticMesh):
+            return asset
+    for candidate in (name, os.path.splitext(os.path.basename(path))[0]):
+        if unreal.EditorAssetLibrary.does_asset_exist(f"{FOLDER}/{candidate}"):
+            return unreal.EditorAssetLibrary.load_asset(f"{FOLDER}/{candidate}")
+    return None
 
 
 def heavy_obj(path, triangles=60_000):
@@ -60,11 +70,14 @@ try:
     validator = agk_validator.register_validator(unreal)
     check("the validator registers", validator is not None)
     good = import_mesh(os.path.join(HOME, "tests", "fixtures", "fbx", "tex_relative.fbx"), "SM_Good")
-    heavy_path = os.path.join(unreal.Paths.project_saved_dir(), "agk_heavy.obj")
+    heavy_path = os.path.join(unreal.Paths.project_saved_dir(), "SM_Heavy.obj")
     heavy_obj(heavy_path)
     heavy = import_mesh(heavy_path, "SM_Heavy")
     check("both test meshes imported", good is not None and heavy is not None)
     for name, asset, want_ok in (("SM_Good", good, True), ("SM_Heavy", heavy, False)):
+        if asset is None:
+            check(f"{name}: the gate's rules give the expected verdict", False, "not imported")
+            continue
         checked, problems = agk_validator.asset_problems(asset, unreal)
         check(f"{name}: the gate's rules give the expected verdict",
               checked and (not problems) == want_ok, problems)
@@ -74,10 +87,10 @@ try:
         settings.set_editor_property("show_if_no_failures", False)
         try:
             results = subsystem.validate_assets_with_settings(
-                [unreal.EditorAssetLibrary.find_asset_data(f"{FOLDER}/SM_Heavy")], settings)
+                [unreal.EditorAssetLibrary.find_asset_data(heavy.get_path_name())], settings)
         except TypeError:
             results = subsystem.validate_assets_with_settings(
-                [unreal.EditorAssetLibrary.find_asset_data(f"{FOLDER}/SM_Heavy")], settings,
+                [unreal.EditorAssetLibrary.find_asset_data(heavy.get_path_name())], settings,
                 unreal.ValidateAssetsResults())
         detail = results
         failed = results[0] if isinstance(results, tuple) else results

@@ -180,6 +180,8 @@ normal_format = "bc5"      #   astc6x6 astc8x8 etc2 etc2a rgba8 rgba16f
 
 [mesh]
 max_mb = 2                 # per mesh: vertex + index buffers (0 = off)
+lightmap_uv = true         # the engine adds a lightmap UV set (Unreal: yes)
+depth_index_buffer = true  # and a second index buffer for depth passes (Unreal: yes)
 texel_density = [400, 1200]  # pixels per metre of surface
 texel_texture = 1024       # texture size assumed when the mesh's material names none
 
@@ -200,7 +202,13 @@ format = "astc8x8"
 * **Mesh memory** = vertices x vertex size + indices. A vertex is 12 bytes of
   position, 8 of packed tangent frame, 4 per UV set (half floats), 4 for vertex
   colours and 8 for skinning; indices are 16-bit up to 65,535 vertices, else
-  32-bit. glTF and OBJ only for now; an FBX gets a note instead.
+  32-bit. By default it also counts what Unreal adds to every static mesh on
+  import: a generated lightmap UV set (`lightmap_uv`) and a second index buffer
+  for depth-only passes (`depth_index_buffer`). Measured on UE 5.3.2 (Nov 2026,
+  five meshes from 1,000 to 48,000 triangles): within 7% of Size Map with them,
+  37-53% under without. An engine that adds neither (most Unity and Godot
+  projects) sets both to `false`. glTF and OBJ only for now; an FBX gets a note
+  instead.
 * **Texel density** = sqrt(UV area x texture pixels / surface area), weighted by
   area over the asset's meshes, in pixels per metre (glTF is in metres; OBJ is
   read as metres). A 1 m plane with 0-1 UVs and a 1024 texture is 1024 px/m.

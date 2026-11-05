@@ -112,11 +112,14 @@ def p4(*args: str, timeout: float = 120.0) -> str:
     return completed.stdout
 
 
-def changelist_files(changelist: str) -> list[tuple[str, str]]:
+def changelist_files(changelist: str,
+                     revisions: Optional[dict] = None) -> list[tuple[str, str]]:
     """Return [(depot_path, action)] for the content-bearing files in a CL.
 
     ``p4 describe -s`` is the portable formulation; the text is parsed rather
-    than version-pinned so this keeps working across server versions.
+    than version-pinned so this keeps working across server versions. When
+    ``revisions`` is given it is filled with ``{depot_path: "3"}`` - the
+    revision each file becomes, which the Art Workstation shows as ``#3``.
     """
     output = p4("p4", "describe", "-s", changelist)
     files: list[tuple[str, str]] = []
@@ -139,9 +142,11 @@ def changelist_files(changelist: str) -> list[tuple[str, str]]:
                 if not body:
                     continue
                 revisioned, _, action = body.rpartition(" ")
-                path = revisioned.split("#")[0]
+                path, _, rev = revisioned.partition("#")
                 if action and path:
                     files.append((path, action))
+                    if revisions is not None and rev.isdigit():
+                        revisions[path] = rev
     return files
 
 
@@ -153,6 +158,105 @@ def fetch_revision(changelist: str, depot_path: str, destination: Path) -> None:
     a pending changelist and can pick a neighbouring revision on a busy server.
     """
     p4("p4", "print", "-q", "-o", str(destination), f"{depot_path}@={changelist}")
+
+
+def fetch_head(depot_path: str, destination: Path) -> None:
+    """A file already in the depot, at its submitted head revision."""
+    p4("p4", "print", "-q", "-o", str(destination), f"{depot_path}#head")
+
+
+#: Assets whose references the gate reads (an .obj's .mtl and its maps, a
+#: .gltf's buffers and images). FBX texture paths are usually absolute DCC
+#: paths that no depot folder can supply, so they are left to the gate.
+REFERENCING_SUFFIXES = {".obj", ".gltf"}
+
+
+_GATE_MODULE: dict = {}
+
+
+def _gate_module():
+    """The gate itself, for its reference parser - or None if it cannot load."""
+    try:
+        script = Path(gatekeeper_command()[1]).resolve()
+    except Exception:            # the gate run itself will report a broken install
+        return None
+    if script in _GATE_MODULE:
+        return _GATE_MODULE[script]
+    module = None
+    name = "agk_gate_for_p4"
+    try:
+        import importlib.util
+        spec = importlib.util.spec_from_file_location(name, script)
+        if spec is not None and spec.loader is not None:
+            module = importlib.util.module_from_spec(spec)
+            # Registered before it runs: its dataclasses look themselves up there.
+            sys.modules[name] = module
+            spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(name, None)
+        module = None
+    _GATE_MODULE[script] = module
+    return module
+
+
+def depot_path_of(local: Path, temp_root: Path) -> Optional[str]:
+    """The depot path a temp copy stands for, or None outside the depot layout."""
+    try:
+        relative = Path(os.path.normpath(local)).relative_to(temp_root)
+    except ValueError:
+        return None
+    parts = relative.parts
+    if len(parts) < 2 or parts[0] in ("_rules",):
+        return None
+    return "//" + "/".join(parts)
+
+
+def fetch_references(meshes: list[Path], temp_root: Path, verbose: bool = False) -> list[str]:
+    """Bring in what the changelist's meshes point at but do not carry.
+
+    Every file of the changelist is fetched first, so a texture submitted with
+    its .obj is next to it before the .obj is gated (it used to be gated the
+    moment it was fetched, before its texture: the developer's 4 Nov submit of an .obj,
+    .mtl and texture was refused for a "missing reference" to the texture in
+    the same changelist). A reference the changelist does not carry - the
+    texture submitted last week - is fetched at its depot head. One that is in
+    neither stays missing, and the gate fails it: that is a real broken link.
+    Two rounds, because an .mtl fetched in the first names textures of its own.
+    Returns the depot paths fetched.
+    """
+    gate_module = _gate_module()
+    if gate_module is None:
+        return []
+    fetched: list[str] = []
+    tried: set[str] = set()
+    for _round in range(2):
+        wanted = []
+        for mesh in meshes:
+            if mesh.suffix.lower() not in REFERENCING_SUFFIXES or not mesh.is_file():
+                continue
+            try:
+                missing = gate_module.missing_references(mesh)
+            except Exception:
+                continue
+            for _written, target in missing:
+                local = Path(os.path.normpath(target))
+                depot = depot_path_of(local, temp_root)
+                if depot and depot not in tried:
+                    tried.add(depot)
+                    wanted.append((depot, local))
+        if not wanted:
+            break
+        for depot, local in wanted:
+            local.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                fetch_head(depot, local)
+            except (RuntimeError, OSError):
+                continue                       # not in the depot either: the gate says so
+            if local.is_file():
+                fetched.append(depot)
+                if verbose:
+                    log(f"AssetGatekeeper: fetched {depot}#head (referenced, not in this change)")
+    return fetched
 
 
 RULES_FILENAME = "rules.toml"
@@ -244,16 +348,38 @@ def approval_problem(base: str, token: str, local: Path) -> str:
 
 
 def send_for_review(base: str, token: str, local: Path, depot_path: str,
-                    changelist: str) -> str:
-    """Best effort: put a submitted asset in the workstation's review queue."""
-    query = urllib.parse.urlencode({"filename": local.name, "source_path": depot_path,
-                                    "changelist": changelist, "source": "perforce"})
+                    changelist: str, rev: str = "",
+                    sidecars: Optional[list[tuple[str, Path]]] = None) -> str:
+    """Best effort: put a submitted asset in the workstation's review queue.
+
+    ``rev`` is shown as ``//depot/...#3 @18`` (it used to be left out). The
+    files a mesh references (``sidecars``: [(name as written, local copy)])
+    go into the same asset, so it renders textured and its .mtl/.bin are part
+    of the version a reviewer approves.
+    """
+    fields = {"filename": local.name, "source_path": depot_path,
+              "changelist": changelist, "source": "perforce"}
+    if rev:
+        fields["source_rev"] = f"#{rev}"
+    query = urllib.parse.urlencode(fields)
     try:
         answer = _workstation_call(base, token, f"/api/assets?{query}", data=local.read_bytes(),
                                    timeout=30)
     except (urllib.error.URLError, OSError, ValueError) as exc:
         return f"not sent to the Art Workstation ({exc})"
-    return f"sent to the Art Workstation as {answer.get('filename')} v{answer.get('version')}"
+    attached = 0
+    asset_id = answer.get("id")
+    for written, path in (sidecars or []) if asset_id is not None else []:
+        side_query = urllib.parse.urlencode({"filename": written})
+        try:
+            _workstation_call(base, token, f"/api/assets/{asset_id}/files?{side_query}",
+                              data=path.read_bytes(), timeout=30)
+            attached += 1
+        except (urllib.error.URLError, OSError, ValueError):
+            continue
+    extra = f" with {attached} file(s) alongside" if attached else ""
+    return (f"sent to the Art Workstation as {answer.get('filename')} "
+            f"v{answer.get('version')}{extra}")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -295,8 +421,9 @@ def main(argv: list[str] | None = None) -> int:
     if options.rules:
         extra += ["--rules", options.rules]
 
+    revisions: dict = {}
     try:
-        files = changelist_files(options.changelist)
+        files = changelist_files(options.changelist, revisions)
     except (RuntimeError, OSError) as exc:
         # Fail closed: an unreadable changelist must not become an implicit pass.
         log(f"AssetGatekeeper: cannot read changelist {options.changelist}: {exc}")
@@ -315,21 +442,33 @@ def main(argv: list[str] | None = None) -> int:
     passed: list[tuple[Path, str]] = []
     rules_cache: dict = {}
     try:
-        # Keep the depot's folder shape so relative texture/buffer references in a
-        # .gltf still resolve when the copy is inspected.
-        common = os.path.commonprefix([path for path, _ in candidates])
-        common_root = common.rsplit("/", 1)[0] if "/" in common else ""
-
-        for depot_path, action in candidates:
-            relative = depot_path[len(common_root):].lstrip("/") if common_root else depot_path.lstrip("/")
-            destination = temp_root / relative
+        # Laid out exactly as in the depot (//depot/art/x.obj -> <temp>/depot/art/x.obj),
+        # so relative texture/buffer references resolve, including ../ ones.
+        # EVERY file is fetched before ANY is gated: gating inside this loop
+        # checked an .obj before its texture had arrived (4 Nov, false refusal).
+        # The .mtl/.bin a mesh names come from this changelist too, even when
+        # they are not checked themselves (no --require-approval).
+        checked = {path for path, _ in candidates}
+        carried = [(path, action) for path, action in files
+                   if action in CONTENT_ACTIONS and path not in checked
+                   and Path(path).suffix.lower() in APPROVAL_ONLY_SUFFIXES]
+        local_of: dict[str, Path] = {}
+        for depot_path, action in candidates + carried:
+            destination = temp_root / depot_path.lstrip("/")
             destination.parent.mkdir(parents=True, exist_ok=True)
             try:
                 fetch_revision(options.changelist, depot_path, destination)
             except (RuntimeError, OSError) as exc:
-                failures.append(f"{depot_path}: could not fetch from depot ({exc})")
-                continue
+                if depot_path in checked:
+                    failures.append(f"{depot_path}: could not fetch from depot ({exc})")
+                continue                       # an unchecked sidecar: the gate reports it missing
+            local_of[depot_path] = destination
+        fetch_references(list(local_of.values()), temp_root, options.verbose)
 
+        for depot_path, action in candidates:
+            destination = local_of.get(depot_path)
+            if destination is None:
+                continue                       # its fetch failure is already recorded
             if Path(depot_path).suffix.lower() not in ASSET_SUFFIXES:
                 # Not measured by the gate; only its approval is in question.
                 problem = approval_problem(options.workstation, options.workstation_token,
@@ -369,11 +508,33 @@ def main(argv: list[str] | None = None) -> int:
                     verdict = line.strip()
             detail = verdict or (completed.stdout + completed.stderr).strip()[:400]
             failures.append(f"{depot_path} ({action})\n    {detail}")
-        # Only a submit that will go through is queued for review.
+        # Only a submit that will go through is queued for review. Meshes first,
+        # carrying the files they reference; a texture that went in with its
+        # mesh is not sent again as an asset of its own.
         if not failures and options.workstation and not options.require_approval:
-            for local, depot_path in passed:
+            gate_module = _gate_module()
+            carried: set[Path] = set()
+            ordered = sorted(passed, key=lambda item: item[0].suffix.lower()
+                             not in REFERENCING_SUFFIXES | {".fbx", ".glb"})
+            for local, depot_path in ordered:
+                if local in carried:
+                    if options.verbose:
+                        log(f"AssetGatekeeper: {depot_path}: sent with the mesh that uses it")
+                    continue
+                sidecars: list[tuple[str, Path]] = []
+                if gate_module is not None and local.suffix.lower() in REFERENCING_SUFFIXES:
+                    try:
+                        pairs = gate_module.resolve_references(local)
+                    except Exception:
+                        pairs = []
+                    for written, target in pairs:
+                        target = Path(os.path.normpath(target))
+                        if target.is_file() and depot_path_of(target, temp_root):
+                            sidecars.append((written.replace("\\", "/"), target))
+                            carried.add(target)
                 note = send_for_review(options.workstation, options.workstation_token,
-                                       local, depot_path, options.changelist)
+                                       local, depot_path, options.changelist,
+                                       revisions.get(depot_path, ""), sidecars)
                 if options.verbose:
                     log(f"AssetGatekeeper: {depot_path}: {note}")
     finally:

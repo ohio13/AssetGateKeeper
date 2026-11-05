@@ -1,5 +1,32 @@
 # Since v1.1.1 (unreleased, on `main`)
 
+* **Found by the developer's hands-on tests on 4 Nov (UE 5.3.2, P4V, Chrome), all fixed
+  and tested.**
+  * Perforce: an `.obj` submitted with its `.mtl` and texture was refused for a
+    "missing reference" to the texture in the same changelist - each file was
+    gated as it was fetched, the `.obj` before its texture, and the `.mtl` was
+    not fetched at all without `--require-approval`. The whole changelist is
+    now fetched first, laid out as in the depot, and referenced files already
+    in the depot are fetched at `#head`.
+  * Perforce to the Workstation (`--workstation`): the depot path now carries
+    its revision (`//depot/...#3 @18`), and a mesh arrives with its `.mtl` and
+    textures instead of each becoming an asset of its own.
+  * Workstation: dropping an `.obj`, `.mtl` and texture together from Windows
+    Explorer (alphabetical: `.mtl` first) made the `.mtl` and texture assets
+    of their own. The mesh had no texture, its shippable LODs were exported
+    with a 2x2 placeholder (black in Unreal), and approving it did not cover
+    its `.mtl` at submit. Meshes now go first, and a texture shared by several
+    dropped meshes is attached to each.
+  * Mesh memory (G2) was 37-53% under Unreal's Size Map. It now counts the
+    lightmap UV set and depth-only index buffer Unreal adds to every static
+    mesh (`[mesh] lightmap_uv`, `depth_index_buffer`, both on by default):
+    within 7% on all five test meshes.
+  * Check for fixes said the fixed copy "is added as a new asset"; it becomes
+    the next version, as the panel now says.
+  * `tests/unreal/validate_in_editor.py`: UE 5.3 imports OBJ through
+    Interchange, which ignores the import task's destination name, so the
+    script could not find its own test mesh. It now loads what was imported.
+
 * **Check for fixes searched the system temp folder (found 3 Nov).** The
   Workstation heals a throwaway copy of the asset, and the healer looked for
   other files referencing the texture in that copy's parent - the system temp

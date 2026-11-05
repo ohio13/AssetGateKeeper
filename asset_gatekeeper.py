@@ -250,6 +250,12 @@ class Budget:
     max_mesh_mb: float = 0.0
     texture_format: str = "bc7"           # colour textures
     normal_format: str = "bc5"            # textures named _Normal/_nrm/_n
+    # What the engine adds to every static mesh on import. Unreal's defaults:
+    # a generated lightmap UV set, and a second index buffer for depth-only
+    # passes. Calibrated on UE 5.3.2 (N2, 4 Nov 2026): without them the
+    # estimate was 37-53% under Size Map on five meshes, with them within 6%.
+    mesh_lightmap_uv: bool = True
+    mesh_depth_index_buffer: bool = True
 
     # - texel density (G8): pixels per metre of surface; (0, 0) = not checked - #
     texel_density_min: float = 0.0
@@ -344,7 +350,8 @@ class Budget:
                                "check_references", "allow_outside_references",
                                "audit_transforms", "require_indexed",
                                "pivot_tolerance", "transform_epsilon", "max_mb",
-                               "texel_density", "texel_texture"), "[mesh]")
+                               "texel_density", "texel_texture", "lightmap_uv",
+                               "depth_index_buffer"), "[mesh]")
         _reject_unknown(texture, ("max_edge", "power_of_two", "naming", "suffixes",
                                   "pbr", "pbr_floor", "pbr_ceiling", "pbr_suffixes",
                                   "max_mb", "format", "normal_format"), "[texture]")
@@ -464,6 +471,11 @@ def _read_memory(mesh: dict, texture: dict) -> dict:
     texel_texture = _read_int(mesh, "texel_texture", "[mesh]", minimum=1)
     if texel_texture is not None:
         found["texel_texture"] = texel_texture
+    for key, field in (("lightmap_uv", "mesh_lightmap_uv"),
+                       ("depth_index_buffer", "mesh_depth_index_buffer")):
+        value = _read_bool(mesh, key, "[mesh]")
+        if value is not None:
+            found[field] = value
     return found
 
 
@@ -484,9 +496,16 @@ def mesh_vertex_size(uv_channels: int, skinned: bool, colours: bool = False) -> 
 
 
 def mesh_memory_bytes(vertices: int, triangles: int, uv_channels: int, skinned: bool,
-                      colours: bool = False) -> int:
+                      colours: bool = False, lightmap_uv: bool = False,
+                      depth_index_buffer: bool = False) -> int:
+    """Vertex and index buffers. ``lightmap_uv`` adds the UV set an engine
+    generates for baked lighting; ``depth_index_buffer`` the second index
+    buffer Unreal keeps for depth-only passes (both on in Unreal by default)."""
     index = 2 if vertices <= 65_535 else 4
-    return vertices * mesh_vertex_size(uv_channels, skinned, colours) + triangles * 3 * index
+    uv_sets = max(1, uv_channels) + (1 if lightmap_uv else 0)
+    index_buffers = 2 if depth_index_buffer else 1
+    return (vertices * mesh_vertex_size(uv_sets, skinned, colours)
+            + triangles * 3 * index * index_buffers)
 
 
 def _mb(value: int) -> str:
@@ -3719,7 +3738,9 @@ class Gatekeeper:
                     size = mesh_memory_bytes(facts["vertices"], triangles,
                                              int(known.get("uv_channels", 0)),
                                              int(known.get("max_bone_influences", 0)) > 0,
-                                             facts["colours"])
+                                             facts["colours"],
+                                             self.budget.mesh_lightmap_uv,
+                                             self.budget.mesh_depth_index_buffer)
                     stats.append(("memory_kb", size // 1024))
                     stats.append(("vertices", facts["vertices"]))
                     if self.budget.max_mesh_mb:

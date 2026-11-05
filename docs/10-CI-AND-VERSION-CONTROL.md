@@ -145,6 +145,14 @@ exactly the window a gate needs. It:
   given with `--rules` on the trigger line;
 * exits non-zero to refuse the submit, or prints warnings for advisory mode.
 
+Every file of the changelist is fetched **before** any is gated, laid out as in
+the depot, so an `.obj` submitted with its `.mtl` and texture finds them. A file
+a mesh references that the changelist does not carry (a texture submitted
+earlier) is fetched at its depot `#head`; one that is in neither is a real
+broken link and fails. (Until Nov 2026 each file was gated as soon as it was
+fetched, so an `.obj` went before its own texture and was refused for a
+"missing reference".)
+
 Validation happens in a temp folder that is deleted afterwards. No sync, no
 workspace, nothing left behind.
 
