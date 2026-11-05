@@ -153,6 +153,12 @@ broken link and fails. (Until Nov 2026 each file was gated as soon as it was
 fetched, so an `.obj` went before its own texture and was refused for a
 "missing reference".)
 
+With `--require-approval`, the file's content hash is looked up in the Art
+Workstation. Perforce stores `.obj`, `.mtl` and `.gltf` as text and hands them
+out with the server's line endings, so for those three the same text with LF and
+with CRLF endings counts as the approved content; every other change, and every
+byte of a binary file, must match exactly.
+
 Validation happens in a temp folder that is deleted afterwards. No sync, no
 workspace, nothing left behind.
 

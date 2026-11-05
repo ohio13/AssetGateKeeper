@@ -1,5 +1,16 @@
 # Since v1.1.1 (unreleased, on `main`)
 
+* **Found by the developer's retest on 5 Nov, fixed and tested.**
+  * Perforce `--require-approval` refused an approved `.obj` and `.mtl`:
+    Perforce stores them as text and printed them to the trigger with CRLF
+    line endings, while the approved copy in the Workstation had LF, so the
+    content hashes differed. For `.obj`, `.mtl` and `.gltf` the trigger now
+    also asks about the same text with LF and CRLF endings; any other change
+    is still refused, and binary files are matched byte for byte.
+  * The Workstation showed `#1` for a file that became `#2`: while the change
+    is pending, `p4 describe` lists the revision being replaced. The trigger
+    asks `p4 files <path>@=<change>` and shows no number rather than a wrong one.
+
 * **Found by the developer's hands-on tests on 4 Nov (UE 5.3.2, P4V, Chrome), all fixed
   and tested.**
   * Perforce: an `.obj` submitted with its `.mtl` and texture was refused for a

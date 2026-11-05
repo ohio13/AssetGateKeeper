@@ -2035,6 +2035,77 @@ _ref_detail = _ws_ref.asset_detail(_ws_ref_dir / "ws.db", _ws_ref_dir / "data",
                                    int(_ref_crate["id"])) if _ref_crate else {}
 expect("... and nothing it references is missing",
        _ref_detail.get("missing") == [], _ref_detail.get("missing"))
+
+# 5 Nov: the edit of a #1 file was shown as "#1" - a pending change lists the
+# revision it replaces. The trigger now asks `p4 files <path>@=<change>`.
+_edit_describe = ("Change 24 by artist@artist_ws\n\n\tedit\n\nAffected files ...\n\n"
+                  "... //depot/art/props/T_Crate_Albedo.png#1 edit\n")
+
+
+def _fake_p4_edit(files_answer):
+    def fake(*args, **kwargs):
+        if "describe" in args:
+            return _edit_describe
+        if "files" in args:
+            if files_answer is None:
+                raise RuntimeError("files: not supported here")
+            return files_answer
+        if "print" in args:
+            raise RuntimeError(f"{args[-1]} - no such file(s).")
+        return ""
+    return fake
+
+
+p4_ref.p4 = _fake_p4_edit("//depot/art/props/T_Crate_Albedo.png#2 - edit change 24 (binary)\n")
+p4_ref.fetch_revision = lambda cl, depot, dest: dest.write_bytes(_REF_BYTES[depot])
+with contextlib.redirect_stdout(io.StringIO()):
+    _exit = p4_ref.main(["24", "artist", "--workstation", _ws_ref_url, "--workstation-token", "reftok"])
+_tex = next((row for row in _ws_ref.list_assets(_ws_ref_dir / "ws.db")
+             if row["filename"] == "T_Crate_Albedo.png"), {})
+expect("an edit shows the revision it creates (#2), not the one it replaces (was #1)",
+       _exit == 0 and _tex.get("source_rev") == "#2" and str(_tex.get("changelist")) == "24", _tex)
+_saved_ref_p4 = p4_ref.p4
+p4_ref.p4 = _fake_p4_edit(None)
+expect("... and when `p4 files` cannot say, an edit shows no number rather than a wrong one",
+       p4_ref.submitted_revision("24", "//depot/x.png", "1", "edit") == ""
+       and p4_ref.submitted_revision("24", "//depot/x.png", "1", "add") == "1")
+p4_ref.p4 = _saved_ref_p4
+
+# 5 Nov: an approved .obj and .mtl were refused at submit. The Workstation had
+# them with LF line endings; Perforce on Windows printed them with CRLF.
+_crlf_db = _ws_ref_dir / "ws.db"
+_crlf_obj = _ws_ref.create_asset(_crlf_db, _ws_ref_dir / "data", "lf_crate.obj",
+                                 _REF_BYTES["//depot/art/props/crate.obj"].replace(b"crate.mtl", b"lf_crate.mtl"),
+                                 new_asset=True)
+_ws_ref.add_sidecar(_crlf_db, _ws_ref_dir / "data", int(_crlf_obj["id"]), "lf_crate.mtl",
+                    _REF_BYTES["//depot/art/props/crate.mtl"])
+_ws_ref.add_sidecar(_crlf_db, _ws_ref_dir / "data", int(_crlf_obj["id"]), "T_Crate_Albedo.png",
+                    _REF_BYTES["//depot/art/props/T_Crate_Albedo.png"])
+_ws_ref.set_review(_crlf_db, int(_crlf_obj["id"]), "approved", reviewer="Lead")
+_CRLF_BYTES = {
+    "//depot/art/lf/lf_crate.obj": _REF_BYTES["//depot/art/props/crate.obj"]
+        .replace(b"crate.mtl", b"lf_crate.mtl").replace(b"\n", b"\r\n"),
+    "//depot/art/lf/lf_crate.mtl": _REF_BYTES["//depot/art/props/crate.mtl"].replace(b"\n", b"\r\n"),
+    "//depot/art/lf/T_Crate_Albedo.png": _REF_BYTES["//depot/art/props/T_Crate_Albedo.png"],
+}
+p4_ref.p4 = _fake_p4_for(list(_CRLF_BYTES))
+p4_ref.fetch_revision = lambda cl, depot, dest: dest.write_bytes(_CRLF_BYTES[depot])
+_out = io.StringIO()
+with contextlib.redirect_stdout(_out):
+    _exit = p4_ref.main(["25", "artist", "--workstation", _ws_ref_url, "--workstation-token",
+                         "reftok", "--require-approval"])
+expect("an approved .obj + .mtl + texture submits although Perforce gave the trigger CRLF copies",
+       _exit == 0, _out.getvalue()[-600:])
+_CRLF_BYTES["//depot/art/lf/lf_crate.mtl"] = b"newmtl wood\r\nKd 0.9 0.9 0.9\r\nmap_Kd T_Crate_Albedo.png\r\n"
+_out = io.StringIO()
+with contextlib.redirect_stdout(_out):
+    _exit = p4_ref.main(["26", "artist", "--workstation", _ws_ref_url, "--workstation-token",
+                         "reftok", "--require-approval"])
+expect("... but a .mtl whose content changed is still refused (line endings are all that is forgiven)",
+       _exit == 1 and "lf_crate.mtl" in _out.getvalue() and "not approved" in _out.getvalue(),
+       _out.getvalue()[-600:])
+expect("... and a binary file is never 'normalised': one exact form only",
+       len(p4_ref.content_variants(Path(_ws_ref_dir / "data" / "assets" / str(_crlf_obj["id"]) / "T_Crate_Albedo.png"))) == 1)
 _ws_ref_server.shutdown()
 
 # -- git: pre-commit against a real repository --------------------------------

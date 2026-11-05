@@ -160,6 +160,31 @@ def fetch_revision(changelist: str, depot_path: str, destination: Path) -> None:
     p4("p4", "print", "-q", "-o", str(destination), f"{depot_path}@={changelist}")
 
 
+#: Actions whose revision `p4 describe` shows as the one being replaced while
+#: the change is still pending (an edit of #1 lists as #1 until it commits).
+_PENDING_SHOWS_OLD_REV = {"edit", "integrate", "merge"}
+
+
+def submitted_revision(changelist: str, depot_path: str, described: str, action: str) -> str:
+    """The revision this change creates, e.g. "2" - or "" when unknown.
+
+    In a change-content trigger the change is still pending, and `p4 describe`
+    lists an edit of #1 as "#1" (the developer, 5 Nov: the Workstation showed #1 for a
+    file that became #2). `p4 files <path>@=<change>` names the new one.
+    """
+    try:
+        output = p4("p4", "files", f"{depot_path}@={changelist}")
+        first = output.strip().splitlines()[0] if output.strip() else ""
+        rev = first.split("#", 1)[1].split(" ", 1)[0] if "#" in first else ""
+        if rev.isdigit():
+            return rev
+    except (RuntimeError, OSError, IndexError):
+        pass
+    # Without `p4 files`: an add/branch is #1 either way; an edit's number is
+    # not known for sure, and a wrong number is worse than none.
+    return described if action not in _PENDING_SHOWS_OLD_REV else ""
+
+
 def fetch_head(depot_path: str, destination: Path) -> None:
     """A file already in the depot, at its submitted head revision."""
     p4("p4", "print", "-q", "-o", str(destination), f"{depot_path}#head")
@@ -330,19 +355,45 @@ def _workstation_call(base: str, token: str, path: str, data: bytes | None = Non
         return json.loads(response.read() or b"{}")
 
 
+#: Perforce stores these as text and rewrites their line endings on the way
+#: out: on a Windows server ``p4 print`` hands the trigger CRLF, while the file
+#: the artist dropped on the Workstation (and had approved) is usually LF.
+TEXT_SUFFIXES = {".obj", ".mtl", ".gltf"}
+
+
+def content_variants(local: Path) -> list[bytes]:
+    """The exact bytes first, then - for text assets only - the same text with
+    LF and with CRLF line endings. Binary files have one form: a different
+    byte is a different file."""
+    data = local.read_bytes()
+    variants = [data]
+    if local.suffix.lower() in TEXT_SUFFIXES:
+        lf = data.replace(b"\r\n", b"\n")
+        crlf = lf.replace(b"\n", b"\r\n")
+        for candidate in (lf, crlf):
+            if candidate not in variants:
+                variants.append(candidate)
+    return variants
+
+
 def approval_problem(base: str, token: str, local: Path) -> str:
     """Why this exact file may not be submitted yet, or "" when it is approved.
 
-    Fails closed: if the workstation cannot be asked, the submit is refused -
-    a gate that waves files through when its reviewer is down is not a gate.
+    "Exact" means the same content: for a text asset the line endings Perforce
+    rewrote do not count (the developer, 5 Nov: an approved .obj and .mtl were refused
+    because the trigger's copy had CRLF and the approved one LF). Fails closed:
+    if the workstation cannot be asked, the submit is refused - a gate that
+    waves files through when its reviewer is down is not a gate.
     """
-    digest = hashlib.sha256(local.read_bytes()).hexdigest()
-    try:
-        answer = _workstation_call(base, token, f"/api/approvals/{digest}")
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        return f"could not ask the Art Workstation at {base} whether it is approved ({exc})"
-    if answer.get("approved"):
-        return ""
+    answer: dict = {}
+    for content in content_variants(local):
+        digest = hashlib.sha256(content).hexdigest()
+        try:
+            answer = _workstation_call(base, token, f"/api/approvals/{digest}")
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            return f"could not ask the Art Workstation at {base} whether it is approved ({exc})"
+        if answer.get("approved"):
+            return ""
     return ("not approved in the Art Workstation: "
             + str(answer.get("reason") or "no approval for this exact file"))
 
@@ -532,9 +583,11 @@ def main(argv: list[str] | None = None) -> int:
                         if target.is_file() and depot_path_of(target, temp_root):
                             sidecars.append((written.replace("\\", "/"), target))
                             carried.add(target)
+                action = dict(candidates).get(depot_path, "")
+                rev = submitted_revision(options.changelist, depot_path,
+                                         revisions.get(depot_path, ""), action)
                 note = send_for_review(options.workstation, options.workstation_token,
-                                       local, depot_path, options.changelist,
-                                       revisions.get(depot_path, ""), sidecars)
+                                       local, depot_path, options.changelist, rev, sidecars)
                 if options.verbose:
                     log(f"AssetGatekeeper: {depot_path}: {note}")
     finally:
