@@ -259,6 +259,9 @@ class Budget:
     # That judges shape, not size: a fixed area cut-off called every triangle of
     # a real-scale 1 mm glTF prop "degenerate" (6 Nov corpus test).
     degenerate_ratio: float = 1e-6
+    # What a degenerate triangle does: "block" (fail, the default), "warn" (pass
+    # with a note) or "allow". allow_degenerate = true is the same as "allow".
+    degenerate_mode: str = "block"
     # Optional: mesh names must start with one of these (["SM_", "SK_"]).
     # Off by default. The same rule runs in the gate (file name) and in every
     # DCC panel (object name), so Maya, Max, Blender and Unreal agree.
@@ -379,6 +382,9 @@ class Budget:
                               "or drop the [texture] table and use the defaults.")
         object.__setattr__(self, "texture_suffixes", texture_suffixes)
         object.__setattr__(self, "pbr_suffixes", pbr_suffixes)
+        if self.degenerate_mode not in ("block", "warn", "allow"):
+            raise ConfigError("budget degenerate must be \"block\", \"warn\" or \"allow\", got "
+                              f"{self.degenerate_mode!r}")
         prefixes = tuple(str(item).strip() for item in (self.mesh_name_prefixes or ()))
         if any(not item for item in prefixes):
             raise ConfigError("budget mesh_name_prefixes contains an empty entry; remove it")
@@ -412,6 +418,7 @@ class Budget:
             raise ConfigError("[texture] must be a table")
         _reject_unknown(mesh, ("max_triangles", "max_material_slots", "max_bone_influences",
                                "max_uv_channels", "allow_degenerate", "degenerate_epsilon", "degenerate_ratio",
+                               "degenerate",
                                "name_prefixes",
                                "check_references", "allow_outside_references",
                                "audit_transforms", "require_indexed",
@@ -430,6 +437,7 @@ class Budget:
         allow_degenerate = _read_bool(mesh, "allow_degenerate", "[mesh]")
         degenerate_epsilon = _read_float(mesh, "degenerate_epsilon", "[mesh]")
         degenerate_ratio = _read_float(mesh, "degenerate_ratio", "[mesh]")
+        degenerate_mode = _read_str(mesh, "degenerate", "[mesh]")
         mesh_name_prefixes = _read_strings(mesh, "name_prefixes", "[mesh]")
         max_texture_edge = _read_int(texture, "max_edge", "[texture]", minimum=1)
         require_power_of_two = _read_bool(texture, "power_of_two", "[texture]")
@@ -475,6 +483,8 @@ class Budget:
             allow_degenerate=defaults.allow_degenerate if allow_degenerate is None else allow_degenerate,
             degenerate_ratio=(
                 defaults.degenerate_ratio if degenerate_ratio is None else degenerate_ratio),
+            degenerate_mode=(defaults.degenerate_mode if degenerate_mode is None
+                             else degenerate_mode.lower()),
             mesh_name_prefixes=(
                 defaults.mesh_name_prefixes if mesh_name_prefixes is None else tuple(mesh_name_prefixes)),
             naming_conventions=naming_conventions,
@@ -3012,9 +3022,11 @@ def _primitive_triangles(document: dict, primitive: dict) -> int:
 def gltf_triangle_counts(document: dict) -> tuple[int, int]:
     """(unique, drawn) triangles of a glTF document, read from its accessors.
 
-    *unique* counts each mesh once - what an engine imports as mesh assets and
-    what an import budget is about. *drawn* counts a mesh once per node that
-    places it, which is what the scene renders. Both come straight from the
+    *unique* counts each mesh once. *drawn* counts a mesh once per node that
+    places it - what the scene renders, and what Unreal Engine 5.3 imports: its
+    glTF importer bakes repeated parts into the static mesh (CesiumMilkTruck:
+    2,856 unique, 3,624 drawn, and Unreal's two meshes hold 2,088 + 1,536 =
+    3,624; measured 6 Nov). The gate budgets the drawn count. Both come straight from the
     accessor counts, so they need no decoding: Draco- or meshopt-compressed
     files count the same as plain ones, and strips and fans are not dropped (a
     fan-only mesh used to read as 0 triangles).
@@ -3061,8 +3073,8 @@ def gltf_triangle_counts(document: dict) -> tuple[int, int]:
 
 
 def _count_triangles_from_document(document: dict) -> int:
-    """Unique triangles of a glTF document (see gltf_triangle_counts)."""
-    return gltf_triangle_counts(document)[0]
+    """Drawn triangles of a glTF document (see gltf_triangle_counts)."""
+    return gltf_triangle_counts(document)[1]
 
 
 def count_triangles(path: Path) -> int:
@@ -3381,6 +3393,15 @@ _GLTF_MESHOPT = ("EXT_meshopt_compression", "KHR_meshopt_compression")
 def _dracopy_available() -> bool:
     # trimesh decodes Draco through DracoPy; only its presence matters here.
     return importlib.util.find_spec("DracoPy") is not None
+
+
+def gltf_uses_draco(path: Path) -> bool:
+    if path.suffix.lower() not in GLTF_SUFFIXES:
+        return False
+    try:
+        return _GLTF_DRACO in set(read_gltf_document(path).get("extensionsUsed") or [])
+    except AssetError:
+        return False
 
 
 def gltf_undecodable_compression(path: Path) -> str:
@@ -4210,15 +4231,15 @@ class Gatekeeper:
         metrics = [f"{triangles:,} tris"]
         stats: list[tuple[str, int]] = [("triangles", triangles)]
         if path.suffix.lower() in GLTF_SUFFIXES:
-            # Repeated parts (one wheel placed four times) count once against
-            # the budget - that is what the engine imports - but the drawn total
-            # is kept for the dashboard and --json.
+            # Repeated parts (one wheel placed twice) count every time - Unreal
+            # bakes them into the mesh - and the unique count is kept for the
+            # dashboard and --json.
             try:
-                drawn = gltf_triangle_counts(read_gltf_document(path))[1]
+                unique = gltf_triangle_counts(read_gltf_document(path))[0]
             except Exception:
-                drawn = triangles
-            if drawn != triangles:
-                stats.append(("drawn_triangles", drawn))
+                unique = triangles
+            if unique != triangles:
+                stats.append(("unique_triangles", unique))
         naming = mesh_name_problem(path.stem, self.budget)
         if naming:
             problems.append(naming)
@@ -4250,6 +4271,11 @@ class Gatekeeper:
         undecodable = gltf_undecodable_compression(path)
         if undecodable:
             warnings.append(undecodable)
+        if gltf_uses_draco(path):
+            # Measured 6 Nov: Unreal Engine 5.3's glTF importer created nothing
+            # from a Draco-compressed .glb (duck.glb) and reported no error.
+            warnings.append("compressed with Draco: Unreal Engine 5.3 imports nothing from such a "
+                            "file; re-export it without Draco compression for Unreal")
 
         try:
             influences = 0 if undecodable else max_bone_influences(path)
@@ -4277,7 +4303,8 @@ class Gatekeeper:
                 if uv_channels > limit:
                     problems.append(f"{uv_channels} UV channels exceeds the {limit} channel limit")
 
-        if not self.budget.allow_degenerate and not undecodable:
+        if (not self.budget.allow_degenerate and self.budget.degenerate_mode != "allow"
+                and not undecodable):
             try:
                 degenerate = count_degenerate_triangles(path, self.budget.degenerate_epsilon,
                                                         self.budget.degenerate_ratio)
@@ -4286,10 +4313,9 @@ class Gatekeeper:
             else:
                 stats.append(("degenerate_triangles", degenerate))
                 if degenerate:
-                    problems.append(
-                        f"{degenerate:,} degenerate triangles (flat or zero-area) - Nanite and ray "
-                        f"tracing compute garbage from these"
-                    )
+                    message = (f"{degenerate:,} degenerate triangles (flat or zero-area) - Nanite "
+                               f"and ray tracing compute garbage from these")
+                    (warnings if self.budget.degenerate_mode == "warn" else problems).append(message)
 
         try:
             packed = embedded_texture_sizes(path)
@@ -4920,7 +4946,7 @@ def describe_budget(budget: Budget) -> str:
         f"materials<={budget.max_material_slots}  "
         f"influences<={budget.max_bone_influences}  "
         f"uvs<={budget.max_uv_channels}  "
-        f"degenerate={'allowed' if budget.allow_degenerate else 'blocked'}  "
+        f"degenerate={'allowed' if budget.allow_degenerate or budget.degenerate_mode == 'allow' else ('warned' if budget.degenerate_mode == 'warn' else 'blocked')}  "
         f"naming={'on' if budget.enforce_texture_naming else 'off'}  "
         f"refs={'checked' if budget.check_references else 'ignored'}  "
         f"pbr={'on' if budget.pbr_check else 'off'}  "

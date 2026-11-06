@@ -29,6 +29,15 @@ AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
     (Maya's own underscore check is gone); `.tif .webp .dds .exr .ktx2` checked;
     a missing file reported once; glTF 1.0 and meshopt explained in words.
   * 3ds Max: a warning icon when blocked, and an installable AGK button.
+* **Calibrated against Unreal Engine 5.3 (6 Nov evening).** Importing the nine
+  test models headlessly gave the same triangle count as the gate for every
+  static mesh, once glTF parts placed several times are counted every time:
+  Unreal bakes the copies in (CesiumMilkTruck 3,624, not 2,856). The gate now
+  budgets that count (`unique_triangles` is in the stats). Unreal kept every
+  triangle the old degenerate test had flagged in BoomBox and Corset, confirming
+  the shape-based rule; `[mesh] degenerate = "block" | "warn" | "allow"` chooses
+  what a genuinely flat triangle does. Unreal 5.3 imported nothing from a
+  Draco-compressed .glb, so such files now carry a warning saying so.
 * **Naming conventions (6 Nov evening).** `[naming]` takes one or more presets
   (`default`, `unreal`, `unity`, `gltf`, `substance`, `godot`) plus a custom
   convention (prefixes, endings, or a regular expression for textures and

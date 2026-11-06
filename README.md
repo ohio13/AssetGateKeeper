@@ -33,11 +33,11 @@ asset-gatekeeper path/to/Exports --recursive           # keep watching; a pop-up
 
 | Files | Rule | Default |
 | :--- | :--- | :--- |
-| `.fbx` `.obj` `.gltf` `.glb` | triangles (each repeated part once) | 50,000 |
+| `.fbx` `.obj` `.gltf` `.glb` | triangles (every placed copy, as Unreal imports them) | 50,000 |
 | | material slots (draw calls) | 3 |
 | | bone weights per vertex | 4 |
 | | UV sets | 4 |
-| | flat or collapsed triangles | none allowed |
+| | flat or collapsed triangles | blocked (or `warn` / `allow`) |
 | | texture links that point at nothing | none allowed |
 | | textures packed inside the file | same rules as textures |
 | | mesh name prefix such as `SM_` | off |

@@ -39,6 +39,7 @@ Two consequences worth knowing before you debug anything:
 | `allow_outside_references` | bool | false | fail on a reference that resolves outside the watch folder; true downgrades it to a warning (shared texture library) |
 | `max_bone_influences` | int | 4 | skin weights per vertex; 4 is the mobile limit |
 | `allow_degenerate` | bool | false | flat or collapsed faces: Nanite and RT compute garbage from them |
+| `degenerate` | string | "block" | what a flat or collapsed triangle does: `"block"` fails the asset, `"warn"` passes it with a note, `"allow"` skips the check. Unreal removes such triangles on import, so `"warn"` suits teams that would rather not be blocked by them |
 | `degenerate_ratio` | float | 1e-06 | a triangle is flat when its area is at most this x its longest edge squared; judged by shape, so real-scale small props are not flagged |
 | `name_prefixes` | list | [] | optional: mesh names must start with one of these, e.g. `["SM_", "SK_"]` (case-insensitive). The gate checks the file name; Maya, 3ds Max, Blender and Unreal check object names with the same rule |
 | `degenerate_epsilon` | float | 0.0 | optional extra: also flag any triangle at or below this area (world units squared); 0 = off |

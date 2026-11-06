@@ -160,14 +160,15 @@ try:
     document, blob = gltf_document(TRIANGLE, indices=[0, 1, 2], nodes=nodes)
     path = write_gltf(WORK / "SM_Repeated.gltf", document, blob)
     unique, drawn = agk.gltf_triangle_counts(json.loads(path.read_text()))
-    expect("a mesh placed three times counts once against the budget", (unique, drawn) == (1, 3),
+    expect("a mesh placed three times: 1 unique, 3 drawn", (unique, drawn) == (1, 3),
            (unique, drawn))
     stats = dict(agk.Gatekeeper(agk.Budget()).check(path).stats)
-    expect("the drawn total is kept in the stats", stats.get("drawn_triangles") == 3, stats)
+    expect("the budget counts every copy, as Unreal 5.3 imports them (CesiumMilkTruck: 3,624)",
+           stats.get("triangles") == 3 and stats.get("unique_triangles") == 1, stats)
     saved = agk.trimesh
     agk.trimesh = None
     try:
-        expect("the count does not depend on trimesh", agk.count_triangles(path) == 1)
+        expect("the count does not depend on trimesh", agk.count_triangles(path) == 3)
     finally:
         agk.trimesh = saved
     cyclic = dict(document, nodes=[{"mesh": 0, "children": [1]}, {"children": [0]}],
@@ -202,6 +203,9 @@ try:
            dict(verdict.stats).get("triangles") == 1
            and any("meshopt" in w for w in verdict.warnings), (verdict.problems, verdict.warnings))
     expect("pyproject installs DracoPy", "DracoPy" in (ROOT / "pyproject.toml").read_text())
+    expect("any Draco file warns that Unreal 5.3 imports nothing from it",
+           any("Unreal Engine 5.3 imports nothing" in w
+               for w in agk.Gatekeeper(agk.Budget()).check(WORK / "SM_Draco.gltf").warnings))
 
     print("4. Textures packed inside .glb / data: URIs are checked")
     if Image is not None:
@@ -268,6 +272,20 @@ try:
     rules.write_text("[mesh]\ndegenerate_ratio = 0.5\n", encoding="utf-8")
     expect("degenerate_ratio is read from the rules file",
            agk.load_rules(rules)[0].degenerate_ratio == 0.5)
+    flat_path = WORK / "SM_Flat.gltf"
+    for mode, failed, warned in (("block", True, False), ("warn", False, True), ("allow", False, False)):
+        rules.write_text(f'[mesh]\ndegenerate = "{mode}"\n', encoding="utf-8")
+        verdict = agk.Gatekeeper(agk.load_rules(rules)[0]).check(flat_path)
+        expect(f'degenerate = "{mode}"',
+               any("degenerate" in p for p in verdict.problems) == failed
+               and any("degenerate" in w for w in verdict.warnings) == warned,
+               (verdict.problems, verdict.warnings))
+    rules.write_text('[mesh]\ndegenerate = "sometimes"\n', encoding="utf-8")
+    try:
+        agk.load_rules(rules)
+        expect("an unknown degenerate mode is refused", False)
+    except agk.ConfigError:
+        expect("an unknown degenerate mode is refused", True)
     import healer
     obj = WORK / "SM_Heal.obj"
     obj.write_text("v 0 0 0\nv 0.0001 0 0\nv 0 0.0001 0\nv 2 0 0\nf 1 2 3\nf 1 2 4\n", encoding="utf-8")

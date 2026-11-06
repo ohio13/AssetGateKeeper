@@ -68,7 +68,8 @@ def gltf_document(path: Path) -> dict:
 
 
 def reference_gltf(path: Path) -> int | None:
-    """Unique triangles of the default scene, every primitive mode honoured.
+    """Drawn triangles of the default scene (each placed copy counts, as Unreal
+    imports them), every primitive mode honoured.
     Written independently of the gate on purpose."""
     try:
         document = gltf_document(path)
@@ -95,17 +96,23 @@ def reference_gltf(path: Path) -> int | None:
     if not scenes:
         return sum(per_mesh)
     scene = scenes[document.get("scene", 0)] if document.get("scene", 0) < len(scenes) else scenes[0]
-    used: set[int] = set()
+    drawn = 0
     stack = [(root, frozenset()) for root in scene.get("nodes", [])]
     while stack:
         index, seen = stack.pop()
         if index in seen or index >= len(nodes):
             continue
         node = nodes[index]
-        if "mesh" in node:
-            used.add(node["mesh"])
+        if "mesh" in node and node["mesh"] < len(per_mesh):
+            copies = 1
+            instancing = node.get("extensions", {}).get("EXT_mesh_gpu_instancing")
+            if instancing:
+                first = next(iter(instancing.get("attributes", {}).values()), None)
+                if first is not None:
+                    copies = max(accessors[first].get("count", 1), 1)
+            drawn += per_mesh[node["mesh"]] * copies
         stack.extend((child, seen | {index}) for child in node.get("children", []))
-    return sum(per_mesh[i] for i in used if i < len(per_mesh))
+    return drawn
 
 
 def reference_ufbx(path: Path) -> int | None:
