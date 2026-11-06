@@ -1,4 +1,47 @@
-# Since v1.1.1 (unreleased, on `main`)
+# v0.1.0-alpha.1 (unreleased, on `main`)
+
+The first public alpha. The internal builds 1.0.0 to 1.1.1 (private testing,
+October-November 2026) are folded into it; their notes follow below for the
+record. The gate, the GitHub check and the editor plug-ins are the product;
+AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
+
+* **Real-world model test (6 Nov).** 460 public models (Khronos glTF samples,
+  three.js and assimp test files) were run through the gate and compared with
+  an independent reader. Fixed from what it found:
+  * One damaged file stopped a whole `--once` folder check with a traceback and
+    no report. Any unexpected error is now an `ERROR` verdict for that file and
+    the run carries on; corrupt GLB text and out-of-range indices say "damaged".
+  * Draco-compressed glTF read every vertex as zero, so every triangle was
+    "degenerate" (duck.glb: 4,212 of 4,212). DracoPy is now a dependency, and
+    when compression cannot be decoded the shape checks are skipped with a
+    warning instead of failing.
+  * Textures packed inside `.glb`, `data:` URIs and FBX embedded media were
+    never checked; a `.glb` with 4096x4096 maps passed a 2048 budget.
+  * The degenerate test used a fixed area, so real-scale small props failed
+    (BoomBox 1,774 triangles, a 1 mm sphere set 1,040,409). It now judges shape:
+    flat (`degenerate_ratio`, default 1e-6 x longest edge squared) or collapsed.
+    `degenerate_epsilon` is an optional extra floor, 0 by default.
+  * glTF triangles are counted from the file: strips and fans included,
+    compressed meshes exact, each mesh once (`drawn_triangles` in stats).
+  * ASCII FBX strings ending in `\` and binary `c` arrays no longer read as corrupt.
+  * 28 default texture map names, matched ignoring case and separators; an
+    optional `[mesh] name_prefixes` rule shared by the gate and every DCC panel
+    (Maya's own underscore check is gone); `.tif .webp .dds .exr .ktx2` checked;
+    a missing file reported once; glTF 1.0 and meshopt explained in words.
+  * 3ds Max: a warning icon when blocked, and an installable AGK button.
+* **AssetHealth and PostgreSQL (found 6 Nov).** `--adopt-legacy` and
+  `--remove-project`; a clearer 401 page. `migrate --sqlite` lost budget
+  exceptions (now copied, with migration `0003_exceptions`); `--init-schema`
+  records its migrations; `--plan` says "would apply".
+* **GitHub.** `--report github:FILE` marks failing assets on a pull request in
+  any repository; the workflow uses `codeql-action` v4 and uploads SARIF only
+  where code scanning exists.
+* **Repository.** Short README (the full manual is `docs/REFERENCE.md`),
+  `CONTRIBUTING.md`, `SECURITY.md`, issue forms, and `tools/corpus_check.py`.
+
+# Internal builds (before the public alpha)
+
+## Since v1.1.1
 
 * **Found by the developer's retest on 5 Nov, fixed and tested.**
   * Perforce `--require-approval` refused an approved `.obj` and `.mtl`:
@@ -185,7 +228,7 @@
     exist, the healer never "resizes oversized" textures, and `pad` was the real
     default in 1.1.0.
 
-# v1.1.1 (2026-11-02)
+## v1.1.1 (2026-11-02)
 
 * **Art Workstation, phase 1 (audit 2026-11-02).** The viewer no longer shows
   the previous asset when a load fails; embedded glTF buffers, every LOD and
@@ -221,7 +264,7 @@
   within 2 seconds are now ignored, a path is queued once per tick, and an asset
   that is already gone is skipped quietly. Found in a hand test on 2026-11-02.
 
-# AssetGatekeeper v1.1.0
+## v1.1.0
 
 **Released:** 2026-11-01  **Tag:** `v1.1.0`
 **Upgrading from 1.0:** read [docs/12-UPGRADING-TO-1.1.md](docs/12-UPGRADING-TO-1.1.md) first -
@@ -326,7 +369,7 @@ several verdicts are deliberately stricter and some pipelines will turn red.
 
 ---
 
-# AssetGatekeeper v1.0.0 - The Indie / Small-Studio Edition
+## v1.0.0 - The Indie / Small-Studio Edition
 
 **Released:** 2026-11-01
 **Tag:** `v1.0.0` **Branch:** `release/v1.x`

@@ -60,7 +60,7 @@ python -m pip install "trimesh>=4" "pillow>=10" charset-normalizer DracoPy
 ```
 python -m venv C:\Tools\agk-venv
 C:\Tools\agk-venv\Scripts\activate
-pip install asset_gatekeeper-1.0.0-py3-none-any.whl
+pip install asset_gatekeeper-<version>-py3-none-any.whl
 asset-gatekeeper --version
 ```
 
@@ -167,7 +167,7 @@ Back up a studio by copying those four things. Restore by copying them back.
 
 ```
 agk-serve down                     # stop the servers: they hold code in memory
-pip install --force-reinstall asset_gatekeeper-1.1.0-py3-none-any.whl
+pip install --force-reinstall asset_gatekeeper-<version>-py3-none-any.whl
 agk-serve up
 ```
 

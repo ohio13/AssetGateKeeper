@@ -1,0 +1,35 @@
+# The real-world model test: the gate over ~460 public models (Khronos glTF
+# samples, three.js and assimp test files), compared with an independent reader.
+# Run by hand from the Actions tab, and before every release.
+name: Real-world models
+
+on:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  corpus:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the gate and the reference reader
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install ".[full]" ufbx
+      - name: Check every model
+        run: python tools/corpus_check.py --corpus "$RUNNER_TEMP/corpus" --jobs 4 --json corpus.json
+      - name: Keep the results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: corpus-results
+          path: corpus.json
+          retention-days: 14

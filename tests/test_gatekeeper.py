@@ -3217,10 +3217,13 @@ expect("the report says FAILED and lists the failure",
        and "* two" in _report.read_text(encoding="utf-8"))
 expect("no control characters in the README (a stray \\a once hid in it)",
        not re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]",
-                     (ROOT_MODULE_DIR / "README.md").read_text(encoding="utf-8")))
+                     (ROOT_MODULE_DIR / "README.md").read_text(encoding="utf-8")
+                     + (ROOT_MODULE_DIR / "docs" / "REFERENCE.md").read_text(encoding="utf-8")))
 
-print("README and the CLI agree")
-readme = Path(__file__).resolve().parent.parent / "README.md"
+print("The reference and the CLI agree")
+# The long manual moved from README.md to docs/REFERENCE.md for the alpha (the
+# front page is now short); the flag table lives there.
+readme = Path(__file__).resolve().parent.parent / "docs" / "REFERENCE.md"
 if readme.is_file():
     documentation = readme.read_text(encoding="utf-8")
     # The flag table drifted from the parser once already: --preset, --tag-mode,
@@ -3229,7 +3232,7 @@ if readme.is_file():
                           for option in action.option_strings
                           if option.startswith("--") and option != "--help"
                           and f"`{option}" not in documentation)
-    expect("every CLI flag appears in the README", not undocumented, str(undocumented))
+    expect("every CLI flag appears in docs/REFERENCE.md", not undocumented, str(undocumented))
 else:                                    # pragma: no cover - shipped without docs
     print("  skip  README.md is not next to the tests")
 

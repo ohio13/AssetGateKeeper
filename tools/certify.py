@@ -30,6 +30,7 @@ ROOT = Path(__file__).resolve().parent.parent
 # (name, script, extra args, group). Order matters: the corpus first.
 SUITES = (
     ("gen_test_assets", "tests/gen_test_assets.py", (), "setup"),
+    ("test_realworld", "tests/test_realworld.py", (), "gate"),
     ("test_gatekeeper", "tests/test_gatekeeper.py", (), "gate"),
     ("test_formats", "tests/test_formats.py", (), "gate"),
     ("test_server", "tests/test_server.py", (), "gate"),

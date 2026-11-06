@@ -27,7 +27,7 @@ The engine script path defaults to `$ASSETGATEKEEPER_HOME/asset_gatekeeper.py`.
 bl_info = {
     "name": "AssetGatekeeper",
     "author": "AssetGatekeeper contributors",
-    "version": (1, 1, 1),
+    "version": (0, 1, 0),
     "blender": (3, 6, 0),
     "location": "View3D > Sidebar > AssetGatekeeper",
     "description": "Validate the active selection against the asset budget before exporting",

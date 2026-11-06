@@ -45,6 +45,8 @@ DROP_IN_FILES = (
     "notifier.py",
     "asset_gatekeeper.example.toml",
     "README.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
     "MANUAL.md",
     "QUICKSTART.md",
     "RELEASE_NOTES.md",

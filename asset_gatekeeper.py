@@ -65,7 +65,7 @@ from __future__ import annotations
 
 # Single source of truth for the version: pyproject.toml reads it from here
 # (setuptools parses this literal statically), so it cannot drift.
-__version__ = "1.1.1"
+__version__ = "0.1.0a1"   # shown as 0.1.0-alpha.1; internal 1.0-1.1.1 builds preceded it
 
 import argparse
 import array
@@ -4007,7 +4007,7 @@ class Gatekeeper:
             limit = self.budget.max_material_slots
             if slots > limit:
                 problems.append(
-                    f"{slots} material slots exceeds the {limit} slot budget (draw calls)"
+                    f"{slots:,} material slots exceeds the {limit:,} slot budget (draw calls)"
                 )
 
         undecodable = gltf_undecodable_compression(path)
@@ -4061,13 +4061,24 @@ class Gatekeeper:
         if packed:
             stats.append(("embedded_textures", len(packed)))
             edge = self.budget.max_texture_edge
-            for label, width, height in packed:
-                if max(width, height) > edge:
-                    problems.append(f"embedded texture '{label}' {width}x{height} exceeds the "
-                                    f"{edge}x{edge} maximum resolution")
-                if self.budget.require_power_of_two and not (
-                        is_power_of_two(width) and is_power_of_two(height)):
-                    problems.append(f"embedded texture '{label}' {width}x{height} is not a power of two")
+            too_big = [(label, width, height) for label, width, height in packed
+                       if max(width, height) > edge]
+            not_pot = [(label, width, height) for label, width, height in packed
+                       if self.budget.require_power_of_two
+                       and not (is_power_of_two(width) and is_power_of_two(height))]
+            # Up to three are named one per line; more become one line, so a
+            # file with 100 packed textures (NodePerformanceTest.glb) is not a
+            # hundred-line verdict.
+            for found, wording in ((too_big, f"exceeds the {edge}x{edge} maximum resolution"),
+                                   (not_pot, "is not a power of two")):
+                if len(found) <= 3:
+                    problems.extend(f"embedded texture '{label}' {width}x{height} {wording}"
+                                    for label, width, height in found)
+                else:
+                    named = ", ".join(f"'{label}' {width}x{height}" for label, width, height in found[:3])
+                    verb = wording.replace("exceeds", "exceed").replace("is not a power", "are not powers")
+                    problems.append(f"{len(found)} embedded textures {verb} ({named} and "
+                                    f"{len(found) - 3} more)")
 
         # Memory (G2) and texel density (G8): measured when budgeted, or when a
         # [[totals]] line needs the number.
@@ -4679,6 +4690,7 @@ def describe_budget(budget: Budget) -> str:
         + (f"  texture<={budget.max_texture_mb:g}MB({budget.texture_format})"
            if budget.max_texture_mb else "")
         + (f"  mesh<={budget.max_mesh_mb:g}MB" if budget.max_mesh_mb else "")
+        + (f"  names={','.join(budget.mesh_name_prefixes)}" if budget.mesh_name_prefixes else "")
         + (f"  texel={budget.texel_density_min:g}-{budget.texel_density_max:g}px/m"
            if budget.texel_density_max else "")
         + (f"  platform={budget.platform}" if budget.platform else "")

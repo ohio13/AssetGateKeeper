@@ -228,6 +228,20 @@ try:
         verdict = agk.Gatekeeper(agk.Budget()).check(write_gltf(WORK / "SM_DataUri.gltf", document, blob))
         expect("a data: URI texture is checked too", any("4096x16" in p for p in verdict.problems),
                verdict.problems)
+        many_document, many_blob = gltf_document(TRIANGLE, indices=[0, 1, 2])
+        many_views = many_document["bufferViews"]
+        many_images = []
+        for number in range(6):
+            data = png_bytes(100, 64)
+            many_views.append({"buffer": 0, "byteOffset": len(many_blob), "byteLength": len(data)})
+            many_blob += data
+            many_images.append({"bufferView": len(many_views) - 1, "name": f"tex{number}"})
+        many_document["images"] = many_images
+        many_document["buffers"][0]["byteLength"] = len(many_blob)
+        verdict = agk.Gatekeeper(agk.Budget()).check(write_glb(WORK / "SM_Many.glb", many_document, many_blob))
+        expect("many packed textures become one line, not one each",
+               verdict.problems == ("6 embedded textures are not powers of two ('tex0' 100x64, "
+                                    "'tex1' 100x64, 'tex2' 100x64 and 3 more)",), verdict.problems)
         ktx2 = b"\xabKTX 20\xbb\r\n\x1a\n" + struct.pack("<IIIII", 0, 1, 8192, 4096, 0) + b"\0" * 64
         expect("KTX2 size read from its header", agk.image_size_from_bytes(ktx2) == (8192, 4096))
     else:                                                   # pragma: no cover

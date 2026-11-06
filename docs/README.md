@@ -16,6 +16,7 @@ for the same flag.
 | Reviewing art | [07 Art Workstation](07-ART-WORKSTATION.md) |
 | Watching the numbers | [08 AssetHealth](08-ASSETHEALTH.md) |
 | Something is broken | [11 Troubleshooting](11-TROUBLESHOOTING.md) |
+| Wanting everything on one page | [Reference](REFERENCE.md) (the old long README) |
 
 ## The whole map
 

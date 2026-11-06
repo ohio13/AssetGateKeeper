@@ -1,0 +1,32 @@
+name: Bug report
+description: The tool gave a wrong answer, crashed, or did something confusing.
+labels: [bug]
+body:
+  - type: textarea
+    id: output
+    attributes:
+      label: What the tool printed
+      description: The FAILED/ERROR line, or the whole traceback. Paste it as text.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected, and how you know
+      description: For example, "Unreal shows 12,400 triangles for this file".
+    validations:
+      required: true
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Operating system, `python --version`, `asset-gatekeeper --version`, and the editor if it is a plug-in problem.
+    validations:
+      required: true
+  - type: textarea
+    id: file
+    attributes:
+      label: The file (if you can share it)
+      description: Drag it here, or link it. A file that shows the problem is the fastest way to a fix. Don't share anything you're not allowed to.
+
