@@ -44,7 +44,7 @@ Exit codes (--once): 0 = every asset passed, 1 = at least one failed, 2 = bad se
 
 Install
 -
-    python -m pip install watchdog trimesh pillow
+    python -m pip install watchdog trimesh pillow DracoPy
 
 Notes for extending
 -
@@ -208,7 +208,12 @@ class Budget:
     max_bone_influences: int = 4          # per-vertex weights; mobile/web GPUs cap at 4
     max_uv_channels: int = 4              # TEXCOORD_n sets; most engines stop at 4-8
     allow_degenerate: bool = False        # zero-area triangles: poison for Nanite / RT
-    degenerate_epsilon: float = 1e-8      # area below which a triangle counts as degenerate
+    # A triangle is degenerate when it is flat - its area is at most
+    # degenerate_ratio x (longest edge)^2 - or two corners are the same point.
+    # That judges shape, not size: a fixed area cut-off called every triangle of
+    # a real-scale 1 mm glTF prop "degenerate" (6 Nov corpus test).
+    degenerate_ratio: float = 1e-6
+    degenerate_epsilon: float = 0.0       # optional extra: any area at or below this (units^2)
 
     # - filters - #
     # Globs that look like assets but are not: review renders, 4x paint sources,
@@ -287,7 +292,7 @@ class Budget:
         # Finite, non-negative floats. NaN is the dangerous one: every comparison
         # against it is False, so ``nan > 0`` silently disabled the degenerate-face
         # check instead of failing loudly.
-        for field in ("degenerate_epsilon", "pivot_tolerance", "transform_epsilon"):
+        for field in ("degenerate_epsilon", "degenerate_ratio", "pivot_tolerance", "transform_epsilon"):
             value = getattr(self, field)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 raise ConfigError(f"budget {field} must be a number, got {value!r}")
@@ -346,7 +351,7 @@ class Budget:
         if not isinstance(texture, dict):
             raise ConfigError("[texture] must be a table")
         _reject_unknown(mesh, ("max_triangles", "max_material_slots", "max_bone_influences",
-                               "max_uv_channels", "allow_degenerate", "degenerate_epsilon",
+                               "max_uv_channels", "allow_degenerate", "degenerate_epsilon", "degenerate_ratio",
                                "check_references", "allow_outside_references",
                                "audit_transforms", "require_indexed",
                                "pivot_tolerance", "transform_epsilon", "max_mb",
@@ -363,6 +368,7 @@ class Budget:
         max_uv_channels = _read_int(mesh, "max_uv_channels", "[mesh]", minimum=1)
         allow_degenerate = _read_bool(mesh, "allow_degenerate", "[mesh]")
         degenerate_epsilon = _read_float(mesh, "degenerate_epsilon", "[mesh]")
+        degenerate_ratio = _read_float(mesh, "degenerate_ratio", "[mesh]")
         max_texture_edge = _read_int(texture, "max_edge", "[texture]", minimum=1)
         require_power_of_two = _read_bool(texture, "power_of_two", "[texture]")
         enforce_texture_naming = _read_bool(texture, "naming", "[texture]")
@@ -403,6 +409,8 @@ class Budget:
             ),
             max_uv_channels=defaults.max_uv_channels if max_uv_channels is None else max_uv_channels,
             allow_degenerate=defaults.allow_degenerate if allow_degenerate is None else allow_degenerate,
+            degenerate_ratio=(
+                defaults.degenerate_ratio if degenerate_ratio is None else degenerate_ratio),
             degenerate_epsilon=(
                 defaults.degenerate_epsilon if degenerate_epsilon is None else degenerate_epsilon
             ),
@@ -2087,12 +2095,24 @@ def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:
 # Analyzers - one concern each, no logging, no watching.
 # --- #
 
+def _describe_unexpected(exc: BaseException) -> str:
+    """``TypeName: message``, or just ``TypeName`` when the message is empty.
+
+    An empty message once surfaced as ``could not read mesh (AssertionError: )``,
+    which tells an artist nothing. The type alone at least reads as a word."""
+    message = str(exc).strip()
+    return f"{type(exc).__name__}: {message}" if message else type(exc).__name__
+
+
 def _mesh_read_error(exc: BaseException) -> str:
     """The FAILED reason for a mesh trimesh could not load, with the fix if there is one."""
     if isinstance(exc, ModuleNotFoundError) and getattr(exc, "name", "") == "charset_normalizer":
         return ("could not read mesh: it is not UTF-8 text, and reading it needs "
                 "charset-normalizer (python -m pip install charset-normalizer)")
-    return f"could not read mesh ({type(exc).__name__}: {exc})"
+    if isinstance(exc, (IndexError, AssertionError)):
+        return ("could not read mesh: it is damaged (an index points past the end of its "
+                f"data - {_describe_unexpected(exc)}); re-export it")
+    return f"could not read mesh ({_describe_unexpected(exc)})"
 
 
 @lru_cache(maxsize=8)
@@ -2143,8 +2163,10 @@ _FBX_MAGIC = b"Kaydara FBX Binary  \x00"
 FBX_MAX_DEPTH = 64
 FBX_MAX_ARRAY_BYTES = 512 * 1024 * 1024      # one array
 FBX_MAX_TOTAL_BYTES = 2 * 1024 * 1024 * 1024  # all arrays in one file
+# 'c' is a byte array some exporters write where others write 'b' (assimp's
+# boxWithCompressedCTypeArray.FBX); it used to fail as "unknown property type 99".
 _FBX_ARRAY_TYPES = {ord("f"): ("f", 4), ord("d"): ("d", 8), ord("l"): ("q", 8),
-                    ord("i"): ("i", 4), ord("b"): ("b", 1)}
+                    ord("i"): ("i", 4), ord("b"): ("b", 1), ord("c"): ("b", 1)}
 
 
 class _FbxNode:
@@ -2289,7 +2311,9 @@ def _looks_like_ascii_fbx(data: bytes) -> bool:
 # length ("*24"), a brace, a comma, a newline, or a bare word (T, Y, W, ...).
 _FBX_ASCII_TOKEN = re.compile(
     rb"""(?P<key>[A-Za-z_][A-Za-z0-9_|]*)[ \t]*:(?!:)"""
-    rb"""|(?P<string>"(?:[^"\\]|\\.)*")"""
+    # No backslash escapes in ASCII FBX (a quote is written &quot;): Maya writes
+    # paths such as "D:\\" whose final backslash once swallowed the closing quote.
+    rb"""|(?P<string>"[^"]*")"""
     rb"""|(?P<count>\*[0-9]+)"""
     rb"""|(?P<number>[-+]?(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][-+]?[0-9]+)?)"""
     rb"""|(?P<open>\{)|(?P<close>\})|(?P<comma>,)|(?P<newline>\n)"""
@@ -2333,7 +2357,7 @@ def parse_fbx_ascii(data: bytes) -> "list[_FbxNode]":
 
     def value(kind, raw):
         if kind == "string":
-            return raw[1:-1].decode("utf-8", "replace")
+            return raw[1:-1].decode("utf-8", "replace").replace("&quot;", '"')
         if kind == "number":
             text = raw.decode("ascii")
             if any(mark in text for mark in ".eE"):
@@ -2457,6 +2481,8 @@ class FbxSummary:
     collision_meshes: int = 0
     #: meshes below LOD0 in an LOD group: not part of the LOD0 budget
     lower_lod_meshes: int = 0
+    #: (name, width, height) of each texture packed inside the FBX
+    embedded_textures: tuple = ()
 
 
 def _fbx_id(node: _FbxNode) -> Optional[int]:
@@ -2505,7 +2531,8 @@ def _fbx_polygons(indices):
 
 
 @lru_cache(maxsize=8)
-def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float) -> FbxSummary:
+def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float,
+                     ratio: float = 1e-6) -> FbxSummary:
     if np is None:                                       # pragma: no cover
         raise AssetError("numpy is not installed; FBX cannot be analysed")
     try:
@@ -2617,9 +2644,8 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float) -> FbxS
             a = corners[starts[owner]]
             b = corners[starts[owner] + step]
             c = corners[starts[owner] + step + 1]
-            cross = np.cross(positions[b] - positions[a], positions[c] - positions[a])
-            areas = 0.5 * np.linalg.norm(cross, axis=1)
-            degenerate += int(np.count_nonzero(areas <= epsilon))
+            degenerate += int(np.count_nonzero(degenerate_mask(
+                positions[a], positions[b], positions[c], ratio, epsilon)))
         # Skin: Skin deformer -> this geometry; clusters -> that skin.
         for skin_id in children_of.get(geometry_id, ()):
             if skin_id not in skins:
@@ -2647,6 +2673,7 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float) -> FbxS
     slots = len(used) if used else (1 if triangles else 0)
 
     references = []
+    packed: dict = {}
     for texture_id, texture in textures.items():
         relative = _fbx_string(texture.child("RelativeFilename"))
         absolute = _fbx_string(texture.child("FileName"))
@@ -2657,21 +2684,27 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float) -> FbxS
             if content is not None and content.props and isinstance(content.props[0], bytes) \
                     and len(content.props[0]) > 0:
                 embedded = True
+                size = image_size_from_bytes(content.props[0])
+                if size is not None and video_id not in packed:
+                    label = (relative or absolute).replace("\\", "/").rsplit("/", 1)[-1] \
+                        or f"texture {len(packed) + 1}"
+                    packed[video_id] = (label, size[0], size[1])
         if embedded or not (relative or absolute):
             continue
         written = relative or absolute
         references.append((written, tuple(item for item in (relative, absolute) if item)))
     return FbxSummary(triangles, slots, uv_channels, max_influences, degenerate,
-                      tuple(references), collision_meshes, lower_lod_meshes)
+                      tuple(references), collision_meshes, lower_lod_meshes,
+                      tuple(packed.values()))
 
 
-def read_fbx(path: Path, epsilon: float = 1e-8) -> FbxSummary:
+def read_fbx(path: Path, epsilon: float = 0.0, ratio: float = 1e-6) -> FbxSummary:
     try:
         modified = path.stat().st_mtime_ns
     except OSError as exc:
         raise AssetError(f"could not read FBX ({exc})") from exc
     try:
-        return _read_fbx_cached(str(path), modified, float(epsilon))
+        return _read_fbx_cached(str(path), modified, float(epsilon), float(ratio))
     except AssetError:
         raise
     except (ValueError, IndexError, TypeError, MemoryError) as exc:
@@ -2708,13 +2741,30 @@ def _count_triangles_trimesh(path: Path) -> int:
 
 def read_gltf_document(path: Path) -> dict:
     """Return the glTF JSON document for a .gltf (text) or .glb (binary) file."""
-    if path.suffix.lower() == ".gltf":
-        return json.loads(path.read_text(encoding="utf-8"))
+    try:
+        if path.suffix.lower() == ".gltf":
+            document = json.loads(path.read_text(encoding="utf-8-sig"))
+        else:
+            document = _glb_json(path.read_bytes())
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        # Corrupt text used to escape as an uncaught UnicodeDecodeError (6 Nov
+        # fuzzing) and stop a folder scan; it is a damaged file like any other.
+        raise AssetError(f"damaged glTF: its JSON is not valid ({type(exc).__name__}); "
+                         "re-export it") from exc
+    if not isinstance(document, dict):
+        raise AssetError("damaged glTF: its JSON is not an object; re-export it")
+    asset = document.get("asset")
+    version = str(asset.get("version", "")) if isinstance(asset, dict) else ""
+    # glTF 1.0 kept meshes/accessors as name-keyed objects, not lists.
+    if version.startswith("1") or isinstance(document.get("meshes"), dict):
+        raise AssetError("glTF 1.0 file: this format was replaced by glTF 2.0 in 2017; "
+                         "re-export it as glTF 2.0")
+    return document
 
-    blob = path.read_bytes()
+
+def _glb_json(blob: bytes) -> dict:
     if blob[:4] != GLB_MAGIC:
         raise AssetError("not a GLB container (bad magic header)")
-
     offset = 12  # magic(4) + version(4) + total length(4)
     while offset + 8 <= len(blob):
         chunk_length, chunk_type = struct.unpack_from("<II", blob, offset)
@@ -2725,65 +2775,105 @@ def read_gltf_document(path: Path) -> dict:
     raise AssetError("GLB contains no JSON chunk")
 
 
-def _count_triangles_from_document(document: dict) -> int:
-    """Count triangles from a glTF JSON document, walking the node graph.
+#: glTF primitive modes: 4 TRIANGLES, 5 TRIANGLE_STRIP, 6 TRIANGLE_FAN. 0-3 are
+#: points and lines, which an engine does not import as mesh triangles.
+_GLTF_TRIANGLE_MODES = (4, 5, 6)
 
-    Pure and dependency-free, so it also serves as the fallback when trimesh (or
-    one of its optional loaders) is unavailable.
-    """
+
+def _primitive_triangles(document: dict, primitive: dict) -> int:
     accessors = document.get("accessors", [])
+    mode = primitive.get("mode", 4)
+    if mode not in _GLTF_TRIANGLE_MODES:
+        return 0
+    index_accessor = primitive.get("indices")
+    if index_accessor is None:
+        index_accessor = (primitive.get("attributes") or {}).get("POSITION")
+    if not isinstance(index_accessor, int) or not 0 <= index_accessor < len(accessors):
+        return 0
+    count = int(accessors[index_accessor].get("count", 0) or 0)
+    if mode == 4:
+        return count // 3
+    return max(count - 2, 0)        # a strip or a fan: one triangle per index after two
 
-    per_mesh: dict[int, int] = {}
-    for mesh_index, mesh in enumerate(document.get("meshes", [])):
-        subtotal = 0
-        for primitive in mesh.get("primitives", []):
-            index_accessor = primitive.get("indices")
-            if index_accessor is not None:
-                subtotal += accessors[index_accessor].get("count", 0) // 3
-            else:
-                position_accessor = primitive.get("attributes", {}).get("POSITION")
-                if position_accessor is not None:
-                    subtotal += accessors[position_accessor].get("count", 0) // 3
-        per_mesh[mesh_index] = subtotal
 
+def gltf_triangle_counts(document: dict) -> tuple[int, int]:
+    """(unique, drawn) triangles of a glTF document, read from its accessors.
+
+    *unique* counts each mesh once - what an engine imports as mesh assets and
+    what an import budget is about. *drawn* counts a mesh once per node that
+    places it, which is what the scene renders. Both come straight from the
+    accessor counts, so they need no decoding: Draco- or meshopt-compressed
+    files count the same as plain ones, and strips and fans are not dropped (a
+    fan-only mesh used to read as 0 triangles).
+    """
+    meshes = document.get("meshes", [])
+    per_mesh = [sum(_primitive_triangles(document, primitive)
+                    for primitive in (mesh.get("primitives") or []))
+                for mesh in meshes]
     nodes = document.get("nodes", [])
+    scenes = document.get("scenes", [])
+    scene_index = document.get("scene", 0)
+    if scenes:
+        scene = scenes[scene_index] if isinstance(scene_index, int) and 0 <= scene_index < len(scenes) else scenes[0]
+        roots = list(scene.get("nodes", []))
+    else:
+        roots = []
+    if not roots:
+        total = sum(per_mesh)
+        return total, total
 
-    def node_total(node_index: int, seen: frozenset[int] = frozenset()) -> int:
-        if node_index in seen:  # defensive: malformed cyclic graph
-            return 0
+    used: set[int] = set()
+    drawn = 0
+    stack = [(root, frozenset()) for root in roots]
+    while stack:
+        node_index, seen = stack.pop()
+        if not isinstance(node_index, int) or not 0 <= node_index < len(nodes) or node_index in seen:
+            continue                     # malformed or cyclic graph: skip, never loop
         node = nodes[node_index]
-        total = per_mesh.get(node.get("mesh", -1), 0)
+        mesh_index = node.get("mesh")
+        if isinstance(mesh_index, int) and 0 <= mesh_index < len(per_mesh):
+            used.add(mesh_index)
+            copies = 1
+            instancing = (node.get("extensions") or {}).get("EXT_mesh_gpu_instancing")
+            if isinstance(instancing, dict):
+                attributes = instancing.get("attributes") or {}
+                accessor = next(iter(attributes.values()), None)
+                accessors = document.get("accessors", [])
+                if isinstance(accessor, int) and 0 <= accessor < len(accessors):
+                    copies = max(int(accessors[accessor].get("count", 1) or 1), 1)
+            drawn += per_mesh[mesh_index] * copies
         for child in node.get("children", []):
-            total += node_total(child, seen | {node_index})
-        return total
+            stack.append((child, seen | {node_index}))
+    return sum(per_mesh[index] for index in used), drawn
 
-    roots = [root for scene in document.get("scenes", []) for root in scene.get("nodes", [])]
-    if roots:
-        return sum(node_total(root) for root in roots)
-    return sum(per_mesh.values())
+
+def _count_triangles_from_document(document: dict) -> int:
+    """Unique triangles of a glTF document (see gltf_triangle_counts)."""
+    return gltf_triangle_counts(document)[0]
 
 
 def count_triangles(path: Path) -> int:
-    """Triangle count for .obj / .gltf / .glb (trimesh first, JSON fallback) and .fbx."""
-    if path.suffix.lower() in FBX_SUFFIXES:
+    """Triangle count for .obj / .gltf / .glb and .fbx.
+
+    glTF is counted from its accessors (one counter, no decoding); OBJ through
+    trimesh; FBX through the built-in reader."""
+    suffix = path.suffix.lower()
+    if suffix in FBX_SUFFIXES:
         return read_fbx(path).triangles
+    if suffix in GLTF_SUFFIXES:
+        document = read_gltf_document(path)
+        try:
+            return _count_triangles_from_document(document)
+        except (ValueError, TypeError, KeyError, AttributeError) as exc:
+            raise AssetError(f"damaged glTF ({_describe_unexpected(exc)}); re-export it") from exc
     if trimesh is not None:
         try:
             return _count_triangles_trimesh(path)
         except AssetError:
             raise
         except Exception as exc:  # trimesh raises a wide variety of errors
-            if path.suffix.lower() not in GLTF_SUFFIXES:
-                raise AssetError(_mesh_read_error(exc)) from exc
-            LOG.debug("trimesh failed on %s, falling back to JSON: %s", path.name, exc)
-
-    if path.suffix.lower() in GLTF_SUFFIXES:
-        try:
-            return _count_triangles_from_document(read_gltf_document(path))
-        except (AssetError, ValueError, OSError, struct.error) as exc:
-            raise AssetError(f"could not parse glTF ({type(exc).__name__}: {exc})") from exc
-
-    raise AssetError("trimesh is not installed; .obj/.glb cannot be analysed")
+            raise AssetError(_mesh_read_error(exc)) from exc
+    raise AssetError("trimesh is not installed; .obj cannot be analysed")
 
 
 def _count_material_slots_trimesh(path: Path) -> int:
@@ -3070,10 +3160,64 @@ def max_bone_influences(path: Path, epsilon: float = 1e-4) -> int:
     return worst
 
 
-def count_degenerate_triangles(path: Path, epsilon: float = 1e-8) -> int:
-    """Triangles whose area is ~zero (collinear or coincident corners)."""
+#: glTF extensions that compress vertex data trimesh cannot read without help.
+_GLTF_DRACO = "KHR_draco_mesh_compression"
+_GLTF_MESHOPT = ("EXT_meshopt_compression", "KHR_meshopt_compression")
+
+
+def _dracopy_available() -> bool:
+    # trimesh decodes Draco through DracoPy; only its presence matters here.
+    return importlib.util.find_spec("DracoPy") is not None
+
+
+def gltf_undecodable_compression(path: Path) -> str:
+    """A warning when a glTF's vertex data is compressed in a way this machine
+    cannot decode, else ''. Geometry checks are then skipped rather than run on
+    placeholder zeros: without DracoPy every Draco vertex reads as (0, 0, 0) and
+    every triangle looked degenerate (duck.glb: 4,212 of 4,212)."""
+    if path.suffix.lower() not in GLTF_SUFFIXES:
+        return ""
+    try:
+        document = read_gltf_document(path)
+    except AssetError:
+        return ""
+    used = set(document.get("extensionsUsed") or [])
+    required = set(document.get("extensionsRequired") or [])
+    if _GLTF_DRACO in used and not _dracopy_available():
+        return ("compressed with Draco and DracoPy is not installed, so the shape checks "
+                "(degenerate triangles, bone weights) were skipped - "
+                "python -m pip install DracoPy")
+    if required & set(_GLTF_MESHOPT):
+        return ("compressed with meshopt, which this version cannot decode, so the shape "
+                "checks (degenerate triangles, bone weights) were skipped; counts are exact")
+    return ""
+
+
+#: Corners closer than this (in file units) are the same point, whatever the scale.
+_COINCIDENT_EDGE_SQUARED = 1e-14
+
+
+def degenerate_mask(a, b, c, ratio: float = 1e-6, epsilon: float = 0.0):
+    """Which triangles (corner arrays a, b, c of shape (n, 3)) are degenerate.
+
+    Flat (area <= ratio x longest edge squared), collapsed (all corners within
+    1e-7 units), or - when epsilon is set - no larger than epsilon in area.
+    Shape, not size: a well-made 0.1 mm triangle on a real-scale prop is fine.
+    """
+    ab, bc, ca = b - a, c - b, a - c
+    areas = 0.5 * np.linalg.norm(np.cross(ab, -ca), axis=1)
+    longest = np.max(np.stack([(ab * ab).sum(axis=1), (bc * bc).sum(axis=1),
+                               (ca * ca).sum(axis=1)]), axis=0)
+    mask = (areas <= ratio * longest) | (longest <= _COINCIDENT_EDGE_SQUARED)
+    if epsilon > 0:
+        mask |= areas <= epsilon
+    return mask
+
+
+def count_degenerate_triangles(path: Path, epsilon: float = 0.0, ratio: float = 1e-6) -> int:
+    """Triangles that are flat or collapsed (see degenerate_mask)."""
     if path.suffix.lower() in FBX_SUFFIXES:
-        return read_fbx(path, epsilon).degenerate
+        return read_fbx(path, epsilon, ratio).degenerate
     if np is None:  # pragma: no cover - numpy ships with trimesh
         LOG.debug("numpy is unavailable; skipping degenerate geometry check")
         return 0
@@ -3084,12 +3228,82 @@ def count_degenerate_triangles(path: Path, epsilon: float = 1e-8) -> int:
         vertices = getattr(geometry, "vertices", None)
         if faces is None or vertices is None or len(faces) == 0:
             continue
-        corners = np.asarray(vertices)[np.asarray(faces)]
-        edge_a = corners[:, 1] - corners[:, 0]
-        edge_b = corners[:, 2] - corners[:, 0]
-        areas = 0.5 * np.linalg.norm(np.cross(edge_a, edge_b), axis=1)
-        total += int(np.count_nonzero(areas <= epsilon))
+        vertices = np.asarray(vertices, dtype=np.float64)
+        faces = np.asarray(faces)
+        if faces.size and (int(faces.max()) >= len(vertices) or int(faces.min()) < 0):
+            raise AssetError("could not read mesh: it is damaged (a triangle points past the "
+                             f"last of its {len(vertices):,} vertices); re-export it")
+        corners = vertices[faces]
+        total += int(np.count_nonzero(degenerate_mask(corners[:, 0], corners[:, 1],
+                                                      corners[:, 2], ratio, epsilon)))
     return total
+
+
+def image_size_from_bytes(data: bytes) -> Optional[tuple[int, int]]:
+    """(width, height) of an image held in memory, or None if unrecognised.
+
+    Pillow reads PNG/JPEG/TGA/WebP/DDS headers; KTX2 (the GPU format glTF
+    uses) is read from its fixed header so no extra library is needed."""
+    if data[:12] == b"\xabKTX 20\xbb\r\n\x1a\n" and len(data) >= 28:
+        width, height = struct.unpack_from("<II", data, 20)
+        return int(width), int(max(height, 1))
+    if Image is None:
+        return None
+    try:
+        import io
+        with Image.open(io.BytesIO(data)) as image:
+            return int(image.size[0]), int(image.size[1])
+    except Exception:
+        return None
+
+
+def embedded_texture_sizes(path: Path) -> list[tuple[str, int, int]]:
+    """(label, width, height) of every texture packed inside a mesh file.
+
+    glTF: images stored in the .glb binary chunk or as data: URIs. FBX: embedded
+    media. External textures are not listed - they are checked as files of
+    their own. Packed ones used to be skipped entirely, so a .glb carrying
+    4096x4096 maps passed a 2048 budget (6 Nov corpus test)."""
+    suffix = path.suffix.lower()
+    if suffix in FBX_SUFFIXES:
+        return [tuple(item) for item in read_fbx(path).embedded_textures]
+    if suffix not in GLTF_SUFFIXES:
+        return []
+    document = read_gltf_document(path)
+    images = document.get("images") or []
+    if not images:
+        return []
+    views = document.get("bufferViews") or []
+    binary: Optional[bytes] = None
+    found: list[tuple[str, int, int]] = []
+    for number, image in enumerate(images, start=1):
+        if not isinstance(image, dict):
+            continue
+        label = str(image.get("name") or "") or f"image {number} of {len(images)}"
+        data: Optional[bytes] = None
+        uri = image.get("uri")
+        if isinstance(uri, str) and uri.startswith("data:") and "," in uri:
+            try:
+                data = base64.b64decode(uri.split(",", 1)[1])
+            except ValueError:
+                data = None
+        elif isinstance(image.get("bufferView"), int) and suffix == ".glb":
+            view_index = image["bufferView"]
+            if 0 <= view_index < len(views):
+                if binary is None:
+                    try:
+                        binary = _glb_binary_chunk(path)
+                    except (AssetError, OSError, struct.error):
+                        binary = b""
+                view = views[view_index]
+                start = int(view.get("byteOffset", 0) or 0)
+                data = binary[start:start + int(view.get("byteLength", 0) or 0)]
+        if not data:
+            continue
+        size = image_size_from_bytes(data)
+        if size is not None:
+            found.append((label, size[0], size[1]))
+    return found
 
 
 def measure_texture(path: Path) -> tuple[int, int]:
@@ -3564,7 +3778,18 @@ class Gatekeeper:
             self._naming = (build_naming_pattern(budget.texture_suffixes)
                             if budget.enforce_texture_naming else None)
         try:
-            verdict = self._inspect(path)
+            try:
+                verdict = self._inspect(path)
+            except (KeyboardInterrupt, SystemExit, MemoryError):
+                raise
+            except Exception as exc:
+                # One damaged file must never stop a folder scan, a watch, a
+                # trigger or a report: it becomes an ERROR verdict like any
+                # other unreadable file, and the run carries on (6 Nov corpus:
+                # an out-of-range glTF index used to abort --once outright).
+                LOG.debug("unexpected error inspecting %s", path, exc_info=True)
+                verdict = Verdict(path, (f"could not be checked ({_describe_unexpected(exc)})",),
+                                  unreadable=True)
             if verdict.problems and self.healer is not None:
                 verdict = self._heal(path, verdict)
         finally:
@@ -3657,6 +3882,16 @@ class Gatekeeper:
         warnings: list[str] = []
         metrics = [f"{triangles:,} tris"]
         stats: list[tuple[str, int]] = [("triangles", triangles)]
+        if path.suffix.lower() in GLTF_SUFFIXES:
+            # Repeated parts (one wheel placed four times) count once against
+            # the budget - that is what the engine imports - but the drawn total
+            # is kept for the dashboard and --json.
+            try:
+                drawn = gltf_triangle_counts(read_gltf_document(path))[1]
+            except Exception:
+                drawn = triangles
+            if drawn != triangles:
+                stats.append(("drawn_triangles", drawn))
 
         if triangles == 0:
             # A zero-triangle mesh is never a legitimate export: it means a
@@ -3682,8 +3917,12 @@ class Gatekeeper:
                     f"{slots} material slots exceeds the {limit} slot budget (draw calls)"
                 )
 
+        undecodable = gltf_undecodable_compression(path)
+        if undecodable:
+            warnings.append(undecodable)
+
         try:
-            influences = max_bone_influences(path)
+            influences = 0 if undecodable else max_bone_influences(path)
         except AssetError as exc:
             problems.append(str(exc))
         else:
@@ -3708,18 +3947,34 @@ class Gatekeeper:
                 if uv_channels > limit:
                     problems.append(f"{uv_channels} UV channels exceeds the {limit} channel limit")
 
-        if not self.budget.allow_degenerate:
+        if not self.budget.allow_degenerate and not undecodable:
             try:
-                degenerate = count_degenerate_triangles(path, self.budget.degenerate_epsilon)
+                degenerate = count_degenerate_triangles(path, self.budget.degenerate_epsilon,
+                                                        self.budget.degenerate_ratio)
             except AssetError as exc:
                 problems.append(str(exc))
             else:
                 stats.append(("degenerate_triangles", degenerate))
                 if degenerate:
                     problems.append(
-                        f"{degenerate:,} degenerate triangles (zero-area) - Nanite and ray "
+                        f"{degenerate:,} degenerate triangles (flat or zero-area) - Nanite and ray "
                         f"tracing compute garbage from these"
                     )
+
+        try:
+            packed = embedded_texture_sizes(path)
+        except AssetError:
+            packed = []
+        if packed:
+            stats.append(("embedded_textures", len(packed)))
+            edge = self.budget.max_texture_edge
+            for label, width, height in packed:
+                if max(width, height) > edge:
+                    problems.append(f"embedded texture '{label}' {width}x{height} exceeds the "
+                                    f"{edge}x{edge} maximum resolution")
+                if self.budget.require_power_of_two and not (
+                        is_power_of_two(width) and is_power_of_two(height)):
+                    problems.append(f"embedded texture '{label}' {width}x{height} is not a power of two")
 
         # Memory (G2) and texel density (G8): measured when budgeted, or when a
         # [[totals]] line needs the number.

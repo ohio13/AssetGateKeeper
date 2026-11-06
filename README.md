@@ -175,7 +175,7 @@ exit $status
 ```yaml
 - name: Asset budget gate
   run: |
-    python -m pip install watchdog trimesh pillow charset-normalizer
+    python -m pip install watchdog trimesh pillow charset-normalizer DracoPy
     python tools/asset_gatekeeper.py Assets/Exports --once --recursive
 ```
 
@@ -203,8 +203,9 @@ max_triangles = 50000        # hard cap per mesh file
 max_material_slots = 3       # draw-call proxy; distinct materials per mesh
 max_bone_influences = 4      # per-vertex weights (mobile/web GPU limit)
 max_uv_channels = 4          # TEXCOORD_n sets
-allow_degenerate = false     # zero-area triangles break Nanite and ray tracing
-degenerate_epsilon = 1e-08   # area below which a triangle counts as degenerate
+allow_degenerate = false     # flat or collapsed triangles break Nanite and ray tracing
+degenerate_ratio = 1e-06     # flat = area at most this x longest edge squared (shape, not size)
+degenerate_epsilon = 0.0     # optional extra area floor in world units squared (0 = off)
 
 [texture]
 max_edge = 2048              # longest edge, in pixels
@@ -1295,7 +1296,7 @@ not allowed to guess: an unparseable file is `UNKNOWN` with the error attached.
 
 ## Design limits (read before you file the bug)
 
-- **Triangles are topology, not render cost.** Instanced scenes are counted once per unique geometry. UV *channel* count, per-vertex bone influences and degenerate faces are measured (see `[mesh]` in `rules.toml`); draw calls, vertex counts and UV seams are not — yet.
+- **Triangles are topology, not render cost.** Instanced scenes are counted once per unique geometry (the drawn total is in `--json` stats as `drawn_triangles`). glTF triangles are read from the file's accessors, so strips, fans and Draco/meshopt-compressed meshes count exactly; Draco shape checks need DracoPy (installed with the gate). Textures packed inside `.glb`/`.fbx` files are checked against the texture size and power-of-two rules. UV *channel* count, per-vertex bone influences and degenerate faces are measured (see `[mesh]` in `rules.toml`); draw calls, vertex counts and UV seams are not — yet.
 - **FBX: 7.1+ (binary or ASCII).** Pre-2011 files fail with a re-export hint rather than a guess. Blend shapes do not add triangles; shared meshes count once; collision meshes and LOD1+ are not counted.
 - **Healing touches PNG only.** TGA/JPG are gated but never rewritten, and a texture that a binary `.fbx`/`.glb` points at is never renamed (those paths cannot be rewritten safely).
 - **Material slots are per file, not per object.** A merged export with three materials across forty objects reads as three slots. Correct for draw calls; not a per-object budget.

@@ -52,7 +52,7 @@ measurement, and `charset-normalizer`, without which trimesh cannot read an `.ob
 or `.mtl` that is not UTF-8 (a cp1252 material name from an older Windows exporter):
 
 ```
-python -m pip install "trimesh>=4" "pillow>=10" charset-normalizer
+python -m pip install "trimesh>=4" "pillow>=10" charset-normalizer DracoPy
 ```
 
 ## Path B - wheel into a virtual environment

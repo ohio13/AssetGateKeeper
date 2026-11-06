@@ -42,10 +42,15 @@ max_material_slots = 3
 max_bone_influences = 4
 # Texture-coordinate sets (TEXCOORD_n). Engines usually stop at 4-8.
 max_uv_channels = 4
-# Zero-area triangles make Nanite and ray tracing compute garbage.
+# Flat or collapsed triangles make Nanite and ray tracing compute garbage.
 allow_degenerate = false
-# Area below which a triangle counts as degenerate (world units squared).
-degenerate_epsilon = 1e-08
+# A triangle is degenerate when its area is at most this fraction of its
+# longest edge squared (flat), or its corners are the same point. Shape, not
+# size: a well-made 0.1 mm triangle on a real-scale prop is fine.
+degenerate_ratio = 1e-06
+# Optional extra: also fail any triangle whose area is at or below this
+# (world units squared). 0 = off.
+degenerate_epsilon = 0.0
 
 [texture]
 # Longest edge in pixels (width or height, whichever is larger).

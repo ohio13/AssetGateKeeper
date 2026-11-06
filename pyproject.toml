@@ -32,7 +32,9 @@ classifiers = [
 # charset-normalizer: trimesh needs it to read any .obj/.mtl that is not UTF-8
 # (a cp1252 material name from an older Windows exporter); without it such a file
 # fails as "could not read mesh".
-dependencies = ["trimesh>=4.0", "pillow>=9.0", "charset-normalizer>=3.0",
+# DracoPy: trimesh decodes Draco-compressed glTF (KHR_draco_mesh_compression, the
+# usual web/three.js export) through it; without it every vertex reads as zero.
+dependencies = ["trimesh>=4.0", "pillow>=9.0", "charset-normalizer>=3.0", "DracoPy>=1.4",
                 "tomli>=2.0; python_version < '3.11'"]
 
 [project.optional-dependencies]

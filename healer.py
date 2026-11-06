@@ -323,7 +323,28 @@ def _face_area(vertices: list[tuple[float, float, float]]) -> float:
     return total
 
 
-def strip_degenerate_obj(path: Path, epsilon: float = 1e-8) -> Optional[str]:
+def _triangle_is_degenerate(a, b, c, ratio: float, epsilon: float) -> bool:
+    """The gate's rule (asset_gatekeeper.degenerate_mask), one triangle at a time."""
+    ab = [b[i] - a[i] for i in range(3)]
+    bc = [c[i] - b[i] for i in range(3)]
+    ca = [a[i] - c[i] for i in range(3)]
+    cross = (ab[1] * -ca[2] - ab[2] * -ca[1], ab[2] * -ca[0] - ab[0] * -ca[2],
+             ab[0] * -ca[1] - ab[1] * -ca[0])
+    area = 0.5 * (cross[0] ** 2 + cross[1] ** 2 + cross[2] ** 2) ** 0.5
+    longest = max(sum(v * v for v in ab), sum(v * v for v in bc), sum(v * v for v in ca))
+    return (area <= ratio * longest or longest <= 1e-14
+            or (epsilon > 0 and area <= epsilon))
+
+
+def _face_is_degenerate(vertices, ratio: float, epsilon: float) -> bool:
+    """A polygon draws nothing when every triangle of its fan is degenerate."""
+    if len(vertices) < 3:
+        return True
+    return all(_triangle_is_degenerate(vertices[0], vertices[i], vertices[i + 1], ratio, epsilon)
+               for i in range(1, len(vertices) - 1))
+
+
+def strip_degenerate_obj(path: Path, epsilon: float = 0.0, ratio: float = 1e-6) -> Optional[str]:
     """Delete zero-area faces from an OBJ in place. Returns a note, or None.
 
     Every line that is kept is written back byte for byte: line endings as they
@@ -342,7 +363,7 @@ def strip_degenerate_obj(path: Path, epsilon: float = 1e-8) -> Optional[str]:
             vertices = [positions[ref] for ref in refs]
         except IndexError:
             continue                 # bad index: not ours to fix
-        if _face_area(vertices) <= epsilon:
+        if _face_is_degenerate(vertices, ratio, epsilon):
             doomed.add(line_index)
     if not doomed:
         return None
@@ -627,7 +648,8 @@ class Healer:
                 modifications.append(note)
         elif suffix in HEALABLE_MESH_SUFFIXES and self.meshes:
             try:
-                note = strip_degenerate_obj(staged, self.budget.degenerate_epsilon)
+                note = strip_degenerate_obj(staged, self.budget.degenerate_epsilon,
+                                            getattr(self.budget, "degenerate_ratio", 1e-6))
             except (OSError, ValueError) as exc:
                 LOG.debug("healing: cannot parse %s: %s", path.name, exc)
                 self.last_refusal = f"the mesh cannot be parsed: {exc}"
