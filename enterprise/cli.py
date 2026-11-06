@@ -212,7 +212,13 @@ def cmd_migrate(args: argparse.Namespace) -> int:
                     _emit({"steps": []}, args.json, "nothing to apply")
                     return 0
                 steps = runner.apply(to=args.to or None, dry_run=args.plan)
-            lines = [f"{step['direction']:<5} {step['key']:<28} "
+            # A preview used to print exactly what the real run prints, so a log
+            # could not tell them apart (6 Nov, C9): say which one this was.
+            def verb(direction: str) -> str:
+                if args.plan:
+                    return "would apply" if direction == "up" else "would roll back"
+                return "applied" if direction == "up" else "rolled back"
+            lines = [f"{verb(step['direction']):<15} {step['key']:<28} "
                      f"{step['statements']} statement(s)"
                      + ("  [non-transactional]" if step["nontransactional"] else "")
                      for step in steps] or ["nothing to do"]
@@ -221,6 +227,12 @@ def cmd_migrate(args: argparse.Namespace) -> int:
         if args.sqlite:
             if args.init_schema:
                 target.executescript(_schema_text())
+                # The full schema already contains every shipped migration;
+                # record them, or the first --plan offers to re-run them all.
+                stamped = MigrationRunner(target, args.schema_dir).stamp_all()
+                if stamped:
+                    print(f"recorded {len(stamped)} migration(s) as already applied: "
+                          + ", ".join(stamped))
             copied = migrate_sqlite(args.sqlite, target, batch=args.batch)
             text = "\n".join(f"{table:<18}{count:>8,}" for table, count in copied.items())
             _emit({"copied": copied}, args.json, text or "(nothing to copy)")

@@ -817,9 +817,11 @@ def open_from_config(config: DatabaseConfig) -> Store:
 # --------------------------------------------------------------------------- #
 
 #: Copy order that satisfies foreign keys.
-MIGRATION_ORDER = ("projects", "budgets", "tag_rules", "verdicts", "problems",
-                   "modifications", "verdict_metrics", "alerts_state",
-                   "admin_users", "admin_sessions", "rule_audit", "meta")
+# exceptions and project_roots were missing, so `migrate --sqlite` silently
+# left a project's budget exceptions and root folders behind (6 Nov, C9).
+MIGRATION_ORDER = ("projects", "budgets", "exceptions", "project_roots", "tag_rules",
+                   "verdicts", "problems", "modifications", "verdict_metrics",
+                   "alerts_state", "admin_users", "admin_sessions", "rule_audit", "meta")
 
 
 def migrate_sqlite(source_path: str | Path, target: Store,

@@ -40,6 +40,7 @@ Two consequences worth knowing before you debug anything:
 | `max_bone_influences` | int | 4 | skin weights per vertex; 4 is the mobile limit |
 | `allow_degenerate` | bool | false | flat or collapsed faces: Nanite and RT compute garbage from them |
 | `degenerate_ratio` | float | 1e-06 | a triangle is flat when its area is at most this x its longest edge squared; judged by shape, so real-scale small props are not flagged |
+| `name_prefixes` | list | [] | optional: mesh names must start with one of these, e.g. `["SM_", "SK_"]` (case-insensitive). The gate checks the file name; Maya, 3ds Max, Blender and Unreal check object names with the same rule |
 | `degenerate_epsilon` | float | 0.0 | optional extra: also flag any triangle at or below this area (world units squared); 0 = off |
 | `audit_transforms` | bool | false | report non-zero object transforms (review, not failure) |
 | `require_indexed` | bool | false | report non-indexed meshes |

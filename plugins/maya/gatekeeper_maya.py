@@ -236,10 +236,14 @@ def check_node(transform: str, budget) -> list[str]:
         problems.append(f"{slots} material slots exceeds the {budget.max_material_slots} slot "
                         f"budget (draw calls)")
 
-    if budget.enforce_texture_naming:
-        name = transform.rsplit("|", 1)[-1]
-        if "_" not in name:
-            problems.append(f"object name '{name}' lacks a namespace prefix (e.g. SM_/SK_)")
+    # Mesh names: the gate's own optional rule ([mesh] name_prefixes), so Maya,
+    # Max, Blender, Unreal and the gate agree. It used to borrow the texture
+    # naming switch and demand an underscore, which nothing else checked.
+    prefixes = tuple(getattr(budget, "mesh_name_prefixes", ()) or ())
+    if prefixes:
+        name = transform.rsplit("|", 1)[-1].rsplit(":", 1)[-1]
+        if not any(name.lower().startswith(prefix.lower()) for prefix in prefixes):
+            problems.append(f"mesh name '{name}' does not start with {' or '.join(prefixes)}")
 
     uvs = uv_channel_count(transform)
     if uvs > budget.max_uv_channels:
@@ -286,7 +290,7 @@ def run(rules_path: Optional[str] = None, show_dialog: bool = True):
             first = failed[0][1][0]
             cmds.confirmDialog(
                 title="AssetGatekeeper",
-                message=(f"{len(failed)} of {len(results)} mesh(es) exceed the budget.\n\n"
+                message=(f"{len(failed)} of {len(results)} mesh(es) failed the checks.\n\n"
                          f"{failed[0][0].rsplit('|', 1)[-1]}: {first}\n\n"
                          "See the Script Editor for the full list."),
                 button=["OK"], defaultButton="OK", icon="warning")

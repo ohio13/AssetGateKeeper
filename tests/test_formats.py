@@ -580,7 +580,8 @@ expect("... and the day after it ends, the failure says the exception expired",
 expect("a texture: power of two, size and naming, as the gate words them",
        agk_validator.texture_problems({"width": 1000, "height": 600, "name": "T_Rock"}, _default, _agk)
        == ["1000x600 is not a power of two",
-           "name does not end with a standard suffix (_Albedo, _Normal, _Roughness, _BaseColor, _ORM)"]
+           "name does not end with a standard suffix "
+           f"({_agk.describe_suffixes(_agk.Budget().texture_suffixes)})"]
        and agk_validator.texture_problems({"width": 4096, "height": 4096, "name": "T_Rock_Albedo"},
                                           _default, _agk)[0].startswith("4096x4096 exceeds")
        and agk_validator.texture_problems({"width": 2048, "height": 1024, "name": "T_Rock_Albedo"},
@@ -760,8 +761,9 @@ class _MaxClass:
 
 
 class _MaxNode:
-    def __init__(self, cls, superclass, triangles, material=None):
+    def __init__(self, cls, superclass, triangles, material=None, name="SM_Node"):
         self.cls, self.superclass, self.triangles, self.material = cls, superclass, triangles, material
+        self.name = name
 
 
 class _MaxSelection(list):
@@ -796,7 +798,7 @@ fake_pymxs.runtime = max_rt
 sys.modules["pymxs"] = fake_pymxs
 sys.path.insert(0, str(ROOT / "plugins" / "max"))
 import max_preflight  # noqa: E402
-max_triangles, _, max_materials, max_textures, _ = max_preflight.scene_facts()
+max_triangles, _, max_materials, max_textures, _, _ = max_preflight.scene_facts()
 expect("Max: an unconverted primitive (Sphere) is measured, a camera target is not",
        max_triangles == 201_000, max_triangles)
 expect("Max: Physical Material and Multi/Sub-Object slots are counted",

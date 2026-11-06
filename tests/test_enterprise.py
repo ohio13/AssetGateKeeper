@@ -742,7 +742,8 @@ from enterprise.migrations import (MigrationError, MigrationRunner,  # noqa: E40
 
 repo_migrations = discover(ROOT / "migrations")
 expect("the shipped migrations are found and ordered",
-       [m.key for m in repo_migrations] == ["0001_baseline", "0002_verdict_metrics"],
+       [m.key for m in repo_migrations] == ["0001_baseline", "0002_verdict_metrics",
+                                             "0003_exceptions"],
        str([m.key for m in repo_migrations]))
 expect("checksums are stable across reads",
        repo_migrations[0].checksum == discover(ROOT / "migrations")[0].checksum)
@@ -800,13 +801,14 @@ mig_db = WORK / "migrated.db"
 mig_store = store.open_store(mig_db)
 runner = MigrationRunner(mig_store, ROOT / "migrations")
 expect("the plan lists every pending migration",
-       [m.key for m in runner.plan()] == ["0001_baseline", "0002_verdict_metrics"])
+       [m.key for m in runner.plan()] == ["0001_baseline", "0002_verdict_metrics",
+                                         "0003_exceptions"])
 dry = runner.apply(dry_run=True)
 expect("a dry run reports the steps without writing",
-       len(dry) == 2 and runner.applied() == {}, str(dry))
+       len(dry) == 3 and runner.applied() == {}, str(dry))
 applied = runner.apply()
-expect("apply runs both migrations", [step["key"] for step in applied] ==
-       ["0001_baseline", "0002_verdict_metrics"])
+expect("apply runs every migration", [step["key"] for step in applied] ==
+       ["0001_baseline", "0002_verdict_metrics", "0003_exceptions"])
 expect("the history is recorded with checksums",
        runner.applied()[1]["checksum"] == repo_migrations[0].checksum)
 expect("verify is clean after a rollout", runner.verify() == [], str(runner.verify()))
@@ -827,7 +829,8 @@ expect("editing an applied migration is detected",
 
 rolled = runner.rollback(to=0)
 expect("rollback runs the down scripts newest-first",
-       [step["key"] for step in rolled] == ["0002_verdict_metrics", "0001_baseline"])
+       [step["key"] for step in rolled] == ["0003_exceptions", "0002_verdict_metrics",
+                                            "0001_baseline"])
 expect("rollback empties the history", runner.applied() == {})
 expect("rollback removed the tables",
        len(runner.check_tables(["verdicts", "verdict_metrics"])) == 2)

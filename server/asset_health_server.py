@@ -539,6 +539,61 @@ def project_count(db_path: str | Path) -> int:
         return int(connection.execute("SELECT COUNT(*) FROM projects").fetchone()[0])
 
 
+#: What the 401 page says. Making the first project switches tokens on for good,
+#: and the old text left people thinking the server had broken (6 Nov test).
+UNAUTHORISED_HELP = (
+    "This server has projects, so the dashboard needs a token. Add ?token=<your "
+    "project's token> to the address (or the admin token, which also shows results "
+    "recorded before projects existed). Ask a pipeline engineer for the token.")
+
+
+def find_project(db_path: str | Path, key: str) -> dict | None:
+    """A project by id ("1") or by name (case-insensitive), or None."""
+    key = (key or "").strip()
+    for row in list_projects(db_path):
+        if (key.isdigit() and int(key) == int(row["id"])) or row["name"].lower() == key.lower():
+            return row
+    return None
+
+
+def legacy_verdict_count(db_path: str | Path) -> int:
+    """Results recorded before any project existed (project_id is NULL)."""
+    with open_db(db_path) as connection:
+        return int(connection.execute(
+            "SELECT COUNT(*) FROM verdicts WHERE project_id IS NULL").fetchone()[0])
+
+
+def adopt_legacy(db_path: str | Path, project_id: int) -> int:
+    """Move every project-less result into a project. Returns how many moved.
+
+    Creating the first project hid all earlier history from that project's
+    dashboard, with no way to bring it across."""
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        cursor = connection.execute(
+            "UPDATE verdicts SET project_id = ? WHERE project_id IS NULL", (int(project_id),))
+        return int(getattr(cursor, "rowcount", 0) or 0)
+
+
+def remove_project(db_path: str | Path, project_id: int) -> int:
+    """Delete a project, its token, budget and exceptions. Its results are kept
+    as project-less history (the admin token still sees them). Returns how many
+    results were detached."""
+    project_id = int(project_id)
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        cursor = connection.execute(
+            "UPDATE verdicts SET project_id = NULL WHERE project_id = ?", (project_id,))
+        detached = int(getattr(cursor, "rowcount", 0) or 0)
+        connection.execute("DELETE FROM budgets WHERE project_id = ?", (project_id,))
+    try:                                # a PostgreSQL database from before 0003 has none
+        with _WRITE_LOCK, open_db(db_path) as connection:
+            connection.execute("DELETE FROM exceptions WHERE project_id = ?", (project_id,))
+    except STORAGE_ERRORS:
+        pass
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        connection.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+    return detached
+
+
 # --- published budgets - #
 
 DEFAULT_BUDGET_ROW = {
@@ -2437,9 +2492,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _analytics_page(self, identity: dict) -> None:
         if identity["role"] == "denied":
-            self._forbid(401, "Unauthorised",
-                         "Send 'Authorization: Bearer <token>' or ?token=. "
-                         "Ask a pipeline engineer for your project's token.")
+            self._forbid(401, "Unauthorised", UNAUTHORISED_HELP)
             return
         project_id, error = self._scope(identity)
         if error == 400:
@@ -2496,9 +2549,7 @@ class Handler(BaseHTTPRequestHandler):
 
     def _dashboard(self, identity: dict) -> None:
         if identity["role"] == "denied":
-            self._forbid(401, "Unauthorised",
-                         "Send 'Authorization: Bearer <token>' or ?token=. "
-                         "Ask a pipeline engineer for your project's token.")
+            self._forbid(401, "Unauthorised", UNAUTHORISED_HELP)
             return
         project_id, error = self._scope(identity)
         if error == 400:
@@ -4430,6 +4481,14 @@ def build_parser() -> argparse.ArgumentParser:
                          help="create a project, print its token once, and exit")
     tenancy.add_argument("--list-projects", action="store_true",
                          help="list projects and exit")
+    tenancy.add_argument("--adopt-legacy", metavar="PROJECT",
+                         help="move results recorded before projects existed into PROJECT "
+                              "(name or id) and exit")
+    tenancy.add_argument("--remove-project", metavar="PROJECT",
+                         help="delete PROJECT (name or id), its token, budget and exceptions, "
+                              "keeping its results as project-less history; needs --yes")
+    tenancy.add_argument("--yes", action="store_true",
+                         help="confirm --remove-project")
 
     alerts = parser.add_argument_group("alerting")
     alerts.add_argument("--webhook-url", default="",
@@ -4566,6 +4625,27 @@ def main(argv: list[str] | None = None) -> int:
         for row in rows:
             print(f"{row['id']:>3}  {row['name']:<24} created {row['created_at']}")
         return 0
+    if args.adopt_legacy or args.remove_project:
+        key = args.adopt_legacy or args.remove_project
+        project = find_project(db_path, key)
+        if project is None:
+            print(f"error: no project called {key!r} (see --list-projects)", file=sys.stderr)
+            return 2
+        if args.adopt_legacy:
+            moved = adopt_legacy(db_path, project["id"])
+            print(f"moved {moved} earlier result(s) into project {project['id']}: {project['name']}")
+            return 0
+        if not args.yes:
+            print(f"would delete project {project['id']}: {project['name']} (its token, budget "
+                  "and exceptions); its results stay as project-less history.")
+            print("run again with --yes to do it")
+            return 1
+        detached = remove_project(db_path, project["id"])
+        print(f"deleted project {project['id']}: {project['name']}; "
+              f"{detached} result(s) kept as project-less history")
+        if project_count(db_path) == 0:
+            print("no projects left: the server is back in single-tenant mode (no token needed)")
+        return 0
     if args.add_project:
         try:
             project_id, token = create_project(db_path, args.add_project)
@@ -4651,6 +4731,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"  projects   {len(projects)} registered - a project token is required")
         for row in projects:
             print(f"             {row['id']}: {row['name']}")
+        try:
+            legacy = legacy_verdict_count(db_path)
+        except STORAGE_ERRORS:
+            legacy = 0
+        if legacy:
+            print(f"  history    {legacy:,} result(s) from before projects existed: only the "
+                  "admin token sees them")
+            print("             move them into a project with --adopt-legacy <project>")
     else:
         print("  projects   none - single-tenant mode (no per-project isolation)")
         print("             create one with --add-project <name>")

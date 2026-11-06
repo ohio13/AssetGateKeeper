@@ -66,7 +66,9 @@ def scene_facts():
     triangles = vertices = degenerate = 0
     materials = set()
     textures = []
+    names = []
     for node in _selected_geometry():
+        names.append(str(node.name))
         triangles += int(rt.getPolygonCount(node)[0] or 0)
         vertices += int(rt.getPolygonCount(node)[1] or 0)
         # Any material type counts: only Standard/Multi used to, so Physical
@@ -85,11 +87,11 @@ def scene_facts():
                     height = int(size.height) if size is not None else 0
                     textures.append((os.path.basename(filename) or str(bitmap.name),
                                      width, height))
-    return triangles, vertices, len(materials), textures, degenerate
+    return triangles, vertices, len(materials), textures, degenerate, names
 
 
 def run_preflight(rules_path=None, preset=None):
-    triangles, vertices, materials, textures, degenerate = scene_facts()
+    triangles, vertices, materials, textures, degenerate, names = scene_facts()
     budget = None
     problem = ""
     try:
@@ -100,17 +102,59 @@ def run_preflight(rules_path=None, preset=None):
     report = core.assess(asset=os.path.basename(str(rt.maxFileName or "")) or "untitled",
                          triangles=triangles, vertices=vertices, materials=materials,
                          textures=textures, degenerate=degenerate,
-                         folder=os.path.basename(scene_file), budget=budget)
+                         folder=os.path.basename(scene_file), budget=budget,
+                         mesh_names=names)
     if problem:
         report.add("info", "no_rules", "budget unavailable: " + problem)
     return report
 
 
+def _qt_box(text, blocked):
+    """A Qt message box with a warning icon when blocked. None if Qt is unavailable."""
+    try:
+        from PySide6 import QtWidgets          # 3ds Max 2025+
+    except ImportError:
+        try:
+            from PySide2 import QtWidgets      # 3ds Max 2021-2024
+        except ImportError:
+            return None
+    try:
+        from qtmax import GetQMaxMainWindow
+        parent = GetQMaxMainWindow()
+    except Exception:
+        parent = None
+    box = QtWidgets.QMessageBox(parent)
+    box.setWindowTitle("Asset Gatekeeper")
+    box.setIcon(QtWidgets.QMessageBox.Warning if blocked else QtWidgets.QMessageBox.Information)
+    box.setText(text)
+    box.exec() if hasattr(box, "exec") else box.exec_()
+    return True
+
+
 def show():
-    """Show the report. Uses a message box: no .ms UI to install, nothing to break."""
+    """Show the report: a warning icon when it is blocked, information when clean.
+
+    MAXScript's messageBox always shows the blue (i), so a BLOCKED result looked
+    like a notice; Qt is used where available, messageBox otherwise."""
     report = run_preflight()
-    rt.messageBox(report.as_text(), title="Asset Gatekeeper")
+    text = report.as_text()
+    if _qt_box(text, bool(report.errors)) is None:
+        rt.messageBox(text, title="Asset Gatekeeper")
     return report
+
+
+def install_button():
+    """Add an "AGK Pre-flight" action (category AssetGatekeeper) that runs this file.
+
+    Run once: python.ExecuteFile @"<...>\\plugins\\max\\install_max_button.py".
+    Max keeps the action across restarts; drag it onto a toolbar or menu from
+    Customize > Customize User Interface (category AssetGatekeeper).
+    """
+    script = os.path.abspath(__file__).replace("\\", "/")
+    rt.execute('macroScript AGK_Preflight category:"AssetGatekeeper" '
+               'buttonText:"AGK" tooltip:"AssetGatekeeper pre-flight check" '
+               '( python.ExecuteFile @"' + script + '" )')
+    return True
 
 
 if __name__ == "__main__":

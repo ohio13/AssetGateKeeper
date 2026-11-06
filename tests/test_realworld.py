@@ -270,6 +270,138 @@ try:
            props[0][-1] == "D:\\" and len(props) == 2, props)
     expect("&quot; becomes a quote", props[1][-1] == 'a "b"', props)
     expect("byte arrays of type 'c' are understood", ord("c") in agk._FBX_ARRAY_TYPES)
+
+    print("7. Texture names: the map names real exports use pass by default")
+    pattern = agk.build_naming_pattern(agk.Budget().texture_suffixes)
+    for name in ("Bishop_black_base_color", "BoomBox_baseColor", "Corset_occlusionRoughnessMetallic",
+                 "T_Rock_D", "rock-normal", "Lantern_emissive", "Sofa_Metallic", "crate_Albedo_02"):
+        expect(f"{name} passes", bool(pattern.search(name)))
+    for name in ("CesiumLogoFlat", "mosquito0", "rockAlbedo", "final_final_v2"):
+        expect(f"{name} still fails", not pattern.search(name))
+    narrow = agk.build_naming_pattern(("_Albedo",))
+    expect("a studio list still narrows it", not narrow.search("rock_Normal") and narrow.search("rock_albedo"))
+    expect("the FAILED line lists a few and counts the rest",
+           agk.describe_suffixes(agk.Budget().texture_suffixes).endswith("and 22 more"))
+
+    print("8. Mesh names: one optional rule, the same in the gate and every DCC")
+    document, blob = gltf_document(TRIANGLE, indices=[0, 1, 2])
+    plain = write_gltf(WORK / "Rock.gltf", document, blob)
+    expect("off by default", not any("mesh name" in p for p in agk.Gatekeeper(agk.Budget()).check(plain).problems))
+    rules = WORK / "names.toml"
+    rules.write_text('[mesh]\nname_prefixes = ["SM_", "SK_"]\n', encoding="utf-8")
+    budget = agk.load_rules(rules)[0]
+    expect("read from [mesh] name_prefixes", budget.mesh_name_prefixes == ("SM_", "SK_"))
+    verdict = agk.Gatekeeper(budget).check(plain)
+    expect("the gate fails a file without the prefix",
+           "mesh name 'Rock' does not start with SM_ or SK_" in verdict.problems, verdict.problems)
+    good = write_gltf(WORK / "sm_Rock.gltf", document, blob)
+    expect("case-insensitive", not any("mesh name" in p for p in agk.Gatekeeper(budget).check(good).problems))
+    sys.path.insert(0, str(ROOT))
+    from plugins import preflight_core
+    report = preflight_core.assess(asset="x", triangles=10, materials=1, budget=budget,
+                                   mesh_names=["Teapot001", "SM_Rock"])
+    names = [f.message for f in report.findings if f.code == "mesh_name"]
+    expect("the DCC core applies the same rule (3ds Max)",
+           names == ["mesh name 'Teapot001' does not start with SM_ or SK_"], names)
+    report = preflight_core.assess(asset="x", triangles=10, materials=1, budget=agk.Budget(),
+                                   mesh_names=["Teapot001"])
+    expect("and stays quiet when the rule is off", not report.errors)
+    maya = (ROOT / "plugins" / "maya" / "gatekeeper_maya.py").read_text(encoding="utf-8")
+    expect("Maya uses the shared rule, not an underscore test",
+           "mesh_name_prefixes" in maya and 'if "_" not in name' not in maya)
+    expect("Maya's dialog says 'failed the checks'", "failed the checks" in maya and "exceed the budget" not in maya)
+    blender = (ROOT / "plugins" / "blender" / "addon.py").read_text(encoding="utf-8")
+    expect("Blender names its temp export after the object", "def export_file_name" in blender)
+    max_text = (ROOT / "plugins" / "max" / "max_preflight.py").read_text(encoding="utf-8")
+    expect("3ds Max passes object names to the core", "mesh_names=names" in max_text)
+    expect("3ds Max shows a warning icon when blocked", "QMessageBox.Warning" in max_text)
+    expect("3ds Max can install an AGK button",
+           (ROOT / "plugins" / "max" / "install_max_button.py").is_file() and "macroScript" in max_text)
+
+    print("9. More texture formats are checked")
+    expect("tif, webp, dds, exr and ktx2 are tracked",
+           {".tif", ".tiff", ".webp", ".dds", ".exr", ".ktx2"} <= agk.TRACKED_SUFFIXES)
+    if Image is not None:
+        for suffix, image_format in ((".tif", "TIFF"), (".webp", "WEBP")):
+            path = WORK / f"T_Big_Normal{suffix}"
+            Image.new("RGB", (4096, 64)).save(path, image_format)
+            verdict = agk.Gatekeeper(agk.Budget()).check(path)
+            expect(f"{suffix} is measured", any("4096x64 exceeds" in p for p in verdict.problems),
+                   verdict.problems)
+    ktx2 = WORK / "T_Big_Normal.ktx2"
+    ktx2.write_bytes(b"\xabKTX 20\xbb\r\n\x1a\n" + struct.pack("<IIIII", 0, 1, 8192, 8192, 0) + b"\0" * 64)
+    expect("ktx2 is measured from its header",
+           agk.Gatekeeper(agk.Budget()).check(ktx2).metric.startswith("8192x8192"))
+
+    def exr_attribute(name, kind, value):
+        return name + b"\0" + kind + b"\0" + struct.pack("<i", len(value)) + value
+    exr = WORK / "T_Sky_Emissive.exr"
+    exr.write_bytes(b"\x76\x2f\x31\x01" + struct.pack("<I", 2)
+                    + exr_attribute(b"dataWindow", b"box2i", struct.pack("<4i", 0, 0, 1023, 511)) + b"\0")
+    expect("exr is measured from its header", agk.measure_texture(exr) == (1024, 512))
+    junk = WORK / "T_Junk_Normal.exr"
+    junk.write_bytes(b"not an exr")
+    expect("a damaged exr fails cleanly", not agk.Gatekeeper(agk.Budget()).check(junk).passed)
+
+    print("10. A missing file is reported once")
+    source = (ROOT / "asset_gatekeeper.py").read_text(encoding="utf-8")
+    expect("missing references are de-duplicated", "seen_written" in source)
+
+    print("11. AssetHealth: earlier history can join a project, and a project can be removed")
+    import server.asset_health_server as health
+    db = WORK / "health.db"
+    health.init_db(db)
+    payload = {"file": "SM_Old.fbx", "name": "SM_Old.fbx", "passed": False, "status": "FAILED",
+               "metric": "60,000 tris", "problems": ["60,000 triangles exceeds the 50,000 budget"]}
+    for _ in range(3):
+        health.store_verdict(db, payload)
+    project_id, _token = health.create_project(db, "Trial")
+    expect("results from before projects are counted", health.legacy_verdict_count(db) == 3)
+    expect("a project is found by name, any case", health.find_project(db, "trial")["id"] == project_id)
+    expect("--adopt-legacy moves them in", health.adopt_legacy(db, project_id) == 3
+           and health.legacy_verdict_count(db) == 0)
+    health.add_exception(db, project_id, {"path": "SM_*", "rule": "max_triangles", "allow": 80000,
+                                          "reason": "test", "owner": "alex", "expires": "2099-01-01"})
+    expect("--remove-project keeps the results as history", health.remove_project(db, project_id) == 3
+           and health.project_count(db) == 0 and health.legacy_verdict_count(db) == 3)
+    expect("... and drops the project's exceptions", health.list_exceptions(db, project_id) == [])
+    expect("the 401 page says what to do", "needs a token" in health.UNAUTHORISED_HELP)
+
+    print("12. PostgreSQL copies keep exceptions; a fresh schema records its migrations")
+    from enterprise import store as enterprise_store
+    expect("migrate --sqlite copies exceptions and project roots",
+           {"exceptions", "project_roots"} <= set(enterprise_store.MIGRATION_ORDER))
+    expect("a migration creates the exceptions table",
+           (ROOT / "migrations" / "0003_exceptions.up.sql").is_file())
+    source = WORK / "copy_source.db"
+    health.init_db(source)
+    project_id, _token = health.create_project(source, "Copied")
+    health.add_exception(source, project_id, {"path": "SM_*", "rule": "max_triangles", "allow": 80000,
+                                              "reason": "test", "owner": "alex", "expires": "2099-01-01"})
+    target = WORK / "copy_target.db"
+    done = subprocess.run([sys.executable, "-m", "enterprise.cli", "migrate", "--sqlite", str(source),
+                           "--dsn", str(target), "--init-schema"], capture_output=True, text=True,
+                          cwd=str(ROOT), timeout=300)
+    expect("the exception arrives in the copy", "exceptions               1" in done.stdout, done.stdout[-400:])
+    expect("--init-schema records the migrations it contains", "recorded 3 migration(s)" in done.stdout)
+    plan = subprocess.run([sys.executable, "-m", "enterprise.cli", "migrate", "--dsn", str(target),
+                           "--plan"], capture_output=True, text=True, cwd=str(ROOT), timeout=300)
+    expect("so the first preview has nothing to apply", "nothing to apply" in plan.stdout, plan.stdout)
+    fresh = WORK / "fresh.db"
+    plan = subprocess.run([sys.executable, "-m", "enterprise.cli", "migrate", "--dsn", str(fresh),
+                           "--plan"], capture_output=True, text=True, cwd=str(ROOT), timeout=300)
+    expect("a preview says 'would apply'", plan.stdout.startswith("would apply"), plan.stdout)
+
+    print("13. GitHub annotations without paid code scanning")
+    verdict = agk.Verdict(Path("assets/SM_Rock, big.fbx"), ("60,000 triangles exceeds the 50,000 budget",))
+    text = agk.github_report([verdict, agk.Verdict(Path("ok.fbx"))])
+    expect("one ::error line per problem, file name escaped",
+           text == "::error file=assets/SM_Rock%2C big.fbx,title=AssetGatekeeper::"
+                   "60,000 triangles exceeds the 50,000 budget\n", text)
+    workflow = (ROOT / ".github" / "workflows" / "asset_gatekeeper.yml").read_text(encoding="utf-8")
+    expect("the workflow prints them, and uses codeql-action v4 with actions: read",
+           "github:gate-annotations.txt" in workflow and "upload-sarif@v4" in workflow
+           and "actions: read" in workflow and "@v3" not in workflow)
 finally:
     shutil.rmtree(WORK, ignore_errors=True)
 

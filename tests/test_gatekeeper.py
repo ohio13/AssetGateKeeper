@@ -73,7 +73,7 @@ for stem, should_match in (
     ("bark_albedo", True),      # case-insensitive
     ("bark_Normal_02", True),   # numbered variant
     ("rock_Roughness_3", True),
-    ("bark_diffuse", False),
+    ("bark_diffuse", True),           # _Diffuse joined the defaults (6 Nov real-world test)
     ("albedo", False),          # missing separator
     ("bark_Albedo_extra", False),
     ("bark_AlbedoTex", False),
@@ -90,7 +90,7 @@ print("5. Rule outcomes (one line, all violations)")
 expect("bark_Albedo.png passes", not problems("bark_Albedo.png"))
 expect("bark_Normal_02.png passes", not problems("bark_Normal_02.png"))
 expect("atlas_max.png fails naming only", problems("atlas_max.png") == (
-    f"name does not end with a standard suffix ({', '.join(agk.Budget().texture_suffixes)})",),
+    f"name does not end with a standard suffix ({agk.describe_suffixes(agk.Budget().texture_suffixes)})",),
     str(problems("atlas_max.png")))
 naming_pattern = agk.build_naming_pattern(agk.Budget().texture_suffixes)
 expect("a _BaseColor map passes naming", bool(naming_pattern.search("bark_BaseColor")))

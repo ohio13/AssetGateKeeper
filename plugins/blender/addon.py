@@ -163,9 +163,21 @@ def run_engine(asset_path: str, python_exe: str, engine_path: str,
     return None, (completed.stderr.strip() or completed.stdout.strip() or "no output")
 
 
+def export_file_name(object_name: str) -> str:
+    """The temp export is named after the object, so the gate's optional mesh-name
+    rule ([mesh] name_prefixes) judges the artist's name, not "agk_selection"."""
+    safe = "".join(ch if ch.isalnum() or ch in "_-." else "_" for ch in (object_name or ""))
+    safe = safe.strip("._")
+    return f"{safe}.gltf" if safe else TEMP_EXPORT_NAME
+
+
 def export_selection(directory: str) -> str:
     """Write the selected objects to a temporary .gltf and return its path."""
-    path = os.path.join(directory, TEMP_EXPORT_NAME)
+    active = getattr(bpy.context, "active_object", None)
+    if active is None or not active.select_get():
+        selected = list(getattr(bpy.context, "selected_objects", []) or [])
+        active = selected[0] if selected else None
+    path = os.path.join(directory, export_file_name(active.name if active is not None else ""))
     try:
         bpy.ops.export_scene.gltf(filepath=path, export_format="GLTF_SEPARATE",
                                   use_selection=True, export_apply=True)

@@ -142,8 +142,9 @@ def texture_problems(facts: dict, budget, engine, exceptions=(), game_path: str 
         pattern = engine.build_naming_pattern(budget.texture_suffixes)
         name = str(facts.get("name", ""))
         if pattern is not None and not pattern.search(name):
+            describe = getattr(engine, "describe_suffixes", lambda items: ", ".join(items))
             problems.append("name does not end with a standard suffix "
-                            f"({', '.join(budget.texture_suffixes)})")
+                            f"({describe(budget.texture_suffixes)})")
     return problems + expired if problems else problems
 
 

@@ -53,6 +53,7 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: read
+      actions: read              # upload-sarif reads the run (required in private repos)
       security-events: write     # upload the SARIF annotations
 
     steps:
@@ -117,6 +118,14 @@ jobs:
           asset-gatekeeper "${{ steps.target.outputs.dir }}" --once --no-color
           --jobs 0 --cache "${{ runner.temp }}/agk-cache/verdicts.json"
           --report junit:gate-junit.xml --report sarif:gate.sarif
+          --report github:gate-annotations.txt
+
+      # Each failing asset becomes an annotation on the pull request's Files tab.
+      # Workflow commands are free and work in private repositories; the SARIF
+      # upload below adds code-scanning alerts where code scanning is enabled.
+      - name: Mark failing assets on the pull request
+        if: always() && steps.target.outputs.found == 'true' && hashFiles('gate-annotations.txt') != ''
+        run: cat gate-annotations.txt
 
       - name: Save the verdict cache
         if: always() && steps.target.outputs.found == 'true'
@@ -126,12 +135,14 @@ jobs:
           path: ${{ runner.temp }}/agk-cache
           key: agk-verdicts-${{ github.sha }}
 
-      # Each failing asset becomes an annotation on the pull request. Needs
-      # code scanning (public repos, or GitHub Advanced Security).
-      - name: Annotate the pull request
-        if: always() && steps.target.outputs.found == 'true' && hashFiles('gate.sarif') != ''
+      # Code-scanning alerts as well, where code scanning is on (public
+      # repositories, or GitHub Advanced Security). Elsewhere it is skipped.
+      - name: Upload to code scanning
+        if: >-
+          always() && steps.target.outputs.found == 'true' && hashFiles('gate.sarif') != ''
+          && (github.event.repository.private == false || vars.AGK_CODE_SCANNING == 'true')
         continue-on-error: true
-        uses: github/codeql-action/upload-sarif@v3
+        uses: github/codeql-action/upload-sarif@v4
         with:
           sarif_file: gate.sarif
           category: asset-gatekeeper

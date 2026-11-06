@@ -167,6 +167,13 @@ def choose_suffix(stem: str, suffixes: Sequence[str]) -> Optional[str]:
     for suffix in suffixes:
         if lowered.endswith(suffix.lower()):
             return None  # already compliant: never double-suffix
+    try:                                  # the gate's own matcher (base_color = BaseColor)
+        from asset_gatekeeper import build_naming_pattern
+        pattern = build_naming_pattern(suffixes)
+    except ImportError:                   # pragma: no cover - healer used on its own
+        pattern = None
+    if pattern is not None and pattern.search(stem):
+        return None
     for hints, suffix in _SUFFIX_HINTS:
         if suffix in suffixes and any(_hint_matches(hint, lowered) for hint in hints):
             return suffix

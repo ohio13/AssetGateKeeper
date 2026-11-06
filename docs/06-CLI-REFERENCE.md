@@ -87,7 +87,7 @@ Reported as: `tag 'charcter' is not a known tag; closest match is 'character'`.
 | Flag | Effect |
 |---|---|
 | `--json` | machine-readable verdicts on stdout |
-| `--report junit:FILE` / `sarif:FILE` | with `--once` or one file, also write a JUnit or SARIF report for CI (repeatable; see [10](10-CI-AND-VERSION-CONTROL.md#reports-your-ci-server-shows-per-asset)) |
+| `--report junit:FILE` / `sarif:FILE` / `github:FILE` | with `--once` or one file, also write a JUnit, SARIF or GitHub-annotation report for CI (repeatable; see [10](10-CI-AND-VERSION-CONTROL.md#reports-your-ci-server-shows-per-asset)) |
 | `--cache FILE` · `--no-cache` | with `--once`: where the verdict cache lives (outside the folder; default in the user's cache directory), or no cache at all |
 | `--exception-path PATH` | with one file: the path `[[exceptions]]` match it as, relative to the rules file's folder (used by the Perforce trigger) |
 | `--jobs N` | with `--once`: check N files at a time in separate processes (`0` = one per CPU; healing always runs one at a time) |

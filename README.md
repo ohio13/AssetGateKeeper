@@ -34,7 +34,7 @@ That is the entire job of AssetGatekeeper: watch one folder, inspect every expor
 14:22:31 rules   D:\Exports\rules.toml
 14:22:31 budget  tris<=50,000  texture<=2048px  pot=on  materials<=3  naming=on
 14:22:34 FAILED: 214,301 triangles exceeds the 50,000 budget (+164,301); 7 material slots exceeds the 3 slot budget (draw calls)  hero_prop.gltf 214,301 tris / 7 mat
-14:22:41 FAILED: 8192x8192 exceeds the 2048x2048 maximum resolution; name does not end with a standard suffix (_Albedo, _Normal, _Roughness)  hero_prop_diffuse.png 8192x8192
+14:22:41 FAILED: 8192x8192 exceeds the 2048x2048 maximum resolution; name does not end with a standard suffix (_Albedo, _BaseColor, _Diffuse, _Color, _Normal, _Roughness and 22 more)  hero_prop_final.png 8192x8192
 14:23:02 PASSED  crate_A_albedo.png 1024x1024
 ```
 
@@ -50,7 +50,7 @@ Two problems, one line, told to the artist *while they still have the export dia
 | `.fbx` `.obj` `.gltf` `.glb` | Material slots | `3` | A draw-call proxy — 12 materials on one prop is 12 draw calls before it's even instanced |
 | `.png` `.tga` `.jpg` | Max edge | `2,048 px` | VRAM and streaming pressure; 8192² is 64× the memory of 1024² |
 | `.png` `.tga` `.jpg` | Power of two | on | Every mip-chain, every compressed texture format, every "why is this blurry" bug report |
-| `.png` `.tga` `.jpg` | Naming suffix | `_Albedo` `_Normal` `_Roughness` `_BaseColor` `_ORM` | Assets named `final_final_diffuse_v2.png` are the ones that never get replaced |
+| `.png` `.tga` `.jpg` | Naming suffix | a map name at the end: `_Albedo` `_BaseColor` `_Normal` `_Roughness` `_Metallic` `_ORM` `_AO` `_Emissive` … (28 by default, case and `_` insensitive) | Assets named `final_final_v2.png` are the ones that never get replaced |
 | `.png` `.tga` `.jpg` | Whole file decodes | on | A half-written texture has a perfectly good header; only decoding it notices the missing half |
 | `.fbx` `.gltf` `.glb` | Bone influences per vertex | `4` | Above four weights a vertex is undefined behaviour on mobile and web runtimes |
 | `.fbx` `.obj` `.gltf` `.glb` | UV channels | `4` | Extra TEXCOORD sets cost memory in every shader permutation; engines cap at 4–8 |
@@ -131,7 +131,7 @@ python asset_gatekeeper.py "D:\Exports\Incoming"
 ```
 14:22:31 watching D:\Exports\Incoming - Ctrl+C to stop
 14:22:31 budget  tris<=50,000  texture<=2048px  pot=on  materials<=3  naming=on
-14:23:02 FAILED: name does not end with a standard suffix (_Albedo, _Normal, _Roughness)  hero_prop_diffuse.png 4096x4096
+14:23:02 FAILED: name does not end with a standard suffix (_Albedo, _BaseColor, _Diffuse, _Color, _Normal, _Roughness and 22 more)  hero_prop_final.png 4096x4096
 14:23:19 PASSED  rock_cliff_Albedo.png 2048x2048
 14:24:55 PASSED  crate_01.glb 8,411 tris / 2 mat
 ```
@@ -902,7 +902,7 @@ python asset_gatekeeper.py [folder] [options]
 | `--dry-run` | With `--heal`: say what would change, write nothing |
 | `--undo-heal` | Put back what the last heal of this file replaced |
 | `--list-heals` | List the heals recorded in a folder, newest first |
-| `--report FORMAT:FILE` | With `--once` or one file: also write `junit:gate.xml` (Jenkins, TeamCity, Horde) or `sarif:gate.sarif` (GitHub annotations); repeatable |
+| `--report FORMAT:FILE` | With `--once` or one file: also write `junit:gate.xml` (Jenkins, TeamCity, Horde), `sarif:gate.sarif` (GitHub code scanning) or `github:annotations.txt` (GitHub Actions annotation lines: `cat` it in a step to mark failing assets on a pull request, free in private repos); repeatable |
 | `--cache FILE` | With `--once`: where the verdict cache lives - outside the folder being checked (a cache inside it is refused). Default: one file per folder in the user's cache directory (`%LOCALAPPDATA%\AssetGatekeeper\cache`, `~/.cache/asset-gatekeeper`, or `$AGK_CACHE_DIR`). An unchanged file - and unchanged files it references - reuses its last verdict; a rule, gate or version change re-checks everything |
 | `--no-cache` | With `--once`: check every file and leave the cache alone |
 | `--jobs N` | With `--once`: check N files at a time in separate processes (`0` = one per CPU). Verdicts and their order are the same as one at a time; healing always runs one at a time |

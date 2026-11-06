@@ -38,6 +38,20 @@ Create one on first run (the bootstrap page), or from `/admin`. With no projects
 at all, the dashboard runs in open mode - that is deliberate for a solo
 developer, and the reason a real studio creates a project on day one.
 
+Creating the first project switches tokens on: from then on the plain
+`/dashboard` answers 401 and every client needs a token. Results recorded before
+that belong to no project; only the admin token sees them, and the start-up
+window counts them. Two commands manage the switch:
+
+```
+asset_health_server.py --db studio.db --adopt-legacy "Nova Survival"   # move earlier results in
+asset_health_server.py --db studio.db --remove-project "Trial" --yes   # undo a trial project
+```
+
+`--remove-project` deletes the project's token, budget and exceptions and keeps
+its results as project-less history. Without `--yes` it only says what it would
+do. With no projects left, the server is back in open mode.
+
 ```
 asset-gatekeeper <folder> --telemetry-url "http://health:8080/api/telemetry?token=<TOKEN>"
 ```

@@ -561,6 +561,24 @@ def analyse_asset(path: Path, preview_dir: Path | None = None) -> dict:
                 "materials": int(summary.material_slots), "bounds": bounds,
                 "kind": "mesh", "note": "; ".join(notes)}
 
+    # A .gltf whose .bin has not arrived yet: the gate can count its triangles
+    # from the JSON alone now, but nothing else can be measured or previewed, so
+    # it keeps waiting for the buffer as before.
+    if suffix == ".gltf":
+        try:
+            document = agk.read_gltf_document(path)
+            absent = [uri for uri in (buffer.get("uri") for buffer in document.get("buffers") or [])
+                      if isinstance(uri, str) and uri and not uri.startswith("data:")
+                      and not (path.parent / urllib.parse.unquote(uri)).is_file()]
+        except Exception:
+            absent = []
+        if absent:
+            missing = missing_references(path) or absent
+            return {"triangles": 0, "vertices": 0, "materials": 0, "bounds": None,
+                    "kind": "unverified",
+                    "note": "waiting for its files: " + ", ".join(missing[:5])
+                            + (" ..." if len(missing) > 5 else "")
+                            + " - upload them with it"}
     try:
         triangles = agk.count_triangles(path)
     except Exception as exc:

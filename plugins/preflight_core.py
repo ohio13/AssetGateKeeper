@@ -183,7 +183,8 @@ def assess(asset: str = "untitled", triangles: Optional[int] = None,
            folder: str = "", filename: str = "",
            tag_budgets: Optional[dict[str, Any]] = None,
            tag_mode: str = "suggest", tag_similarity: float = 0.75,
-           budget: Any = None, asset_path: str | Path | None = None) -> PreflightReport:
+           budget: Any = None, asset_path: str | Path | None = None,
+           mesh_names: Iterable[str] = ()) -> PreflightReport:
     """Judge one asset snapshot against the studio budget.
 
     Everything is optional: a DCC that cannot count degenerate faces simply passes
@@ -230,6 +231,15 @@ def assess(asset: str = "untitled", triangles: Optional[int] = None,
             report.add("error", "degenerate",
                        f"{degenerate} zero-area face(s): Nanite and ray tracing "
                        "compute garbage from these")
+
+    # Mesh names: the gate's optional [mesh] name_prefixes rule, one rule for
+    # every DCC (3ds Max used to skip it while Maya invented its own).
+    prefixes = tuple(getattr(budget, "mesh_name_prefixes", ()) or ()) if budget else ()
+    if prefixes:
+        for name in mesh_names:
+            if not any(str(name).lower().startswith(p.lower()) for p in prefixes):
+                report.add("error", "mesh_name",
+                           f"mesh name '{name}' does not start with {' or '.join(prefixes)}")
 
     if non_manifold:
         report.add("warning", "non_manifold",

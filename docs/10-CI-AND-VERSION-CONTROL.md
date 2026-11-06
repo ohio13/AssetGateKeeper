@@ -66,9 +66,14 @@ asset-gatekeeper Assets --once --recursive --report junit:gate.xml --report sari
   GitLab (`artifacts:reports:junit`) and Azure DevOps (Publish Test Results)
   show each failing asset as its own red line.
 * **SARIF** (`sarif:<file>`): one result per problem of each failing asset. The
-  shipped GitHub workflow uploads it with `github/codeql-action/upload-sarif`,
-  so each failure is an annotation on the file in the pull request (needs code
-  scanning: public repositories, or GitHub Advanced Security).
+  shipped GitHub workflow uploads it with `github/codeql-action/upload-sarif@v4`
+  where code scanning is available (public repositories, or GitHub Advanced
+  Security; set the repository variable `AGK_CODE_SCANNING=true` for a private
+  repository that has it).
+* **GitHub annotations** (`github:<file>`): one `::error file=...` workflow
+  command per problem. The shipped workflow prints the file, so each failing
+  asset is marked on the pull request's Files tab in any repository, free or
+  paid.
 
 Reports are written by `--once` runs and single-file runs; a watch ignores the
 flag.

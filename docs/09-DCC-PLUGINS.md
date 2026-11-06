@@ -161,8 +161,20 @@ with the pre-flight window and the check itself (`mayapy`, 9 scene cases).
 python.ExecuteFile @"C:\Tools\AssetGatekeeper\plugins\max\max_preflight.py"
 ```
 
-Add that line to a macroscript or a toolbar button. The panel is a message box on
-purpose: no `.ms` rollouts to maintain, nothing to break across Max versions.
+It checks the selection (or the whole scene when nothing is selected) and shows
+the result straight away: a warning icon when it is blocked, an information icon
+when it is clean. There is no panel to open.
+
+To get an **AGK** button, run this once:
+
+```maxscript
+python.ExecuteFile @"C:\Tools\AssetGatekeeper\plugins\max\install_max_button.py"
+```
+
+It adds the action *AssetGatekeeper pre-flight check* (category
+**AssetGatekeeper**), which Max keeps across restarts. Put it on a toolbar or menu
+from **Customize > Customize User Interface > Toolbars** (or **Menus**): pick the
+AssetGatekeeper category and drag the action across.
 
 ### What it measures
 

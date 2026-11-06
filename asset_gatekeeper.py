@@ -167,9 +167,22 @@ LOG = logging.getLogger("assetgatekeeper")
 
 MESH_SUFFIXES = frozenset({".obj", ".gltf", ".glb", ".fbx"})
 GLTF_SUFFIXES = frozenset({".gltf", ".glb"})
-TEXTURE_SUFFIXES = frozenset({".png", ".tga", ".jpg", ".jpeg"})
+# .tif/.webp/.dds are read by Pillow; .exr and .ktx2 by their headers. All six
+# used to be skipped outright (KTX2 and WebP are standard glTF texture formats).
+TEXTURE_SUFFIXES = frozenset({".png", ".tga", ".jpg", ".jpeg", ".tif", ".tiff", ".webp",
+                              ".dds", ".exr", ".ktx2"})
+HEADER_ONLY_TEXTURES = frozenset({".exr", ".ktx2"})
+DEFAULT_TEXTURE_SUFFIXES: tuple[str, ...] = (
+    "_Albedo", "_BaseColor", "_Diffuse", "_Color",
+    "_Normal", "_Roughness", "_Metallic", "_Metalness",
+    "_ORM", "_ARM", "_MetallicRoughness", "_OcclusionRoughnessMetallic",
+    "_AO", "_AmbientOcclusion", "_Occlusion",
+    "_Emissive", "_Emission", "_Height", "_Displacement",
+    "_Opacity", "_Alpha", "_Mask", "_Specular", "_Gloss",
+    "_D", "_N", "_R", "_M")
 #: The decoder format each texture extension must actually contain.
-TEXTURE_FORMATS = {".png": "PNG", ".tga": "TGA", ".jpg": "JPEG", ".jpeg": "JPEG"}
+TEXTURE_FORMATS = {".png": "PNG", ".tga": "TGA", ".jpg": "JPEG", ".jpeg": "JPEG",
+                   ".tif": "TIFF", ".tiff": "TIFF", ".webp": "WEBP", ".dds": "DDS"}
 TRACKED_SUFFIXES = MESH_SUFFIXES | TEXTURE_SUFFIXES
 
 # Partial writes and DCC scratch files that must never be inspected.
@@ -202,8 +215,11 @@ class Budget:
     max_material_slots: int = 3
     require_power_of_two: bool = True
     enforce_texture_naming: bool = True
-    texture_suffixes: tuple[str, ...] = ("_Albedo", "_Normal", "_Roughness",
-                                        "_BaseColor", "_ORM")
+    # The map names real exports use (6 Nov: every one of 548 textures in the
+    # Khronos glTF samples failed the old five-name list). Matching ignores case
+    # and the separators inside a name, so _BaseColor also accepts _base_color
+    # and _basecolor. A studio narrows it with [texture] suffixes.
+    texture_suffixes: tuple[str, ...] = DEFAULT_TEXTURE_SUFFIXES
     # Deep data profiling: the bottlenecks that survive an art review.
     max_bone_influences: int = 4          # per-vertex weights; mobile/web GPUs cap at 4
     max_uv_channels: int = 4              # TEXCOORD_n sets; most engines stop at 4-8
@@ -213,6 +229,10 @@ class Budget:
     # That judges shape, not size: a fixed area cut-off called every triangle of
     # a real-scale 1 mm glTF prop "degenerate" (6 Nov corpus test).
     degenerate_ratio: float = 1e-6
+    # Optional: mesh names must start with one of these (["SM_", "SK_"]).
+    # Off by default. The same rule runs in the gate (file name) and in every
+    # DCC panel (object name), so Maya, Max, Blender and Unreal agree.
+    mesh_name_prefixes: tuple[str, ...] = ()
     degenerate_epsilon: float = 0.0       # optional extra: any area at or below this (units^2)
 
     # - filters - #
@@ -324,6 +344,10 @@ class Budget:
                               "or drop the [texture] table and use the defaults.")
         object.__setattr__(self, "texture_suffixes", texture_suffixes)
         object.__setattr__(self, "pbr_suffixes", pbr_suffixes)
+        prefixes = tuple(str(item).strip() for item in (self.mesh_name_prefixes or ()))
+        if any(not item for item in prefixes):
+            raise ConfigError("budget mesh_name_prefixes contains an empty entry; remove it")
+        object.__setattr__(self, "mesh_name_prefixes", prefixes)
 
     @classmethod
     def from_mapping(cls, document: dict) -> "Budget":
@@ -352,6 +376,7 @@ class Budget:
             raise ConfigError("[texture] must be a table")
         _reject_unknown(mesh, ("max_triangles", "max_material_slots", "max_bone_influences",
                                "max_uv_channels", "allow_degenerate", "degenerate_epsilon", "degenerate_ratio",
+                               "name_prefixes",
                                "check_references", "allow_outside_references",
                                "audit_transforms", "require_indexed",
                                "pivot_tolerance", "transform_epsilon", "max_mb",
@@ -369,6 +394,7 @@ class Budget:
         allow_degenerate = _read_bool(mesh, "allow_degenerate", "[mesh]")
         degenerate_epsilon = _read_float(mesh, "degenerate_epsilon", "[mesh]")
         degenerate_ratio = _read_float(mesh, "degenerate_ratio", "[mesh]")
+        mesh_name_prefixes = _read_strings(mesh, "name_prefixes", "[mesh]")
         max_texture_edge = _read_int(texture, "max_edge", "[texture]", minimum=1)
         require_power_of_two = _read_bool(texture, "power_of_two", "[texture]")
         enforce_texture_naming = _read_bool(texture, "naming", "[texture]")
@@ -411,6 +437,8 @@ class Budget:
             allow_degenerate=defaults.allow_degenerate if allow_degenerate is None else allow_degenerate,
             degenerate_ratio=(
                 defaults.degenerate_ratio if degenerate_ratio is None else degenerate_ratio),
+            mesh_name_prefixes=(
+                defaults.mesh_name_prefixes if mesh_name_prefixes is None else tuple(mesh_name_prefixes)),
             degenerate_epsilon=(
                 defaults.degenerate_epsilon if degenerate_epsilon is None else degenerate_epsilon
             ),
@@ -2015,6 +2043,7 @@ def _budget_summary(budget: Budget) -> dict[str, object]:
         "texture_naming": bool(budget.enforce_texture_naming),
         "allow_degenerate": bool(budget.allow_degenerate),
         "check_references": bool(budget.check_references),
+        "mesh_name_prefixes": list(budget.mesh_name_prefixes),
     }
 
 
@@ -3306,8 +3335,41 @@ def embedded_texture_sizes(path: Path) -> list[tuple[str, int, int]]:
     return found
 
 
+def _exr_size(data: bytes) -> Optional[tuple[int, int]]:
+    """Width and height from an OpenEXR header's dataWindow attribute."""
+    if data[:4] != b"\x76\x2f\x31\x01":
+        return None
+    position = 8
+    while position < len(data):
+        end = data.find(b"\0", position)
+        if end <= position:
+            return None
+        name = data[position:end]
+        type_end = data.find(b"\0", end + 1)
+        if type_end < 0 or type_end + 5 > len(data):
+            return None
+        size = struct.unpack_from("<i", data, type_end + 1)[0]
+        value = type_end + 5
+        if name == b"dataWindow" and size == 16 and value + 16 <= len(data):
+            x_min, y_min, x_max, y_max = struct.unpack_from("<4i", data, value)
+            return x_max - x_min + 1, y_max - y_min + 1
+        position = value + max(size, 0)
+    return None
+
+
 def measure_texture(path: Path) -> tuple[int, int]:
     """A texture's resolution, after proving the whole file decodes."""
+    suffix = path.suffix.lower()
+    if suffix in HEADER_ONLY_TEXTURES:
+        try:
+            with path.open("rb") as handle:
+                head = handle.read(1 << 16)
+        except OSError as exc:
+            raise AssetError(f"could not read image ({exc})") from exc
+        size = _exr_size(head) if suffix == ".exr" else image_size_from_bytes(head[:64])
+        if size is None or min(size) <= 0:
+            raise AssetError(f"could not read the {suffix} header (damaged or not really {suffix})")
+        return size
     if Image is None:
         raise AssetError("Pillow is not installed; textures cannot be analysed")
     try:
@@ -3335,16 +3397,44 @@ def is_power_of_two(value: int) -> bool:
     return value > 0 and value & (value - 1) == 0
 
 
+def _suffix_token(suffix: str) -> str:
+    """``_BaseColor`` -> a pattern that also accepts base_color, base-color, basecolor."""
+    words = re.findall(r"[A-Z]+(?![a-z])|[A-Z]?[a-z]+|\d+", suffix.strip("_- ."))
+    if not words:
+        words = [suffix.strip("_- .")]
+    return r"[_\-.]?".join(re.escape(word) for word in words)
+
+
 def build_naming_pattern(suffixes: Sequence[str]) -> Optional[re.Pattern[str]]:
     """Case-insensitive ``_Albedo``-style suffix matcher.
 
-    Tolerates a trailing index (``_Albedo_02``) because exported atlases and
+    Separators inside a suffix are optional (``_BaseColor`` matches
+    ``_base_color``), the suffix itself may follow ``_`` ``-`` or ``.``, and a
+    trailing index is tolerated (``_Albedo_02``) because exported atlases and
     variant sets legitimately number their maps.
     """
-    tokens = [re.escape(suffix.lstrip("_")) for suffix in suffixes if suffix.strip("_")]
+    tokens = [_suffix_token(suffix) for suffix in suffixes if suffix.strip("_- .")]
     if not tokens:
         return None
-    return re.compile(rf"_(?:{'|'.join(tokens)})(?:_?\d+)?$", re.IGNORECASE)
+    return re.compile(rf"[_\-.](?:{'|'.join(tokens)})(?:[_\-]?\d+)?$", re.IGNORECASE)
+
+
+def mesh_name_problem(name: str, prefixes: Sequence[str]) -> str:
+    """The FAILED reason when a mesh name lacks a required prefix, else ''.
+
+    One rule for every caller: the gate passes the file name, the DCC panels
+    pass the object name. Case-insensitive (sm_rock is SM_rock)."""
+    if not prefixes:
+        return ""
+    if any(name.lower().startswith(prefix.lower()) for prefix in prefixes):
+        return ""
+    return f"mesh name '{name}' does not start with {' or '.join(prefixes)}"
+
+
+def describe_suffixes(suffixes: Sequence[str], shown: int = 6) -> str:
+    """The suffix list for a FAILED line: the first few, then how many more."""
+    listed = ", ".join(suffixes[:shown])
+    return listed + (f" and {len(suffixes) - shown} more" if len(suffixes) > shown else "")
 
 
 # --- #
@@ -3892,6 +3982,9 @@ class Gatekeeper:
                 drawn = triangles
             if drawn != triangles:
                 stats.append(("drawn_triangles", drawn))
+        naming = mesh_name_problem(path.stem, self.budget.mesh_name_prefixes)
+        if naming:
+            problems.append(naming)
 
         if triangles == 0:
             # A zero-triangle mesh is never a legitimate export: it means a
@@ -4028,7 +4121,11 @@ class Gatekeeper:
         # Broken references are unconditional when enabled: a .gltf pointing at a
         # texture nobody shipped fails to load in every engine, on every platform.
         if self.budget.check_references:
-            broken = missing_references(path)
+            # One line per missing file: an FBX that names ALPHA.png from two
+            # materials used to report it twice (Head_69.fbx, 6 Nov).
+            seen_written: set = set()
+            broken = [item for item in missing_references(path)
+                      if not (item[0] in seen_written or seen_written.add(item[0]))]
             broken_names = {written for written, _target in broken}
             for written, _target in broken:
                 problems.append(
@@ -4092,7 +4189,7 @@ class Gatekeeper:
                                 f"{self.budget.max_texture_mb:g} MB texture budget")
 
         if self._naming is not None and not self._naming.search(path.stem):
-            expected = ", ".join(self.budget.texture_suffixes)
+            expected = describe_suffixes(self.budget.texture_suffixes)
             problems.append(f"name does not end with a standard suffix ({expected})")
 
         # PBR sanitisation applies to albedo/diffuse only: a normal map is
@@ -4107,6 +4204,8 @@ class Gatekeeper:
                        (("width", width), ("height", height), ("memory_kb", memory // 1024)))
 
     def _is_pbr(self, path: Path) -> bool:
+        if path.suffix.lower() in HEADER_ONLY_TEXTURES:
+            return False              # sizes come from the header; pixels are not decoded
         stem = path.stem.lower()
         return any(stem.endswith(suffix.lower()) for suffix in self.budget.pbr_suffixes)
 
@@ -5324,7 +5423,7 @@ def _positive_int(text: str) -> int:
 # CI reports (G3): one entry per asset, in the formats build servers display
 # --- #
 
-REPORT_FORMATS = ("junit", "sarif")
+REPORT_FORMATS = ("junit", "sarif", "github")
 
 
 def _report_target(text: str) -> tuple[str, str]:
@@ -5332,7 +5431,7 @@ def _report_target(text: str) -> tuple[str, str]:
     kind = kind.strip().lower()
     if not sep or kind not in REPORT_FORMATS or not path.strip():
         raise argparse.ArgumentTypeError(
-            f"use junit:<file> or sarif:<file>, got {text!r}")
+            f"use junit:<file>, sarif:<file> or github:<file>, got {text!r}")
     return kind, path.strip()
 
 
@@ -5413,10 +5512,42 @@ def sarif_report(verdicts: Sequence[Verdict], root: Optional[Path] = None) -> st
     return json.dumps(document, indent=2) + "\n"
 
 
+def _github_escape(text: str, property_value: bool = False) -> str:
+    text = text.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+    if property_value:
+        text = text.replace(":", "%3A").replace(",", "%2C")
+    return text
+
+
+def github_report(verdicts: Sequence[Verdict], root: Optional[Path] = None) -> str:
+    """GitHub Actions annotation commands (``::error file=...::...``).
+
+    Printed by any workflow step (``cat`` the file), each failing asset is marked
+    on the pull request's Files tab - free, in private repositories too, where
+    SARIF upload needs paid code scanning."""
+    lines = []
+    cwd = Path.cwd().resolve()
+    for verdict in verdicts:
+        if verdict.passed:
+            continue
+        name = _relative_name(verdict.path, root)
+        if not name.startswith("[total] "):
+            try:
+                name = verdict.path.resolve().relative_to(cwd).as_posix()
+            except (ValueError, OSError):
+                pass
+        title = "AssetGatekeeper: could not read" if verdict.unreadable else "AssetGatekeeper"
+        for problem in verdict.problems or ("could not be checked",):
+            lines.append(f"::error file={_github_escape(name, True)},"
+                         f"title={_github_escape(title, True)}::{_github_escape(problem)}")
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
 def write_reports(targets: Sequence[tuple[str, str]], verdicts: Sequence[Verdict],
                   root: Optional[Path]) -> None:
+    writers = {"junit": junit_report, "sarif": sarif_report, "github": github_report}
     for kind, destination in targets:
-        text = junit_report(verdicts, root) if kind == "junit" else sarif_report(verdicts, root)
+        text = writers[kind](verdicts, root)
         path = Path(destination).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(text, encoding="utf-8")

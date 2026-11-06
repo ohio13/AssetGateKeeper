@@ -384,6 +384,25 @@ class MigrationRunner:
         applied = self.applied()
         return [m for m in discover(self.directory) if m.version not in applied]
 
+    def stamp_all(self) -> list[str]:
+        """Record every pending migration as applied without running it.
+
+        For a database just built from the server's full schema (``migrate
+        --sqlite --init-schema``), which already contains everything the
+        migrations would create. Returns the keys recorded."""
+        pending = self.plan()
+        if not pending:
+            return []
+        stamped_at = self._clock()
+        with self.store.connect() as connection:
+            for migration in pending:
+                connection.execute(                              # type: ignore[attr-defined]
+                    "INSERT INTO schema_migrations (version, name, checksum, applied_at,"
+                    " duration_ms, kind) VALUES (?, ?, ?, ?, ?, ?)",
+                    (migration.version, migration.name, migration.checksum, stamped_at, 0,
+                     "stamp"))
+        return [migration.key for migration in pending]
+
     # -- execution --------------------------------------------------------- #
 
     def _lock(self, connection: Any) -> bool:
