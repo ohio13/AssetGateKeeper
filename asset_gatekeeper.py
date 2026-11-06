@@ -180,6 +180,36 @@ DEFAULT_TEXTURE_SUFFIXES: tuple[str, ...] = (
     "_Emissive", "_Emission", "_Height", "_Displacement",
     "_Opacity", "_Alpha", "_Mask", "_Specular", "_Gloss",
     "_D", "_N", "_R", "_M")
+
+#: Ready-made naming conventions for [naming] preset. Each is complete on its
+#: own: texture prefixes, texture suffixes and mesh prefixes. Choose several
+#: (preset = ["unreal", "substance"]) and a name passes when it follows ANY
+#: of them - studios mix exports from different tools.
+NAMING_PRESETS: dict[str, dict[str, tuple[str, ...]]] = {
+    "default": {"texture_suffixes": DEFAULT_TEXTURE_SUFFIXES},
+    # Unreal's community style guide: T_ textures with one-letter map suffixes,
+    # SM_ static and SK_ skeletal meshes.
+    "unreal": {"texture_prefixes": ("T_",),
+               "texture_suffixes": ("_D", "_N", "_R", "_M", "_A", "_O", "_B", "_E", "_S", "_H",
+                                    "_ORM", "_MRA", "_ARM", "_RMA", "_Mask", "_BaseColor",
+                                    "_Normal", "_Roughness", "_Metallic", "_Emissive"),
+               "mesh_prefixes": ("SM_", "SK_")},
+    # Unity's Standard / URP / HDRP map names.
+    "unity": {"texture_suffixes": ("_Albedo", "_AlbedoTransparency", "_BaseMap", "_MetallicSmoothness",
+                                   "_MaskMap", "_Smoothness", "_Normal", "_Occlusion", "_Emission",
+                                   "_Height", "_DetailMask", "_Mask", "_Specular")},
+    # The glTF material slots, as Khronos samples and Blender's exporter name them.
+    "gltf": {"texture_suffixes": ("_baseColor", "_metallicRoughness", "_normal", "_occlusion",
+                                  "_emissive", "_ORM", "_transmission", "_clearcoat", "_sheen")},
+    # Adobe Substance 3D Painter's export presets.
+    "substance": {"texture_suffixes": ("_BaseColor", "_Base_Color", "_Normal", "_Roughness",
+                                       "_Metallic", "_Height", "_Emissive", "_AO", "_AmbientOcclusion",
+                                       "_OcclusionRoughnessMetallic", "_Opacity", "_Mixed_AO",
+                                       "_Specular", "_Glossiness")},
+    # Godot's StandardMaterial3D map names.
+    "godot": {"texture_suffixes": ("_albedo", "_normal", "_roughness", "_metallic", "_ao",
+                                   "_emission", "_orm", "_height")},
+}
 #: The decoder format each texture extension must actually contain.
 TEXTURE_FORMATS = {".png": "PNG", ".tga": "TGA", ".jpg": "JPEG", ".jpeg": "JPEG",
                    ".tif": "TIFF", ".tiff": "TIFF", ".webp": "WEBP", ".dds": "DDS"}
@@ -233,6 +263,11 @@ class Budget:
     # Off by default. The same rule runs in the gate (file name) and in every
     # DCC panel (object name), so Maya, Max, Blender and Unreal agree.
     mesh_name_prefixes: tuple[str, ...] = ()
+    # [naming]: several conventions at once. Each entry is
+    # (label, texture prefixes, texture suffixes, texture regex, mesh prefixes,
+    # mesh regex); a name passes when it follows ANY entry. Empty = the plain
+    # texture_suffixes / mesh_name_prefixes rules above.
+    naming_conventions: tuple = ()
     degenerate_epsilon: float = 0.0       # optional extra: any area at or below this (units^2)
 
     # - filters - #
@@ -360,7 +395,8 @@ class Budget:
             raise ConfigError("the rules file must contain a table of settings")
         _reject_unknown(document, ("mesh", "texture", "server", "healer",
                                    "platforms", "platform", "tags", "tagging",
-                                   "preset", "notify", "filters", "exceptions", "totals"),
+                                   "preset", "notify", "filters", "exceptions", "totals",
+                                   "naming"),
                         "the rules file")
         filters = document.get("filters") or {}
         if not isinstance(filters, dict):
@@ -399,6 +435,8 @@ class Budget:
         require_power_of_two = _read_bool(texture, "power_of_two", "[texture]")
         enforce_texture_naming = _read_bool(texture, "naming", "[texture]")
         texture_suffixes = _read_strings(texture, "suffixes", "[texture]")
+        naming_conventions = _read_naming(document.get("naming"), texture_suffixes,
+                                          mesh_name_prefixes)
 
         # Reference / hierarchy auditing
         check_references = _read_bool(mesh, "check_references", "[mesh]")
@@ -439,6 +477,7 @@ class Budget:
                 defaults.degenerate_ratio if degenerate_ratio is None else degenerate_ratio),
             mesh_name_prefixes=(
                 defaults.mesh_name_prefixes if mesh_name_prefixes is None else tuple(mesh_name_prefixes)),
+            naming_conventions=naming_conventions,
             degenerate_epsilon=(
                 defaults.degenerate_epsilon if degenerate_epsilon is None else degenerate_epsilon
             ),
@@ -656,6 +695,59 @@ def _read_strings(table: dict, key: str, where: str) -> Optional[tuple[str, ...]
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ConfigError(f"{where}.{key} must be a list of strings, got {value!r}")
     return tuple(value)
+
+
+def _read_naming(table, texture_suffixes, mesh_prefixes) -> tuple:
+    """[naming]: presets plus one custom convention, as Budget.naming_conventions.
+
+        [naming]
+        preset = ["unreal", "substance"]      # any of NAMING_PRESETS
+        texture_prefixes = ["TX_"]             # a custom convention, added to them
+        texture_suffixes = ["_Diff", "_Nrm"]
+        texture_pattern = "^TX_[A-Z][A-Za-z0-9]+_(Diff|Nrm)$"   # a regex, whole name
+        mesh_prefixes = ["GEO_"]
+        mesh_pattern = "^GEO_[a-z0-9_]+$"
+    """
+    if table is None:
+        return ()
+    if not isinstance(table, dict):
+        raise ConfigError("[naming] must be a table")
+    _reject_unknown(table, ("preset", "texture_prefixes", "texture_suffixes", "texture_pattern",
+                            "mesh_prefixes", "mesh_pattern"), "[naming]")
+    presets = table.get("preset", [])
+    if isinstance(presets, str):
+        presets = [presets]
+    if not isinstance(presets, list) or not all(isinstance(item, str) for item in presets):
+        raise ConfigError(f"[naming].preset must be a name or a list of names, got {presets!r}")
+    conventions = []
+    for name in presets:
+        key = name.strip().lower()
+        if key not in NAMING_PRESETS:
+            raise ConfigError(f"[naming].preset {name!r} is not one of: "
+                              + ", ".join(sorted(NAMING_PRESETS)))
+        preset = NAMING_PRESETS[key]
+        conventions.append((key, preset.get("texture_prefixes", ()), preset.get("texture_suffixes", ()),
+                            "", preset.get("mesh_prefixes", ()), ""))
+    custom = {key: _read_strings(table, key, "[naming]") or ()
+              for key in ("texture_prefixes", "texture_suffixes", "mesh_prefixes")}
+    patterns = {}
+    for key in ("texture_pattern", "mesh_pattern"):
+        pattern = _read_str(table, key, "[naming]") or ""
+        if pattern:
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise ConfigError(f"[naming].{key} is not a valid regular expression: {exc}") from exc
+        patterns[key] = pattern
+    if any(custom.values()) or any(patterns.values()):
+        conventions.append(("custom", custom["texture_prefixes"], custom["texture_suffixes"],
+                            patterns["texture_pattern"], custom["mesh_prefixes"],
+                            patterns["mesh_pattern"]))
+    if texture_suffixes or mesh_prefixes:
+        # [texture] suffixes / [mesh] name_prefixes still count, as one more convention.
+        conventions.append(("rules", (), tuple(texture_suffixes or ()), "",
+                            tuple(mesh_prefixes or ()), ""))
+    return tuple(conventions)
 
 
 def _read_str(table: dict, key: str, where: str) -> Optional[str]:
@@ -1526,6 +1618,96 @@ def run_init(target: Optional[Path] = None, ask=input, out=None,
 
 
 # --- #
+# Naming rules from the files a studio already has
+# --- #
+
+def _name_tokens(stem: str) -> list[str]:
+    return [token for token in re.split(r"[_\-.]+", stem) if token]
+
+
+def suggest_naming(root: Path, recursive: bool = True) -> str:
+    """A ready-to-paste [naming] block learned from the names already in a folder.
+
+    Scores every preset against the textures and meshes found, picks the ones
+    that fit, adds the other map endings and prefixes the folder uses often,
+    and says how many files the result would pass. Nothing is written."""
+    files = [path for path in walk_files(root, recursive=recursive)
+             if path.suffix.lower() in TRACKED_SUFFIXES]
+    textures = sorted({path.stem for path in files if path.suffix.lower() in TEXTURE_SUFFIXES})
+    meshes = sorted({path.stem for path in files if path.suffix.lower() in MESH_SUFFIXES})
+    lines = [f"# Learned from {len(textures)} texture name(s) and {len(meshes)} mesh name(s) "
+             f"in {root}"]
+    if not textures and not meshes:
+        return lines[0] + "\n# nothing to learn from: no textures or meshes here\n"
+
+    def passing(budget: "Budget", names: list[str], kind: str) -> int:
+        check = texture_name_problem if kind == "texture" else mesh_name_problem
+        return sum(1 for name in names if not check(name, budget))
+
+    def budget_for(document: dict) -> "Budget":
+        return Budget.from_mapping({"naming": document})
+
+    chosen: list[str] = []
+    if textures:
+        scores = sorted(((passing(budget_for({"preset": name}), textures, "texture"), name)
+                         for name in NAMING_PRESETS), reverse=True)
+        lines.append("# How many textures each preset already passes:")
+        lines += [f"#   {name:<10} {count:>5} of {len(textures)}" for count, name in scores]
+        covered: set[str] = set()
+        for count, name in scores:          # greedy: add a preset while it helps
+            budget = budget_for({"preset": [name]})
+            gain = {stem for stem in textures if not texture_name_problem(stem, budget)} - covered
+            if count and len(gain) >= max(2, len(textures) // 20):
+                chosen.append(name)
+                covered |= gain
+    # Endings no chosen preset knows, used by two or more textures.
+    budget = budget_for({"preset": chosen}) if chosen else None
+    leftover = [stem for stem in textures if budget is None or texture_name_problem(stem, budget)]
+    endings: dict[str, int] = {}
+    spelling: dict[str, str] = {}
+    for stem in leftover:
+        tokens = _name_tokens(re.sub(r"[_\-]?\d+$", "", stem))
+        # A map name is a word: not a number, a resolution (2k) or one letter.
+        if len(tokens) >= 2 and re.fullmatch(r"[A-Za-z]{2,}", tokens[-1]):
+            key = tokens[-1].lower()
+            endings[key] = endings.get(key, 0) + 1
+            spelling.setdefault(key, "_" + tokens[-1])
+    extra = [spelling[key] for key, count in sorted(endings.items(), key=lambda item: -item[1])
+             if count >= 2][:15]
+    starts: dict[str, int] = {}
+    for stem in meshes:
+        tokens = _name_tokens(stem)
+        if len(tokens) >= 2 and len(tokens[0]) <= 4:
+            starts[tokens[0] + "_"] = starts.get(tokens[0] + "_", 0) + 1
+    mesh_prefixes = [prefix for prefix, count in sorted(starts.items(), key=lambda item: -item[1])
+                     if count >= max(2, len(meshes) // 5)]
+
+    document: dict = {}
+    block = ["[naming]"]
+    if chosen:
+        document["preset"] = chosen
+        block.append("preset = [" + ", ".join(f'"{name}"' for name in chosen) + "]")
+    if extra:
+        document["texture_suffixes"] = extra
+        block.append("texture_suffixes = [" + ", ".join(f'"{e}"' for e in extra)
+                     + "]   # other endings used here")
+    if mesh_prefixes:
+        document["mesh_prefixes"] = mesh_prefixes
+        block.append("mesh_prefixes = [" + ", ".join(f'"{p}"' for p in mesh_prefixes)
+                     + "]   # most meshes here start with these")
+    if len(block) == 1:
+        lines.append("# No common convention found; [texture] suffixes or [naming] texture_pattern "
+                     "can describe yours.")
+        return "\n".join(lines) + "\n"
+    result = budget_for(document)
+    lines.append(f"# With this block: {passing(result, textures, 'texture')} of {len(textures)} "
+                 f"textures and {passing(result, meshes, 'mesh')} of {len(meshes)} meshes pass the "
+                 "naming rules.")
+    lines.append("# Paste it into rules.toml (and edit freely):")
+    return "\n".join(lines + [""] + block) + "\n"
+
+
+# --- #
 # Repository audit: the whole folder, not one asset
 # --- #
 
@@ -2044,6 +2226,8 @@ def _budget_summary(budget: Budget) -> dict[str, object]:
         "allow_degenerate": bool(budget.allow_degenerate),
         "check_references": bool(budget.check_references),
         "mesh_name_prefixes": list(budget.mesh_name_prefixes),
+        "naming_conventions": [list(c[:1]) + [list(c[1]), list(c[2]), c[3], list(c[4]), c[5]]
+                               for c in budget.naming_conventions],
     }
 
 
@@ -3419,16 +3603,69 @@ def build_naming_pattern(suffixes: Sequence[str]) -> Optional[re.Pattern[str]]:
     return re.compile(rf"[_\-.](?:{'|'.join(tokens)})(?:[_\-]?\d+)?$", re.IGNORECASE)
 
 
-def mesh_name_problem(name: str, prefixes: Sequence[str]) -> str:
-    """The FAILED reason when a mesh name lacks a required prefix, else ''.
+def _starts_with_any(name: str, prefixes: Sequence[str]) -> bool:
+    return not prefixes or any(name.lower().startswith(prefix.lower()) for prefix in prefixes)
 
-    One rule for every caller: the gate passes the file name, the DCC panels
-    pass the object name. Case-insensitive (sm_rock is SM_rock)."""
+
+def _full_match(pattern: str, name: str) -> bool:
+    return not pattern or re.fullmatch(pattern, name) is not None
+
+
+def mesh_name_problem(name: str, rules) -> str:
+    """The FAILED reason when a mesh name breaks the naming rules, else ''.
+
+    ``rules`` is a Budget (its [naming] conventions, or mesh_name_prefixes) or a
+    plain list of prefixes. One rule for every caller: the gate passes the file
+    name, the DCC panels pass the object name. Case-insensitive prefixes."""
+    conventions = tuple(getattr(rules, "naming_conventions", ()) or ())
+    if conventions:
+        relevant = [c for c in conventions if c[4] or c[5]]
+        if not relevant or any(_starts_with_any(name, c[4]) and _full_match(c[5], name)
+                               for c in relevant):
+            return ""
+        wanted = sorted({prefix for c in relevant for prefix in c[4]})
+        shown = " or ".join(wanted) if wanted else "the naming pattern"
+        return (f"mesh name '{name}' does not follow the naming rules (start with {shown}"
+                f"; conventions: {', '.join(c[0] for c in relevant)})")
+    prefixes = getattr(rules, "mesh_name_prefixes", rules) or ()
     if not prefixes:
         return ""
-    if any(name.lower().startswith(prefix.lower()) for prefix in prefixes):
+    if _starts_with_any(name, prefixes):
         return ""
     return f"mesh name '{name}' does not start with {' or '.join(prefixes)}"
+
+
+def texture_name_problem(stem: str, budget) -> str:
+    """The FAILED reason when a texture name breaks the naming rules, else ''."""
+    if not getattr(budget, "enforce_texture_naming", True):
+        return ""
+    conventions = tuple(getattr(budget, "naming_conventions", ()) or ())
+    relevant = [c for c in conventions if c[1] or c[2] or c[3]]
+    if relevant:
+        for label, prefixes, suffixes, pattern, _mesh_prefixes, _mesh_pattern in relevant:
+            suffix_pattern = build_naming_pattern(suffixes) if suffixes else None
+            if (_starts_with_any(stem, prefixes)
+                    and (suffix_pattern is None or suffix_pattern.search(stem))
+                    and _full_match(pattern, stem)):
+                return ""
+        return ("name follows none of the naming conventions ("
+                + "; ".join(_describe_convention(c) for c in relevant) + ")")
+    pattern = build_naming_pattern(budget.texture_suffixes)
+    if pattern is not None and not pattern.search(stem):
+        return f"name does not end with a standard suffix ({describe_suffixes(budget.texture_suffixes)})"
+    return ""
+
+
+def _describe_convention(convention) -> str:
+    label, prefixes, suffixes, pattern = convention[:4]
+    parts = []
+    if prefixes:
+        parts.append("starts " + "/".join(prefixes))
+    if suffixes:
+        parts.append("ends " + describe_suffixes(suffixes, shown=4))
+    if pattern:
+        parts.append(f"matches {pattern}")
+    return f"{label}: " + ", ".join(parts)
 
 
 def describe_suffixes(suffixes: Sequence[str], shown: int = 6) -> str:
@@ -3982,7 +4219,7 @@ class Gatekeeper:
                 drawn = triangles
             if drawn != triangles:
                 stats.append(("drawn_triangles", drawn))
-        naming = mesh_name_problem(path.stem, self.budget.mesh_name_prefixes)
+        naming = mesh_name_problem(path.stem, self.budget)
         if naming:
             problems.append(naming)
 
@@ -4199,9 +4436,10 @@ class Gatekeeper:
                 problems.append(f"~{_mb(memory)} as {texture_format.upper()} with mips exceeds the "
                                 f"{self.budget.max_texture_mb:g} MB texture budget")
 
-        if self._naming is not None and not self._naming.search(path.stem):
-            expected = describe_suffixes(self.budget.texture_suffixes)
-            problems.append(f"name does not end with a standard suffix ({expected})")
+        if self._naming is not None:
+            naming_problem = texture_name_problem(path.stem, self.budget)
+            if naming_problem:
+                problems.append(naming_problem)
 
         # PBR sanitisation applies to albedo/diffuse only: a normal map is
         # allowed to be flat violet-blue, and a roughness map is allowed to be
@@ -4691,6 +4929,8 @@ def describe_budget(budget: Budget) -> str:
            if budget.max_texture_mb else "")
         + (f"  mesh<={budget.max_mesh_mb:g}MB" if budget.max_mesh_mb else "")
         + (f"  names={','.join(budget.mesh_name_prefixes)}" if budget.mesh_name_prefixes else "")
+        + (f"  conventions={','.join(c[0] for c in budget.naming_conventions)}"
+           if budget.naming_conventions else "")
         + (f"  texel={budget.texel_density_min:g}-{budget.texel_density_max:g}px/m"
            if budget.texel_density_max else "")
         + (f"  platform={budget.platform}" if budget.platform else "")
@@ -5630,6 +5870,9 @@ def build_parser() -> argparse.ArgumentParser:
                         default=None, help="also fail triangle-soup geometry (implies the audit)")
     parser.add_argument("--doctor", action="store_true",
                         help="check this machine can run the gate (deps, rules, ports), then exit")
+    parser.add_argument("--suggest-naming", action="store_true", dest="suggest_naming",
+                        help="read the names in <folder> and print a [naming] block for "
+                             "rules.toml that fits them, then exit (nothing is written)")
     parser.add_argument("--list-presets", action="store_true", dest="list_presets",
                         help="print the shipped platform targets and their budgets, then exit")
     parser.add_argument("--init", action="store_true",
@@ -5733,6 +5976,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
                   f"{'yes' if row['pbr'] else 'no':>5}")
         print("\nlegacy aliases (retro, mobile) are kept so old scripts keep working.")
         print("apply one: asset-gatekeeper <folder> --preset n64")
+        return 0
+
+    if getattr(args, "suggest_naming", False):
+        if not args.folder:
+            print("error: --suggest-naming needs a folder", file=sys.stderr)
+            return 2
+        target = Path(args.folder).expanduser()
+        if not target.is_dir():
+            print(f"error: not a folder: {target}", file=sys.stderr)
+            return 2
+        print(suggest_naming(target, recursive=True), end="")
         return 0
 
     # The doctor runs before the dependency check on purpose: reporting a missing

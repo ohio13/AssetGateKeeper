@@ -65,6 +65,43 @@ The suffix list is a studio convention, not a universal truth. Change the list
 rather than switching `naming` off: a list documents the convention, a boolean
 just hides the check.
 
+## [naming]
+
+Naming conventions differ between studios and tools, so you can describe yours
+instead of adopting ours. Without a `[naming]` table, textures must end in one of
+the `[texture] suffixes` (28 common map names by default) and meshes follow
+`[mesh] name_prefixes` (off by default).
+
+```toml
+[naming]
+preset = ["unreal", "substance"]     # ready-made conventions; a name passes if it follows ANY
+texture_prefixes = ["TX_"]           # plus your own convention, as one more option
+texture_suffixes = ["_Diff", "_Nrm"]
+texture_pattern = "^TX_[A-Z][A-Za-z0-9]+_(Diff|Nrm)$"   # a regular expression for the whole name
+mesh_prefixes = ["GEO_"]
+mesh_pattern = "^GEO_[a-z0-9_]+$"
+```
+
+| Preset | Textures | Meshes |
+|---|---|---|
+| `default` | end in a common map name (`_Albedo`, `_BaseColor`, `_Normal`, `_ORM`, ... 28 in all) | any name |
+| `unreal` | start `T_`, end `_D` `_N` `_R` `_M` `_A` `_O` `_E` `_ORM` `_MRA` ... | start `SM_` or `SK_` |
+| `unity` | end `_Albedo` `_MetallicSmoothness` `_MaskMap` `_Normal` `_Occlusion` ... | any name |
+| `gltf` | end `_baseColor` `_metallicRoughness` `_normal` `_occlusion` `_emissive` ... | any name |
+| `substance` | Substance 3D Painter's export names (`_BaseColor`, `_OcclusionRoughnessMetallic`, ...) | any name |
+| `godot` | end `_albedo` `_normal` `_roughness` `_metallic` `_ao` `_orm` ... | any name |
+
+Matching ignores case and the separators inside a name (`_BaseColor` also
+accepts `_base_color`). A `[texture] suffixes` or `[mesh] name_prefixes` list in
+the same file counts as one more convention. `[texture] naming = false` still
+switches texture naming off.
+
+**Let the tool write it.** `asset-gatekeeper <folder> --suggest-naming` reads
+the names already in a folder, scores each preset against them, adds the other
+map endings and mesh prefixes you use often, and prints a `[naming]` block with
+how many of your files it would pass. Paste it into `rules.toml` and edit it.
+Nothing is written for you.
+
 ## [healer]
 
 | Key | Type | Default | Meaning |

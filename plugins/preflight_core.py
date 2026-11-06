@@ -234,12 +234,21 @@ def assess(asset: str = "untitled", triangles: Optional[int] = None,
 
     # Mesh names: the gate's optional [mesh] name_prefixes rule, one rule for
     # every DCC (3ds Max used to skip it while Maya invented its own).
-    prefixes = tuple(getattr(budget, "mesh_name_prefixes", ()) or ()) if budget else ()
-    if prefixes:
+    if budget is not None:
+        try:
+            from asset_gatekeeper import mesh_name_problem     # the gate's own rule
+        except ImportError:                                    # pragma: no cover
+            mesh_name_problem = None
+        prefixes = tuple(getattr(budget, "mesh_name_prefixes", ()) or ())
         for name in mesh_names:
-            if not any(str(name).lower().startswith(p.lower()) for p in prefixes):
-                report.add("error", "mesh_name",
-                           f"mesh name '{name}' does not start with {' or '.join(prefixes)}")
+            if mesh_name_problem is not None:
+                problem = mesh_name_problem(str(name), budget)
+            elif prefixes and not any(str(name).lower().startswith(p.lower()) for p in prefixes):
+                problem = f"mesh name '{name}' does not start with {' or '.join(prefixes)}"
+            else:
+                problem = ""
+            if problem:
+                report.add("error", "mesh_name", problem)
 
     if non_manifold:
         report.add("warning", "non_manifold",

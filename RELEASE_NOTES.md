@@ -29,6 +29,12 @@ AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
     (Maya's own underscore check is gone); `.tif .webp .dds .exr .ktx2` checked;
     a missing file reported once; glTF 1.0 and meshopt explained in words.
   * 3ds Max: a warning icon when blocked, and an installable AGK button.
+* **Naming conventions (6 Nov evening).** `[naming]` takes one or more presets
+  (`default`, `unreal`, `unity`, `gltf`, `substance`, `godot`) plus a custom
+  convention (prefixes, endings, or a regular expression for textures and
+  meshes); a name passes when it follows any of them. `--suggest-naming` reads a
+  folder's existing names and prints a block that fits them. The same rules run
+  in the gate, Maya, 3ds Max, Blender and the Unreal validator.
 * **AssetHealth and PostgreSQL (found 6 Nov).** `--adopt-legacy` and
   `--remove-project`; a clearer 401 page. `migrate --sqlite` lost budget
   exceptions (now copied, with migration `0003_exceptions`); `--init-schema`

@@ -96,6 +96,7 @@ Reported as: `tag 'charcter' is not a known tag; closest match is 'character'`.
 | `--init [--yes]` | write a commented starter `rules.toml` |
 | `--list-presets` | print the ten shipped budgets |
 | `--doctor` | environment report: interpreter, packages, ports, rules |
+| `--suggest-naming` | learn a `[naming]` block from the names already in `<folder>`; prints it, writes nothing |
 | `--version` | print the version |
 
 ### The JSON shape

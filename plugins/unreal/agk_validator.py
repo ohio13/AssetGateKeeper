@@ -123,6 +123,13 @@ def mesh_problems(facts: dict, budget, exceptions=(), game_path: str = "", today
     uvs = facts.get("uv_channels")
     if uvs is not None and int(uvs) > budget.max_uv_channels:
         problems.append(f"{int(uvs)} UV channels exceeds the {budget.max_uv_channels} channel budget")
+    if facts.get("name"):
+        try:
+            naming = engine_module().mesh_name_problem(str(facts["name"]), budget)
+        except Exception:                      # an older gate without the rule
+            naming = ""
+        if naming:
+            problems.append(naming)
     return problems + expired if problems else problems
 
 
@@ -139,12 +146,16 @@ def texture_problems(facts: dict, budget, engine, exceptions=(), game_path: str 
                                             and engine.is_power_of_two(height)):
         problems.append(f"{width}x{height} is not a power of two")
     if budget.enforce_texture_naming:
-        pattern = engine.build_naming_pattern(budget.texture_suffixes)
         name = str(facts.get("name", ""))
-        if pattern is not None and not pattern.search(name):
-            describe = getattr(engine, "describe_suffixes", lambda items: ", ".join(items))
-            problems.append("name does not end with a standard suffix "
-                            f"({describe(budget.texture_suffixes)})")
+        if hasattr(engine, "texture_name_problem"):
+            naming = engine.texture_name_problem(name, budget)
+            if naming:
+                problems.append(naming)
+        else:                                  # an older gate
+            pattern = engine.build_naming_pattern(budget.texture_suffixes)
+            if pattern is not None and not pattern.search(name):
+                problems.append("name does not end with a standard suffix "
+                                f"({', '.join(budget.texture_suffixes)})")
     return problems + expired if problems else problems
 
 
@@ -153,7 +164,8 @@ def texture_problems(facts: dict, budget, engine, exceptions=(), game_path: str 
 def static_mesh_facts(mesh, unreal) -> dict:
     # None = could not be read: never taken as 0 (a 0 passes every budget).
     facts = {"triangles": None, "material_slots": 0, "uv_channels": None,
-             "lods": int(mesh.get_num_lods()) if hasattr(mesh, "get_num_lods") else 1}
+             "lods": int(mesh.get_num_lods()) if hasattr(mesh, "get_num_lods") else 1,
+             "name": mesh.get_name() if hasattr(mesh, "get_name") else ""}
     try:
         facts["triangles"] = int(mesh.get_num_triangles(0))
     except Exception:

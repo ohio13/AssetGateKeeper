@@ -322,7 +322,7 @@ try:
     expect("and stays quiet when the rule is off", not report.errors)
     maya = (ROOT / "plugins" / "maya" / "gatekeeper_maya.py").read_text(encoding="utf-8")
     expect("Maya uses the shared rule, not an underscore test",
-           "mesh_name_prefixes" in maya and 'if "_" not in name' not in maya)
+           "mesh_name_problem" in maya and 'if "_" not in name' not in maya)
     expect("Maya's dialog says 'failed the checks'", "failed the checks" in maya and "exceed the budget" not in maya)
     blender = (ROOT / "plugins" / "blender" / "addon.py").read_text(encoding="utf-8")
     expect("Blender names its temp export after the object", "def export_file_name" in blender)
@@ -416,6 +416,54 @@ try:
     expect("the workflow prints them, and uses codeql-action v4 with actions: read",
            "github:gate-annotations.txt" in workflow and "upload-sarif@v4" in workflow
            and "actions: read" in workflow and "@v3" not in workflow)
+
+    print("14. Naming conventions: presets, several at once, custom patterns, and suggestions")
+    def naming_budget(text):
+        path = WORK / "naming.toml"
+        path.write_text(text, encoding="utf-8")
+        return agk.load_rules(path)[0]
+    unreal = naming_budget('[naming]\npreset = "unreal"\n')
+    expect("unreal: T_Rock_D passes", not agk.texture_name_problem("T_Rock_D", unreal))
+    expect("unreal: Rock_D fails (no T_)", agk.texture_name_problem("Rock_D", unreal))
+    expect("unreal: SM_Rock passes and Rock fails as a mesh",
+           not agk.mesh_name_problem("SM_Rock", unreal) and agk.mesh_name_problem("Rock", unreal))
+    mixed = naming_budget('[naming]\npreset = ["unreal", "gltf"]\n')
+    expect("two presets: a name passes when it follows either",
+           not agk.texture_name_problem("T_Rock_N", mixed)
+           and not agk.texture_name_problem("Helmet_baseColor", mixed)
+           and agk.texture_name_problem("Helmet_final", mixed))
+    custom = naming_budget('[naming]\ntexture_pattern = "^TX_[A-Z][A-Za-z]+_(Diff|Nrm)$"\n'
+                           'mesh_pattern = "^GEO_[a-z0-9_]+$"\n')
+    expect("a custom texture regex", not agk.texture_name_problem("TX_Rock_Diff", custom)
+           and agk.texture_name_problem("TX_rock_Diff", custom))
+    expect("a custom mesh regex", not agk.mesh_name_problem("GEO_rock_01", custom)
+           and agk.mesh_name_problem("GEO_Rock", custom))
+    for bad, why in (('[naming]\npreset = "unrael"\n', "unknown preset"),
+                     ('[naming]\ntexture_pattern = "("\n', "bad regex"),
+                     ('[naming]\nprefix = ["T_"]\n', "unknown key")):
+        try:
+            naming_budget(bad)
+            expect(f"{why} is refused", False)
+        except agk.ConfigError:
+            expect(f"{why} is refused", True)
+    expect("without [naming] nothing changes", agk.Budget().naming_conventions == ())
+    if Image is not None:
+        folder = WORK / "names"
+        folder.mkdir()
+        for stem in ("T_Rock_D", "T_Rock_N", "T_Wall_D", "T_Wall_N", "T_Wall_Grime", "T_Rock_Grime"):
+            Image.new("RGB", (64, 64), (90, 90, 90)).save(folder / f"{stem}.png")
+        document, blob = gltf_document(TRIANGLE, indices=[0, 1, 2])
+        for stem in ("SM_Rock", "SM_Wall", "SM_Crate"):
+            write_gltf(folder / f"{stem}.gltf", document, blob)
+        text = agk.suggest_naming(folder)
+        expect("the suggestion picks the preset the files follow", 'preset = ["unreal"]' in text, text)
+        expect("... adds endings the preset lacks", '"_Grime"' in text, text)
+        expect("... and says the result passes them all",
+               "6 of 6 textures and 3 of 3 meshes" in text, text)
+        done = run_gate(folder, "--suggest-naming")
+        expect("--suggest-naming prints the block and writes nothing",
+               done.returncode == 0 and "[naming]" in done.stdout
+               and not (folder / "rules.toml").exists(), done.stdout[-300:])
 finally:
     shutil.rmtree(WORK, ignore_errors=True)
 

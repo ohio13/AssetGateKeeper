@@ -239,11 +239,10 @@ def check_node(transform: str, budget) -> list[str]:
     # Mesh names: the gate's own optional rule ([mesh] name_prefixes), so Maya,
     # Max, Blender, Unreal and the gate agree. It used to borrow the texture
     # naming switch and demand an underscore, which nothing else checked.
-    prefixes = tuple(getattr(budget, "mesh_name_prefixes", ()) or ())
-    if prefixes:
-        name = transform.rsplit("|", 1)[-1].rsplit(":", 1)[-1]
-        if not any(name.lower().startswith(prefix.lower()) for prefix in prefixes):
-            problems.append(f"mesh name '{name}' does not start with {' or '.join(prefixes)}")
+    naming = _import_engine().mesh_name_problem(transform.rsplit("|", 1)[-1].rsplit(":", 1)[-1],
+                                                budget)
+    if naming:
+        problems.append(naming)
 
     uvs = uv_channel_count(transform)
     if uvs > budget.max_uv_channels:

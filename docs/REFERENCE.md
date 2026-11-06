@@ -915,6 +915,7 @@ python asset_gatekeeper.py [folder] [options]
 | `--no-naming` | Accept texture names without a standard suffix |
 | `--no-color` | Disable ANSI colour |
 | `--doctor` | Check this machine can run the gate (python, trimesh, Pillow, watchdog, rules, ports), then exit |
+| `--suggest-naming` | Read the texture and mesh names in `<folder>` and print a `[naming]` block for `rules.toml` that fits them; writes nothing |
 | `--list-presets` | Print the shipped platform targets and their budgets, then exit |
 | `--init` | Interactive setup: create the watch folder and its `rules.toml` |
 | `--yes` | With `--init`: accept every default instead of prompting |

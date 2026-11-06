@@ -47,6 +47,8 @@ asset-gatekeeper path/to/Exports --recursive           # keep watching; a pop-up
 
 Every rule lives in a `rules.toml` next to the assets and can be changed per folder, per platform or per asset type. See the [rules reference](docs/05-RULES-REFERENCE.md).
 
+Naming is yours to define: pick one or more ready-made conventions (`unreal`, `unity`, `gltf`, `substance`, `godot`), add your own prefixes, endings or a pattern, or run `asset-gatekeeper <folder> --suggest-naming` to have the tool learn a `[naming]` block from the files you already have.
+
 ## Where it runs
 
 | Where | How |
