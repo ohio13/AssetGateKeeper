@@ -5270,8 +5270,13 @@ def available_memory() -> Optional[int]:
             for line in meminfo.read_text().splitlines():
                 if line.startswith("MemAvailable:"):
                     return int(line.split()[1]) * 1024
-        pages = os.sysconf("SC_AVPHYS_PAGES")            # macOS and other Unix
-        return int(pages) * int(os.sysconf("SC_PAGE_SIZE"))
+        page = int(os.sysconf("SC_PAGE_SIZE"))
+        try:
+            return int(os.sysconf("SC_AVPHYS_PAGES")) * page    # other Unix
+        except (OSError, ValueError):
+            # macOS has no free-page count here (found by CI, 9 Nov 2026): assume
+            # half the installed memory is free rather than giving up.
+            return int(os.sysconf("SC_PHYS_PAGES")) * page // 2
     except (OSError, ValueError, AttributeError, ImportError):
         return None
 
