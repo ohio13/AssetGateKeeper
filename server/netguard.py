@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import threading
 from typing import Iterable
 from urllib.parse import urlsplit
 
@@ -42,18 +43,38 @@ def is_ip_literal(name: str) -> bool:
         return False
 
 
+def _with_short_form(value: str) -> set[str]:
+    value = str(value or "").strip().lower()
+    if not value:
+        return set()
+    return {value, value.split(".", 1)[0]} if "." in value else {value}
+
+
+#: socket.getfqdn() does a reverse DNS lookup, which on macOS can take many
+#: seconds. It used to run on every request carrying a non-loopback Host
+#: header, so such a request could hang (found by the macOS CI job, 9 Nov 2026).
+#: It now runs once, in the background; until it answers, the short host name
+#: from gethostname() (instant) is all that is matched.
+_FQDN: set[str] = set()
+
+
+def _resolve_fqdn() -> None:
+    try:
+        _FQDN.update(_with_short_form(socket.getfqdn()))
+    except OSError:                          # pragma: no cover - exotic setups
+        pass
+
+
+threading.Thread(target=_resolve_fqdn, name="agk-fqdn", daemon=True).start()
+
+
 def local_names() -> set[str]:
-    """The names this machine answers to, best effort and never fatal."""
-    names: set[str] = set()
-    for getter in (socket.gethostname, socket.getfqdn):
-        try:
-            value = str(getter() or "").strip().lower()
-        except OSError:                      # pragma: no cover - exotic setups
-            continue
-        if value:
-            names.add(value)
-            if "." in value:                 # also accept the short form
-                names.add(value.split(".", 1)[0])
+    """The names this machine answers to, best effort, never fatal, never slow."""
+    names: set[str] = set(_FQDN)
+    try:
+        names |= _with_short_form(socket.gethostname())
+    except OSError:                          # pragma: no cover - exotic setups
+        pass
     return names
 
 
