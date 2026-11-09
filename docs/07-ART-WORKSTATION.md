@@ -57,11 +57,13 @@ selected, drop the missing files onto the page to complete it.
 | FBX | `.fbx` (binary or ASCII 7.1+) | measured by the gate's own reader (same numbers as the verdict); drawn through a **converted `.glb` preview**, with a warning on screen (below) |
 | Other meshes | `.ply`, `.stl`, `.dae`, ... (whatever trimesh reads) | measured; no 3D preview in the browser |
 | Textures | `.png`, `.jpg`, `.bmp`, `.webp` shown as-is; `.tga`, `.tif`, `.dds` shown through a PNG conversion | sized, power-of-two noted, previewed as an image |
-| Referenced files | `.bin`, `.mtl`, textures an asset names | stored in the asset's folder (64 files, 64 MB each) |
+| Referenced files | `.bin`, `.mtl`, textures an asset names | stored in the asset's folder (64 files, each within the upload limit) |
 | Source files | `.blend`, `.max`, `.ma`, `.mb`, `.usd*` | stored as **unverified**: reviewable, noteable, **excluded from triangle totals** |
 | Executables | `.exe`, `.dll`, `.ps1`, `.sh`, `.msi`, `.bat`, `.cmd` | **refused with HTTP 415** |
 
-Any upload is capped at 64 MB. Names in any script are kept (`岩石_rock.fbx`
+Any upload is capped at 512 MB per file; `--max-upload-mb` (or `Rules.bat
+--max-upload-mb`, or `$AGK_MAX_UPLOAD_MB`) moves it. A file over the limit is
+refused in words before it is sent, naming its size and the limit. Names in any script are kept (`岩石_rock.fbx`
 stays `岩石_rock.fbx`, and downloads under that name); characters a file system
 or a header cannot carry are replaced.
 

@@ -5,6 +5,25 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **First outside test (9 Nov).** A fresh download from GitHub, used on a real
+  90 MB ZBrush sculpt (1,082,096 triangles):
+  * The review screen refused any file over 64 MB with "body must be at most
+    67108864 bytes" in small grey text, and Send to Workstation failed with
+    "[WinError 10053] An established connection was aborted". The limit is now
+    512 MB (`--max-upload-mb`, `$AGK_MAX_UPLOAD_MB`, `Rules.bat --max-upload-mb`);
+    a larger file is refused before it is sent, in red, with its size, the
+    limit and how to raise it, and the dashboard asks the review screen for its
+    limit instead of finding out mid-upload. The bulk uploader does the same.
+  * Double-clicking `agk-serve.bat` stopped nothing (it flashed its help and
+    closed), so the hidden servers kept the folder locked and it could not be
+    deleted. New **`Stop.bat`** stops both servers and any other server running
+    from that copy; `agk-serve.bat` on its own now shows what is running and
+    waits; no launcher window keeps the folder open any more.
+  * Opening a project outside the install folder needed `setx`. New
+    **`Allow_Folder.bat`** picks a folder in a dialog (or takes one dragged onto
+    it), keeps it in `.agk\allowed_folders.txt` and restarts the page.
+  * `tools\agk.bat` and `tools\upload.bat` pointed at a developer's own
+    sandbox; they now find Python like the other launchers.
 * **Real-world model test (6 Nov).** 460 public models (Khronos glTF samples,
   three.js and assimp test files) were run through the gate and compared with
   an independent reader. Fixed from what it found:

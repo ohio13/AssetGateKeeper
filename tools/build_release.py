@@ -55,6 +55,8 @@ DROP_IN_FILES = (
     "MANIFEST.in",
     "setup.py",
     "Rules.bat",
+    "Stop.bat",
+    "Allow_Folder.bat",
     "agk-serve.bat",
     "start_workstation.bat",
     "start_asset_health.bat",

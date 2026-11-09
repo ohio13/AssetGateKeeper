@@ -118,9 +118,15 @@ accounts exist). Then:
   dropdown, tags as a tree;
 * **audit trail** - who changed which rule, when, and what the diff was.
 
-The project picker is allow-listed at launch (`--allow-root`, `$AGK_PROJECT_ROOTS`,
-`;`-separated). Paths are resolved before comparison, so `..` and symlinks cannot
-escape the list, and a browser cannot widen it.
+The project picker is allow-listed at launch: the install folder, folders added
+with `Allow_Folder.bat` (kept in `.agk/allowed_folders.txt`; it restarts the
+dashboard for you), `--allow-root` and `$AGK_PROJECT_ROOTS` (`;`-separated). Paths
+are resolved before comparison, so `..` and symlinks cannot escape the list, and a
+browser cannot widen it.
+
+**Send to Workstation** asks the review screen for its upload limit first (512 MB
+by default). A file over it is not sent; the row says how big it is and how to
+raise the limit, instead of a connection error.
 
 ## Alerts
 

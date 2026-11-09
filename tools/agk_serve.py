@@ -7,6 +7,9 @@
     python tools/agk_serve.py urls               the URLs + the gate command
     python tools/agk_serve.py logs --tail 40     recent server log lines
     python tools/agk_serve.py down               stop both
+    python tools/agk_serve.py restart            stop, then start as last time
+    python tools/agk_serve.py allow [FOLDER]     let the project picker open FOLDER
+                                                 (no FOLDER: a folder dialog)
 
 Why a file of record instead of just starting processes: the whole point of a
 dashboard is that verdicts land in it. If the dashboard moved from 8080 to 8081
@@ -49,6 +52,10 @@ REPO_ROOT = HERE.parent
 STATE_DIR = REPO_ROOT / ".agk"
 PORTS_FILE = STATE_DIR / "ports.json"
 LOG_DIR = STATE_DIR / "logs"
+#: Folders the project picker may open, one per line, written by `allow`
+#: (Allow_Folder.bat). It lives in this copy's .agk folder, so deleting the copy
+#: removes it too - nothing is left in the Windows environment.
+ALLOWED_FILE = STATE_DIR / "allowed_folders.txt"
 
 HEALTH_SCRIPT = REPO_ROOT / "server" / "asset_health_server.py"
 WORKSTATION_SCRIPT = REPO_ROOT / "server" / "art_workstation_server.py"
@@ -274,6 +281,8 @@ def command_up(args: argparse.Namespace) -> int:
                             "--data", str(Path(args.workstation_data).expanduser())]
         if args.token:
             workstation_args += ["--token", args.token]
+        if args.max_upload_mb:
+            workstation_args += ["--max-upload-mb", str(args.max_upload_mb)]
         record = start_one("workstation", WORKSTATION_SCRIPT,
                            workstation_args + rules_args, args.host, args.workstation_port,
                            (HEALTH_PORT,), "workstation", "/api/health")
@@ -283,7 +292,7 @@ def command_up(args: argparse.Namespace) -> int:
         say(f"  workstation: {record['url']}")
 
     started = {**records, "started": time.strftime("%Y-%m-%dT%H:%M:%S"),
-               "python": python_exe()}
+               "python": python_exe(), "argv": list(getattr(args, "argv", []) or [])}
     write_ports(started)
     say()
     say_portline(started)
@@ -300,6 +309,10 @@ def project_roots(args: argparse.Namespace) -> list[Path]:
     """
     raw = [str(item) for item in (args.allow_root or [])]
     raw += os.environ.get("AGK_PROJECT_ROOTS", "").split(os.pathsep)
+    explicit = any(item.strip().strip('"') for item in raw)
+    raw += read_allowed()
+    if not explicit:
+        raw.append(str(REPO_ROOT))      # added folders widen the default, never replace it
     roots: list[Path] = []
     seen: set[str] = set()
     for item in raw:
@@ -322,6 +335,109 @@ def project_roots(args: argparse.Namespace) -> list[Path]:
     if not roots:
         roots = [REPO_ROOT]
     return roots
+
+
+def read_allowed() -> list[str]:
+    """Folders added with `allow`, one per line ('#' starts a comment)."""
+    try:
+        lines = ALLOWED_FILE.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    return [line.strip() for line in lines if line.strip() and not line.lstrip().startswith("#")]
+
+
+def write_allowed(folders: list[str]) -> None:
+    STATE_DIR.mkdir(parents=True, exist_ok=True)
+    ALLOWED_FILE.write_text(
+        "# Folders the AssetGatekeeper project picker may open, one per line.\n"
+        "# Added by Allow_Folder.bat; delete a line to take a folder off the list.\n"
+        + "".join(f"{folder}\n" for folder in folders), encoding="utf-8")
+
+
+def _same_folder(a: str, b: str) -> bool:
+    def key(text: str) -> str:
+        try:
+            value = str(Path(os.path.normpath(text)).expanduser().resolve())
+        except OSError:
+            value = os.path.normpath(text)
+        return value.lower() if os.name == "nt" else value
+    return key(a) == key(b)
+
+
+def choose_folder() -> str:
+    """A folder picked in the Windows folder dialog, or typed when there is none."""
+    try:
+        import tkinter
+        from tkinter import filedialog
+        window = tkinter.Tk()
+        window.withdraw()
+        window.attributes("-topmost", True)
+        chosen = filedialog.askdirectory(
+            title="Choose a folder AssetGatekeeper may open", mustexist=True,
+            initialdir=str(Path.home()))
+        window.destroy()
+        return str(chosen or "")
+    except Exception:                       # no tkinter, or no display
+        try:
+            return input("Folder to allow (paste its path, then Enter): ").strip().strip('"')
+        except EOFError:
+            return ""
+
+
+def command_allow(args: argparse.Namespace) -> int:
+    """Add a folder to the picker's allow-list, then restart if running."""
+    folders = read_allowed()
+    if args.list:
+        say("Folders the project picker may open (besides this one):")
+        for folder in folders or ["(none added yet)"]:
+            say(f"  {folder}")
+        say(f"List kept in {ALLOWED_FILE}")
+        return 0
+    if args.remove:
+        kept = [folder for folder in folders if not _same_folder(folder, args.remove)]
+        if len(kept) == len(folders):
+            say(f"{args.remove} was not on the list.")
+            return 1
+        write_allowed(kept)
+        say(f"Removed {args.remove}.")
+        return restart_if_running()
+    text = (args.folder or "").strip().strip('"') or choose_folder()
+    if not text:
+        say("No folder chosen; nothing changed.")
+        return 1
+    folder = Path(os.path.normpath(text)).expanduser()
+    if not folder.is_dir():
+        say(f"{folder} is not a folder on this computer; nothing changed.")
+        return 1
+    folder = folder.resolve()
+    if any(_same_folder(existing, str(folder)) for existing in folders):
+        say(f"{folder} is already allowed.")
+    else:
+        write_allowed(folders + [str(folder)])
+        say(f"Allowed: {folder}")
+    say("Pick it under 'Allowed folder' on the Rules & Presets page, then 'Use this folder'.")
+    return restart_if_running()
+
+
+def restart_if_running() -> int:
+    """The allow-list is read at start-up, so a running dashboard needs a restart."""
+    records = read_ports()
+    dashboard = records.get("dashboard") or {}
+    if not (dashboard.get("url") and health_ok(dashboard["url"], "/api/summary")):
+        say("The dashboard is not running; it will use the new list next time it starts.")
+        return 0
+    say("Restarting the dashboard so it sees the new list...")
+    return command_restart(argparse.Namespace())
+
+
+def command_restart(args: argparse.Namespace) -> int:
+    """Stop both, then start them again with the options of the last start."""
+    argv = list(read_ports().get("argv") or ["up", "--open", "admin",
+                                             "--allow-root", str(REPO_ROOT)])
+    command_down(argparse.Namespace())
+    parsed = build_parser().parse_args(argv)
+    parsed.argv = argv
+    return parsed.func(parsed)
 
 
 def open_ui(args: argparse.Namespace, records: dict) -> None:
@@ -358,7 +474,8 @@ def say_portline(records: dict) -> None:
     say(f"  workstation  {work.get('url', '?')}/viewer")
     if dash.get("url"):
         say(f"  gate         {gate_command(records)}")
-    say("  stop         python tools/agk_serve.py down")
+    say("  stop         " + ("double-click Stop.bat" if os.name == "nt"
+                             else "python tools/agk_serve.py down"))
     say(f"  record       {PORTS_FILE}")
 
 
@@ -367,8 +484,7 @@ def say_portline(records: dict) -> None:
 def command_down(args: argparse.Namespace) -> int:
     records = read_ports()
     if not records:
-        say("Nothing recorded in .agk/ports.json - nothing to stop.")
-        return 0
+        say("Nothing recorded in .agk/ports.json.")
     problems = 0
     for key in ("dashboard", "workstation"):
         record = records.get(key) or {}
@@ -391,7 +507,74 @@ def command_down(args: argparse.Namespace) -> int:
             stop_pid(pid)
             say(f"  {key}: was not answering; pid {pid} stopped anyway")
     PORTS_FILE.unlink(missing_ok=True)
+    stopped = {int(pid) for pid in ((records.get(k) or {}).get("pid") for k in
+                                    ("dashboard", "workstation")) if pid}
+    strays = 0
+    for pid, command in stray_servers():
+        if pid in stopped:
+            continue
+        stop_pid(pid)
+        strays += 1
+        say(f"  also stopped a server started from this folder (pid {pid})")
+    if not records and not strays:
+        say("Nothing from this folder is running - nothing to stop.")
     return 0 if problems == 0 else 1
+
+
+def stray_servers() -> list[tuple[int, str]]:
+    """Servers running from *this* copy that ports.json does not record.
+
+    A second Rules.bat, a start_workstation.bat window, or a ports.json removed
+    by hand all leave servers nobody can stop by name - and a running server
+    keeps its folder locked, so the copy cannot be deleted (9 Nov 2026). Only
+    processes whose command line names this copy's own server scripts match.
+    """
+    wanted = [str(HEALTH_SCRIPT), str(WORKSTATION_SCRIPT)]
+    if os.name == "nt":
+        wanted = [item.lower() for item in wanted]
+    found: list[tuple[int, str]] = []
+    for pid, command in _python_processes():
+        if pid == os.getpid():
+            continue
+        if os.name == "nt":
+            # Only python*.exe processes are listed; match the script path in them.
+            if any(item in command.lower() for item in wanted):
+                found.append((pid, command))
+        elif command in wanted:
+            found.append((pid, command))
+    return found
+
+
+def _python_processes() -> list[tuple[int, str]]:
+    """(pid, command line) of every running Python process."""
+    if os.name == "nt":
+        try:
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                 "Get-CimInstance Win32_Process -Filter \"Name like 'python%'\" | "
+                 "Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"],
+                capture_output=True, text=True, timeout=20, creationflags=0x08000000)
+            data = json.loads(result.stdout or "[]")
+        except (OSError, subprocess.SubprocessError, ValueError):
+            return []
+        if isinstance(data, dict):
+            data = [data]
+        return [(int(item.get("ProcessId") or 0), str(item.get("CommandLine") or ""))
+                for item in data if isinstance(item, dict)]
+    found = []
+    for entry in Path("/proc").glob("[0-9]*"):
+        try:
+            parts = (entry / "cmdline").read_bytes().split(b"\0")
+        except OSError:
+            continue
+        # The interpreter itself, not a shell whose command line merely mentions
+        # python and the script (that shell may be the one running this).
+        if not parts or b"python" not in Path(parts[0].decode("utf-8", "replace")).name.encode():
+            continue
+        args = [part.decode("utf-8", "replace") for part in parts[1:] if part]
+        script = next((arg for arg in args if not arg.startswith("-")), "")
+        found.append((int(entry.name), script))
+    return found
 
 
 def command_status(args: argparse.Namespace) -> int:
@@ -466,7 +649,20 @@ def build_parser() -> argparse.ArgumentParser:
                          "'both' = admin + review screen")
     up.add_argument("--allow-root", action="append", default=[], metavar="PATH",
                     help="folder the project picker may open (repeatable; also "
-                         "$AGK_PROJECT_ROOTS; default: this repo)")
+                         "$AGK_PROJECT_ROOTS and .agk/allowed_folders.txt; default: this repo)")
+    up.add_argument("--max-upload-mb", type=int, default=0, metavar="MB",
+                    help="largest file the review screen accepts (default 512)")
+
+    restart = sub.add_parser("restart", help="stop, then start again as last time")
+    restart.set_defaults(func=command_restart)
+
+    allow = sub.add_parser("allow", help="let the project picker open another folder")
+    allow.add_argument("folder", nargs="?", default="",
+                       help="the folder (default: choose it in a folder dialog)")
+    allow.add_argument("--remove", metavar="FOLDER", default="",
+                       help="take a folder off the list instead")
+    allow.add_argument("--list", action="store_true", help="show the list and stop")
+    allow.set_defaults(func=command_allow)
 
     down = sub.add_parser("down", help="stop what this tool started")
     down.set_defaults(func=command_down)
@@ -494,7 +690,9 @@ def main(argv: list[str] | None = None) -> int:
         except (AttributeError, ValueError):
             pass
     parser = build_parser()
-    args = parser.parse_args(argv)
+    raw = list(sys.argv[1:] if argv is None else argv)
+    args = parser.parse_args(raw)
+    args.argv = raw
     if not getattr(args, "func", None):
         parser.print_help()
         return 2

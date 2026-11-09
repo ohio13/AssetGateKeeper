@@ -34,6 +34,7 @@ import os
 import queue
 import re
 import secrets
+import socket
 import socketserver
 import sqlite3
 import subprocess
@@ -127,6 +128,51 @@ ART_WORKSTATION_PORT = 8100
 ALLOW_ROOTS_ENV = "AGK_PROJECT_ROOTS"
 
 MAX_BODY_BYTES = 64 * 1024       # one verdict is ~1 KB; 64 KB is already generous
+#: What a workstation older than 0.1.0a2 accepted; used when it does not say.
+WORKSTATION_LEGACY_UPLOAD_LIMIT = 64 * 1024 * 1024
+
+
+def _megabytes(size: int) -> str:
+    if size < 1024 * 1024:
+        return f"{max(1, round(size / 1024)):,} KB"
+    value = size / (1024 * 1024)
+    return f"{value:.1f} MB" if value < 10 else f"{value:,.0f} MB"
+
+
+def _send_timeout(size: int) -> float:
+    """Seconds to allow for one file to the workstation: 30 s plus 1 s per MB,
+    because the workstation measures a mesh before it answers."""
+    return 30.0 + size / (1024 * 1024)
+
+
+def _workstation_error(exc) -> str:
+    """The workstation's own sentence from an HTTP error, not its raw JSON."""
+    try:
+        raw = exc.read()[:2000]
+    except Exception:
+        return ""
+    try:
+        return str(json.loads(raw).get("error") or "").strip() or raw.decode("utf-8", "replace")
+    except (ValueError, AttributeError):
+        return raw[:160].decode("utf-8", "replace")
+
+
+def _send_failure(exc: BaseException, name: str, size: int) -> str:
+    """A sentence for a connection that failed while a file was being sent.
+
+    "[WinError 10053] An established connection was aborted by the software in
+    your host machine" told an artist nothing (9 Nov 2026).
+    """
+    reason = getattr(exc, "reason", exc)
+    if isinstance(reason, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
+        return (f"the Art Workstation hung up while {name} ({_megabytes(size)}) was being "
+                "sent - usually the file is bigger than it accepts, or it was stopped. "
+                "Check it is running (agk-serve.bat status) and try a lighter copy")
+    if isinstance(reason, ConnectionRefusedError):
+        return "the Art Workstation is not running - start it (Rules.bat) and try again"
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return f"the Art Workstation took too long to take {name} ({_megabytes(size)})"
+    return str(reason)
 
 # How much of a refused request body is read and discarded before the connection
 # is dropped instead. Draining is what stops an unread body from being parsed as
@@ -3167,7 +3213,9 @@ class Handler(BaseHTTPRequestHandler):
         if target is None:
             self._json(403, {
                 "error": "that folder is outside the allowed roots",
-                "detail": f"allowed: {', '.join(str(root) for root in self.server.allow_roots)}",
+                "detail": f"allowed: {', '.join(str(root) for root in self.server.allow_roots)}. "
+                          "To add it, double-click Allow_Folder.bat in the AssetGatekeeper "
+                          "folder and choose it.",
                 "path": raw,
             })
             return
@@ -3328,7 +3376,26 @@ class Handler(BaseHTTPRequestHandler):
                 matched.append(name)
         return matched[:3]
 
-    def _send_sidecars(self, base: str, source: Path, asset_id) -> tuple[list, list]:
+    def _workstation_upload_limit(self, base: str) -> int:
+        """The largest file the workstation at ``base`` accepts, from its /api/health.
+
+        Asked, not assumed: the limit is a workstation setting (--max-upload-mb),
+        and a file over it used to be posted anyway; the workstation hung up
+        mid-upload and the artist saw "WinError 10053" (9 Nov 2026). An older
+        workstation that does not say gets the old 64 MB.
+        """
+        request = urllib.request.Request(f"{base}/api/health")
+        if self.server.workstation_token:
+            request.add_header("Authorization", f"Bearer {self.server.workstation_token}")
+        try:
+            with urllib.request.urlopen(request, timeout=5) as response:
+                value = json.loads(response.read() or b"{}").get("max_upload_bytes")
+            return int(value) if value else WORKSTATION_LEGACY_UPLOAD_LIMIT
+        except (OSError, ValueError, TypeError, AttributeError):
+            return WORKSTATION_LEGACY_UPLOAD_LIMIT
+
+    def _send_sidecars(self, base: str, source: Path, asset_id,
+                       limit: int = 0) -> tuple[list, list]:
         """Send the files ``source`` references (a .bin, a .mtl, textures).
 
         The bridge used to post the one file, so a .gltf the gate had PASSED
@@ -3350,21 +3417,24 @@ class Handler(BaseHTTPRequestHandler):
             seen.add(written)
             try:
                 size = target.stat().st_size
-                if size > 64 * 1024 * 1024:
-                    errors.append(f"{written}: larger than 64 MB, not sent")
+                limit = limit or WORKSTATION_LEGACY_UPLOAD_LIMIT
+                if size > limit:
+                    errors.append(f"{written}: {_megabytes(size)}, over the workstation's "
+                                  f"{_megabytes(limit)} limit, not sent")
                     continue
                 query = urllib.parse.urlencode({"filename": written})
                 request = urllib.request.Request(f"{base}/api/assets/{asset_id}/files?{query}",
                                                  data=target.read_bytes(), method="POST")
                 if self.server.workstation_token:
                     request.add_header("Authorization", f"Bearer {self.server.workstation_token}")
-                with urllib.request.urlopen(request, timeout=30) as response:
+                with urllib.request.urlopen(request, timeout=_send_timeout(size)) as response:
                     response.read()
                 sent.append(written)
             except urllib.error.HTTPError as exc:
-                errors.append(f"{written}: the workstation said {exc.code}")
+                errors.append(f"{written}: the workstation said {exc.code}: "
+                              f"{_workstation_error(exc)}")
             except OSError as exc:
-                errors.append(f"{written}: {exc}")
+                errors.append(f"{written}: {_send_failure(exc, written, size)}")
         return sent, errors
 
     def _send_to_workstation(self, identity: dict) -> None:
@@ -3388,6 +3458,7 @@ class Handler(BaseHTTPRequestHandler):
                                       "(agk-serve.bat up) or pass --workstation-url"})
             return
         results = []
+        limit = self._workstation_upload_limit(base)
         for raw in ids[:MAX_SEND_BATCH]:
             try:
                 verdict_id = int(raw)
@@ -3409,6 +3480,19 @@ class Handler(BaseHTTPRequestHandler):
                 results.append({"ok": False, "id": verdict_id, "name": row["filename"],
                                 "error": f"that file is not reachable here: {source}"})
                 continue
+            size = source.stat().st_size
+            if size > limit:
+                # Say it here, before sending: the workstation would hang up
+                # part-way and the artist would see only a socket error.
+                results.append({"ok": False, "id": verdict_id, "name": source.name,
+                                "error": f"{source.name} is {_megabytes(size)}; the Art "
+                                         f"Workstation takes files up to {_megabytes(limit)}. "
+                                         "Send a lighter copy (decimate it first), or raise "
+                                         "the limit with --max-upload-mb "
+                                         f"{-(-size // (1024 * 1024)) + 1} (for example: "
+                                         "Rules.bat --max-upload-mb "
+                                         f"{-(-size // (1024 * 1024)) + 1})"})
+                continue
             tags = self._asset_tags(source)
             query = urllib.parse.urlencode({
                 "filename": source.name,
@@ -3425,19 +3509,20 @@ class Handler(BaseHTTPRequestHandler):
             if self.server.workstation_token:
                 request.add_header("Authorization", f"Bearer {self.server.workstation_token}")
             try:
-                with urllib.request.urlopen(request, timeout=30) as response:
+                with urllib.request.urlopen(request, timeout=_send_timeout(size)) as response:
                     body = json.loads(response.read() or b"{}")
-                sidecars, sidecar_errors = self._send_sidecars(base, source, body.get("id"))
+                sidecars, sidecar_errors = self._send_sidecars(base, source, body.get("id"),
+                                                               limit)
                 results.append({"ok": True, "id": verdict_id, "name": source.name,
                                 "asset_id": body.get("id"), "tags": tags,
                                 "sidecars": sidecars, "sidecar_errors": sidecar_errors})
             except urllib.error.HTTPError as exc:
-                detail = exc.read()[:160].decode("utf-8", "replace")
                 results.append({"ok": False, "id": verdict_id, "name": source.name,
-                                "error": f"the workstation said {exc.code}: {detail}"})
+                                "error": f"the workstation said {exc.code}: "
+                                         f"{_workstation_error(exc)}"})
             except OSError as exc:
                 results.append({"ok": False, "id": verdict_id, "name": source.name,
-                                "error": str(exc)})
+                                "error": _send_failure(exc, source.name, size)})
         sent = sum(1 for item in results if item["ok"])
         self._json(200, {"requested": len(ids), "sent": sent, "limit": MAX_SEND_BATCH,
                          "results": results})

@@ -97,8 +97,39 @@ RULES_ENV = "ASSET_GATEKEEPER_RULES"    # same name the health server uses
 # this module must stay importable without the dashboard present).
 ASSET_HEALTH_PORT = 8080
 
-MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+#: Largest file one upload may carry. 64 MB refused a 90 MB ZBrush sculpt with
+#: "body must be at most 67108864 bytes" (9 Nov 2026); 512 MB covers sculpts
+#: and scans, and --max-upload-mb / $AGK_MAX_UPLOAD_MB moves it either way.
+MAX_UPLOAD_ENV = "AGK_MAX_UPLOAD_MB"
+DEFAULT_MAX_UPLOAD_MB = 512
+MAX_UPLOAD_BYTES = DEFAULT_MAX_UPLOAD_MB * 1024 * 1024
 MAX_JSON_BYTES = 1024 * 1024
+
+
+def megabytes(size: int) -> str:
+    """A byte count as people say it: '86 MB', '1.5 MB', '512 MB'."""
+    if size < 1024 * 1024:
+        return f"{max(1, round(size / 1024)):,} KB"
+    value = size / (1024 * 1024)
+    return f"{value:.1f} MB" if value < 10 else f"{value:,.0f} MB"
+
+
+def too_large_message(name: str, size: int, limit: int) -> str:
+    """The one sentence an artist sees when a file is over the upload limit."""
+    needed = max(1, -(-size // (1024 * 1024)) + 1)
+    return (f"{name or 'this file'} is {megabytes(size)}; the Art Workstation takes files "
+            f"up to {megabytes(limit)}. Upload a lighter copy (decimate it first), or raise "
+            f"the limit with --max-upload-mb {needed} (for example: Rules.bat "
+            f"--max-upload-mb {needed})")
+
+
+def _env_upload_limit() -> int:
+    """Upload limit in MB from $AGK_MAX_UPLOAD_MB, or the default."""
+    try:
+        value = int(os.environ.get(MAX_UPLOAD_ENV, "") or DEFAULT_MAX_UPLOAD_MB)
+    except ValueError:
+        value = DEFAULT_MAX_UPLOAD_MB
+    return max(1, value)
 #: Suffixes we hand straight to trimesh. The installed build decides what it can
 #: actually open (see MESH_SUFFIXES below, extended at import time).
 MESH_SUFFIXES = {".obj", ".gltf", ".glb", ".ply", ".stl", ".off", ".dae", ".3mf",
@@ -2485,7 +2516,7 @@ class Handler(BaseHTTPRequestHandler):
             length = 0
         if length <= 0:
             return
-        if length > MAX_UPLOAD_BYTES:
+        if length > getattr(self.server, "max_upload_bytes", MAX_UPLOAD_BYTES):
             self.close_connection = True
             return
         remaining = length
@@ -2626,7 +2657,10 @@ class Handler(BaseHTTPRequestHandler):
             "can": sorted(PERMISSIONS.get(who["role"], set())) if who else [],
         })
 
-    def _body(self, limit: int) -> bytes | None:
+    def _upload_limit(self) -> int:
+        return int(getattr(self.server, "max_upload_bytes", MAX_UPLOAD_BYTES))
+
+    def _body(self, limit: int, name: str | None = None) -> bytes | None:
         header = self.headers.get("Content-Length")
         if header is None:
             self._json(411, {"error": "Content-Length required"})
@@ -2637,7 +2671,14 @@ class Handler(BaseHTTPRequestHandler):
             self._json(400, {"error": "invalid Content-Length"})
             return None
         if length < 0 or length > limit:
-            self._json(413, {"error": f"body must be at most {limit} bytes"})
+            if name is not None:
+                # An upload: say which file, how big, the limit and what to do -
+                # not "body must be at most 67108864 bytes".
+                self._json(413, {"error": too_large_message(name, length, limit),
+                                 "size": length, "max_upload_bytes": limit})
+            else:
+                self._json(413, {"error": f"request is {megabytes(length)}; "
+                                          f"at most {megabytes(limit)} is accepted here"})
             return None
         raw = self.rfile.read(length)
         self._body_read = True
@@ -2755,6 +2796,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {"ok": True, "auth": bool(server.token),
                              "accounts": bool(account_count(server.db_path)),
                              "exposed": bool(getattr(server, "exposed", False)),
+                             "max_upload_bytes": self._upload_limit(),
                              "stats": repository_stats(server.db_path)})
             return
         if path == "/api/stats":
@@ -3024,11 +3066,11 @@ class Handler(BaseHTTPRequestHandler):
                 return
 
             if path == "/api/assets":
-                raw = self._body(MAX_UPLOAD_BYTES)
-                if raw is None:
-                    return
                 filename = (self._query().get("filename", [""])[0]
                             or self.headers.get("X-Filename", ""))
+                raw = self._body(self._upload_limit(), name=filename)
+                if raw is None:
+                    return
                 if not filename:
                     raise WorkstationError("filename is required (query or X-Filename)", 400)
                 # Provenance arrives from AssetHealth's bridge: what the gate said
@@ -3080,11 +3122,11 @@ class Handler(BaseHTTPRequestHandler):
 
             match = ASSET_SIDECARS_RE.match(path)
             if match:
-                raw = self._body(MAX_UPLOAD_BYTES)
-                if raw is None:
-                    return
                 filename = (self._query().get("filename", [""])[0]
                             or self.headers.get("X-Filename", ""))
+                raw = self._body(self._upload_limit(), name=filename)
+                if raw is None:
+                    return
                 if not filename:
                     raise WorkstationError("filename is required (query or X-Filename)", 400)
                 asset = add_sidecar(server.db_path, Path(server.data_dir), int(match.group(1)),
@@ -3167,11 +3209,11 @@ class Handler(BaseHTTPRequestHandler):
 
             match = ASSET_LOD_RE.match(path)
             if match:
-                raw = self._body(MAX_UPLOAD_BYTES)
-                if raw is None:
-                    return
                 filename = (self._query().get("filename", [""])[0]
                             or self.headers.get("X-Filename", ""))
+                raw = self._body(self._upload_limit(), name=filename)
+                if raw is None:
+                    return
                 if not filename:
                     raise WorkstationError("filename is required (query or X-Filename)", 400)
                 lods = upload_lod(server.db_path, Path(server.data_dir), int(match.group(1)),
@@ -3278,8 +3320,9 @@ class WorkstationServer(socketserver.ThreadingTCPServer):
     def __init__(self, address: tuple[str, int], db_path: str | Path, data_dir: str | Path,
                  token: str = "", quiet: bool = False,
                  rules_path: str | Path = "", rules_root: str | Path = "",
-                 allow_hosts: tuple[str, ...] = ()):
+                 allow_hosts: tuple[str, ...] = (), max_upload_bytes: int = 0):
         self.db_path = str(db_path)
+        self.max_upload_bytes = int(max_upload_bytes or _env_upload_limit() * 1024 * 1024)
         self.data_dir = str(data_dir)
         self.token = token
         self.quiet = quiet
@@ -3307,9 +3350,10 @@ class WorkstationServer(socketserver.ThreadingTCPServer):
 def build_server(host: str, port: int, db_path: str | Path, data_dir: str | Path,
                  token: str = "", quiet: bool = False,
                  rules_path: str | Path = "", rules_root: str | Path = "",
-                 allow_hosts: tuple[str, ...] = ()) -> WorkstationServer:
+                 allow_hosts: tuple[str, ...] = (),
+                 max_upload_bytes: int = 0) -> WorkstationServer:
     return WorkstationServer((host, port), db_path, data_dir, token, quiet,
-                             rules_path, rules_root, allow_hosts)
+                             rules_path, rules_root, allow_hosts, max_upload_bytes)
 
 
 def describe_rules(server: "WorkstationServer") -> dict:
@@ -3355,6 +3399,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--token", default=os.environ.get(TOKEN_ENV, ""),
                         help=f"require a bearer token (default ${TOKEN_ENV}; empty = solo mode)")
     parser.add_argument("--quiet", action="store_true", help="only log errors")
+    parser.add_argument("--max-upload-mb", type=int, default=_env_upload_limit(), metavar="MB",
+                        help=f"largest file one upload may be (default {DEFAULT_MAX_UPLOAD_MB}, "
+                             f"or ${MAX_UPLOAD_ENV})")
     parser.add_argument("--rules", metavar="PATH", default=os.environ.get(RULES_ENV, ""),
                         help="rules.toml the in-page Rules & Budgets panel reports on, "
                              f"read-only (default: ./{agk.RULES_FILENAME} in the working "
@@ -3454,7 +3501,9 @@ def main(argv: list[str] | None = None) -> int:
             lambda host, port: build_server(host, port, db_path, data_dir, args.token,
                                             args.quiet, rules_path=args.rules,
                                             rules_root=Path.cwd(),
-                                            allow_hosts=tuple(args.allow_host)),
+                                            allow_hosts=tuple(args.allow_host),
+                                            max_upload_bytes=max(1, args.max_upload_mb)
+                                            * 1024 * 1024),
             args.host, args.port, auto=args.port_auto, tries=args.port_tries,
             reserved=(ASSET_HEALTH_PORT,), report=_moved)
     except OSError as exc:
@@ -3472,6 +3521,7 @@ def main(argv: list[str] | None = None) -> int:
     rules_shown = Path(args.rules).resolve() if args.rules else Path.cwd() / agk.RULES_FILENAME
     print(f"  rules      {rules_shown}  (GET /api/rules, read-only)")
     print(f"  auth       {'bearer token required' if args.token else 'solo mode (no token)'}")
+    print(f"  uploads    up to {megabytes(httpd.max_upload_bytes)} per file (--max-upload-mb)")
     if httpd.exposed and not args.token:
         print("WARNING: listening on the network with no token. Anyone who can reach "
               f"{host}:{port} can upload, edit notes, set verdicts and delete assets.\n"

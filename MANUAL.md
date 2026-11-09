@@ -142,7 +142,8 @@ Rules.bat
 It finds Python, starts the admin page **and** the 3D review screen as detached
 background services (auto port fallback, logs in `.agk\logs`), and opens your
 browser on the admin dashboard. Running it again while they are up just re-opens
-the page. `agk-serve.bat down` stops them.
+the page. `Stop.bat` (double-click) stops them; `Allow_Folder.bat` lets the
+page open another folder.
 
 To let the project picker reach folders outside this repo, set once:
 
@@ -801,7 +802,7 @@ Open <http://127.0.0.1:8100/viewer>.
 | HTTP | `POST /api/assets?filename=x.glb` with the raw body | your own pipeline |
 
 Uploads are **copied** into `workstation_data\` — your source art is never
-touched. 64 MB per file.
+touched. Up to 512 MB per file (`--max-upload-mb` changes it).
 
 ### What you get per asset
 
@@ -1032,7 +1033,7 @@ agk-serve.bat up --open   :: ...and open the dashboard
 agk-serve.bat status      :: running? which port? which pid?
 agk-serve.bat urls        :: URLs + the exact gate command
 agk-serve.bat logs        :: recent server output
-agk-serve.bat down        :: stop both
+agk-serve.bat down        :: stop both (Stop.bat does the same)
 ```
 
 (or `python tools/agk_serve.py up`). No windows to keep alive: the servers run

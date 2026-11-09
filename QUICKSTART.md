@@ -113,8 +113,9 @@ keep running.
 | I want to… | Do |
 |---|---|
 | re-open the page later | double-click `Rules.bat` again (it reuses the running services) |
-| stop everything | `agk-serve.bat down` |
-| see if they are running | `agk-serve.bat status` |
+| stop everything | double-click `Stop.bat` |
+| let the page open another folder | double-click `Allow_Folder.bat` |
+| see if they are running | double-click `agk-serve.bat` (or `agk-serve.bat status`) |
 | read the server output | `agk-serve.bat logs --tail 60` |
 | start with the review screen too | `agk-serve.bat up --open both` |
 
@@ -146,17 +147,21 @@ The password is printed once. `--admin-role artist` gives a read-only account.
 ## 4. Point it at your project
 
 The admin page can write `rules.toml` into a project folder — so it can only
-open folders you allow **at launch**. Set this once:
+open folders on its allow-list, and the browser cannot add to it. The install
+folder is always allowed. To add another:
 
-```bat
-setx AGK_PROJECT_ROOTS "D:\Projects;C:\Work\MyGame"
-```
+1. double-click **`Allow_Folder.bat`** in the install folder;
+2. choose the folder in the window that opens (or drag the folder onto
+   `Allow_Folder.bat` instead);
+3. the page restarts by itself and the folder is in the **Allowed folder** list.
 
-(`;`-separated. On macOS/Linux use `:` and `export`.) The install folder is
-always allowed. Alternatively pass them at launch:
-`Rules.bat --allow-root "D:\Projects"`.
+`Allow_Folder.bat --list` shows the list and `Allow_Folder.bat --remove "<folder>"`
+takes one off. The list lives in `.agk\allowed_folders.txt` in the install folder,
+so it goes when the install folder does.
 
-Close and re-open `Rules.bat` after `setx` so the new environment is picked up.
+Studios that script the setup can instead set `AGK_PROJECT_ROOTS` once
+(`setx AGK_PROJECT_ROOTS "D:\Projects;C:\Work\MyGame"`, `;`-separated; `:` and
+`export` on macOS/Linux) or pass `Rules.bat --allow-root "D:\Projects"`.
 
 Then, in the page:
 
@@ -172,7 +177,7 @@ What you get:
 - the choice is remembered in the recent chips and recorded in the audit trail.
 
 If you get **"that folder is outside the allowed roots"**, the page is telling
-you the truth: add the folder (or one of its parents) to `AGK_PROJECT_ROOTS`.
+you the truth: add the folder (or one of its parents) with `Allow_Folder.bat`.
 A `..` in a path is not a way around it — paths are resolved before they are
 compared.
 
@@ -397,12 +402,15 @@ total across four suites).
 | Task | Command |
 |---|---|
 | start / re-open | `Rules.bat` |
-| stop | `agk-serve.bat down` |
+| stop | `Stop.bat` (or `agk-serve.bat down`) |
+| allow another project folder | `Allow_Folder.bat` |
+| restart with the same options | `agk-serve.bat restart` |
 | status | `agk-serve.bat status` |
 | URLs + gate command | `agk-serve.bat urls` |
 | tail the logs | `agk-serve.bat logs --tail 60` |
 | start without a browser | `agk-serve.bat up` |
 | different ports | `agk-serve.bat up --health-port 9000 --workstation-port 9100` |
+| review screen takes bigger files | `Rules.bat --max-upload-mb 1024` (default 512 MB per file) |
 
 ### Where things live
 
@@ -429,7 +437,9 @@ Back up by copying the `.db` files while the services are stopped. Deleting
 | `trimesh`/`Pillow` missing | `.venv\Scripts\python.exe -m pip install trimesh pillow` |
 | browser opens a dead page | the services took longer than the browser; wait 2 s and refresh, or run `agk-serve.bat status` |
 | `cannot bind … in use` | another process owns the port; the message prints the find/stop commands. `--port-auto` moves instead of failing |
-| "that folder is outside the allowed roots" | add it to `AGK_PROJECT_ROOTS` and restart (`setx` needs a new console) |
+| "that folder is outside the allowed roots" | double-click `Allow_Folder.bat` and choose it |
+| "… is 600 MB; the Art Workstation takes files up to 512 MB" | upload a decimated copy, or start with `Rules.bat --max-upload-mb 700` |
+| Windows will not delete the install folder ("in use") | double-click `Stop.bat`, close every window open on that folder, then delete. Still locked: Task Manager → end the Python entries |
 | page says "sign in" and I have no password | the account exists but the password is lost. Stop the services and create another: `.venv\Scripts\python.exe server\asset_health_server.py --add-admin <name> --admin-role director` (or `asset-health …` if the wheel is installed) |
 | admin page is blank | a JS error blanks the module: open the browser console (F12). `tests\test_admin.py` checks every element id the script uses exists |
 | saves say "no changes" | the form already matches the file — or you are editing a different project than you think; check the `rules.toml:` line under the picker |
@@ -441,12 +451,9 @@ Back up by copying the `.db` files while the services are stopped. Deleting
 
 ## 13. Uninstall
 
-Nothing was installed system-wide, so removal is deletion:
-
-```bat
-agk-serve.bat down
-```
-
-then delete the folder (or keep it and delete only `.agk\`, `*.db`,
+Nothing was installed system-wide, so removal is deletion: double-click
+**`Stop.bat`**, close its window and any File Explorer window showing the
+folder, then delete the folder (or keep it and delete only `.agk\`, `*.db`,
 `workstation_data\`, `.venv\` to reset state while keeping the tool). Project
 `rules.toml` files stay where you put them — they are yours, and they are in git.
+The gate's cache is in `%LOCALAPPDATA%\AssetGatekeeper` and can be deleted too.

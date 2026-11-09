@@ -36,7 +36,39 @@ const state = {
   pinDraft: null,       // {point, normal} waiting for the note text
   activeNote: null,     // the note whose view is on screen
   flight: null,         // camera animation towards a note's view
+  maxUpload: 0,         // /api/health max_upload_bytes: bigger files are refused here, unsent
 };
+
+/* "86 MB", "1.5 MB": the same wording the server uses. */
+function megabytes(size) {
+  if (size < 1024 * 1024) return `${Math.max(1, Math.round(size / 1024)).toLocaleString()} KB`;
+  const value = size / (1024 * 1024);
+  return value < 10 ? `${value.toFixed(1)} MB` : `${Math.round(value).toLocaleString()} MB`;
+}
+
+/* Refuse an over-limit file before sending it: a 600 MB upload should not
+ * travel the whole way only to be turned down (9 Nov 2026 test). */
+function checkUploadSize(file) {
+  if (state.maxUpload && file.size > state.maxUpload) {
+    const needed = Math.ceil(file.size / (1024 * 1024)) + 1;
+    throw new Error(`${file.name} is ${megabytes(file.size)}; the Art Workstation takes files `
+      + `up to ${megabytes(state.maxUpload)}. Upload a lighter copy (decimate it first), `
+      + `or raise the limit with --max-upload-mb ${needed} (for example: Rules.bat --max-upload-mb ${needed})`);
+  }
+}
+
+/* "rock.obj: why" - without naming the file twice when the reason already does. */
+function refusal(file, error) {
+  const message = String(error && error.message || error);
+  return message.startsWith(file.name) ? message : `${file.name}: ${message}`;
+}
+
+/* The header status line. A refusal is shown in red so it is not missed. */
+function setStatus(text, bad = false) {
+  const element = $("status");
+  element.textContent = text;
+  element.classList.toggle("status-bad", Boolean(bad));
+}
 
 // Formats the browser can draw. Everything else the server stores is measured
 // (or labelled unverified) but gets the "no 3D preview" panel instead of being
@@ -972,6 +1004,7 @@ async function generateLods() {
 
 async function uploadLodFile(file, level, asset = state.asset) {
   if (!asset) return null;
+  checkUploadSize(file);
   const query = new URLSearchParams({ filename: file.name });
   const response = await api(`/api/assets/${asset.id}/lods/${level}?${query}`, {
     method: "POST",
@@ -1449,6 +1482,7 @@ function askVersionChoice(name, existing) {
 }
 
 async function uploadFile(file, choice = null) {
+  checkUploadSize(file);
   const params = {
     filename: file.name,
     uploader: $("note-author").value.trim() || "anonymous",
@@ -1477,6 +1511,7 @@ async function uploadFile(file, choice = null) {
 }
 
 async function uploadSidecar(assetId, file, written) {
+  checkUploadSize(file);
   const query = new URLSearchParams({ filename: written || file.name });
   const response = await api(`/api/assets/${assetId}/files?${query}`, {
     method: "POST",
@@ -1504,6 +1539,7 @@ const baseName = (uri) => String(uri || "").split(/[\\/]/).pop().toLowerCase();
 async function uploadFiles(files) {
   const pending = Array.from(files || []);
   if (!pending.length) return;
+  setStatus("uploading…");                 // clears a red refusal from the last drop
   const done = [];
   const refused = [];
   let attached = 0;
@@ -1532,7 +1568,7 @@ async function uploadFiles(files) {
           asset = await uploadSidecar(asset.id, file, uri.includes(":") ? file.name : uri);
           attached += 1;
         } catch (error) {
-          refused.push(`${file.name}: ${error.message}`);
+          refused.push(refusal(file, error));
         }
       }
     }
@@ -1561,7 +1597,7 @@ async function uploadFiles(files) {
       lodsAdded.push(`${file.name} -> LOD${match[2]} of ${target.filename}`);
       lodTarget = target.id;
     } catch (error) {
-      refused.push(`${file.name}: ${error.message}`);
+      refused.push(refusal(file, error));
     }
   }
   // 3. Meshes first, then .mtl, then the rest, so sidecars find their asset.
@@ -1575,7 +1611,7 @@ async function uploadFiles(files) {
     try {
       done.push(await attachMissing(await uploadFile(file)));
     } catch (error) {
-      refused.push(`${file.name}: ${error.message}`);
+      refused.push(refusal(file, error));
     }
   }
   await refreshAssets().catch(() => {});
@@ -1595,7 +1631,7 @@ async function uploadFiles(files) {
   if (attached) parts.push(`${attached} file${attached === 1 ? "" : "s"} added alongside`);
   if (lodsAdded.length) parts.push(`LOD added: ${lodsAdded.join("; ")}`);
   if (refused.length) parts.push(`refused: ${refused.join("; ")}`);
-  $("status").textContent = parts.join(" - ");
+  setStatus(parts.join(" - "), refused.length > 0);
 }
 
 /* - wiring */
@@ -2298,7 +2334,8 @@ animate();
       return;
     }
     const health = await json("/api/health");
-    $("status").textContent = health.auth ? "token mode" : "solo mode";
+    state.maxUpload = Number(health.max_upload_bytes) || 0;
+    setStatus(health.auth ? "token mode" : "solo mode");
     $("exposure-warning").hidden = !(health.exposed && !health.auth);
     await refreshAssets();
 

@@ -5,6 +5,7 @@ port inside this script and shut down before it exits, so the suite can never
 leave a process behind or hang a terminal.
 """
 import json
+import os
 import shutil
 import sys
 import threading
@@ -222,6 +223,48 @@ for category, text, label in (
         expect(label, False, "no error raised")
     except aws.WorkstationError as exc:
         expect(label, exc.status in (400, 413), f"{exc.status} {exc}")
+
+print("4b. upload size limit (9 Nov 2026: a 90 MB sculpt was refused at 64 MB)")
+expect("the default limit is 512 MB",
+       aws.build_server("127.0.0.1", 0, db, data_dir, quiet=True).max_upload_bytes
+       == 512 * 1024 * 1024)
+expect("sizes read as people say them",
+       (aws.megabytes(90_230_854), aws.megabytes(1_572_864), aws.megabytes(512 * 1048576))
+       == ("86 MB", "1.5 MB", "512 MB"))
+message = aws.too_large_message("SM_Hero_HP_03.obj", 90_230_854, 64 * 1048576)
+expect("the refusal names the file, its size, the limit and the way past it",
+       message.startswith("SM_Hero_HP_03.obj is 86 MB; the Art Workstation takes files up to 64 MB")
+       and "--max-upload-mb 88" in message and "67108864" not in message, message)
+_old_env = os.environ.get("AGK_MAX_UPLOAD_MB")
+os.environ["AGK_MAX_UPLOAD_MB"] = "100"
+expect("$AGK_MAX_UPLOAD_MB sets the limit",
+       aws.build_server("127.0.0.1", 0, db, data_dir, quiet=True).max_upload_bytes
+       == 100 * 1048576)
+if _old_env is None:
+    os.environ.pop("AGK_MAX_UPLOAD_MB", None)
+else:
+    os.environ["AGK_MAX_UPLOAD_MB"] = _old_env
+expect("--max-upload-mb is a flag", aws.build_parser().parse_args(
+    ["--max-upload-mb", "900"]).max_upload_mb == 900)
+tiny = aws.build_server("127.0.0.1", 0, db, data_dir, quiet=True, max_upload_bytes=1024)
+threading.Thread(target=tiny.serve_forever, daemon=True).start()
+tiny_base = f"http://127.0.0.1:{tiny.server_address[1]}"
+request = urllib.request.Request(f"{tiny_base}/api/assets?filename=big.obj",
+                                 data=b"v 0 0 0\n" * 400, method="POST")
+try:
+    urllib.request.urlopen(request, timeout=5)
+    expect("an over-limit upload is refused", False, "accepted")
+except urllib.error.HTTPError as exc:
+    payload = json.loads(exc.read())
+    expect("an over-limit upload is refused with 413 and a sentence",
+           exc.code == 413 and payload["error"].startswith("big.obj is 3 KB; the Art Workstation "
+                                                           "takes files up to 1 KB")
+           and payload["max_upload_bytes"] == 1024,
+           str(payload))
+health = json.loads(urllib.request.urlopen(f"{tiny_base}/api/health", timeout=5).read())
+expect("/api/health tells clients the limit", health["max_upload_bytes"] == 1024, str(health)[:120])
+tiny.shutdown()
+tiny.server_close()
 
 print("5. HTTP: solo mode")
 server = aws.build_server("127.0.0.1", 0, db, data_dir, quiet=True)

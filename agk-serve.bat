@@ -7,7 +7,9 @@ rem      agk-serve.bat up --open     ...and open the dashboard
 rem      agk-serve.bat status        what is running, and on which port
 rem      agk-serve.bat urls          URLs + the exact gate command
 rem      agk-serve.bat logs          recent server output
-rem      agk-serve.bat down          stop both
+rem      agk-serve.bat down          stop both (or double-click Stop.bat)
+rem      agk-serve.bat restart       stop, then start as last time
+rem      agk-serve.bat allow         let the project picker open another folder
 rem
 rem  Servers run detached with output in .agk\logs\ - no window to keep alive.
 rem  Ports are chosen automatically and recorded in .agk\ports.json.
@@ -19,8 +21,24 @@ if not defined PYEXE for /f "delims=" %%I in ('py -3 -c "import sys;print(sys.ex
 if not defined PYEXE for %%I in (python.exe) do set "PYEXE=%%~$PATH:I"
 if not defined PYEXE for /f "delims=" %%I in ('py -3 -c "import sys;print(sys.executable)" 2^>nul') do set "PYEXE=%%I"
 if not defined PYEXE goto :nopython
+if "%~1"=="" goto :menu
 "%PYEXE%" "%~dp0tools\agk_serve.py" %*
 exit /b %ERRORLEVEL%
+
+:menu
+rem  Double-clicked with no command: show what is running and how to use it,
+rem  and wait, instead of flashing the help text and closing.
+"%PYEXE%" "%~dp0tools\agk_serve.py" status
+echo.
+echo   To stop everything:       double-click Stop.bat
+echo   To start everything:      double-click Rules.bat
+echo   To allow another folder:  double-click Allow_Folder.bat
+echo.
+echo   From a command prompt:    agk-serve.bat up ^| down ^| restart ^| status ^| urls ^| logs
+echo.
+cd /d "%USERPROFILE%"
+pause
+exit /b 0
 
 :nopython
 echo No Python found - see start_workstation.bat for the venv setup.

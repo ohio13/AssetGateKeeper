@@ -7,9 +7,10 @@ rem  services (logs in .agk\logs, ports in .agk\ports.json, automatic port
 rem  fallback), then opens your browser on the admin dashboard.
 rem
 rem  Clicking it again while they are running just re-opens the page.
-rem  Close them with:  agk-serve.bat down
+rem  Stop them with Stop.bat (double-click).
 rem
-rem  To let the project picker reach folders outside this repo, set once:
+rem  To let the project picker reach folders outside this copy, double-click
+rem  Allow_Folder.bat and choose the folder. Studios can also set once:
 rem      setx AGK_PROJECT_ROOTS "D:\Projects;C:\Users\you\Documents\Game"
 rem  or pass them here:   Rules.bat --allow-root "D:\Projects"
 rem ===========================================================================
@@ -35,9 +36,13 @@ rem  the Windows command line and silently swallows every later argument.
 set "CODE=%ERRORLEVEL%"
 echo.
 if not "%CODE%"=="0" echo Something went wrong (exit %CODE%). Details: .agk\logs\
-if "%CODE%"=="0" echo Leave this window open, or close it - the services keep running.
-echo Stop everything later with:  agk-serve.bat down
+if "%CODE%"=="0" echo You can close this window - the pages keep running.
 echo.
+echo   To stop everything:       double-click Stop.bat
+echo   To allow another folder:  double-click Allow_Folder.bat
+echo.
+rem  Leave this folder before pausing, so this window never stops it being deleted.
+cd /d "%USERPROFILE%"
 pause
 exit /b %CODE%
 

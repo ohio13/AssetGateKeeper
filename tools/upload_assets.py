@@ -48,7 +48,21 @@ def references_of(path: Path) -> list[tuple[str, Path]]:
             seen.add(written)
             found.append((written, target))
     return found
+#: Used only when the workstation does not report its own limit (older builds).
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
+
+
+def upload_limit(base_url: str, token: str = "") -> int:
+    """The workstation's own per-file limit from /api/health (--max-upload-mb)."""
+    request = urllib.request.Request(f"{base_url}/api/health")
+    if token:
+        request.add_header("Authorization", f"Bearer {token}")
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            value = json.loads(response.read() or b"{}").get("max_upload_bytes")
+        return int(value) if value else MAX_UPLOAD_BYTES
+    except (OSError, ValueError, TypeError, AttributeError):
+        return MAX_UPLOAD_BYTES
 
 
 def iter_assets(root: Path, recursive: bool, suffixes: tuple[str, ...]) -> list[Path]:
@@ -67,7 +81,9 @@ def _request(url: str, token: str, data: bytes | None = None) -> tuple[int, byte
     if token:
         request.add_header("Authorization", f"Bearer {token}")
     try:
-        with urllib.request.urlopen(request, timeout=60) as response:  # noqa: S310
+        # 60 s plus 1 s per MB: the workstation measures a mesh before it answers.
+        timeout = 60 + len(data or b"") / 1048576
+        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310
             return response.status, response.read()
     except urllib.error.HTTPError as exc:
         return exc.code, exc.read()
@@ -158,6 +174,7 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     skip = existing_names(base_url, args.token) if args.skip_uploaded else set()
+    limit = upload_limit(base_url, args.token)
     uploaded = skipped = failed = 0
     for index, path in enumerate(files, 1):
         name = path.name
@@ -171,10 +188,11 @@ def main(argv: list[str] | None = None) -> int:
             failed += 1
             print(f"{prefix}: FAILED empty file", file=sys.stderr)
             continue
-        if size > MAX_UPLOAD_BYTES:
+        if size > limit:
             failed += 1
-            print(f"{prefix}: FAILED {size:,} bytes is over the "
-                  f"{MAX_UPLOAD_BYTES:,} byte upload limit", file=sys.stderr)
+            print(f"{prefix}: FAILED {size / 1048576:,.0f} MB is over the workstation's "
+                  f"{limit / 1048576:,.0f} MB limit (start it with --max-upload-mb to raise it)",
+                  file=sys.stderr)
             continue
         try:
             relative = path.relative_to(root).as_posix() if root.is_dir() else path.name
@@ -205,7 +223,7 @@ def main(argv: list[str] | None = None) -> int:
             for written, target in sidecars_of.get(path, []):
                 if not isinstance(asset.get("id"), int):
                     break
-                if target.stat().st_size > MAX_UPLOAD_BYTES:
+                if target.stat().st_size > limit:
                     print(f"{prefix}: {written} skipped (over the upload limit)", file=sys.stderr)
                     continue
                 query = urllib.parse.urlencode({"filename": written})

@@ -571,6 +571,43 @@ result = json.loads(body)
 expect("a row whose file has gone fails on its own",
        result["sent"] == 0 and "not reachable" in result["results"][0]["error"], body[:200])
 
+# 9 Nov 2026: a 90 MB sculpt was posted to a workstation that takes 64 MB; it
+# hung up mid-upload and the artist saw "[WinError 10053] ...". The bridge now
+# asks the workstation for its limit and refuses up front, in words.
+small_db, small_data = WORK / "small-ws.db", WORK / "small-ws-data"
+aws.init_db(small_db)
+small_ws = aws.build_server("127.0.0.1", 0, small_db, small_data, quiet=True,
+                            max_upload_bytes=1024 * 1024)
+threading.Thread(target=small_ws.serve_forever, daemon=True).start()
+bridge_server.workstation_url = f"http://127.0.0.1:{small_ws.server_address[1]}"
+sculpt = WORK / "SM_Sculpt.obj"
+sculpt.write_bytes(b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n" + b"# padding\n" * 300_000)
+status, body = bridge.post("/api/telemetry", {
+    "filename": sculpt.name, "path": str(sculpt), "passed": False,
+    "status": "FAILED", "problems": ["1,082,096 triangles exceeds the 1,000,000 budget"]})
+sculpt_id = json.loads(body)["id"]
+status, body = bridge.post("/api/send-to-workstation", {"verdicts": [sculpt_id]})
+error = json.loads(body)["results"][0].get("error", "")
+expect("a file over the workstation's limit is refused before sending",
+       json.loads(body)["sent"] == 0 and "takes files up to 1.0 MB" in error, error)
+expect("... naming the file, its size and how to raise the limit",
+       error.startswith("SM_Sculpt.obj is 2.9 MB") and "--max-upload-mb 4" in error, error)
+expect("... not a socket error", "WinError" not in error and "10053" not in error, error)
+status, body = bridge.post("/api/send-to-workstation", {"verdicts": [verdict_id]})
+expect("a small file still goes to the same workstation", json.loads(body)["sent"] == 1, body[:200])
+expect("the workstation reports its limit to the bridge",
+       bridge_server.workstation_url and json.loads(urllib.request.urlopen(
+           f"{bridge_server.workstation_url}/api/health", timeout=5).read())["max_upload_bytes"]
+       == 1024 * 1024)
+aborted = ahs._send_failure(urllib.error.URLError(ConnectionAbortedError(10053, "aborted")),
+                            "SM_Sculpt.obj", 90_230_854)
+expect("a connection the workstation drops is explained, not quoted",
+       "hung up while SM_Sculpt.obj (86 MB)" in aborted and "10053" not in aborted, aborted)
+expect("a workstation that is not running says so",
+       "not running" in ahs._send_failure(ConnectionRefusedError(), "a.obj", 10))
+small_ws.shutdown()
+small_ws.server_close()
+
 bridge_server.shutdown()
 bridge_server.server_close()
 ws_server.shutdown()

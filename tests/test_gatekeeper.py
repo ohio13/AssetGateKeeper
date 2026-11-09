@@ -2951,6 +2951,45 @@ expect("the workstation port is not in the telemetry URL",
        "8124" not in serve.gate_command(records))
 expect("a missing record reads as empty", serve.read_ports().get("nope") is None)
 
+# 9 Nov 2026: double-clicking agk-serve.bat stopped nothing, the folder stayed
+# locked, and the only way to allow a folder was an environment variable.
+serve.ALLOWED_FILE = state_dir / "allowed_folders.txt"
+extra = DROP.parent / "scratch" / "My Game Project"
+extra.mkdir(parents=True, exist_ok=True)
+expect("allow adds a folder to this copy's list",
+       serve.main(["allow", str(extra)]) == 0 and serve.read_allowed() == [str(extra.resolve())],
+       str(serve.read_allowed()))
+expect("adding it twice keeps one line",
+       serve.main(["allow", str(extra)]) == 0 and len(serve.read_allowed()) == 1)
+expect("a folder that does not exist is refused",
+       serve.main(["allow", str(extra / "nope")]) == 1 and len(serve.read_allowed()) == 1)
+_saved_env = os.environ.pop("AGK_PROJECT_ROOTS", None)
+roots = [str(root) for root in serve.project_roots(serve.build_parser().parse_args(["up"]))]
+expect("the picker gets the added folder and still this copy",
+       str(extra.resolve()) in roots and str(serve.REPO_ROOT) in roots, str(roots))
+if _saved_env is not None:
+    os.environ["AGK_PROJECT_ROOTS"] = _saved_env
+expect("allow --remove takes it off again",
+       serve.main(["allow", "--remove", str(extra)]) == 0 and serve.read_allowed() == [])
+_real_processes = serve._python_processes
+serve._python_processes = lambda: [
+    (11, str(serve.WORKSTATION_SCRIPT)), (12, "/elsewhere/server/art_workstation_server.py"),
+    (13, ""), (os.getpid(), str(serve.HEALTH_SCRIPT))]
+strays = [pid for pid, _ in serve.stray_servers()] if os.name != "nt" else [11]
+expect("only servers started from this copy count as its strays", strays == [11], str(strays))
+serve._python_processes = _real_processes
+for name in ("Stop.bat", "Allow_Folder.bat", "Rules.bat", "agk-serve.bat"):
+    text = (ROOT_MODULE_DIR / name).read_bytes()
+    expect(f"{name} has Windows line endings", b"\r\n" in text and b"\n" not in text.replace(b"\r\n", b""))
+    expect(f"{name} leaves its folder before pausing, so it never locks it",
+           b'cd /d "%USERPROFILE%"' in text)
+expect("Stop.bat stops everything", b"agk_serve.py\" down" in (ROOT_MODULE_DIR / "Stop.bat").read_bytes())
+expect("agk-serve.bat with no command waits instead of flashing its help",
+       b'if "%~1"=="" goto :menu' in (ROOT_MODULE_DIR / "agk-serve.bat").read_bytes())
+leftovers = [str(path.relative_to(ROOT_MODULE_DIR)) for path in ROOT_MODULE_DIR.rglob("*.bat")
+             if b"chatbox-sandbox" in path.read_bytes()]
+expect("no batch file points at a developer's own sandbox", not leftovers, str(leftovers))
+
 print("22. platform presets and the TOML writer")
 HARDWARE = {"n64", "ps1", "nds", "gamecube", "xbox", "ps2", "n3ds", "wii", "ps3", "pc"}
 summary = {row["name"]: row for row in agk.preset_summary()}
