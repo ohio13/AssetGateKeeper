@@ -5,7 +5,7 @@ You are installing three things that share one config file:
 | Piece | What it is | Opened in |
 |---|---|---|
 | **Admin page** | pick the project, choose a platform budget, save it, run an audit | `http://127.0.0.1:8080/admin` |
-| **AssetHealth** | pass rate, wall of shame, bottlenecks, history | `http://127.0.0.1:8080/` |
+| **AssetHealth** | pass rate, recent failures, bottlenecks, history | `http://127.0.0.1:8080/` |
 | **Art Workstation** | 3D review: LODs, collision, notes, reports | `http://127.0.0.1:8100/viewer` |
 
 `asset-gatekeeper` (the command-line gate) is installed too — the web pages are a
@@ -289,7 +289,7 @@ roles cannot protect a password sent in clear text.
 
 ## 8. The other two surfaces
 
-**AssetHealth** — `http://127.0.0.1:8080/`: pass rate, wall of shame, which rule
+**AssetHealth** — `http://127.0.0.1:8080/`: pass rate, recent failures, which rule
 everybody is failing, and history. `/?refresh=5` makes it a wallboard.
 
 Optional Slack/Discord/Teams alerts — set the webhook once, then restart:

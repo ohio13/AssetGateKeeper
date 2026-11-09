@@ -162,11 +162,12 @@ def install() -> int:
         print(f"existing hook backed up to {backup}")
     interpreter = sys.executable
     script = Path(__file__).resolve()
-    target.write_text(
+    # Bytes, not write_text(newline=...): that argument is Python 3.10+, and on
+    # 3.9 --install crashed (9 Nov 2026). A shell script must keep LF endings.
+    target.write_bytes((
         "#!/bin/sh\n"
         "# Installed by AssetGatekeeper. Re-run git_pre_commit.py --install to refresh.\n"
-        f'exec "{interpreter}" "{script}" "$@"\n',
-        encoding="utf-8", newline="\n")
+        f'exec "{interpreter}" "{script}" "$@"\n').encode("utf-8"))
     try:
         target.chmod(0o755)
     except OSError:

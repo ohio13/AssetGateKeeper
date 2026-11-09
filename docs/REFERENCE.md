@@ -86,7 +86,7 @@ pip install "asset-gatekeeper[full]"       # or: pip install .[full] from a chec
 
 ```bash
 # 2. as a single file, no install at all
-curl -O https://raw.githubusercontent.com/ohio13/asset-gatekeeper/main/asset_gatekeeper.py
+curl -O https://raw.githubusercontent.com/ohio13/AssetGateKeeper/main/asset_gatekeeper.py
 python asset_gatekeeper.py --help
 ```
 
@@ -214,7 +214,7 @@ naming = true                # require a standard map suffix
 suffixes = ["_Albedo", "_Normal", "_Roughness"]   # case-insensitive, allows _Albedo_02
 ```
 
-A copy ships as [`asset_gatekeeper.example.toml`](asset_gatekeeper.example.toml).
+A copy ships as [`asset_gatekeeper.example.toml`](../asset_gatekeeper.example.toml).
 
 **Why flags still win.** CI must be able to tighten one number without editing a file that artists own and submit to source control:
 
@@ -595,7 +595,7 @@ python server/asset_health_server.py --port 8080
 python asset_gatekeeper.py "D:\Exports" --once --telemetry-url http://studio:8080/api/telemetry
 ```
 
-![AssetHealth dashboard](server/dashboard.png)
+![AssetHealth dashboard](images/dashboard.png)
 
 | Route | Method | Returns |
 | :--- | :--- | :--- |
@@ -682,7 +682,7 @@ verdict is still stored, and the dashboard remains the complete record.
 
 ### Budget planner
 
-![Budget planner](server/budget_planner.png)
+![Budget planner](images/budget_planner.png)
 
 A producer opens the planner, drags two sliders, picks a texture edge, ticks three
 boxes, and clicks **Publish budgets**. That writes the `budgets` table; `/api/rules`
@@ -729,7 +729,7 @@ keeps the dashboard readable while verdicts are landing.
 ### The three numbers
 
 - **Global status** — total scanned, passed, failed, pass rate, distinct workstations.
-- **Wall of shame** — the last 20 failures, newest first, each with *every* reason it
+- **Recent failures** — the last 20 failures, newest first, each with *every* reason it
   broke, plus who and which machine.
 - **Top bottlenecks** — every problem string is bucketed into the rule a lead thinks
   in (`Triangle budget`, `Non-power-of-two`, `Bone influences`, …) and ranked. Unknown
@@ -763,7 +763,7 @@ Same rules, four front doors — the verdict arrives where the artist actually w
 
 Every plugin reads the budget through the engine's own parser, so a rule can never
 mean different things in different applications. Install steps live in
-[plugins/README.md](plugins/README.md).
+[plugins/README.md](../plugins/README.md).
 
 All four speak one contract, and that contract is just the CLI:
 
@@ -981,7 +981,6 @@ asset_gatekeeper.py              the tool (single file)
 healer.py                        opt-in repair engine (only loaded with --auto-heal)
 asset_gatekeeper.example.toml    rules.toml template
 pyproject.toml  setup.py         pip-installable (asset-gatekeeper command)
-ASSET_DIFF_ENGINE_SPEC.md        design for the next subsystem (not implemented)
 README.md  LICENSE  .gitignore  .gitattributes
 .github/workflows/
   ci.yml                         every push/PR: lint, every suite on Ubuntu + Windows, Chromium
@@ -1004,6 +1003,7 @@ enterprise/                     optional: PostgreSQL, SSO, RBAC, VCS, remote
   vcs.py remote.py cli.py       LFS + Perforce, runner farm, agk-enterprise
 plugins/preflight_core.py       in-DCC pre-flight (Blender, Maya, Max, Unreal)
 docs/ENTERPRISE.md              deployment and security guide
+docs/images/  docs/design/     screenshots; design notes for future subsystems
 server/
   asset_health_server.py         dashboard + planner + ingest, stdlib only
   art_workstation_server.py     3D viewer, LODs, collision, notes
@@ -1012,8 +1012,6 @@ engine/
   lod_manager.py                vertex-cluster decimator for preview LODs (stdlib only)
   lod_shippable.py              quadric decimator that keeps UVs, normals, materials
   fbx_preview.py                FBX -> .glb for the viewer (UVs, normals, textures)
-  dashboard.png                  what /dashboard looks like (README)
-  budget_planner.png             what /budget-planner looks like (README)
 vcs_hooks/
   p4_pre_submit.py               Perforce change-submit trigger
   git_pre_commit.py              Git pre-commit hook (+ --install)
@@ -1143,7 +1141,7 @@ can't live in a runner.
 
 ## Art Workstation: the technical-art review screen
 
-![Art Workstation](server/static/workstation.png)
+![Art Workstation](images/workstation.png)
 
 The gate answers "is it within budget". AssetHealth answers "what is the studio
 trend". This answers the question a technical artist actually asks across a desk:
@@ -1280,7 +1278,7 @@ containing `<script>` is text, never markup.
 
 ## Roadmap: the Asset Diff Engine
 
-[`ASSET_DIFF_ENGINE_SPEC.md`](ASSET_DIFF_ENGINE_SPEC.md) is the memory bank for the
+[`docs/design/asset-diff-engine-spec.md`](design/asset-diff-engine-spec.md) is the memory bank for the
 next subsystem: tracking what actually changed in a binary asset across commits, and
 whether it changed the way the asset *looks*. It is a design document — no code in
 this repository implements it — written down now so the data model (`asset_snapshots`,
@@ -1341,4 +1339,4 @@ Good pipelines are invisible when they work. The best thing this tool can do is 
 
 ## License
 
-MIT — see [LICENSE](LICENSE). Use it in your studio, fork it, ship it, rename the suffixes to your convention.
+MIT — see [LICENSE](../LICENSE). Use it in your studio, fork it, ship it, rename the suffixes to your convention.

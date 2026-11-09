@@ -101,13 +101,17 @@ def load_parts(path: Path, resources: Optional[Path] = None) -> list[Part]:
                                 f"(use {', '.join(sorted(SUPPORTED_SUFFIXES))})")
     try:
         import trimesh
+        # load_scene, not load(force="scene"): trimesh marks the latter as a
+        # compatibility wrapper (9 Nov 2026 audit, B7).
+        load = getattr(trimesh, "load_scene", None) or (
+            lambda *a, **k: trimesh.load(*a, force="scene", **k))
         if resources is not None:
             resolver = trimesh.resolvers.FilePathResolver(str(Path(resources) / "x"))
             with open(path, "rb") as handle:
-                scene = trimesh.load(handle, file_type=path.suffix.lower().lstrip("."),
-                                     resolver=resolver, force="scene", process=False)
+                scene = load(handle, file_type=path.suffix.lower().lstrip("."),
+                             resolver=resolver, process=False)
         else:
-            scene = trimesh.load(str(path), force="scene", process=False)
+            scene = load(str(path), process=False)
         geometries = scene.dump(concatenate=False)
     except Exception as exc:      # trimesh raises many types for broken files
         raise ShippableLodError(f"could not read {path.name}: {exc}") from exc

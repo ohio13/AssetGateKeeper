@@ -134,7 +134,7 @@ def child_environment(environ=None) -> dict:
 
 
 def run_engine(asset_path: str, python_exe: str, engine_path: str,
-               rules_path: str = "", timeout: float = 180.0) -> tuple[dict | None, str]:
+               rules_path: str = "", timeout: float = 180.0) -> "tuple[dict | None, str]":
     """Run the engine over one file and return (verdict dict, error text)."""
     command = [python_exe, engine_path, asset_path, "--json"]
     if rules_path:

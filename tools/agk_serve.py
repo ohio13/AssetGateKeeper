@@ -49,7 +49,37 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
-STATE_DIR = REPO_ROOT / ".agk"
+
+
+def is_checkout(root: Path = REPO_ROOT) -> bool:
+    """A downloaded or cloned copy (Rules.bat beside it), not a pip install."""
+    return (root / "pyproject.toml").is_file() or (root / "Rules.bat").is_file()
+
+
+def data_root() -> Path:
+    """Where the servers keep their databases, logs and settings.
+
+    A downloaded copy keeps them beside itself, so deleting the folder removes
+    everything. A pip install must not: its home is Python's site-packages,
+    which an upgrade replaces and a system Python may not let us write to
+    (9 Nov 2026 audit, B2). $AGK_HOME overrides both.
+    """
+    explicit = os.environ.get("AGK_HOME", "").strip()
+    if explicit:
+        return Path(explicit).expanduser()
+    if is_checkout():
+        return REPO_ROOT
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+        return Path(base) / "AssetGatekeeper"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "AssetGatekeeper"
+    base = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
+    return Path(base) / "asset-gatekeeper"
+
+
+DATA_ROOT = data_root()
+STATE_DIR = DATA_ROOT / ".agk"
 PORTS_FILE = STATE_DIR / "ports.json"
 LOG_DIR = STATE_DIR / "logs"
 #: Folders the project picker may open, one per line, written by `allow`
@@ -197,10 +227,14 @@ def start_one(label: str, script: Path, args: list[str], host: str,
         log.write(f"\n--- {time.strftime('%Y-%m-%d %H:%M:%S')} {label} on port {port} ---\n"
                   .encode("utf-8"))
         log.flush()
+        DATA_ROOT.mkdir(parents=True, exist_ok=True)
+        environment = dict(os.environ)
+        environment["AGK_DATA_DIR"] = str(DATA_ROOT)       # never scanned as a project
+        environment["AGK_PORTS_FILE"] = str(PORTS_FILE)    # how the dashboard finds the workstation
         process = subprocess.Popen(
             [python_exe(), str(script), "--host", host, "--port", str(port), *args,
              "--quiet"],
-            cwd=str(REPO_ROOT), stdout=log, stderr=subprocess.STDOUT,
+            cwd=str(DATA_ROOT), env=environment, stdout=log, stderr=subprocess.STDOUT,
             stdin=subprocess.DEVNULL, creationflags=_detached_flags(),
             start_new_session=(os.name != "nt"))
         url = f"http://{'127.0.0.1' if host in ('0.0.0.0', '', '::') else host}:{port}"
@@ -237,7 +271,7 @@ def command_up(args: argparse.Namespace) -> int:
     if args.rules:
         rules_args = ["--rules", str(Path(args.rules).expanduser().resolve())]
     else:
-        default_rules = REPO_ROOT / "rules.toml"
+        default_rules = DATA_ROOT / "rules.toml"
         rules_args = ["--rules", str(default_rules)] if default_rules.is_file() else []
 
     records: dict[str, dict] = {}
@@ -312,7 +346,7 @@ def project_roots(args: argparse.Namespace) -> list[Path]:
     explicit = any(item.strip().strip('"') for item in raw)
     raw += read_allowed()
     if not explicit:
-        raw.append(str(REPO_ROOT))      # added folders widen the default, never replace it
+        raw.append(str(default_root()))  # added folders widen the default, never replace it
     roots: list[Path] = []
     seen: set[str] = set()
     for item in raw:
@@ -333,8 +367,14 @@ def project_roots(args: argparse.Namespace) -> list[Path]:
         seen.add(key)
         roots.append(path)
     if not roots:
-        roots = [REPO_ROOT]
+        roots = [default_root()]
     return roots
+
+
+def default_root() -> Path:
+    """The folder the picker may always open: this copy, or for a pip install the
+    folder `agk-serve up` was run from (normally the project)."""
+    return REPO_ROOT if is_checkout() else Path.cwd()
 
 
 def read_allowed() -> list[str]:
@@ -433,7 +473,7 @@ def restart_if_running() -> int:
 def command_restart(args: argparse.Namespace) -> int:
     """Stop both, then start them again with the options of the last start."""
     argv = list(read_ports().get("argv") or ["up", "--open", "admin",
-                                             "--allow-root", str(REPO_ROOT)])
+                                             "--allow-root", str(default_root())])
     command_down(argparse.Namespace())
     parsed = build_parser().parse_args(argv)
     parsed.argv = argv
@@ -467,6 +507,20 @@ def gate_command(records: dict) -> str:
     return f"asset-gatekeeper <folder> --once --telemetry-url {url}/api/telemetry"
 
 
+def command_hint(action: str) -> str:
+    """How *this* user runs an action: the .bat, the script, or the console command.
+
+    The launcher printed "python tools/agk_serve.py down" to pip users, who have
+    no tools/ folder (9 Nov 2026 audit, B6).
+    """
+    if not is_checkout():
+        return f"agk-serve {action}"
+    if os.name == "nt":
+        return {"down": "double-click Stop.bat", "up": "double-click Rules.bat"}.get(
+            action, f"agk-serve.bat {action}")
+    return f"python tools/agk_serve.py {action}"
+
+
 def say_portline(records: dict) -> None:
     dash = records.get("dashboard", {})
     work = records.get("workstation", {})
@@ -474,8 +528,7 @@ def say_portline(records: dict) -> None:
     say(f"  workstation  {work.get('url', '?')}/viewer")
     if dash.get("url"):
         say(f"  gate         {gate_command(records)}")
-    say("  stop         " + ("double-click Stop.bat" if os.name == "nt"
-                             else "python tools/agk_serve.py down"))
+    say(f"  stop         {command_hint('down')}")
     say(f"  record       {PORTS_FILE}")
 
 
@@ -580,7 +633,7 @@ def _python_processes() -> list[tuple[int, str]]:
 def command_status(args: argparse.Namespace) -> int:
     records = read_ports()
     if not records:
-        say("Not running (no .agk/ports.json). Start with: python tools/agk_serve.py up")
+        say(f"Not running. Start with: {command_hint('up')}")
         return 1
     unhealthy = 0
     for key in ("dashboard", "workstation"):

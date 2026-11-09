@@ -1,4 +1,6 @@
 """Generate throwaway assets to exercise asset_gatekeeper.py."""
+from __future__ import annotations   # X | None annotations on Python 3.9
+
 import base64
 import json
 import struct

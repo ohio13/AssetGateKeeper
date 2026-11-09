@@ -10,7 +10,7 @@ ORM, no JS build step. Drop it next to the gatekeeper, run it, open the dashboar
 
 Routes
     POST /api/telemetry   one verdict per request, JSON body (the gatekeeper's payload)
-    GET  /dashboard       HTML: totals, pass rate, wall of shame, top bottlenecks
+    GET  /dashboard       HTML: totals, pass rate, recent failures, top bottlenecks
     GET  /api/summary     the same numbers as JSON, for a wallboard or a test
     GET  /               302 -> /dashboard
 
@@ -51,6 +51,24 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 REPO_ROOT = HERE.parent
+NO_PROJECT_MESSAGE = ("Pick your project folder first (Project panel, then 'Use this "
+                      "folder'). AssetGatekeeper does not scan its own install folder.")
+
+
+def is_install_folder(path: str | Path) -> bool:
+    """Is ``path`` this AssetGatekeeper install, or the folder its servers keep data in?
+
+    Only the folder itself: a project kept in a subfolder such as demo/ is the
+    user's choice and is scanned.
+    """
+    homes = [REPO_ROOT]
+    if os.environ.get("AGK_DATA_DIR"):
+        homes.append(Path(os.environ["AGK_DATA_DIR"]))   # the launcher's data folder
+    try:
+        target = Path(path).resolve()
+        return any(target == home.resolve() for home in homes)
+    except OSError:
+        return False
 for _path in (str(HERE), str(REPO_ROOT)):
     if _path not in sys.path:
         sys.path.insert(0, _path)
@@ -1935,8 +1953,20 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
         shame_rows = []
         for entry in shame:
             reasons = "".join(f"<div>{_e(reason)}</div>" for reason in entry["reasons"]) or "<div>no reason recorded</div>"
-            who = _e(entry["username"] or "unknown")
-            host = f" <span class=\"mono\">({_e(entry['hostname'])})</span>" if entry["hostname"] else ""
+            # With the default identity = "host" the gate sends the machine name
+            # but not the user name, on purpose. "unknown (DESKTOP-1)" on every row
+            # read as broken (9 Nov 2026 audit, B9): show the machine alone, and say why.
+            if entry["username"]:
+                who = _e(entry["username"])
+                host = (f" <span class=\"mono\">({_e(entry['hostname'])})</span>"
+                        if entry["hostname"] else "")
+            elif entry["hostname"]:
+                who = (f"<span class=\"mono\" title=\"User names are not sent unless the "
+                       f"rules say [server] identity = &quot;full&quot;\">"
+                       f"{_e(entry['hostname'])}</span>")
+                host = ""
+            else:
+                who, host = "unknown", ""
             shame_rows.append(
                 "<tr>"
                 f"<td class=\"who mono\">{_e(entry['timestamp'][:19].replace('T', ' '))}</td>"
@@ -2028,7 +2058,7 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
     <div class="card"><div class="k">Workstations</div><div class="v">{stats['hosts']:,}</div></div>
   </div>
 
-  <h2>Wall of shame - last {min(len(shame), WALL_OF_SHAME_LIMIT)} failures</h2><span class='sub' style='margin-left:10px;font-weight:400'><a href='/audit/full'>all verdicts</a>  <a href='/audit/passes'>all passes</a></span>
+  <h2>Recent failures - last {min(len(shame), WALL_OF_SHAME_LIMIT)}</h2><span class='sub' style='margin-left:10px;font-weight:400'><a href='/audit/full'>all verdicts</a>  <a href='/audit/passes'>all passes</a></span>
   {shame_html}
 {passed_html}
 
@@ -2855,9 +2885,17 @@ class Handler(BaseHTTPRequestHandler):
             return Path(server.rules_path)
         return Path(server.rules_root) / agk.RULES_FILENAME
 
-    def _scan_target(self) -> Path:
+    def _scan_target(self) -> Path | None:
+        """The folder a scan checks, or None when there is nothing sensible.
+
+        With no project picked the fallback used to be the server's own working
+        folder - for Rules.bat, the AssetGatekeeper install itself - so a first
+        scan filled the dashboard with the tool's test files and screenshots
+        marked as failures (9 Nov 2026). The install folder is never scanned.
+        """
         project = self._active_project()
-        return project if project is not None else Path(self.server.scan_root)
+        target = project if project is not None else Path(self.server.scan_root)
+        return None if is_install_folder(target) else target
 
     def _allowed_path(self, raw: str) -> Path | None:
         """Resolve a user-supplied folder, but only inside an allowed root.
@@ -2936,7 +2974,8 @@ class Handler(BaseHTTPRequestHandler):
                 "project": str(project) if project else "",
                 "allowed_roots": [str(root) for root in server.allow_roots],
                 "recent_projects": recent_projects(server.db_path),
-                "scan_root": str(self._scan_target()),
+                "scan_root": str(self._scan_target() or ""),
+                "scan_blocked": "" if self._scan_target() else NO_PROJECT_MESSAGE,
                 "document": document,
                 "presets": agk.preset_summary(),
                 "audit": list_audit(server.db_path, 25),
@@ -3166,16 +3205,22 @@ class Handler(BaseHTTPRequestHandler):
             record_audit(self.server.db_path, user, key, old_value, new_value,
                          self._client_ip(), summary=summary)
         started = False
+        blocked = ""
         if payload.get("action") == "rescan":
-            started = self.server.scanner.start(
-                str(self._scan_target()), rules_path,
-                f"http://127.0.0.1:{self.server.server_address[1]}/api/telemetry")
+            target = self._scan_target()
+            if target is None:
+                blocked = NO_PROJECT_MESSAGE
+            else:
+                started = self.server.scanner.start(
+                    str(target), rules_path,
+                    f"http://127.0.0.1:{self.server.server_address[1]}/api/telemetry")
         self._json(200, {
             "ok": True,
             "path": str(rules_path),
             "notes": notes,
             "changed": [{"key": k, "old": o, "new": n} for k, o, n in changes],
-            "scan": {"started": started, **self.server.scanner.snapshot()},
+            "scan": {"started": started, "blocked": blocked,
+                     **self.server.scanner.snapshot()},
         })
 
     def _admin_scan(self) -> None:
@@ -3185,8 +3230,12 @@ class Handler(BaseHTTPRequestHandler):
         if not self._same_origin() or not self._csrf_ok(user):
             self._json(403, {"error": "missing or stale CSRF token; reload the page"})
             return
+        target = self._scan_target()
+        if target is None:
+            self._json(400, {"error": NO_PROJECT_MESSAGE})
+            return
         started = self.server.scanner.start(
-            str(self._scan_target()), self._rules_path(),
+            str(target), self._rules_path(),
             f"http://127.0.0.1:{self.server.server_address[1]}/api/telemetry")
         if not started:
             self._json(409, {"error": "a scan is already running",

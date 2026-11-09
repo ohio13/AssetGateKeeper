@@ -12,14 +12,17 @@ license = { text = "MIT" }
 authors = [{ name = "AssetGatekeeper contributors" }]
 keywords = ["gamedev", "pipeline", "technical-art", "assets", "ci", "linter"]
 classifiers = [
-  "Development Status :: 5 - Production/Stable",
+  "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
   "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: Multimedia :: Graphics :: 3D Modeling",
   "Topic :: Software Development :: Quality Assurance",
 ]
@@ -34,7 +37,10 @@ classifiers = [
 # fails as "could not read mesh".
 # DracoPy: trimesh decodes Draco-compressed glTF (KHR_draco_mesh_compression, the
 # usual web/three.js export) through it; without it every vertex reads as zero.
-dependencies = ["trimesh>=4.0", "pillow>=9.0", "charset-normalizer>=3.0", "DracoPy>=1.4",
+# trimesh and Pillow are capped below their next major version: a major release
+# has changed loaders before, and a release must not break every check overnight.
+# Raise the caps once the weekly dependency test passes on the new version.
+dependencies = ["trimesh>=4.0,<6", "pillow>=9.0,<13", "charset-normalizer>=3.0", "DracoPy>=1.4",
                 "tomli>=2.0; python_version < '3.11'"]
 
 [project.optional-dependencies]
@@ -51,19 +57,20 @@ saml = ["signxml>=3.2"]
 [project.scripts]
 # The two commands a studio actually types. Everything below them is optional.
 asset-gatekeeper = "asset_gatekeeper:main"
-art-workstation = "server.art_workstation_server:main"
+art-workstation = "agk_suite.server.art_workstation_server:main"
 # The rest of the surface: the metrics dashboard, the launcher that owns ports
 # and logs, and the bulk uploader that loads a folder of exports in one go.
-asset-health = "server.asset_health_server:main"
-art-workstation-upload = "tools.upload_assets:main"
-agk-serve = "tools.agk_serve:main"
+asset-health = "agk_suite.server.asset_health_server:main"
+art-workstation-upload = "agk_suite.tools.upload_assets:main"
+agk-serve = "agk_suite.tools.agk_serve:main"
 # Enterprise operations: trends, RBAC checks, remote validation, the PostgreSQL
 # migration and the runner farm. See docs/ENTERPRISE.md.
-agk-enterprise = "enterprise.cli:main"
+agk-enterprise = "agk_suite.enterprise.cli:main"
 
 [project.urls]
-Homepage = "https://github.com/ohio13/asset-gatekeeper"
-Issues = "https://github.com/ohio13/asset-gatekeeper/issues"
+Homepage = "https://github.com/ohio13/AssetGateKeeper"
+Issues = "https://github.com/ohio13/AssetGateKeeper/issues"
+Changelog = "https://github.com/ohio13/AssetGateKeeper/blob/main/RELEASE_NOTES.md"
 
 [tool.setuptools]
 # Both modules ship: the gate loads healer.py by path from its own directory, so
@@ -71,17 +78,26 @@ Issues = "https://github.com/ohio13/asset-gatekeeper/issues"
 include-package-data = true
 py-modules = ["asset_gatekeeper", "healer", "notifier"]
 
-[tool.setuptools.packages.find]
-# server/ and engine/ are packages so that the dashboard, the workstation and the
-# LOD decimator travel with the wheel. They keep their folder names, which is what
-# the servers' own HERE/REPO_ROOT path bootstrapping already assumes.
-include = ["server*", "engine*", "tools*", "enterprise*", "plugins*", "agk_vendor*"]
-namespaces = false
+# server/, engine/, tools/, enterprise/ and plugins/ travel with the wheel, but
+# under agk_suite/ rather than at the top of site-packages, where names this
+# common collide with other packages (9 Nov 2026 audit, B3). Inside agk_suite they
+# keep their folder names, which is what the HERE/REPO_ROOT path bootstrapping in
+# each module assumes.
+packages = ["agk_suite", "agk_suite.server", "agk_suite.engine", "agk_suite.tools",
+            "agk_suite.enterprise", "agk_suite.plugins", "agk_vendor", "agk_vendor.tomli"]
+
+[tool.setuptools.package-dir]
+"agk_suite.server" = "server"
+"agk_suite.engine" = "engine"
+"agk_suite.tools" = "tools"
+"agk_suite.enterprise" = "enterprise"
+"agk_suite.plugins" = "plugins"
 
 [tool.setuptools.package-data]
 # Without the static folder the workstation serves a 404 at /viewer and the
 # dashboard renders unstyled, so this is not optional decoration.
-server = ["static/*"]
+"agk_suite.server" = ["static/*", "static/vendor/*", "static/vendor/**/*"]
+"agk_suite.plugins" = ["**/*.py", "**/*.md", "**/*.mel", "**/*.ms", "**/*.json"]
 "agk_vendor.tomli" = ["LICENSE", "py.typed"]
 
 [tool.setuptools.dynamic]

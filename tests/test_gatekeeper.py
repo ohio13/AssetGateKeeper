@@ -1,4 +1,6 @@
 """Sanity checks for asset_gatekeeper: new rules, fallbacks, edge cases."""
+from __future__ import annotations   # X | None annotations on Python 3.9
+
 import contextlib
 import hashlib
 import io
@@ -2465,7 +2467,7 @@ expect("the version is dynamic so it cannot drift",
 # The gate refuses to run without trimesh+Pillow, so they are honest hard
 # requirements; watchdog is a speed-up and must stay optional.
 expect("trimesh and pillow are declared as required",
-       '"trimesh>=4.0"' in pyproject_text and '"pillow>=9.0"' in pyproject_text)
+       '"trimesh>=4.0,<6"' in pyproject_text and '"pillow>=9.0,<13"' in pyproject_text)
 # Audited: without tomli a plain pip install on 3.9/3.10 cannot read rules.toml
 # at all, so it is a hard requirement below 3.11 - and must not be installed on
 # 3.11+, where tomllib is in the standard library.
@@ -2986,6 +2988,48 @@ for name in ("Stop.bat", "Allow_Folder.bat", "Rules.bat", "agk-serve.bat"):
 expect("Stop.bat stops everything", b"agk_serve.py\" down" in (ROOT_MODULE_DIR / "Stop.bat").read_bytes())
 expect("agk-serve.bat with no command waits instead of flashing its help",
        b'if "%~1"=="" goto :menu' in (ROOT_MODULE_DIR / "agk-serve.bat").read_bytes())
+# 9 Nov 2026 audit: B2 (pip installs kept their databases in site-packages) and
+# B6 (pip users were told to run a tools/ script they do not have).
+expect("this repository is a downloaded copy", serve.is_checkout() is True)
+expect("a pip install is not", serve.is_checkout(DROP.parent / "scratch") is False)
+_saved_home = os.environ.get("AGK_HOME")
+os.environ["AGK_HOME"] = str(DROP.parent / "scratch" / "agk-home")
+expect("$AGK_HOME decides where the servers keep their data",
+       serve.data_root() == DROP.parent / "scratch" / "agk-home")
+if _saved_home is None:
+    os.environ.pop("AGK_HOME")
+else:
+    os.environ["AGK_HOME"] = _saved_home
+expect("a downloaded copy keeps its data beside itself", serve.data_root() == serve.REPO_ROOT
+       or os.environ.get("AGK_HOME"))
+_real_checkout = serve.is_checkout
+serve.is_checkout = lambda root=serve.REPO_ROOT: False
+_pip_home = serve.data_root()
+expect("a pip install keeps its data in the user's own folder, not site-packages",
+       serve.REPO_ROOT not in _pip_home.parents and _pip_home != serve.REPO_ROOT
+       and _pip_home.name in ("AssetGatekeeper", "asset-gatekeeper"), str(_pip_home))
+expect("pip users are told the command they have",
+       serve.command_hint("down") == "agk-serve down", serve.command_hint("down"))
+serve.is_checkout = _real_checkout
+expect("a downloaded copy names its own launcher",
+       serve.command_hint("down") in ("double-click Stop.bat", "python tools/agk_serve.py down"))
+
+# B8: --jobs 0 on a many-core PC started a worker per core whatever the files.
+_big = DROP.parent / "scratch" / "big.obj"
+_big.write_bytes(b"#" * (8 * 1024 * 1024))
+expect("big files lower the number of parallel checks to fit in memory",
+       agk.memory_safe_jobs(16, [_big] * 16, free=1024 ** 3) == 2,
+       str(agk.memory_safe_jobs(16, [_big] * 16, free=1024 ** 3)))
+expect("small files keep every worker",
+       agk.memory_safe_jobs(16, [ROOT_MODULE_DIR / "healer.py"] * 16, free=16 * 1024 ** 3) == 16)
+expect("unknown free memory changes nothing",
+       agk.memory_safe_jobs(4, [_big], free=0) == 4)
+expect("this system reports its free memory", (agk.available_memory() or 0) > 0)
+_big.unlink()
+# B7: the scene loader trimesh no longer calls a compatibility wrapper.
+expect("meshes load through trimesh.load_scene when trimesh has it",
+       agk.load_trimesh_scene.__doc__ and hasattr(agk.trimesh, "load_scene"))
+
 leftovers = [str(path.relative_to(ROOT_MODULE_DIR)) for path in ROOT_MODULE_DIR.rglob("*.bat")
              if b"chatbox-sandbox" in path.read_bytes()]
 expect("no batch file points at a developer's own sandbox", not leftovers, str(leftovers))
@@ -3034,7 +3078,10 @@ expect("--preset stays budget-only so it cannot switch a check off",
 # The writer has to round-trip the annotated example, or the admin page would
 # silently reformat somebody's file into something else.
 example = Path(__file__).resolve().parent.parent / "asset_gatekeeper.example.toml"
-import tomllib  # noqa: E402, PLC0415 - local to this section
+try:                                     # 3.11+: the standard library
+    import tomllib  # noqa: E402, PLC0415 - local to this section
+except ModuleNotFoundError:              # 3.9/3.10: the same parser, vendored
+    from agk_vendor import tomli as tomllib  # noqa: E402, PLC0415
 original = tomllib.loads(example.read_text(encoding="utf-8"))
 written = agk.to_toml(original)
 expect("the example round-trips through to_toml", tomllib.loads(written) == original)

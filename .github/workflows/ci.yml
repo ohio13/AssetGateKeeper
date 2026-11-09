@@ -19,6 +19,13 @@ jobs:
       matrix:
         os: [ubuntu-latest, windows-latest]
         python: ["3.11", "3.12"]
+        # The README promises 3.9+; test the oldest and newest, and macOS once
+        # (9 Nov 2026 audit, B5).
+        include:
+          - { os: ubuntu-latest, python: "3.9" }
+          - { os: ubuntu-latest, python: "3.10" }
+          - { os: ubuntu-latest, python: "3.13" }
+          - { os: macos-latest, python: "3.12" }
 
     steps:
       - uses: actions/checkout@v4
@@ -30,7 +37,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install watchdog trimesh pillow numpy pyflakes charset-normalizer DracoPy
+          python -m pip install watchdog "trimesh<6" "pillow<13" numpy pyflakes charset-normalizer DracoPy "tomli; python_version < '3.11'"
 
       # bpy.props property annotations make pyflakes emit bogus F722
       # ("syntax error in forward annotation"), so the engine and tests are
@@ -55,30 +62,30 @@ jobs:
       - name: Real-world regression suite (6 Nov corpus findings)
         run: python tests/test_realworld.py
 
-      - name: Gate suite (396 assertions)
+      - name: Gate suite
         run: python tests/test_gatekeeper.py
 
-      - name: Workstation suite (135 assertions)
+      - name: Workstation suite
         run: python tests/test_workstation.py
 
       # Spins the real dashboard server on an ephemeral port and drives it over
       # real sockets: ingest, bearer auth, 400/404/405/413, HTML, cascade delete.
-      - name: Server suite (203 assertions)
+      - name: Server suite
         run: python tests/test_server.py
 
       # Accounts, sessions, CSRF, role enforcement, atomic rules writes, the
       # audit trail and a streamed rescan - the parts a security review asks about.
-      - name: Admin suite (123 assertions)
+      - name: Admin suite
         run: python tests/test_admin.py
 
       # No server, no IdP, no DCC: the enterprise suite fakes every
       # external system, and asserts the fail-closed path when one is absent.
-      - name: Enterprise suite (218 assertions)
+      - name: Enterprise suite
         run: python tests/test_enterprise.py
 
       # The server's own queries, run twice: once on SQLite and once through
       # the PostgreSQL adapter (driver double). The numbers must be equal.
-      - name: Analytics + storage parity (59 assertions)
+      - name: Analytics + storage parity
         run: python tests/test_analytics.py
 
       # FBX/TGA/JPG against Blender-made fixtures, hostile FBX, and the reference,
@@ -88,6 +95,43 @@ jobs:
 
       - name: Headless integration (synthetic exporter)
         run: python tests/run_headless_integration.py --synthetic
+
+  # What `pip install` gives a user: a wheel whose packages sit under agk_suite/
+  # (not top-level server/, tools/ ...) and servers that keep their data out of
+  # site-packages (9 Nov 2026 audit, B2 and B3).
+  package:
+    name: package · install from a wheel
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and install the wheel
+        run: |
+          python -m pip install --upgrade pip build
+          python -m build --wheel --outdir dist
+          python -m venv /tmp/agk
+          /tmp/agk/bin/pip install dist/*.whl
+      - name: Nothing lands at the top of site-packages but our own names
+        run: |
+          site=$(/tmp/agk/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          for name in server tools engine enterprise plugins; do
+            if [ -e "$site/$name" ]; then echo "$name/ installed at the top of site-packages"; exit 1; fi
+          done
+          test -d "$site/agk_suite/server/static/vendor"
+      - name: The installed commands start, serve and stop
+        run: |
+          mkdir -p /tmp/project && cd /tmp/project
+          export HOME=/tmp/home
+          /tmp/agk/bin/asset-gatekeeper --version
+          /tmp/agk/bin/agk-serve up
+          curl -sf http://127.0.0.1:8100/viewer > /dev/null
+          curl -sf http://127.0.0.1:8100/static/vendor/three.module.js > /dev/null
+          /tmp/agk/bin/agk-serve down
+          site=$(/tmp/agk/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
+          if ls "$site"/*.db "$site"/.agk 2>/dev/null; then echo "data written into site-packages"; exit 1; fi
+          test -f /tmp/home/.local/share/asset-gatekeeper/asset_health.db
 
   # The Art Workstation viewer in a real browser. The API suite passed for
   # months while the page showed the wrong model, refused embedded glTF

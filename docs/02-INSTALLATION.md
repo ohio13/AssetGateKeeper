@@ -151,17 +151,34 @@ used, and whether the default ports are free.
 
 ## Where it writes
 
-Nothing writes to `Program Files`, the registry, or `%APPDATA%`.
+Nothing writes to `Program Files` or the registry. The servers started by
+`agk-serve` / `Rules.bat` keep their data in one folder:
+
+| Installed as | Data folder |
+|---|---|
+| a downloaded or cloned copy | that copy's own folder (deleting it removes everything) |
+| `pip install`, Windows | `%LOCALAPPDATA%\AssetGatekeeper` |
+| `pip install`, macOS | `~/Library/Application Support/AssetGatekeeper` |
+| `pip install`, Linux | `$XDG_DATA_HOME/asset-gatekeeper` (`~/.local/share/asset-gatekeeper`) |
+| any, with `AGK_HOME` set | `$AGK_HOME` |
+
+Inside it:
 
 | Path | Written by | Contains |
 |---|---|---|
-| `asset_health.db` (CWD) | AssetHealth | verdicts, problems, projects, budgets, admin |
-| `art_workstation.db` (CWD) | Art Workstation | assets, LODs, collision, notes |
+| `asset_health.db` | AssetHealth | verdicts, problems, projects, budgets, admin |
+| `art_workstation.db` | Art Workstation | assets, LODs, collision, notes |
 | `workstation_data/` | Art Workstation | uploaded files, by asset id |
 | `.agk/ports.json` | `agk-serve` | which port each server actually took |
 | `.agk/logs/*.log` | `agk-serve` | one log per server |
+| `.agk/allowed_folders.txt` | `Allow_Folder.bat` / `agk-serve allow` | extra project folders the picker may open |
 
-Back up a studio by copying those four things. Restore by copying them back.
+Started by hand (`asset-health`, `art-workstation`), a server writes its
+database to the folder it is run from instead. The gate's verdict cache is in
+`%LOCALAPPDATA%\AssetGatekeeper\cache` (`~/.cache/asset-gatekeeper` elsewhere).
+
+Back up a studio by copying the two databases and `workstation_data/`.
+Restore by copying them back.
 
 ## Upgrading
 

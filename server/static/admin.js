@@ -274,6 +274,7 @@ async function saveWithRescan(rescan) {
       notes ? "warn" : "ok");
     await loadState(false);
     if (result.scan && result.scan.started) watchScan();
+    else if (rescan && result.scan && result.scan.blocked) notice(result.scan.blocked, "warn");
     else if (rescan) notice("A scan was already running; it was left alone.", "warn");
   } catch (error) {
     notice(`Could not apply: ${error.message}`, "err");
@@ -346,7 +347,7 @@ async function loadState(firstTime = true) {
   state.document = data.document || {};
   $("who").textContent = `${data.user.username}  ${data.user.role}`;
   $("where").textContent = data.rules_path;
-  $("scan-root").textContent = data.scan_root;
+  $("scan-root").textContent = data.scan_root || "your project folder (pick it above)";
   $("project-path").value = data.project || data.scan_root || "";
   setProjectStatus({ rules_path: data.rules_path, rules_exists: data.rules_exists,
                      rules_error: data.rules_error });

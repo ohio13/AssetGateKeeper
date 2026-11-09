@@ -218,8 +218,19 @@ page = body.decode("utf-8")
 expect("dashboard renders", status == 200 and "AssetHealth" in page, str(status))
 expect("dashboard shows global status", all(word in page for word in
                                             ("Assets scanned", "Pass rate", "Failed")))
-expect("dashboard shows the wall of shame", "Wall of shame" in page and "boss_statue.gltf" in page)
+expect("dashboard shows the recent failures", "Recent failures" in page and "boss_statue.gltf" in page)
 expect("dashboard shows top bottlenecks", "Top bottlenecks" in page and "Triangle budget" in page)
+
+# 9 Nov 2026 audit, B9: identity = "host" sends the machine but not the user, by
+# design, and every row read "unknown (DESKTOP-...)" as if something were broken.
+host_db = fresh_db("host_only.db")
+ahs.store_verdict(host_db, {"filename": "rock.obj", "path": "rock.obj", "passed": False,
+                            "status": "FAILED", "problems": ["too many triangles"],
+                            "hostname": "DESKTOP-AB12CD3", "username": ""})
+host_page = ahs.render_dashboard(host_db)
+expect("a row with only a machine name shows the machine, not 'unknown'",
+       "DESKTOP-AB12CD3" in host_page and "unknown (" not in host_page
+       and "identity = &quot;full&quot;" in host_page, host_page[host_page.find("rock.obj"):][:300])
 expect("dashboard prints the pass rate", f"{stats['pass_rate']}%" in page)
 
 status, body, _ = request(port, "/api/summary")

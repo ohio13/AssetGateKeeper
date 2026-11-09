@@ -166,7 +166,7 @@ def stage_drop_in(version: str) -> Path:
 
     commit = git("rev-parse", "--short", "HEAD") or "unknown"
     built = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
-    (stage / "BUILD-INFO.txt").write_text(
+    (stage / "BUILD-INFO.txt").write_bytes((
         f"{PROJECT} {version}\n"
         f"built {built}\n"
         f"commit {commit}\n"
@@ -175,8 +175,7 @@ def stage_drop_in(version: str) -> Path:
         "This tree runs without being installed:\n"
         "  python asset_gatekeeper.py <folder> --preset retro\n"
         "  python server\\art_workstation_server.py\n"
-        "  python server\\asset_health_server.py\n",
-        encoding="utf-8", newline="\n")
+        "  python server\\asset_health_server.py\n").encode("utf-8"))
     return stage
 
 
@@ -207,7 +206,7 @@ def write_sums(artefacts: list[Path]) -> Path:
     """
     sums = DIST / "SHA256SUMS.txt"
     lines = [f"{sha256(item)}  {item.name}" for item in artefacts]
-    sums.write_text("\n".join(lines) + "\n", encoding="ascii", newline="\n")
+    sums.write_bytes(("\n".join(lines) + "\n").encode("ascii"))   # LF only, on 3.9 too
     return sums
 
 

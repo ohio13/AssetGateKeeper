@@ -24,6 +24,25 @@ AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
     it), keeps it in `.agk\allowed_folders.txt` and restarts the page.
   * `tools\agk.bat` and `tools\upload.bat` pointed at a developer's own
     sandbox; they now find Python like the other launchers.
+* **Full audit (9 Nov).** Fixed what a first-time user would meet:
+  * With no project picked, a scan checked the AssetGatekeeper folder itself, so
+    a new dashboard filled with the tool's own test files and screenshots marked
+    as failures. The install folder is never scanned; the page asks for a
+    project first. The dashboard's "Wall of shame" is now "Recent failures", and
+    a row with no user name shows the machine name instead of `unknown (...)`.
+  * `pip install`: the servers kept their databases and logs inside
+    site-packages, and the wheel installed folders called `server`, `tools`,
+    `engine`, `enterprise` and `plugins` at the top level. Data now goes to the
+    user's data folder (`%LOCALAPPDATA%\AssetGatekeeper`, `AGK_HOME` to move
+    it) and the packages install under `agk_suite/`. The launcher names the
+    command pip users have (`agk-serve down`).
+  * Python 3.9, 3.10 and 3.13 and macOS are now tested; the package says
+    "Alpha" and links to the right repository; broken links in the reference
+    manual are fixed and its screenshots and design notes moved into `docs/`.
+  * `--jobs` lowers itself when the largest files would not fit in free memory
+    (a 90 MB sculpt needs about 750 MB to check), and trimesh and Pillow are
+    capped below their next major version; meshes load with
+    `trimesh.load_scene`.
 * **Real-world model test (6 Nov).** 460 public models (Khronos glTF samples,
   three.js and assimp test files) were run through the gate and compared with
   an independent reader. Fixed from what it found:

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import http.cookiejar
 import json
+import os
 import shutil
 import sys
 import tempfile
@@ -331,6 +332,30 @@ expect("it counted the asset", snapshot["totals"]["total"] >= 1, json.dumps(snap
 expect("the asset passed under a 1,200 triangle budget",
        snapshot["totals"]["passed"] >= 1, json.dumps(snapshot["totals"]))
 expect("events are buffered for a late subscriber", len(server.scanner.recent()) >= 2)
+
+# 9 Nov 2026 audit, B1: with no project picked, the fallback folder was the
+# install itself, and a first scan filled the dashboard with the tool's own
+# test files. The install folder (and the launcher's data folder) is never scanned.
+_saved_root = server.scan_root
+server.scan_root = str(ahs.REPO_ROOT)
+status, body = anon.post("/admin/api/scan", csrf=csrf)
+expect("a scan of the install folder is refused", status == 400
+       and b"Pick your project folder first" in body, body[:160])
+status, body = anon.post("/admin/api/apply", {"document": document, "action": "rescan"}, csrf=csrf)
+result = json.loads(body)
+expect("Apply & Rescan saves but says why it did not scan",
+       status == 200 and not result["scan"]["started"]
+       and "Pick your project folder" in result["scan"]["blocked"], body[:300])
+blocked_state = anon.state()
+expect("the page is told there is no scan target",
+       blocked_state["scan_root"] == "" and blocked_state["scan_blocked"], str(blocked_state)[:200])
+expect("a subfolder of the install (demo/) is still a valid project",
+       not ahs.is_install_folder(ahs.REPO_ROOT / "demo"))
+os.environ["AGK_DATA_DIR"] = str(WORK / "agk-data")
+expect("the launcher's data folder is never scanned either",
+       ahs.is_install_folder(WORK / "agk-data"))
+os.environ.pop("AGK_DATA_DIR")
+server.scan_root = _saved_root
 
 # --------------------------------------------------------------------------- #
 print("9. static files are an allow-list")

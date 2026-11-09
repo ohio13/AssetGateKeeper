@@ -648,7 +648,7 @@ screen on the studio LAN is an explicit act (`--host 0.0.0.0`), not a default.
 
 | Route | What |
 |---|---|
-| `/` → `/dashboard` | totals, pass rate, wall of shame, bottlenecks, alert state |
+| `/` → `/dashboard` | totals, pass rate, recent failures, bottlenecks, alert state |
 | `/budget-planner` | edit a project's published budget |
 | `/api/summary` | JSON totals + bottlenecks + alert state |
 | `/api/telemetry` | `POST` one verdict (this is what `--telemetry-url` calls) |
@@ -905,7 +905,7 @@ adjusts the budget — in the PR, where the argument belongs.
    is blocking what.
 
 What each surface is for in this mode: the **artist** needs exit codes and
-toasts; the **TA** needs the wall of shame and bottlenecks; the **producer**
+toasts; the **TA** needs the recent failures and bottlenecks; the **producer**
 needs the pass rate and the Slack alerts; **nobody** needs to read a TOML by hand.
 
 ### E. Studio with central control
@@ -1005,7 +1005,7 @@ How it is wired matters if you plan to run the two services apart:
 
 **Weekly review**
 
-Dashboard → wall of shame (who/what is repeatedly failing) → bottlenecks (which
+Dashboard → recent failures (who/what is repeatedly failing) → bottlenecks (which
 rule is everyone hitting) → if a bottleneck is systemic, fix the budget or the
 pipeline, not the artists.
 

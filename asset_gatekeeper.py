@@ -2338,10 +2338,19 @@ def _mesh_read_error(exc: BaseException) -> str:
     return f"could not read mesh ({_describe_unexpected(exc)})"
 
 
+def load_trimesh_scene(source, **kwargs) -> object:
+    """trimesh's scene loader, without the call trimesh marks as a compatibility
+    wrapper: ``trimesh.load(force='scene')`` (9 Nov 2026 audit, B7)."""
+    loader = getattr(trimesh, "load_scene", None)
+    if loader is not None:
+        return loader(source, **kwargs)
+    return trimesh.load(source, force="scene", **kwargs)    # trimesh before load_scene
+
+
 @lru_cache(maxsize=8)
 def _load_scene_cached(path_string: str, modified_ns: int) -> object:
     """One load per (path, mtime). The mtime keeps the cache honest on re-export."""
-    return trimesh.load(path_string, force="scene", process=False)
+    return load_trimesh_scene(path_string, process=False)
 
 
 def load_scene(path: Path) -> object:
@@ -3105,7 +3114,7 @@ def _count_material_slots_trimesh(path: Path) -> int:
     """Fallback: distinct material objects across a loaded scene."""
     if trimesh is None:
         raise AssetError("trimesh is not installed; material slots cannot be counted")
-    loaded = trimesh.load(str(path), force="scene", process=False)
+    loaded = load_trimesh_scene(str(path), process=False)
     geometries = loaded.geometry.values() if isinstance(loaded, trimesh.Scene) else [loaded]
 
     unused_default = 0
@@ -5231,6 +5240,72 @@ def resolve_jobs(requested: Optional[int]) -> int:
     return requested
 
 
+#: Peak memory of one check, as a multiple of the file's size. Measured on a
+#: 90 MB ZBrush OBJ (1.08 M triangles): 748 MB, so about 8.3x; rounded up.
+MEMORY_PER_FILE_BYTE = 9
+#: What a worker needs before it opens anything (Python, numpy, trimesh).
+MEMORY_PER_WORKER = 256 * 1024 * 1024
+
+
+def available_memory() -> Optional[int]:
+    """Bytes of memory free for new work, or None when this system will not say."""
+    try:
+        if os.name == "nt":
+            import ctypes
+
+            class _Status(ctypes.Structure):
+                _fields_ = [("length", ctypes.c_ulong), ("load", ctypes.c_ulong),
+                            ("total_phys", ctypes.c_ulonglong), ("avail_phys", ctypes.c_ulonglong),
+                            ("total_page", ctypes.c_ulonglong), ("avail_page", ctypes.c_ulonglong),
+                            ("total_virtual", ctypes.c_ulonglong),
+                            ("avail_virtual", ctypes.c_ulonglong),
+                            ("avail_extended", ctypes.c_ulonglong)]
+            status = _Status()
+            status.length = ctypes.sizeof(_Status)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):  # type: ignore[attr-defined]
+                return int(status.avail_phys)
+            return None
+        meminfo = Path("/proc/meminfo")
+        if meminfo.is_file():
+            for line in meminfo.read_text().splitlines():
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) * 1024
+        pages = os.sysconf("SC_AVPHYS_PAGES")            # macOS and other Unix
+        return int(pages) * int(os.sysconf("SC_PAGE_SIZE"))
+    except (OSError, ValueError, AttributeError, ImportError):
+        return None
+
+
+def memory_safe_jobs(jobs: int, paths: Sequence[Path],
+                     free: Optional[int] = None) -> int:
+    """Lower ``jobs`` so N workers on the largest files fit in free memory.
+
+    --jobs 0 on a 16-core PC used to start 16 workers whatever the files were;
+    sixteen 90 MB sculpts at about 750 MB each is 12 GB (9 Nov 2026 audit, B8).
+    Assumes each worker may get one of the largest files, and leaves 30 % free.
+    """
+    if jobs <= 1 or not paths:
+        return max(1, jobs)
+    free = available_memory() if free is None else free
+    if not free:
+        return jobs
+    sizes = []
+    for path in paths:
+        try:
+            sizes.append(path.stat().st_size)
+        except OSError:
+            continue
+    largest = sorted(sizes, reverse=True)[:jobs]
+    need_each = MEMORY_PER_WORKER + MEMORY_PER_FILE_BYTE * (max(largest) if largest else 0)
+    allowed = max(1, int(free * 0.7) // need_each)
+    if allowed < jobs:
+        LOG.warning("checking %d files at a time, not %d: the largest is %.0f MB and needs "
+                    "about %.0f MB each, with %.0f MB free", allowed, jobs,
+                    (max(largest) if largest else 0) / 1048576, need_each / 1048576,
+                    free / 1048576)
+    return min(jobs, allowed)
+
+
 def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
              recursive: bool, exclude: Sequence[str] = (),
              follow_symlinks: bool = False, allow_empty: bool = False,
@@ -5268,6 +5343,8 @@ def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
     pending = [path for path, cached in ready if cached is None]
     futures: dict[Path, object] = {}
     pool = None
+    if jobs > 1 and len(pending) > 1:
+        jobs = memory_safe_jobs(min(jobs, len(pending)), pending)
     if jobs > 1 and len(pending) > 1:
         try:
             from concurrent.futures import ProcessPoolExecutor
