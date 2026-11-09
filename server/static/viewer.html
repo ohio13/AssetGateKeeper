@@ -194,6 +194,25 @@
         </label>
       </div>
     </div>
+    <div class="field" id="bake-tools" hidden>
+      <label for="bake-run">Polypaint</label>
+      <div class="sub">This sculpt's colour is stored per vertex. Bake it into a game asset:
+        a reduced .glb with UVs and a BaseColor texture, added to the library.</div>
+      <div class="row">
+        <select id="bake-triangles" title="Triangles in the game asset">
+          <option value="15000">15,000 tris</option>
+          <option value="30000" selected>30,000 tris</option>
+          <option value="50000">50,000 tris</option>
+        </select>
+        <select id="bake-texture" title="BaseColor texture size">
+          <option value="1024">1024 px</option>
+          <option value="2048" selected>2048 px</option>
+          <option value="4096">4096 px</option>
+        </select>
+      </div>
+      <button id="bake-run" class="chip" type="button">Bake into a game asset</button>
+      <div id="bake-progress" class="sub" aria-live="polite"></div>
+    </div>
 
     <h2 class="section">Collision inspector</h2>
     <div id="collision-info" class="kv">

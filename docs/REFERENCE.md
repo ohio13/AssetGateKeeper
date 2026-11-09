@@ -916,6 +916,8 @@ python asset_gatekeeper.py [folder] [options]
 | `--no-color` | Disable ANSI colour |
 | `--doctor` | Check this machine can run the gate (python, trimesh, Pillow, watchdog, rules, ports), then exit |
 | `--suggest-naming` | Read the texture and mesh names in `<folder>` and print a `[naming]` block for `rules.toml` that fits them; writes nothing |
+| `--bake-polypaint` | With one `.obj` whose colour is ZBrush Polypaint or vertex colours: write a game asset beside it (a reduced `.glb` with UVs and a baked `_BaseColor` texture) sized to the rules, then check it. Needs `pip install "asset-gatekeeper[bake]"` |
+| `--bake-triangles N` · `--bake-texture PX` | With `--bake-polypaint`: the triangle count and texture size (default: the budget, at most 30,000 and 2048) |
 | `--list-presets` | Print the shipped platform targets and their budgets, then exit |
 | `--init` | Interactive setup: create the watch folder and its `rules.toml` |
 | `--yes` | With `--init`: accept every default instead of prompting |

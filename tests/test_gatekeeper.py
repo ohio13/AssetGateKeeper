@@ -2475,7 +2475,7 @@ expect("tomli is declared for interpreters older than 3.11",
        '"tomli>=2.0; python_version < \'3.11\'"' in pyproject_text,
        pyproject_text[:160])
 expect("watchdog is only an extra",
-       'full = ["watchdog>=3.0"]' in pyproject_text
+       'full = ["watchdog>=3.0"' in pyproject_text
        and "watchdog" not in pyproject_text.split("[project.optional-dependencies]")[0])
 expect("the version attribute exists", isinstance(agk.__version__, str) and agk.__version__)
 expect("setup.py is a shim, not a second configuration",

@@ -957,7 +957,45 @@ function renderLodList() {
   });
 }
 
+/* Polypaint (9 Nov 2026): a ZBrush .obj whose colour is per vertex can be baked
+ * into a game asset - a reduced .glb with UVs and a BaseColor texture. */
+async function bakePolypaint() {
+  const asset = state.asset;
+  if (!asset) return;
+  $("bake-run").disabled = true;
+  $("bake-progress").textContent = "queued";
+  try {
+    const response = await api(`/api/assets/${asset.id}/bake-polypaint`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ triangles: Number($("bake-triangles").value),
+                             texture: Number($("bake-texture").value) }),
+    });
+    let job = (await response.json()).job;
+    while (job.state === "queued" || job.state === "running") {
+      $("bake-progress").textContent = job.state === "queued" ? "queued"
+        : `${job.level || "baking"} (${job.step} of ${job.steps})`;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      job = await json(`/api/jobs/${job.id}`);
+    }
+    if (job.state === "failed") throw new Error(job.error || "the bake failed");
+    const result = job.result || {};
+    const made = result.asset || {};
+    await refreshAssets().catch(() => {});
+    if (made.id) await selectAsset(made.id);
+    setStatus(`${made.filename || "game asset"}: ${fmt(result.triangles || 0)} tris from `
+      + `${fmt(result.source_triangles || 0)}, ${result.texture_size}px BaseColor, `
+      + `${result.seconds} s - ${result.note || ""}`);
+    $("bake-progress").textContent = "";
+  } catch (error) {
+    $("bake-progress").textContent = `error: ${error.message}`;
+  } finally {
+    $("bake-run").disabled = false;
+  }
+}
+
 function setLodTools(asset) {
+  $("bake-tools").hidden = !(asset && asset.preview && asset.preview.polypaint);
   const measured = !!asset && asset.kind === "mesh";
   $("lod-generate").disabled = !(measured && previewable(asset)) || state.lodJob !== null;
   $("lod-upload").disabled = !measured;
@@ -1637,6 +1675,7 @@ async function uploadFiles(files) {
 /* - wiring */
 
 $("lod-generate").addEventListener("click", () => { generateLods(); });
+$("bake-run").addEventListener("click", () => { bakePolypaint(); });
 $("asset-delete").addEventListener("click", () => { deleteSelected(); });
 $("lod-upload").addEventListener("change", async (event) => {
   const file = event.target.files && event.target.files[0];

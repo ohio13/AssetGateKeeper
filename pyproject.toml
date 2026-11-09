@@ -45,7 +45,13 @@ dependencies = ["trimesh>=4.0,<6", "pillow>=9.0,<13", "charset-normalizer>=3.0",
 
 [project.optional-dependencies]
 # watchdog is a speed-up only: without it the watches fall back to polling.
-full = ["watchdog>=3.0"]
+full = ["watchdog>=3.0", "fast-simplification>=0.1.7; python_version >= '3.10'",
+        "xatlas>=0.0.9; python_version >= '3.10'", "scipy>=1.7; python_version >= '3.10'"]
+# --bake-polypaint and the review page's "Bake into a game asset": reduce, unwrap
+# UVs, and bake ZBrush Polypaint into a BaseColor texture. Python 3.10+:
+# fast-simplification does not import on 3.9.
+bake = ["fast-simplification>=0.1.7; python_version >= '3.10'",
+        "xatlas>=0.0.9; python_version >= '3.10'", "scipy>=1.7; python_version >= '3.10'"]
 dev = ["pyflakes>=3.0"]
 # Enterprise extras are split by feature so a studio installs only what it runs.
 # Every one of them is optional: without it the feature refuses with an install

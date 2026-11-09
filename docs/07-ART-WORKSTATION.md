@@ -100,6 +100,25 @@ send it; otherwise the slot is a flat colour named after the FBX material.
 Normal, roughness and other maps are not applied in the FBX preview; the UV and
 texel-density views (below) work on it like on any other mesh.
 
+### ZBrush Polypaint
+
+ZBrush writes Polypaint into an `.obj` as `#MRGB` comment lines (one colour per
+vertex). Houdini and Blender read them; Maya, 3ds Max and most engines show the
+model grey. The review page draws such a file in colour through a converted
+`.glb`, says so above the model, and the gate adds a note to its verdict.
+
+For a game the colour has to become a texture: a reduced mesh keeps only a few
+of the sculpt's vertices, and engines need a vertex-colour material to show
+them at all. **Bake into a game asset** (under LODs, shown for these files)
+reduces the mesh to 15,000, 30,000 or 50,000 triangles, unwraps UVs, bakes the
+colours into a 1024, 2048 or 4096 px BaseColor texture and adds the result to the
+library as a new `.glb` (`SM_Hero_HP_03.obj` becomes `SM_Hero_LP_03.glb`). On a
+1.08 million triangle sculpt it takes about 15 seconds. It bakes colour only; the
+sculpt's surface detail is not baked into a normal map yet. It needs
+`fast-simplification`, `xatlas` and `scipy`; without them the button says the
+exact install command. The same bake from a terminal:
+`asset-gatekeeper SM_Hero_HP_03.obj --bake-polypaint`.
+
 ### Inspection views
 
 The toolbar's view buttons switch how the mesh is drawn, without changing it:
@@ -469,7 +488,7 @@ tab shows), `--allow-host NAME`, `--quiet`.
 | `GET /api/events` | the live event stream |
 | `GET /api/assets` · `POST /api/assets?filename=` | list · upload (raw body; optional verdict fields) |
 | `GET` · `DELETE /api/assets/<id>` | detail (LODs, collision, files, missing files) · delete |
-| `GET /api/assets/<id>/file` · `/preview` | the bytes · the converted preview (FBX `.glb`, texture `.png`) |
+| `GET /api/assets/<id>/file` · `/preview` | the bytes · the converted preview (FBX or Polypaint `.glb`, texture `.png`) |
 | `POST /api/assets/<id>/files?filename=` · `GET .../files/<path>` | add · serve a file the asset references |
 | `GET` · `POST /api/assets/<id>/lods` | list · generate (`?async=1` for a job) |
 | `POST` · `DELETE /api/assets/<id>/lods/<LODn>` · `GET .../file` | upload · delete · download a level |
@@ -477,6 +496,7 @@ tab shows), `--allow-host NAME`, `--quiet`.
 | `GET` · `POST /api/assets/<id>/collision` · `GET .../collision.obj` | read · set · export the proxy |
 | `GET /api/assets/<id>/references` · `/report` | reference check · printable report |
 | `GET` · `POST /api/assets/<id>/heal` | what a fix would change (nothing stored) · make the fixed copy as a new asset |
+| `POST /api/assets/<id>/bake-polypaint` | bake a Polypaint `.obj` into a new game asset (JSON `triangles`, `texture`; a job, `GET /api/jobs/<id>`) |
 | `GET /api/assets/<id>/notes` · `POST /api/notes` · `DELETE /api/notes/<id>` | notes; `POST` takes an optional `pin` (`point`, `normal`, `camera` {`position`, `target`, `fov`}, `level`) and `screenshot` (a PNG or JPEG `data:` URL, 600 KB max) |
 | `GET /api/notes/<id>/screenshot` | the view a pinned note was written in |
 | `GET` · `POST /api/assets/<id>/review` | sign-off history · a decision (`status`, `note`, `reviewer` without accounts) |

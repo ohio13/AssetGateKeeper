@@ -1901,6 +1901,72 @@ expect("... and not on loopback", "WARNING" not in startup_stderr("--host", "127
 expect("... and not with a token",
        "WARNING" not in startup_stderr("--host", "0.0.0.0", "--token", "s3cret"))
 
+print("29. ZBrush Polypaint shows in colour, and bakes into a game asset (9 Nov 2026)")
+_verts, _groups, _faces = [], [], []
+for _i in range(13):
+    for _j in range(24):
+        _t, _p = _math.pi * _i / 12, 2 * _math.pi * _j / 24
+        _verts.append(f"v {_math.sin(_t) * _math.cos(_p):.5f} {_math.cos(_t):.5f} "
+                      f"{_math.sin(_t) * _math.sin(_p):.5f}")
+        _groups.append("ffff0000" if _math.cos(_t) > 0 else "ff0000ff")
+for _i in range(12):
+    for _j in range(24):
+        _a, _b = _i * 24 + _j, _i * 24 + (_j + 1) % 24
+        _faces += [f"f {_a + 1} {_a + 25} {_b + 1}", f"f {_b + 1} {_a + 25} {_b + 25}"]
+_mrgb = ["#MRGB " + "".join(_groups[k:k + 64]) for k in range(0, len(_groups), 64)]
+painted_obj = ("\n".join(_verts + _mrgb + _faces) + "\n").encode()
+pp_db, pp_data = fresh("polypaint")
+pp_server = aws.build_server("127.0.0.1", 0, pp_db, pp_data, quiet=True)
+threading.Thread(target=pp_server.serve_forever, daemon=True).start()
+pp = Client(pp_server.server_address[1])
+status, made = pp.json("/api/assets?filename=SM_Ball_HP.obj", method="POST", body=painted_obj)
+expect("a Polypaint .obj uploads as a mesh", status == 201 and made["kind"] == "mesh", str(made)[:200])
+status, detail = pp.json(f"/api/assets/{made['id']}")
+expect("its preview is a .glb carrying the colours, and says why",
+       detail["preview"]["type"] == "glb" and detail["preview"]["polypaint"] is True
+       and "Polypaint" in detail["preview"]["warning"], str(detail["preview"]))
+status, preview_bytes, _ = pp.call(f"/api/assets/{made['id']}/preview")
+expect("... and the preview really has vertex colours (COLOR_0)",
+       status == 200 and b"COLOR_0" in preview_bytes[:4000], str(status))
+status, plain = pp.json("/api/assets?filename=plain.obj", method="POST",
+                        body=b"v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n")
+status, plain_detail = pp.json(f"/api/assets/{plain['id']}")
+expect("a plain .obj is drawn as before", plain_detail["preview"]["polypaint"] is False)
+status, refused = pp.json(f"/api/assets/{plain['id']}/bake-polypaint", method="POST", body={})
+expect("baking is refused at once for a file with no Polypaint, in words",
+       status == 400 and "no ZBrush Polypaint" in refused.get("error", ""), str(refused)[:160])
+import importlib  # noqa: E402
+def _bake_ready():
+    try:
+        for _name in ("fast_simplification", "xatlas", "scipy.spatial"):
+            importlib.import_module(_name)
+        return True
+    except Exception:                     # missing, or (3.9) installed but broken
+        return False
+
+
+if _bake_ready():
+    status, queued = pp.json(f"/api/assets/{made['id']}/bake-polypaint", method="POST",
+                             body={"triangles": 300, "texture": 256})
+    expect("a bake is queued as a job", status == 202 and queued["job"]["kind"] == "bake", str(queued)[:200])
+    job = queued["job"]
+    deadline = time.time() + 120
+    while job["state"] in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.3)
+        job = pp.json(f"/api/jobs/{job['id']}")[1]
+    baked = (job.get("result") or {}).get("asset") or {}
+    expect("the bake adds a new game asset to the library",
+           job["state"] == "done" and baked.get("filename") == "SM_Ball_LP.glb"
+           and baked.get("kind") == "mesh" and 0 < baked.get("triangle_count", 0) <= 300,
+           str(job)[:300])
+    status, library = pp.json("/api/assets")
+    expect("... beside the sculpt, which is kept",
+           {row["filename"] for row in library["assets"]} >= {"SM_Ball_HP.obj", "SM_Ball_LP.glb"})
+else:
+    print("  skip baking: pip install fast-simplification xatlas scipy")
+pp_server.shutdown()
+pp_server.server_close()
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

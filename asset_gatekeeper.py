@@ -2338,6 +2338,37 @@ def _mesh_read_error(exc: BaseException) -> str:
     return f"could not read mesh ({_describe_unexpected(exc)})"
 
 
+def obj_colour_source(path: Path) -> str:
+    """How an .obj carries colour without a texture: 'polypaint', 'vertex colours' or ''.
+
+    ZBrush writes Polypaint as ``#MRGB`` comment lines, which Houdini and Blender
+    read and Maya, 3ds Max and three.js skip, so a sculpt looked blue in one and
+    grey in the next (9 Nov 2026). Other exporters put r g b on each ``v`` line.
+    Read in chunks: a sculpt can be 90 MB.
+    """
+    try:
+        with open(path, "rb") as handle:
+            carry = b"\n"
+            first_vertex_checked = False
+            while True:
+                chunk = handle.read(16 * 1024 * 1024)
+                if not chunk:
+                    return ""
+                data = carry + chunk
+                if b"\n#MRGB " in data:
+                    return "polypaint"
+                if not first_vertex_checked:
+                    start = data.find(b"\nv ")
+                    end = data.find(b"\n", start + 1) if start >= 0 else -1
+                    if end > 0:
+                        first_vertex_checked = True
+                        if len(data[start + 1:end].split()) >= 7:
+                            return "vertex colours"
+                carry = data[-8:]
+    except OSError:
+        return ""
+
+
 def load_trimesh_scene(source, **kwargs) -> object:
     """trimesh's scene loader, without the call trimesh marks as a compatibility
     wrapper: ``trimesh.load(force='scene')`` (9 Nov 2026 audit, B7)."""
@@ -4285,6 +4316,14 @@ class Gatekeeper:
             # from a Draco-compressed .glb (duck.glb) and reported no error.
             warnings.append("compressed with Draco: Unreal Engine 5.3 imports nothing from such a "
                             "file; re-export it without Draco compression for Unreal")
+        if path.suffix.lower() == ".obj":
+            colour = obj_colour_source(path)
+            if colour:
+                what = "ZBrush Polypaint" if colour == "polypaint" else "vertex colours"
+                warnings.append(
+                    f"its colour is {what} (one colour per vertex), not a texture: Maya, 3ds Max "
+                    "and most engines show it grey, and reducing the mesh loses it. Bake it into "
+                    f"a texture with: asset-gatekeeper \"{path.name}\" --bake-polypaint")
 
         try:
             influences = 0 if undecodable else max_bone_influences(path)
@@ -5232,6 +5271,65 @@ def _pool_check(path: Path) -> Verdict:
                        unreadable=True)
 
 
+def polypaint_module():
+    """engine/polypaint.py from a downloaded copy, or agk_suite.engine when installed."""
+    try:
+        from agk_suite.engine import polypaint            # type: ignore[import-not-found]
+        return polypaint
+    except ImportError:
+        engine = Path(__file__).resolve().parent / "engine"
+        if str(engine) not in sys.path:
+            sys.path.insert(0, str(engine))
+        import polypaint                                  # type: ignore[import-not-found]
+        return polypaint
+
+
+def bake_defaults(budget: "Budget") -> tuple[int, int]:
+    """(triangles, texture edge) a baked asset should aim for under ``budget``."""
+    triangles = max(100, min(budget.max_triangles, 30_000))
+    edge = 16
+    while edge * 2 <= min(budget.max_texture_edge, 2048):
+        edge *= 2
+    return triangles, edge
+
+
+def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace) -> int:
+    """--bake-polypaint: make a game asset from a Polypaint .obj, then gate it."""
+    if not source.is_file() or source.suffix.lower() != ".obj":
+        LOG.error("--bake-polypaint takes one .obj file with ZBrush Polypaint or vertex colours")
+        return 2
+    triangles, edge = bake_defaults(budget)
+    # The defaults follow the folder's rules, so a strict rules.toml makes a tiny
+    # asset; say so, with the flag that overrides it.
+    if not args.bake_texture and edge < 512:
+        LOG.warning("the texture budget here is %d px, so the baked texture will be %dx%d; "
+                    "use --bake-texture 2048 for more detail", edge, edge, edge)
+    if not args.bake_triangles and triangles < 5000:
+        LOG.warning("the triangle budget here is %s, so the baked mesh will have %s triangles; "
+                    "use --bake-triangles 30000 for more", f"{triangles:,}", f"{triangles:,}")
+    triangles = args.bake_triangles or triangles
+    edge = args.bake_texture or edge
+    module = polypaint_module()
+    LOG.info("bake    %s -> %d triangles, %dx%d BaseColor", source.name, triangles, edge, edge)
+    try:
+        result = module.bake(source, source.parent, triangles=triangles, texture=edge,
+                             progress=lambda name, i, n: LOG.info("bake    %d/%d %s", i + 1, n, name))
+    except module.PolypaintError as exc:
+        LOG.error("%s", exc)
+        return 2
+    LOG.info("bake    wrote %s and %s in %s s (%s)", Path(result["mesh"]).name,
+             Path(result["texture"]).name, result["seconds"], result["note"])
+    gatekeeper = Gatekeeper(budget)
+    reporter = Reporter(color=not getattr(args, "no_color", False), root=source.parent,
+                        json_mode=bool(getattr(args, "json", False)))
+    failed = 0
+    for made in (Path(result["mesh"]), Path(result["texture"])):
+        verdict = gatekeeper.check(made)
+        reporter.report(verdict)
+        failed += 0 if verdict.passed else 1
+    return 1 if failed else 0
+
+
 def resolve_jobs(requested: Optional[int]) -> int:
     if requested is None:
         return 1
@@ -5978,6 +6076,17 @@ def build_parser() -> argparse.ArgumentParser:
                         default=None, help="also fail triangle-soup geometry (implies the audit)")
     parser.add_argument("--doctor", action="store_true",
                         help="check this machine can run the gate (deps, rules, ports), then exit")
+    parser.add_argument("--bake-polypaint", action="store_true", dest="bake_polypaint",
+                        help="turn an .obj with ZBrush Polypaint (or vertex colours) into a game "
+                             "asset beside it: a reduced .glb with UVs and a baked _BaseColor "
+                             "texture, sized to the folder's rules, then check it. The source "
+                             "is never changed. Needs: pip install \"asset-gatekeeper[bake]\"")
+    parser.add_argument("--bake-triangles", type=int, default=None, metavar="N",
+                        help="with --bake-polypaint: triangles to reduce to (default: the "
+                             "budget, at most 30,000)")
+    parser.add_argument("--bake-texture", type=int, default=None, metavar="PX",
+                        help="with --bake-polypaint: texture size, a power of two (default: "
+                             "the texture budget, at most 2048)")
     parser.add_argument("--suggest-naming", action="store_true", dest="suggest_naming",
                         help="read the names in <folder> and print a [naming] block for "
                              "rules.toml that fits them, then exit (nothing is written)")
@@ -6193,6 +6302,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if overrides:
         LOG.info("cli     overriding %s", ", ".join(overrides))
     LOG.info("budget  %s", describe_budget(budget))
+
+    if getattr(args, "bake_polypaint", False):
+        return run_bake_polypaint(root, budget, args)
 
     try:
         heal_settings = resolve_healer(watch_dir, args, remote_document)

@@ -84,6 +84,7 @@ import asset_gatekeeper as agk  # noqa: E402 - validated glTF/OBJ analysers
 import fbx_preview  # noqa: E402 - FBX -> .glb for the 3D preview
 import lod_manager  # noqa: E402 - the decimator
 import lod_shippable  # noqa: E402 - the decimator that keeps UVs, normals, materials
+import polypaint  # noqa: E402 - ZBrush Polypaint: preview it, bake it into a game asset
 from server import netguard  # noqa: E402 - shared Host policy with the dashboard
 
 DEFAULT_DB = "art_workstation.db"
@@ -542,7 +543,7 @@ def analyse_asset(path: Path, preview_dir: Path | None = None) -> dict:
     kind = asset_kind(path)
     suffix = path.suffix.lower()
     if preview_dir is not None:
-        for stale in ("preview.glb", "preview.png"):
+        for stale in ("preview.glb", "preview.png", POLYPAINT_MARKER):
             (preview_dir / stale).unlink(missing_ok=True)
 
     if kind == "texture":
@@ -634,6 +635,20 @@ def analyse_asset(path: Path, preview_dir: Path | None = None) -> dict:
     missing = missing_references(path)
     note = ("missing: " + ", ".join(missing[:5]) + (" ..." if len(missing) > 5 else "")) \
         if missing else ""
+    if suffix == ".obj" and preview_dir is not None:
+        colour = agk.obj_colour_source(path)
+        if colour:
+            # three.js skips ZBrush's #MRGB lines, so the sculpt drew grey while
+            # Houdini showed it in colour (9 Nov 2026): preview it as a .glb
+            # that carries the colours as COLOR_0.
+            try:
+                polypaint.write_preview_glb(polypaint.read_obj(path), preview_dir / "preview.glb")
+                (preview_dir / POLYPAINT_MARKER).write_text(colour, encoding="utf-8")
+                note = "; ".join(item for item in (
+                    f"{'ZBrush Polypaint' if colour == 'polypaint' else 'vertex colours'} "
+                    "shown through a converted .glb", note) if item)
+            except Exception as exc:                   # never block the upload over a preview
+                note = "; ".join(item for item in (f"colours not shown: {exc}", note) if item)
     return {
         "triangles": int(triangles),
         "vertices": vertices,
@@ -696,19 +711,63 @@ def asset_folder(data_dir: Path, asset: dict) -> Path | None:
     return None
 
 
+POLYPAINT_MARKER = "polypaint.txt"
+POLYPAINT_WARNING = (
+    "Shown with its ZBrush Polypaint (one colour per vertex) through a converted .glb. "
+    "Maya, 3ds Max and most engines show this file grey, and reducing the mesh loses the "
+    "colour: 'Bake into a game asset' makes a reduced .glb with UVs and a BaseColor texture.")
+
+
 def preview_of(data_dir: Path, asset: dict) -> dict:
-    """What the viewer should draw: {"type": "glb"|"image"|"", "converted": bool}."""
+    """What the viewer should draw: {"type": "glb"|"image"|"", "converted": bool,
+    "warning": str, "polypaint": bool}."""
     folder = asset_folder(Path(data_dir), asset)
     suffix = Path(asset["filename"]).suffix.lower()
     if folder is not None and (folder / PREVIEW_DIR / "preview.glb").is_file():
-        return {"type": "glb", "converted": True, "warning": fbx_preview.PREVIEW_WARNING}
+        if (folder / PREVIEW_DIR / POLYPAINT_MARKER).is_file():
+            return {"type": "glb", "converted": True, "warning": POLYPAINT_WARNING,
+                    "polypaint": True}
+        return {"type": "glb", "converted": True, "warning": fbx_preview.PREVIEW_WARNING,
+                "polypaint": False}
     if asset.get("kind") == "texture":
         if suffix in BROWSER_IMAGE_SUFFIXES:
-            return {"type": "image", "converted": False, "warning": ""}
+            return {"type": "image", "converted": False, "warning": "", "polypaint": False}
         if folder is not None and (folder / PREVIEW_DIR / "preview.png").is_file():
             return {"type": "image", "converted": True,
-                    "warning": f"{suffix} converted to PNG for preview"}
-    return {"type": "", "converted": False, "warning": ""}
+                    "warning": f"{suffix} converted to PNG for preview", "polypaint": False}
+    return {"type": "", "converted": False, "warning": "", "polypaint": False}
+
+
+def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
+                         triangles: int = 0, texture: int = 0, progress=None) -> dict:
+    """Make a game asset from an .obj with Polypaint: a new library asset holding
+    a reduced .glb with UVs and the colours baked into its BaseColor texture."""
+    asset = get_asset(db_path, asset_id)
+    stored = resolve_inside(Path(data_dir), asset["file_path"])
+    if stored is None or not stored.is_file() or stored.suffix.lower() != ".obj":
+        raise WorkstationError("only an .obj with ZBrush Polypaint or vertex colours can be baked",
+                               400)
+    if not agk.obj_colour_source(stored):
+        raise WorkstationError(f"{asset['filename']} has no Polypaint or vertex colours to bake",
+                               400)
+    with tempfile.TemporaryDirectory(prefix="agk_bake_") as scratch:
+        try:
+            result = polypaint.bake(stored, Path(scratch),
+                                    triangles=triangles or polypaint.DEFAULT_TRIANGLES,
+                                    texture=texture or polypaint.DEFAULT_TEXTURE,
+                                    progress=progress)
+        except polypaint.PolypaintError as exc:
+            raise WorkstationError(str(exc), 400) from exc
+        made = Path(result["mesh"])
+        payload = made.read_bytes()
+    # The library name follows the source: SM_Hero_HP_03.obj -> SM_Hero_LP_03.glb.
+    created = create_asset(db_path, data_dir, made.name, payload,
+                           uploader="polypaint bake", new_asset=True,
+                           provenance={"source": "polypaint bake"})
+    return {"asset": created, "triangles": result["triangles"],
+            "source_triangles": result["source_triangles"],
+            "texture_size": result["texture_size"], "seconds": result["seconds"],
+            "note": result["note"]}
 
 
 def asset_files(data_dir: Path, asset: dict) -> list[str]:
@@ -1968,15 +2027,17 @@ class JobRunner:
         self._thread = threading.Thread(target=self._work, name="lod-jobs", daemon=True)
         self._thread.start()
 
-    def submit(self, asset_id: int, work) -> dict:
+    def submit(self, asset_id: int, work, kind: str = "lods") -> dict:
         with self._lock:
             for job in self._jobs.values():
-                if job["asset_id"] == asset_id and job["state"] in ("queued", "running"):
+                if (job["asset_id"] == asset_id and job["kind"] == kind
+                        and job["state"] in ("queued", "running")):
+                    what = "LODs for" if kind == "lods" else "a bake of"
                     raise WorkstationError(
-                        f"LODs for asset {asset_id} are already being generated (job {job['id']})", 409)
+                        f"{what} asset {asset_id} is already running (job {job['id']})", 409)
             job_id = self._next
             self._next += 1
-            job = {"id": job_id, "asset_id": asset_id, "kind": "lods", "state": "queued",
+            job = {"id": job_id, "asset_id": asset_id, "kind": kind, "state": "queued",
                    "level": "", "step": 0, "steps": 0, "error": "", "result": None,
                    "created_at": utc_now()}
             self._jobs[job_id] = job
@@ -2469,6 +2530,7 @@ ASSET_PREVIEW_RE = re.compile(r"^/api/assets/(\d+)/preview$")
 ASSET_SIDECAR_RE = re.compile(r"^/api/assets/(\d+)/files/(.+)$")
 ASSET_SIDECARS_RE = re.compile(r"^/api/assets/(\d+)/files$")
 ASSET_LODS_RE = re.compile(r"^/api/assets/(\d+)/lods$")
+ASSET_BAKE_RE = re.compile(r"^/api/assets/(\d+)/bake-polypaint$")
 ASSET_LOD_FILE_RE = re.compile(r"^/api/assets/(\d+)/lods/(LOD[1-4])/file$")
 ASSET_LOD_RE = re.compile(r"^/api/assets/(\d+)/lods/(LOD[1-4])$")
 JOB_RE = re.compile(r"^/api/jobs/(\d+)$")
@@ -2611,8 +2673,8 @@ class Handler(BaseHTTPRequestHandler):
     def _permission_for(method: str, path: str) -> str:
         if method == "DELETE":
             return "delete" if ASSET_RE.match(path) else "edit"
-        if path in ("/api/assets",) or ASSET_SIDECARS_RE.match(path):
-            return "upload"
+        if path in ("/api/assets",) or ASSET_SIDECARS_RE.match(path) or ASSET_BAKE_RE.match(path):
+            return "upload"                  # a bake adds a new asset to the library
         if path == "/api/notes":
             return "note"
         if ASSET_REVIEW_RE.match(path):
@@ -3151,6 +3213,36 @@ class Handler(BaseHTTPRequestHandler):
                                 data_dir=server.data_dir)
                 self._publish("notes", asset_id)
                 self._json(201, note)
+                return
+
+            match = ASSET_BAKE_RE.match(path)
+            if match:
+                payload = self._json_body()
+                if payload is None:
+                    return
+                triangles, texture = payload.get("triangles", 0), payload.get("texture", 0)
+                for value, what in ((triangles, "triangles"), (texture, "texture")):
+                    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+                        raise WorkstationError(f"{what} must be a positive whole number", 400)
+                asset_id = int(match.group(1))
+                bakeable = get_asset(server.db_path, asset_id)      # 404 before queueing
+                stored = resolve_inside(Path(server.data_dir), bakeable["file_path"])
+                if stored is None or stored.suffix.lower() != ".obj" \
+                        or not agk.obj_colour_source(stored):
+                    raise WorkstationError(
+                        f"{bakeable['filename']} has no ZBrush Polypaint or vertex colours to "
+                        "bake (only an .obj that carries them can be baked)", 400)
+                db_path, data_dir = server.db_path, Path(server.data_dir)
+                publish = self._publish
+
+                def bake_work(progress, _asset=asset_id, _tris=triangles, _tex=texture):
+                    result = bake_polypaint_asset(
+                        db_path, data_dir, _asset, _tris, _tex,
+                        progress=lambda name, i, n: progress(name, i, n))
+                    publish("asset", result["asset"]["id"])
+                    return result
+                job = server.jobs.submit(asset_id, bake_work, kind="bake")
+                self._json(202, {"job": job})
                 return
 
             match = ASSET_LODS_RE.match(path)

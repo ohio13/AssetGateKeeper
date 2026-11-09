@@ -49,6 +49,11 @@ Every rule lives in a `rules.toml` next to the assets and can be changed per fol
 
 Naming is yours to define: pick one or more ready-made conventions (`unreal`, `unity`, `gltf`, `substance`, `godot`), add your own prefixes, endings or a pattern, or run `asset-gatekeeper <folder> --suggest-naming` to have the tool learn a `[naming]` block from the files you already have.
 
+Sculpts are covered too: an `.obj` whose colour is ZBrush Polypaint is flagged
+(most programs show it grey), and `asset-gatekeeper <file.obj> --bake-polypaint`
+turns it into a game asset: a reduced `.glb` with UVs and a baked BaseColor
+texture, sized to your budget.
+
 ## Where it runs
 
 | Where | How |

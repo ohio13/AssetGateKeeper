@@ -116,6 +116,7 @@ output { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12p
 .kv .k { color: var(--muted); }
 .kv .v { font-variant-numeric: tabular-nums; }
 .field { margin-top: 14px; display: grid; gap: 8px; }
+.field[hidden] { display: none; }   /* display:grid beat the hidden attribute */
 .field label { font-size: 12px; color: var(--muted); }
 select, input[type=text], textarea, #note-author, #review-name,
 #signin-user, #signin-password {

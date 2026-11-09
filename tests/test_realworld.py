@@ -482,6 +482,95 @@ try:
         expect("--suggest-naming prints the block and writes nothing",
                done.returncode == 0 and "[naming]" in done.stdout
                and not (folder / "rules.toml").exists(), done.stdout[-300:])
+
+    print("15. ZBrush Polypaint: recognised, explained, and baked into a game asset")
+    # 9 Nov 2026: a ZBrush sculpt showed blue in Houdini and grey in Maya, 3ds
+    # Max, Blender and the review page. Its colour was #MRGB comment lines.
+
+    def painted_sphere(rings=24, segments=48, style="mrgb"):
+        """A sphere: red top half, blue bottom half, as ZBrush (or xyzrgb) writes it."""
+        import math
+        vertices, colours, faces = [], [], []
+        for i in range(rings + 1):
+            theta = math.pi * i / rings
+            for j in range(segments):
+                phi = 2 * math.pi * j / segments
+                vertices.append((math.sin(theta) * math.cos(phi), math.cos(theta),
+                                 math.sin(theta) * math.sin(phi)))
+                colours.append((255, 0, 0) if math.cos(theta) > 0 else (0, 0, 255))
+        for i in range(rings):
+            for j in range(segments):
+                a, b = i * segments + j, i * segments + (j + 1) % segments
+                c, d = a + segments, b + segments
+                faces += [(a, c, b), (b, c, d)]    # two per quad; poles collapse one
+        lines = ["# File exported by ZBrush version 2022"]
+        for (x, y, z), (r, g, bl) in zip(vertices, colours):
+            lines.append(f"v {x:.6f} {y:.6f} {z:.6f}" + (f" {r / 255:.3f} {g / 255:.3f} {bl / 255:.3f}"
+                                                         if style == "xyzrgb" else ""))
+        if style == "mrgb":
+            groups = [f"ff{r:02x}{g:02x}{bl:02x}" for r, g, bl in colours]
+            for start in range(0, len(groups), 64):
+                lines.append("#MRGB " + "".join(groups[start:start + 64]))
+        lines += [f"f {a + 1} {b + 1} {c + 1}" for a, b, c in faces]
+        return "\n".join(lines) + "\n", len(faces)
+
+    paint = WORK / "polypaint"
+    paint.mkdir()
+    text, sphere_tris = painted_sphere()
+    (paint / "SM_Ball_HP.obj").write_text(text, encoding="utf-8")
+    (paint / "SM_Plain.obj").write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+    (paint / "SM_Inline.obj").write_text(painted_sphere(style="xyzrgb")[0], encoding="utf-8")
+    expect("ZBrush #MRGB lines are recognised as Polypaint",
+           agk.obj_colour_source(paint / "SM_Ball_HP.obj") == "polypaint")
+    expect("colours on the vertex lines are recognised too",
+           agk.obj_colour_source(paint / "SM_Inline.obj") == "vertex colours")
+    expect("an .obj without colours is left alone", agk.obj_colour_source(paint / "SM_Plain.obj") == "")
+    done = run_gate(paint / "SM_Ball_HP.obj")
+    expect("the gate explains that the colour is per vertex and how to bake it",
+           "ZBrush Polypaint" in done.stdout and "--bake-polypaint" in done.stdout, done.stdout[-400:])
+    expect("... and says nothing about a plain .obj",
+           "Polypaint" not in run_gate(paint / "SM_Plain.obj").stdout)
+    sys.path.insert(0, str(ROOT / "engine"))
+    import polypaint  # noqa: E402
+    read = polypaint.read_obj(paint / "SM_Ball_HP.obj")
+    expect("the colours are read one per vertex, in vertex order",
+           len(read.colours) == len(read.vertices) and tuple(read.colours[0]) == (1.0, 0.0, 0.0)
+           and tuple(read.colours[-1]) == (0.0, 0.0, 1.0), str(read.colours[:1]))
+    expect("bake output names follow the source: _HP becomes _LP",
+           polypaint.output_names(Path("SM_Hero_HP_03.obj"))
+           == ("SM_Hero_LP_03.glb", "T_Hero_LP_03_BaseColor.png"))
+    import importlib
+    def _bake_ready():
+        try:
+            for _name in ("fast_simplification", "xatlas", "scipy.spatial"):
+                importlib.import_module(_name)
+            return True
+        except Exception:                 # missing, or (3.9) installed but broken
+            return False
+    if _bake_ready():
+        done = run_gate(paint / "SM_Ball_HP.obj", "--bake-polypaint", "--bake-triangles", "600",
+                        "--bake-texture", "256")
+        # The source sphere's poles hold 96 collapsed triangles (as many ZBrush
+        # meshes do): the source fails for them, the baked asset must not.
+        expect("--bake-polypaint makes a game asset that passes the folder's rules",
+               done.returncode == 0 and "PASSED  SM_Ball_LP.glb" in done.stdout
+               and "PASSED  T_Ball_LP_BaseColor.png" in done.stdout, done.stdout[-600:] + done.stderr[-300:])
+        from PIL import Image as _Image
+        baked = _Image.open(paint / "T_Ball_LP_BaseColor.png").convert("RGB")
+        import numpy as _np
+        _pixels = _np.asarray(baked).reshape(-1, 3).astype(int)
+        histogram = {"red": int(((_pixels[:, 0] > 200) & (_pixels[:, 2] < 60)).sum()),
+                     "blue": int(((_pixels[:, 2] > 200) & (_pixels[:, 0] < 60)).sum())}
+        expect("the texture carries the sculpt's colours (red and blue halves)",
+               histogram["red"] > 4000 and histogram["blue"] > 4000, str(histogram))
+        import trimesh as _trimesh
+        made = _trimesh.load(paint / "SM_Ball_LP.glb", force="mesh")
+        expect("the game asset is reduced to the budget and has UVs",
+               len(made.faces) <= 600 and getattr(made.visual, "uv", None) is not None,
+               str(len(made.faces)))
+        expect("the source is never changed", (paint / "SM_Ball_HP.obj").read_text(encoding="utf-8") == text)
+    else:
+        print("  skip baking: pip install fast-simplification xatlas scipy")
 finally:
     shutil.rmtree(WORK, ignore_errors=True)
 

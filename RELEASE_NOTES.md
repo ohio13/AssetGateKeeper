@@ -24,6 +24,14 @@ AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
     it), keeps it in `.agk\allowed_folders.txt` and restarts the page.
   * `tools\agk.bat` and `tools\upload.bat` pointed at a developer's own
     sandbox; they now find Python like the other launchers.
+* **ZBrush Polypaint (9 Nov).** A ZBrush sculpt looked blue in Houdini and grey
+  in Maya, 3ds Max, Blender and the review page: its colour was `#MRGB` comment
+  lines, one colour per vertex. The gate now says so in its verdict; the review
+  page draws such files in colour; and `--bake-polypaint` (or **Bake into a game
+  asset** on the review page) turns the sculpt into a game asset: a reduced
+  `.glb` with UVs and the colours baked into a BaseColor texture, sized to the
+  rules (30,000 triangles and 2048 px from a 1.08 M triangle sculpt in about 15 s).
+  Optional extra: `pip install "asset-gatekeeper[bake]"`.
 * **Full audit (9 Nov).** Fixed what a first-time user would meet:
   * With no project picked, a scan checked the AssetGatekeeper folder itself, so
     a new dashboard filled with the tool's own test files and screenshots marked
