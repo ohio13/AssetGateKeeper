@@ -93,7 +93,7 @@ def main() -> int:
             folder=options["folder"] or "charcter",      # deliberate typo: fuzzy check
             tag_budgets={"character": core.load_budget(None, preset="retro")},
             tag_mode=options["tag_mode"] or "suggest",
-            budget=budget)
+            budget=budget, **panel.structure_facts(budget))
         result["fixture"] = {
             "path": fixture,
             "triangles": triangles,
