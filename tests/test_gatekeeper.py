@@ -3470,6 +3470,10 @@ expect("... and a dated one with a matching tag goes ahead",
 _wf = (ROOT_MODULE_DIR / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 expect("the release workflow checks the tag before it builds",
        _wf.index("--check-tag") < _wf.index("python tools/build_release.py\n"))
+expect("the release runner installs what build_release.py builds with (setuptools 77+)",
+       'pip install --upgrade pip build "setuptools>=77"' in _wf)
+expect("a tag pushed again refreshes its release instead of failing",
+       "gh release view" in _wf and "--clobber" in _wf)
 expect("... and writes nothing beside the code before the build (it refuses a dirty tree)",
        "--notes notes.md" not in _wf and "--notes dist/notes.md" in _wf
        and _wf.index("python tools/build_release.py\n") < _wf.index("--notes dist/notes.md"))
