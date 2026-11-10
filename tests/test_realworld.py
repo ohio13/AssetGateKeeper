@@ -842,6 +842,69 @@ try:
         expect("the face is found where the eyes and lips are (front of the head)",
                centre is not None and 1.2 < centre[1] < 1.8 and centre[2] > 0.15
                and abs(centre[0]) < 0.15, str(centre))
+
+        # What the test sculpt did to the first two versions: a head sculpted far denser
+        # than the body, a suit with coarse two-colour panel lines (the first
+        # version's busiest edges, so the "face" landed on her chest) and a
+        # blue collar ring round the neck (colour spread per cell pulled the
+        # centre down to her chin). Counting colours per cell finds the face.
+        def hero_like():
+            import math
+            vertices, colours, faces = [], [], []
+
+            def sphere(cx, cy, cz, rx, ry, rz, rings, segments, paint):
+                base = len(vertices)
+                for i in range(rings + 1):
+                    theta = math.pi * i / rings
+                    for j in range(segments):
+                        phi = 2 * math.pi * j / segments
+                        x, y = math.sin(theta) * math.cos(phi), math.cos(theta)
+                        z = math.sin(theta) * math.sin(phi)
+                        vertices.append((cx + rx * x, cy + ry * y, cz + rz * z))
+                        colours.append(paint(x, y, z))
+                for i in range(rings):
+                    for j in range(segments):
+                        a = base + i * segments + j
+                        b = base + i * segments + (j + 1) % segments
+                        faces.extend([(a, a + segments, b), (b, a + segments, b + segments)])
+
+            def suit(x, y, z):
+                return (40, 70, 200) if int((y + 1) * 8) % 2 else (120, 170, 240)
+
+            def blend(base, paint, inside):
+                return tuple(round(p * inside + q * (1 - inside)) for p, q in zip(paint, base))
+
+            def soft(distance, radius, width=0.06):
+                """1 inside, 0 outside, a soft airbrushed edge as Polypaint has."""
+                return min(1.0, max(0.0, (radius + width - distance) / (2 * width)))
+
+            def head(x, y, z):
+                if y < -0.7:                    # the suit's collar, a hard ring
+                    return (40, 70, 200) if y < -0.8 else (240, 240, 250)
+                colour = (230, 200, 90) if y > 0.55 else (235, 190, 160)
+                if z <= 0:
+                    return colour
+                for ex in (-0.35, 0.35):
+                    d = math.hypot(x - ex, y - 0.15)
+                    colour = blend(colour, (250, 250, 250), soft(d, 0.13))   # white
+                    colour = blend(colour, (60, 140, 90), soft(d, 0.08))     # iris
+                    colour = blend(colour, (10, 10, 10), soft(d, 0.04))      # pupil
+                colour = blend(colour, (110, 80, 40), soft(abs(y - 0.33), 0.02)
+                               * soft(abs(abs(x) - 0.35), 0.15))             # brows
+                return blend(colour, (200, 30, 40), soft(abs(y + 0.4), 0.05)
+                             * soft(abs(x), 0.28))                           # lips
+
+            sphere(0, 0.6, 0, 0.6, 0.45, 0.55, 40, 80, suit)
+            sphere(0, -1.4, 0, 0.45, 1.2, 0.4, 60, 60, suit)
+            sphere(0, 1.55, 0, 0.32, 0.4, 0.34, 160, 320, head)
+            return (_np.array(vertices, float), _np.array(faces, _np.int64),
+                    _np.array(colours, _np.float32) / 255.0)
+
+        centre = polypaint._face_centre(*hero_like())
+        expect("a dense head, a striped suit and a collar ring: the face is still found "
+               "between the eyes and the lips (not the chest, not the chin)",
+               centre is not None and 1.3 < centre[1] < 1.75 and centre[2] > 0.15
+               and abs(centre[0]) < 0.15, str(centre))
     else:
         print("  skip baking: pip install fast-simplification xatlas scipy")
 finally:

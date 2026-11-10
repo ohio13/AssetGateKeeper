@@ -106,13 +106,19 @@ DETAIL_MIN_TEXTURE = 512
 #: a texel or two wide and smooth filtering would blend in the next island.
 NEAREST_TEXTURE = 128
 #: Face texture (second material): the region around the sculpt's densest colour
-#: detail (eyes, brows, lips) that gets a texture of its own. A sculpt edge whose
-#: two ends differ by FACE_EDGE_CONTRAST (0-1, largest channel) is a detail
-#: edge; their density is counted on a FACE_GRID-cell grid over the model; the
-#: region is the reduced surface nearest that centre, FACE_SHARE of its area
-#: (about a head on a full figure: the rule of nines gives the head 9%).
+#: detail (eyes, brows, lips) that gets a texture of its own: colours counted in
+#: small cells, summed on a FACE_GRID-cell grid over the model (_face_centre);
+#: the region is the reduced surface nearest that centre, FACE_SHARE of its
+#: area (about a head on a full figure: the rule of nines gives the head 9%).
+#: A sculpt edge whose two ends differ by FACE_EDGE_CONTRAST (0-1, largest
+#: channel) is a detail edge; with fewer than FACE_MIN_EDGES there is no face.
 FACE_EDGE_CONTRAST = 0.25
 FACE_GRID = 48
+#: Colours are counted in cells this many across the model (a test figure
+#: 12 units tall: 3 cm cells on a 1.7 m person), or 2.5 typical edges wide if
+#: that is larger, with each channel in FACE_COLOUR_LEVELS steps.
+FACE_FINE_GRID = 400
+FACE_COLOUR_LEVELS = 4
 FACE_SHARE = 0.10
 #: Fewer detail edges than this: no face to speak of, so one texture.
 FACE_MIN_EDGES = 200
@@ -948,34 +954,71 @@ def _face_centre(vertices, faces, colours, spatial=None):
     """Where the sculpt's colour detail is densest - on a character, the eyes,
     brows and lips - or None when it has too little detail to tell.
 
-    Counts the sculpt's edges whose two ends differ in colour (FACE_EDGE_CONTRAST)
-    on a coarse grid over the model, sums each cell with its 26 neighbours, and
-    returns the mean of the detail edges around the busiest cell."""
+    The model is cut into small cells (FACE_FINE_GRID across). A cell's detail
+    is how many different colours it holds (each channel in FACE_COLOUR_LEVELS
+    steps, a colour counting once it paints two vertices there), less one: a
+    plain cell scores 0, a seam between two colours 1, an eye (white, iris,
+    pupil, lashes, skin) 4 or 5. Those are summed per coarse cell (FACE_GRID
+    across) with the 26 neighbours, and the centre is the detail-weighted
+    middle of the busiest neighbourhood.
+
+    Tried on the test sculpt and dropped: counting sculpt edges whose ends differ in
+    colour put the face on her chest (ZBrush sculptors give a head far more
+    polygons, so each face edge changes colour only a little, while the suit's
+    coarse panel lines change a lot per edge); colour spread per cell put it on
+    her chin, pulled down by the suit collar's ring of blue against skin.
+
+    ``faces`` only gates the decision: a sculpt with fewer than FACE_MIN_EDGES
+    edges whose two ends differ in colour (FACE_EDGE_CONTRAST) has no detail
+    worth a texture of its own."""
     import numpy as np
     colours = np.asarray(colours, np.float32)
     if colours.max(initial=0.0) > 1.0:
         colours = colours / 255.0
     edges = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
     contrast = np.abs(colours[edges[:, 0]] - colours[edges[:, 1]]).max(axis=1)
-    detail = edges[contrast >= FACE_EDGE_CONTRAST]
+    enough = int((contrast >= FACE_EDGE_CONTRAST).sum()) >= FACE_MIN_EDGES
     del edges, contrast
-    if len(detail) < FACE_MIN_EDGES:
+    if not enough:
         return None
-    middles = (vertices[detail[:, 0]] + vertices[detail[:, 1]]) * 0.5
+    vertices = np.asarray(vertices, np.float64)
     low, high = vertices.min(axis=0), vertices.max(axis=0)
-    cell = float(np.max(high - low)) / FACE_GRID or 1.0
-    shape = np.maximum(np.ceil((high - low) / cell).astype(np.int64), 1) + 1
-    index = np.minimum(((middles - low) / cell).astype(np.int64), shape - 1)
-    flat = np.ravel_multi_index(index.T, shape)
-    grid = np.bincount(flat, minlength=int(np.prod(shape))).reshape(shape).astype(np.float64)
+    span = float(np.max(high - low)) or 1.0
+    # Cells a few edges wide at least, so a coarse sculpt still has several
+    # vertices in each (the median edge: a dense head outvotes a coarse body).
+    sample = faces[:: max(1, len(faces) // 200_000)]
+    edge = float(np.median(np.linalg.norm(vertices[sample[:, 0]] - vertices[sample[:, 1]],
+                                          axis=1))) if len(sample) else 0.0
+    fine = max(span / FACE_FINE_GRID, 2.5 * edge)
+    cells = np.floor((vertices - low) / fine).astype(np.int64)
+    shape = cells.max(axis=0) + 1
+    cell = np.ravel_multi_index(cells.T, shape)
+    del cells
+    levels = FACE_COLOUR_LEVELS
+    step = np.minimum((colours * levels).astype(np.int64), levels - 1)
+    colour = (step[:, 0] * levels + step[:, 1]) * levels + step[:, 2]
+    pairs, counts = np.unique(cell * levels ** 3 + colour, return_counts=True)
+    del cell, step, colour
+    keys, kinds = np.unique(pairs[counts >= 2] // levels ** 3, return_counts=True)
+    detail = (kinds - 1).astype(np.float64)
+    keep = detail > 0
+    keys, detail = keys[keep], detail[keep]
+    if not len(keys):
+        return None
+    middles = (np.array(np.unravel_index(keys, shape)).T + 0.5) * fine + low
+    coarse = span / FACE_GRID
+    cshape = np.maximum(np.ceil((high - low) / coarse).astype(np.int64), 1) + 1
+    index = np.minimum(((middles - low) / coarse).astype(np.int64), cshape - 1)
+    grid = np.bincount(np.ravel_multi_index(index.T, cshape), weights=detail,
+                       minlength=int(np.prod(cshape))).reshape(cshape)
     try:
         from scipy import ndimage
         grid = ndimage.uniform_filter(grid, size=3, mode="constant")
     except ImportError:                      # pragma: no cover - scipy comes with the bake
         pass
-    busiest = np.array(np.unravel_index(int(np.argmax(grid)), shape))
+    busiest = np.array(np.unravel_index(int(np.argmax(grid)), cshape))
     near = np.all(np.abs(index - busiest) <= 1, axis=1)
-    return middles[near].mean(axis=0) if near.any() else None
+    return (middles[near] * detail[near, None]).sum(axis=0) / detail[near].sum()
 
 
 def _face_region(centre, positions, faces, share: float = FACE_SHARE):

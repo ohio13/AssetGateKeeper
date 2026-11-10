@@ -9,10 +9,16 @@ AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
   texture and her face got about 6 x 6 texels: the eyes were dark blobs. The
   bake can now give the face a texture of its own, the same size, as a second
   material (`T_<name>_Face_BaseColor.png`; `_Face_Normal.png` with a normal
-  map), packed separately. The face is found where the sculpt's colour detail is
-  densest (edges whose ends differ in colour, counted on a grid over the model)
+  map), packed separately. The face is found where the sculpt holds the most
+  different colours in a small space (eyes: white, iris, pupil, lashes, skin)
   and is the reduced surface nearest it, a tenth of the area - on a full figure,
-  about the head. On with `--bake-preset n64` and the review page's **N64 style**
+  about the head. Checked on the developer's test sculpt: the face texture runs from the
+  hairline to the neck, and both eyes, the brows and the lips show at 64 px,
+  where one shared texture had blobs and no lips (13 s, gate passes under her
+  N64 rules). Two simpler detectors were tried on the test sculpt first and are kept out
+  by a test: counting colour-changing edges put the face on her chest (her head
+  has far more polygons, so each face edge changes colour only a little), and
+  colour spread per cell put it on her chin (the suit collar's ring). On with `--bake-preset n64` and the review page's **N64 style**
   (the **Face texture** box), off otherwise (`--bake-face-texture`,
   `--bake-no-face-texture`). Rules that allow one material slot keep one
   texture and the log says why; a sculpt with no colour detail keeps one too.
