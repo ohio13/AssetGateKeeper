@@ -103,4 +103,4 @@ Bug reports, sample files that break it, and pull requests are all welcome. It i
 
 ## Licence
 
-MIT. See [LICENSE](https://github.com/ohio13/AssetGateKeeper/blob/main/LICENSE).
+MIT. See [LICENSE](https://github.com/ohio13/AssetGateKeeper/blob/main/LICENSE). The 3D viewer ships three.js and the rules reader ships tomli, both MIT; see [THIRD_PARTY_NOTICES.md](https://github.com/ohio13/AssetGateKeeper/blob/main/THIRD_PARTY_NOTICES.md).

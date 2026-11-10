@@ -11,7 +11,7 @@ requires-python = ">=3.9"
 # SPDX string (setuptools 77+): the TOML table and the license classifier are
 # deprecated and would stop building in 2027.
 license = "MIT"
-license-files = ["LICENSE"]
+license-files = ["LICENSE", "THIRD_PARTY_NOTICES.md"]
 authors = [{ name = "AssetGatekeeper contributors" }]
 keywords = ["gamedev", "pipeline", "technical-art", "assets", "ci", "linter"]
 classifiers = [

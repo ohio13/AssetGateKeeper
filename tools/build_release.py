@@ -52,6 +52,7 @@ DROP_IN_FILES = (
     "QUICKSTART.md",
     "RELEASE_NOTES.md",
     "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "pyproject.toml",
     "MANIFEST.in",
     "setup.py",

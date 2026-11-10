@@ -9,6 +9,10 @@ AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
   plain note: an early alpha, built first as a test tool for private projects;
   try it on a copy or under version control; which parts write to your files;
   no warranty. Test fixtures no longer use the developer's PC and folder names.
+  THIRD_PARTY_NOTICES.md lists the two libraries copied in (three.js and
+  tomli, both MIT) and three.js's licence now sits beside it in
+  `server/static/vendor/`. Personal notes and AI-assistant files are
+  ignored by Git, and the public history was rebuilt without them.
 * **Long LOD jobs can be watched and stopped (10 Nov).** The developer left a Shippable
   LOD of the test sculpt running for 25 minutes and gave up: the page said "generating
   LOD1 (1 of 3)" the whole time, closing the page did not stop it, and a second
