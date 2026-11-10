@@ -110,7 +110,15 @@ def main(argv: list[str] | None = None) -> int:
             print("AssetGatekeeper: no staged assets")
         return 0
 
-    interpreter_problem = check_interpreter()
+    try:
+        interpreter_problem = check_interpreter()
+    except RuntimeError as exc:
+        # The script copied into .git/hooks finds no asset_gatekeeper.py beside
+        # it: say how to fix that instead of printing a traceback.
+        print(f"AssetGatekeeper: {exc}, or install the hook with "
+              "`python <AssetGatekeeper>/vcs_hooks/git_pre_commit.py --install`",
+              file=sys.stderr)
+        return 2
     if interpreter_problem:
         print(f"AssetGatekeeper: {interpreter_problem}", file=sys.stderr)
         return 2

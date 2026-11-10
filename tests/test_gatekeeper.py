@@ -2201,6 +2201,16 @@ else:
     only_text = run([sys.executable, str(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py")],
                     git_dir, {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
     expect("a commit with no assets is not gated", only_text.returncode == 0)
+    _copied = (git_dir / ".git" / "copied_pre_commit.py").resolve()     # copied, as people do
+    shutil.copy(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py", _copied)
+    shutil.copy(DROP / "crate_1mtl.obj", git_dir / "crate_copied.obj")
+    run(["git", "add", "crate_copied.obj"], git_dir)
+    _lost = run([sys.executable, str(_copied)], git_dir, {"AGK_GATEKEEPER": ""})
+    expect("a copied hook that cannot find the gate exits 2 saying how to install it, "
+           "not a traceback", _lost.returncode == 2 and "Traceback" not in _lost.stderr
+           and "--install" in _lost.stderr, (_lost.returncode, _lost.stderr[-300:]))
+    run(["git", "reset", "-q", "crate_copied.obj"], git_dir)
+    _copied.unlink()
 
     install = run([sys.executable, str(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py"),
                    "--install"], git_dir)

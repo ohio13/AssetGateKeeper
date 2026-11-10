@@ -23,13 +23,16 @@ find out in month three.
 vcs_hooks/git_pre_commit.py
 ```
 
-Install once per clone:
+Install once per clone, from inside it:
 
 ```
-copy "<AGK>\vcs_hooks\git_pre_commit.py" .git\hooks\pre-commit
+python "<AGK>\vcs_hooks\git_pre_commit.py" --install
 ```
 
-(or call it from `.git/hooks/pre-commit` if you already have a hook). It gates
+That writes a small `.git/hooks/pre-commit` that runs the script where it is
+(an existing hook is kept as `pre-commit.bak`). A plain copy of the script
+into `.git\hooks` cannot find `asset_gatekeeper.py` unless `AGK_GATEKEEPER`
+names it; call the script from your own hook if you already have one. It gates
 the staged files only, exits non-zero on problems, and prints one line per
 violation - which is what makes people keep it enabled rather than `--no-verify`-ing
 it forever.
