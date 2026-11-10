@@ -306,8 +306,18 @@ with ahs.open_db(PG_DSN) as connection:
 
 sqlite_report = ahs.analytics_report(sqlite_db, None, "90d", "month")
 pg_report = ahs.analytics_report(PG_DSN, None, "90d", "month")
+
+
+def _same_window(part):
+    """The report minus window.since: each backend's report reads the clock on
+    its own, so the two can be a second apart (macOS CI, 10 Nov 2026)."""
+    copy = dict(part)
+    copy["window"] = {k: v for k, v in part.get("window", {}).items() if k != "since"}
+    return copy
+
+
 expect("compliance is identical on both backends",
-       sqlite_report["compliance"] == pg_report["compliance"],
+       _same_window(sqlite_report["compliance"]) == _same_window(pg_report["compliance"]),
        f"{sqlite_report['compliance']} vs {pg_report['compliance']}")
 expect("the summary is identical", sqlite_report["summary"] == pg_report["summary"])
 expect("polygon growth is identical", sqlite_report["growth"] == pg_report["growth"])
