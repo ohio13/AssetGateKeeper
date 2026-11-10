@@ -3440,6 +3440,31 @@ _build = load_module("agk_build_release", "tools/build_release.py")
 expect("the release ZIP ships it", "Install_Extras.bat" in _build.DROP_IN_FILES)
 expect("the release is named by the version string alone, not the comment after it",
        _build.read_version() == agk.__version__, _build.read_version())
+
+print("Release workflow: the tag, the source and the notes agree (10 Nov 2026)")
+# .github/workflows/release.yml runs build_release.py --check-tag on the pushed
+# tag before it builds or publishes anything.
+for _tag, _norm in (("v0.1.0-alpha.1", "0.1.0a1"), ("0.1.0a1", "0.1.0a1"), ("v1.2.0-beta.3", "1.2.0b3"),
+                    ("v1.0.0rc1", "1.0.0rc1"), ("v1.0.0", "1.0.0"), ("v2.0.post1", "2.0.post1")):
+    expect(f"tag {_tag} reads as version {_norm}", _build.normalise_version(_tag) == _norm,
+           _build.normalise_version(_tag))
+_notes_text = ("# v0.2.0 (unreleased)\n\n* new\n\n# v0.1.0-alpha.1 (12 Nov 2026)\n\n* first\n\n"
+               "# v1.1.1 (internal)\n\n* old\n")
+_heading, _body = _build.release_notes("0.1.0a1", _notes_text)
+expect("the notes for a version are its own section only",
+       _heading == "v0.1.0-alpha.1 (12 Nov 2026)" and _body == "* first\n", repr((_heading, _body)))
+expect("a tag that is not the source's version is refused",
+       any("is not the version" in p for p in _build.check_tag("v9.9.9", "0.1.0a1")))
+expect("a release whose notes still say 'unreleased' is refused",
+       any("unreleased" in p for p in _build.check_tag("v0.2.0", "0.2.0", _notes_text)))
+expect("... and a dated one with a matching tag goes ahead",
+       _build.check_tag("v0.1.0-alpha.1", "0.1.0a1", _notes_text) == [])
+_wf = (ROOT_MODULE_DIR / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+expect("the release workflow checks the tag before it builds",
+       _wf.index("--check-tag") < _wf.index("python tools/build_release.py\n"))
+expect("PyPI publishing is opt-in and uses trusted publishing (no stored token)",
+       "vars.PUBLISH_TO_PYPI == 'true'" in _wf and "id-token: write" in _wf
+       and "password" not in _wf.replace("no password", ""))
 _pp = load_module("agk_polypaint_hint", "engine/polypaint.py")
 expect("the bake's install hint names the exact pip command",
        "-m pip install fast-simplification xatlas scipy" in _pp.install_hint())
