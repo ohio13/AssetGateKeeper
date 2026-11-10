@@ -3714,5 +3714,13 @@ if os.name != "nt":
     expect("a file name with ESC in it is printed escaped", _esc.returncode == 1
            and "\x1b" not in _esc_out and "SM_bad\\x1b[2J.obj" in _esc_out, _esc_out[-300:])
 
+_broken_rules = Path(_tempfile.mkdtemp(prefix="agk-badrules-"))
+(_broken_rules / "rules.toml").write_text("[mesh\nmax_triangles = 5\n", encoding="utf-8")
+_br = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(_broken_rules),
+                      "--once"], capture_output=True, text=True, encoding="utf-8", errors="replace")
+expect("a rules.toml that does not parse is called invalid rules, not server settings",
+       _br.returncode == 2 and "invalid rules:" in _br.stderr + _br.stdout
+       and "server settings" not in _br.stderr + _br.stdout, (_br.stderr + _br.stdout)[-300:])
+
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

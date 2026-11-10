@@ -2529,6 +2529,10 @@ def describe_rules(root: Path, rules_path: Optional[str | Path] = None,
     }
 
 
+class RulesFileError(ConfigError):
+    """The rules file could not be read or parsed at all."""
+
+
 def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:
     """Merge server settings: CLI flag > environment > ``[server]`` > nothing.
 
@@ -2540,7 +2544,13 @@ def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:
     rules_path = Path(args.rules).expanduser() if getattr(args, "rules", None) else root / RULES_FILENAME
     if rules_path.is_file():
         try:
-            from_file = ServerSettings.from_mapping(parse_rules(rules_path).get("server", {}))
+            document = parse_rules(rules_path)
+        except (ConfigError, ValueError, OSError) as exc:
+            # The file itself is broken: say "rules", not "server settings"
+            # (the [server] reader is merely the first to open it).
+            raise RulesFileError(f"{rules_path}: {exc}") from exc
+        try:
+            from_file = ServerSettings.from_mapping(document.get("server", {}))
         except (ConfigError, ValueError, OSError) as exc:
             raise ConfigError(f"{rules_path}: {exc}") from exc
     return replace(
@@ -8042,6 +8052,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         server = resolve_server(watch_dir, args)
+    except RulesFileError as exc:
+        LOG.error("invalid rules: %s", exc)
+        return 2
     except ConfigError as exc:
         LOG.error("invalid server settings: %s", exc)
         return 2
