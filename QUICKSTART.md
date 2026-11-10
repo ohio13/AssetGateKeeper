@@ -123,11 +123,19 @@ keep running.
 | read the server output | `agk-serve.bat logs --tail 60` |
 | start with the review screen too | `agk-serve.bat up --open both` |
 
-### Create the first account
+### Just me, or a first account
 
-On a brand-new install the browser lands on **"Create the first account"** —
-because a fresh dashboard has no users, and a zero-CLI install should not need a
-terminal for its first step.
+On a brand-new install the browser offers two ways in:
+
+- **Just me on this PC** — no account and no password. The rules can be changed
+  from this PC only; from any other machine the page says it is in solo mode and
+  lets nobody in. When a second person joins, click **Turn on accounts** at the
+  top of the page and choose your own name and password: you stay the director
+  and your earlier changes stay in the history under that name. Until then
+  `--add-admin` refuses, so the PC's owner can never be locked out.
+- **Create the first account** — for a team from day one, as below. A fresh
+  dashboard has no users, and a zero-CLI install should not need a terminal for
+  its first step.
 
 - The first account is always a **director** (whoever sets up the box is
   accountable for the budgets).

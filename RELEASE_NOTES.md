@@ -5,6 +5,15 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **No account for one person (10 Nov).** A solo install opened on "Create
+  the first account", a password nobody else would ever need. The first-run
+  page now offers **Just me on this PC** first: no account, no password, rules
+  changed from this PC only (any other machine is shown a page saying so and
+  gets nothing). **Turn on accounts** gives you a name and password when a second
+  person joins; you stay the director and the change history moves to your name.
+  `--add-admin` refuses while solo mode is on, so the PC's owner cannot be
+  locked out. Rule changes still need the page's CSRF token, so another website
+  cannot make them.
 * **Big models open quickly on the review page (10 Nov).** The test sculpt (1.08 million
   triangles) took about 70 seconds to appear, with nothing on screen. A model
   over 500,000 triangles now gets a lighter copy at upload (about 200,000

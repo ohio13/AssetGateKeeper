@@ -108,8 +108,12 @@ are stored, and served with the budget on `/api/rules`, so every
 
 ### Admin console
 
-First visit bootstraps the first account (the page is only reachable while zero
-accounts exist). Then:
+First visit offers **Just me on this PC** (solo mode: no account, no password,
+this machine only; requests from elsewhere get a page saying so) or bootstraps the
+first account (both only while zero accounts exist, only from loopback). Solo mode
+is one director account named `me` with a random password nobody knows, plus a
+per-run CSRF token; **Turn on accounts** (`/admin/accounts`) renames it and sets a
+real password. `--add-admin` refuses while solo mode is on. Then:
 
 * **accounts** - PBKDF2 (120,000 rounds), sessions expire after 12 hours;
 * **projects** - create/rotate tokens, set roots;

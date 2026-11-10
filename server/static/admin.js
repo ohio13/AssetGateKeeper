@@ -349,7 +349,10 @@ async function loadState(firstTime = true) {
   state.user = data.user;
   state.presets = data.presets || [];
   state.document = data.document || {};
-  $("who").textContent = `${data.user.username}  ${data.user.role}`;
+  $("who").textContent = data.solo ? "Solo mode: just you on this PC"
+    : `${data.user.username}  ${data.user.role}`;
+  $("accounts-on").hidden = !data.solo;
+  $("logout").hidden = !!data.solo;     // nothing to sign out of
   $("where").textContent = data.rules_path;
   $("scan-root").textContent = data.scan_root || "your project folder (pick it above)";
   $("project-path").value = data.project || data.scan_root || "";
