@@ -5,6 +5,16 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **Big models open quickly on the review page (10 Nov).** The test sculpt (1.08 million
+  triangles) took about 70 seconds to appear, with nothing on screen. A model
+  over 500,000 triangles now gets a lighter copy at upload (about 200,000
+  triangles, quadric reduction, Polypaint colours averaged onto it): 3 MB
+  instead of 20 MB for the test sculpt, about 4 seconds more at upload. The viewer shows
+  it first with a "Lighter preview" banner and a **Show full detail** button,
+  and every download has a progress bar, then "Building the 3D view (N
+  triangles)". Needs fast-simplification (Install_Extras.bat); without it the
+  full model loads with the bar. `GET /api/assets/<id>/preview?light=1`.
+  `engine/light_preview.py`.
 * **Say what was skipped (10 Nov).** A run used to ignore files it does not
   read without a word: the six `.jfif` reference images in the developer's test folder
   were never mentioned, so the folder looked checked. Each run now ends with

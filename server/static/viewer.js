@@ -13,6 +13,8 @@ import { ConvexGeometry } from "three/addons/geometries/ConvexGeometry.js";
 const $ = (id) => document.getElementById(id);
 
 const state = {
+  fullDetail: new Set(), // asset ids whose full model was asked for over the light copy
+  showingLight: false,
   assets: [],
   asset: null,          // the full /api/assets/<id> payload
   level: "source",
@@ -214,6 +216,7 @@ function clearModel() {
   state.originals.clear();
   $("materials").innerHTML = '<div class="empty">No 3D model loaded.</div>';
   showPreviewWarning("");
+  $("full-detail").hidden = true;
   hideTexture();
   setPinning(false);
   state.pinDraft = null;
@@ -221,9 +224,10 @@ function clearModel() {
   renderPins();
 }
 
-function showPreviewWarning(text) {
+function showPreviewWarning(text, kind = "converted") {
   const banner = $("preview-warning");
   banner.textContent = text;
+  banner.dataset.kind = kind;
   banner.hidden = !text;
 }
 
@@ -272,21 +276,81 @@ function frameObject(object) {
   grid.scale.setScalar(Math.max(radius / 4, 0.4));
 }
 
+/* Loading progress (10 Nov 2026). The developer's 1.08 million triangle test sculpt took
+ * about 70 seconds to appear with nothing on screen; now the bar says how much
+ * has arrived, then that the 3D view is being built. */
+function showLoadProgress(text, fraction) {
+  const box = $("load-progress");
+  if (!box) return;
+  if (text === null) { box.hidden = true; return; }
+  box.hidden = false;
+  $("load-progress-text").textContent = text;
+  const bar = $("load-progress-bar");
+  if (fraction === undefined || fraction === null) bar.removeAttribute("value");
+  else bar.value = Math.max(0, Math.min(1, fraction));
+}
+
+const megabytesOf = (bytes) => `${(bytes / 1048576).toFixed(bytes < 10485760 ? 1 : 0)} MB`;
+
+/* The response body as an ArrayBuffer, reporting progress as it arrives. */
+async function readWithProgress(response, label) {
+  const total = Number(response.headers.get("Content-Length")) || 0;
+  if (!response.body || !response.body.getReader || total < 1048576) {
+    return response.arrayBuffer();
+  }
+  const reader = response.body.getReader();
+  const chunks = [];
+  let received = 0;
+  let shown = 0;
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    chunks.push(value);
+    received += value.length;
+    if (received - shown > 262144 || received === total) {
+      shown = received;
+      showLoadProgress(`Downloading ${label}: ${megabytesOf(received)} of ${megabytesOf(total)}`,
+                       received / total);
+      $("load-progress").dataset.shown = "download";   // read by the browser test
+    }
+  }
+  const out = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) { out.set(chunk, offset); offset += chunk.length; }
+  return out.buffer;
+}
+
+/* Let the browser paint the progress text before a long parse blocks it. */
+const nextPaint = () => new Promise((resolve) =>
+  requestAnimationFrame(() => requestAnimationFrame(resolve)));
+
+const hasLight = (asset) => !!(asset && asset.preview && asset.preview.light);
+
 /* Fetch and parse one asset's model (or one of its LODs) into an Object3D,
- * without touching the scene: loadModel shows it, the version compare ghosts it. */
-async function fetchObject(asset, level) {
+ * without touching the scene: loadModel shows it, the version compare ghosts it.
+ * ``light`` asks for the server's lighter copy of a big model. */
+async function fetchObject(asset, level, light = false) {
   const assetId = asset.id;
   const lod = level === "source" ? null
     : ((asset && asset.lods) || []).find((item) => item.level === level);
+  const useLight = light && level === "source" && hasLight(asset);
   const fromPreview = level === "source" && previewType(asset) === "glb";
-  const path = level !== "source" ? `/api/assets/${assetId}/lods/${level}/file`
+  const path = useLight ? `/api/assets/${assetId}/preview?light=1`
+    : level !== "source" ? `/api/assets/${assetId}/lods/${level}/file`
     : fromPreview ? `/api/assets/${assetId}/preview` : `/api/assets/${assetId}/file`;
   const response = await api(path);
-  const buffer = await response.arrayBuffer();
+  const label = useLight ? "lighter preview" : level === "source" ? asset.filename : level;
+  const buffer = await readWithProgress(response, label);
+  const triangles = useLight ? asset.preview.light.triangles
+    : level === "source" ? asset.triangles : (lod && lod.triangles);
+  showLoadProgress(`Building the 3D view${triangles ? ` (${Number(triangles).toLocaleString()} triangles)` : ""}`,
+                   null);
+  await nextPaint();
   // The loader follows the stored file's real type. LODs used to be named
   // "<level>.gltf" whatever they were, so every LOD of an .obj failed with
   // "Unexpected token '#' ... is not valid JSON".
-  const name = level !== "source" ? (lod ? lod.file_path : `${level}.glb`)
+  const name = useLight ? "preview_light.glb"
+    : level !== "source" ? (lod ? lod.file_path : `${level}.glb`)
     : fromPreview ? "preview.glb" : asset.filename;
   // Relative references (rock.bin, textures/wood.png) resolve inside the
   // asset's folder on the server. An empty base path asked for /rock.bin.
@@ -314,9 +378,16 @@ async function fetchObject(asset, level) {
   return object;
 }
 
-async function loadModel(assetId, level) {
+async function loadModel(assetId, level, light = false) {
   if (!state.asset || state.asset.id !== assetId) return;
-  const object = await fetchObject(state.asset, level);
+  const useLight = light && level === "source" && hasLight(state.asset)
+    && !state.fullDetail.has(assetId);
+  let object;
+  try {
+    object = await fetchObject(state.asset, level, useLight);
+  } finally {
+    showLoadProgress(null);
+  }
   if (!state.asset || state.asset.id !== assetId) {
     disposeObject(object);                 // the user moved on while this loaded
     return;
@@ -324,8 +395,17 @@ async function loadModel(assetId, level) {
 
   clearModel();
   $("viewport-hint").style.display = "none";
-  showPreviewWarning(converted(state.asset)
-    ? (state.asset.preview.warning || "Converted preview, not the original file.") : "");
+  state.showingLight = useLight;
+  if (useLight) {
+    const light = state.asset.preview.light;
+    showPreviewWarning(`${Number(light.triangles).toLocaleString()} of `
+      + `${Number(light.source_triangles).toLocaleString()} triangles, shape and colour only, `
+      + "for a quick first look. The numbers on the right are the full model's.", "light");
+  } else {
+    showPreviewWarning(converted(state.asset)
+      ? (state.asset.preview.warning || "Converted preview, not the original file.") : "");
+  }
+  $("full-detail").hidden = !useLight;
   const lodRow = (state.asset.lods || []).find((lod) => lod.level === level);
   const keepsMaterials = level === "source" || (lodRow && lodRow.origin !== "uploaded"
                                                 && lodRow.engine === "shippable");
@@ -823,7 +903,7 @@ async function selectAsset(id) {
   showHint(`Loading ${asset.filename}`, "");
   $("status").textContent = `loading ${asset.filename}`;
   try {
-    await loadModel(asset.id, "source");
+    await loadModel(asset.id, "source", true);
     if (seq === state.selectSeq) $("status").textContent = asset.filename;
   } catch (error) {
     if (seq !== state.selectSeq) return;
@@ -894,7 +974,7 @@ function buildLodButtons() {
       Array.from(container.children).forEach((child) =>
         child.classList.toggle("active", child === button));
       try {
-        await loadModel(state.asset.id, item.level);
+        await loadModel(state.asset.id, item.level, true);
         $("status").textContent = `${state.asset.filename}  ${item.level === "source" ? "" : item.level}`;
       } catch (error) {
         clearModel();
@@ -948,7 +1028,7 @@ function renderLodList() {
         await api(`/api/assets/${asset.id}/lods/${lod.level}`, { method: "DELETE" });
         await refreshSelected();
         if (wasViewing && state.asset && previewable(state.asset)) {
-          await loadModel(state.asset.id, "source");          // back to the source
+          await loadModel(state.asset.id, "source", true);    // back to the source
         }
         $("status").textContent = `${lod.level} deleted`;
       } catch (error) { $("status").textContent = `error: ${error.message}`; }
@@ -1699,6 +1779,22 @@ async function uploadFiles(files) {
 
 $("lod-generate").addEventListener("click", () => { generateLods(); });
 $("bake-run").addEventListener("click", () => { bakePolypaint(); });
+$("full-detail").addEventListener("click", async () => {
+  if (!state.asset) return;
+  const id = state.asset.id;
+  state.fullDetail.add(id);
+  $("full-detail").hidden = true;
+  $("status").textContent = `loading the full ${state.asset.filename}`;
+  try {
+    await loadModel(id, "source");
+    if (state.asset && state.asset.id === id) $("status").textContent = state.asset.filename;
+  } catch (error) {
+    if (state.asset && state.asset.id === id) {
+      showPreviewWarning(`The full model could not be displayed: ${error.message}`, "error");
+      $("status").textContent = `${state.asset.filename}: could not display it`;
+    }
+  }
+});
 $("bake-preset").addEventListener("change", applyBakePreset);
 $("asset-delete").addEventListener("click", () => { deleteSelected(); });
 $("lod-upload").addEventListener("change", async (event) => {

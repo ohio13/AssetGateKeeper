@@ -85,6 +85,7 @@ import fbx_preview  # noqa: E402 - FBX -> .glb for the 3D preview
 import lod_manager  # noqa: E402 - the decimator
 import lod_shippable  # noqa: E402 - the decimator that keeps UVs, normals, materials
 import polypaint  # noqa: E402 - ZBrush Polypaint: preview it, bake it into a game asset
+import light_preview  # noqa: E402 - a lighter first look at a big model
 from server import netguard  # noqa: E402 - shared Host policy with the dashboard
 
 DEFAULT_DB = "art_workstation.db"
@@ -543,7 +544,8 @@ def analyse_asset(path: Path, preview_dir: Path | None = None) -> dict:
     kind = asset_kind(path)
     suffix = path.suffix.lower()
     if preview_dir is not None:
-        for stale in ("preview.glb", "preview.png", POLYPAINT_MARKER):
+        for stale in ("preview.glb", "preview.png", POLYPAINT_MARKER, light_preview.LIGHT_NAME,
+                      LIGHT_MARKER):
             (preview_dir / stale).unlink(missing_ok=True)
 
     if kind == "texture":
@@ -649,6 +651,8 @@ def analyse_asset(path: Path, preview_dir: Path | None = None) -> dict:
                     "shown through a converted .glb", note) if item)
             except Exception as exc:                   # never block the upload over a preview
                 note = "; ".join(item for item in (f"colours not shown: {exc}", note) if item)
+    if preview_dir is not None and triangles > light_preview.LIGHT_TRIANGLES:
+        note = "; ".join(item for item in (write_light_preview(path, preview_dir), note) if item)
     return {
         "triangles": int(triangles),
         "vertices": vertices,
@@ -657,6 +661,29 @@ def analyse_asset(path: Path, preview_dir: Path | None = None) -> dict:
         "kind": "mesh",
         "note": note,
     }
+
+
+LIGHT_MARKER = "light.json"
+
+
+def write_light_preview(path: Path, preview_dir: Path) -> str:
+    """For a model over LIGHT_TRIANGLES: .preview/preview_light.glb (about
+    LIGHT_TARGET triangles, colours kept) plus light.json saying how big each
+    is, so the viewer can show it first. Returns a note, or "" when no light
+    copy was made. Never raises: a first look is a convenience, not the asset."""
+    converted = preview_dir / "preview.glb"
+    source = converted if converted.is_file() else path
+    if source.suffix.lower() not in (".glb", ".gltf", ".obj"):
+        return ""
+    try:
+        made = light_preview.make(source, preview_dir / light_preview.LIGHT_NAME)
+    except Exception as exc:                      # never block the upload over a preview
+        return f"no lighter preview: {exc.__class__.__name__}: {exc}"
+    if not made:
+        return "" if light_preview.available() else (
+            "big model: install the bake extras (Install_Extras.bat) for a quicker first look")
+    (preview_dir / LIGHT_MARKER).write_text(json.dumps(made), encoding="utf-8")
+    return f"first shown as a lighter preview ({made['triangles']:,} triangles)"
 
 
 # --- #
@@ -723,6 +750,19 @@ def preview_of(data_dir: Path, asset: dict) -> dict:
     "warning": str, "polypaint": bool}."""
     folder = asset_folder(Path(data_dir), asset)
     suffix = Path(asset["filename"]).suffix.lower()
+    light = None
+    if folder is not None and (folder / PREVIEW_DIR / light_preview.LIGHT_NAME).is_file():
+        try:
+            light = json.loads((folder / PREVIEW_DIR / LIGHT_MARKER).read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            light = None
+    result = _preview_kind(folder, asset, suffix)
+    result["light"] = light if result["type"] == "glb" or (
+        light and suffix in (".glb", ".gltf", ".obj")) else None
+    return result
+
+
+def _preview_kind(folder: Path | None, asset: dict, suffix: str) -> dict:
     if folder is not None and (folder / PREVIEW_DIR / "preview.glb").is_file():
         if (folder / PREVIEW_DIR / POLYPAINT_MARKER).is_file():
             return {"type": "glb", "converted": True, "warning": POLYPAINT_WARNING,
@@ -2893,7 +2933,8 @@ class Handler(BaseHTTPRequestHandler):
 
         match = ASSET_PREVIEW_RE.match(path)
         if match:
-            self._serve_preview(int(match.group(1)))
+            self._serve_preview(int(match.group(1)),
+                                light=self._query().get("light", [""])[0] in ("1", "true"))
             return
 
         match = ASSET_SIDECAR_RE.match(path)
@@ -3036,11 +3077,16 @@ class Handler(BaseHTTPRequestHandler):
             raise WorkstationError("the stored file is missing", 410)
         self._send_file(path, download_name=asset["filename"])
 
-    def _serve_preview(self, asset_id: int) -> None:
+    def _serve_preview(self, asset_id: int, light: bool = False) -> None:
         server = self.server  # type: ignore[attr-defined]
         asset = get_asset(server.db_path, asset_id)
         preview = preview_of(Path(server.data_dir), asset)
         folder = asset_folder(Path(server.data_dir), asset)
+        if light:
+            if preview.get("light") and folder is not None:
+                self._send_file(folder / PREVIEW_DIR / light_preview.LIGHT_NAME)
+                return
+            raise WorkstationError("this asset has no lighter preview", 404)
         if preview["type"] == "glb" and folder is not None:
             self._send_file(folder / PREVIEW_DIR / "preview.glb")
             return

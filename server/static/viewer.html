@@ -121,6 +121,12 @@
         <div class="texture-caption" id="texture-caption"></div>
       </div>
       <div class="preview-warning" id="preview-warning" role="note" hidden></div>
+      <button class="chip full-detail" id="full-detail" type="button" hidden
+              title="Load every triangle of the model (can take a while for a sculpt)">Show full detail</button>
+      <div class="load-progress" id="load-progress" role="status" aria-live="polite" hidden>
+        <div id="load-progress-text">Loading</div>
+        <progress id="load-progress-bar" max="1"></progress>
+      </div>
       <div class="pins" id="pins"></div>
       <div class="version-choice" id="version-choice" role="dialog" aria-live="polite" hidden>
         <div id="version-choice-text"></div>

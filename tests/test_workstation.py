@@ -2006,6 +2006,83 @@ else:
 pp_server.shutdown()
 pp_server.server_close()
 
+print("30. a big model is first shown as a lighter preview (10 Nov 2026)")
+# The test sculpt (1.08 M triangles) took about 70 s to appear with nothing on screen.
+# The limits are lowered here so the test model stays small.
+_saved_limits = (aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET)
+aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET = 4000, 1000
+
+
+def _sphere_obj(rings, segments, painted):
+    verts, groups, faces = [], [], []
+    for i in range(rings + 1):
+        for j in range(segments):
+            t, q = _math.pi * i / rings, 2 * _math.pi * j / segments
+            verts.append(f"v {_math.sin(t) * _math.cos(q):.5f} {_math.cos(t):.5f} "
+                         f"{_math.sin(t) * _math.sin(q):.5f}")
+            groups.append("ffff0000" if _math.cos(t) > 0 else "ff0000ff")
+    for i in range(rings):
+        for j in range(segments):
+            a, b = i * segments + j, i * segments + (j + 1) % segments
+            faces += [f"f {a + 1} {a + segments + 1} {b + 1}",
+                      f"f {b + 1} {a + segments + 1} {b + segments + 1}"]
+    mrgb = (["#MRGB " + "".join(groups[k:k + 64]) for k in range(0, len(groups), 64)]
+            if painted else [])
+    return ("\n".join(verts + mrgb + faces) + "\n").encode()
+
+
+lp_db, lp_data = fresh("lightpreview")
+lp_server = aws.build_server("127.0.0.1", 0, lp_db, lp_data, quiet=True)
+threading.Thread(target=lp_server.serve_forever, daemon=True).start()
+lp = Client(lp_server.server_address[1])
+if aws.light_preview.available():
+    status, big = lp.json("/api/assets?filename=SM_Big_HP.obj", method="POST",
+                          body=_sphere_obj(50, 100, True))
+    status, detail = lp.json(f"/api/assets/{big['id']}")
+    light = detail["preview"].get("light") or {}
+    expect("a model over the limit gets a lighter copy, and the page is told its size",
+           light.get("source_triangles") == 10000 and 0 < light.get("triangles", 0) <= 1300
+           and "lighter preview" in detail.get("analyse_note", ""), str(detail["preview"])[:300])
+    status, light_bytes, _ = lp.call(f"/api/assets/{big['id']}/preview?light=1")
+    expect("... served at ?light=1, keeping the Polypaint colours",
+           status == 200 and light_bytes[:4] == b"glTF" and b"COLOR_0" in light_bytes[:4000],
+           str(status))
+    status, full_bytes, _ = lp.call(f"/api/assets/{big['id']}/preview")
+    expect("... while the full preview is still there for Show full detail",
+           status == 200 and len(full_bytes) > 3 * len(light_bytes), f"{len(full_bytes)} {len(light_bytes)}")
+    expect("... and the counts are the full model's", detail.get("triangle_count") == 10000,
+           str(detail.get("triangle_count")))
+    status, grey = lp.json("/api/assets?filename=SM_Grey.obj", method="POST",
+                           body=_sphere_obj(50, 100, False))
+    status, grey_detail = lp.json(f"/api/assets/{grey['id']}")
+    expect("a plain (uncoloured) big .obj gets one too",
+           (grey_detail["preview"].get("light") or {}).get("source_triangles") == 10000,
+           str(grey_detail["preview"])[:300])
+    status, _, _ = lp.call(f"/api/assets/{grey['id']}/preview?light=1")
+    expect("... and it is served", status == 200, str(status))
+else:
+    print("  skip lighter preview: pip install fast-simplification")
+status, small = lp.json("/api/assets?filename=SM_Small.obj", method="POST",
+                        body=_sphere_obj(10, 20, False))
+status, small_detail = lp.json(f"/api/assets/{small['id']}")
+expect("a small model has none", small_detail["preview"].get("light") is None,
+       str(small_detail["preview"]))
+status, _, _ = lp.call(f"/api/assets/{small['id']}/preview?light=1")
+expect("... and asking for one is a 404, not the full file", status == 404, str(status))
+_real_available = aws.light_preview.available
+aws.light_preview.available = lambda: False
+status, nolib = lp.json("/api/assets?filename=SM_NoLib.obj", method="POST",
+                        body=_sphere_obj(50, 100, False))
+aws.light_preview.available = _real_available
+status, nolib_detail = lp.json(f"/api/assets/{nolib['id']}")
+expect("without the reducer the full model loads, and the note says how to get a quicker look",
+       nolib_detail["preview"].get("light") is None
+       and "Install_Extras.bat" in nolib_detail.get("analyse_note", ""),
+       str(nolib_detail.get("analyse_note")))
+aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET = _saved_limits
+lp_server.shutdown()
+lp_server.server_close()
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

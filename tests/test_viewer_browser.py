@@ -11,6 +11,7 @@ Without them the suite says so and exits 0 (CI installs both and runs it).
 import http.server
 import io
 import json
+import math
 import shutil
 import socketserver
 import struct
@@ -788,6 +789,54 @@ with sync_playwright() as playwright:
            and "no materials" not in page.locator("#materials").inner_text(),
            page.locator("#materials").inner_text()[:200])
     page.uncheck("#lod-shippable")
+
+    print("8b. a big model: a lighter preview first, a progress bar, then full detail (10 Nov 2026)")
+    if aws.light_preview.available():
+        _saved = (aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET)
+        aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET = 20000, 3000
+        _rows, _segs = 120, 240
+        _v, _g, _f = [], [], []
+        for _i in range(_rows + 1):
+            for _j in range(_segs):
+                _t, _q = math.pi * _i / _rows, 2 * math.pi * _j / _segs
+                _v.append(f"v {math.sin(_t) * math.cos(_q):.5f} {math.cos(_t):.5f} "
+                          f"{math.sin(_t) * math.sin(_q):.5f}")
+                _g.append("ffff0000" if math.cos(_t) > 0 else "ff0000ff")
+        for _i in range(_rows):
+            for _j in range(_segs):
+                _a, _b = _i * _segs + _j, _i * _segs + (_j + 1) % _segs
+                _f += [f"f {_a + 1} {_a + _segs + 1} {_b + 1}",
+                       f"f {_b + 1} {_a + _segs + 1} {_b + _segs + 1}"]
+        _mrgb = ["#MRGB " + "".join(_g[k:k + 64]) for k in range(0, len(_g), 64)]
+        _big = ("\n".join(_v + _mrgb + _f) + "\n").encode()
+        ids["big"] = aws.create_asset(db, data, "SM_Big_HP.obj", _big)["id"]
+        aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET = _saved
+        page.goto(f"{BASE}/viewer?live=0&asset={ids['big']}")
+        page.wait_for_function("() => document.getElementById('status').textContent === 'SM_Big_HP.obj'",
+                               timeout=30000)
+        _banner = page.locator("#preview-warning")
+        expect("a big model opens as a lighter preview, and says so",
+               _banner.is_visible() and _banner.get_attribute("data-kind") == "light"
+               and "of 57,600 triangles" in _banner.inner_text(), _banner.inner_text())
+        expect("... with a Show full detail button, and the progress box gone",
+               page.locator("#full-detail").is_visible()
+               and not page.locator("#load-progress").is_visible())
+        expect("... while the numbers on the right are the full model's",
+               "57,600" in page.locator("body").inner_text())
+        page.click("#full-detail")
+        page.wait_for_function("() => document.getElementById('status').textContent === 'SM_Big_HP.obj'"
+                               " && document.getElementById('full-detail').hidden", timeout=30000)
+        expect("Show full detail loads the whole model, with a download bar on the way",
+               _banner.get_attribute("data-kind") == "converted"
+               and "Polypaint" in _banner.inner_text()
+               and page.locator("#load-progress").get_attribute("data-shown") == "download"
+               and not page.locator("#load-progress").is_visible(), _banner.inner_text()[:120])
+        page.locator('#lod-buttons [data-level="source"]').click()
+        page.wait_for_timeout(500)
+        expect("... and Source stays at full detail once asked for",
+               page.locator("#full-detail").is_hidden(), "")
+    else:
+        print("  skip: pip install fast-simplification")
 
     print("9. deleted while open")
     page.goto(f"{BASE}/viewer?asset={ids['embedded']}")
