@@ -283,6 +283,121 @@ format = "astc8x8"
   budget on them. `max_texture_mb` and `max_mesh_mb` can be relaxed per asset
   with [[exceptions]].
 
+## [lod]
+
+LOD levels: does the asset ship its lower levels, and does each one actually
+save triangles? Off until a key is set.
+
+```toml
+[lod]
+min_levels = 3      # LOD0 + LOD1 + LOD2 at least (0 = off)
+max_ratio = 0.6     # each level at most 60% of the triangles of the one above (0 = off)
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `min_levels` | int | 0 (off) | the asset must have at least this many levels, **LOD0 included**. An asset with no LODs has 1 level and fails any value above 1, saying so: *no LODs (LOD0 only); at least 3 levels are required: add LOD1-LOD2 (export an LOD group)* |
+| `max_ratio` | float | 0 (off) | above 0 and at most 1: every level may keep at most this fraction of the triangles of the level above it. The failure names the level, its ratio and both counts, and the count to get under: *LOD2 of 'Tree' keeps 0.80 of LOD1's triangles (80 of 100); at most 0.6 is allowed: reduce it to 60 triangles or fewer*. A level with no triangles fails too |
+
+Where the levels come from:
+
+| Format | Read as LODs | Who imports them that way |
+|---|---|---|
+| FBX | an **LOD group** (`LodGroup` node): its children in order are LOD0, LOD1, ... | Unreal ("Import Mesh LODs") and Unity |
+| FBX without an LOD group | objects named `<name>_LOD0`, `<name>_LOD1`, ... | Unity builds an LOD group from these; **Unreal does not** (it reads an FBX's LODs only from an LOD group), so the verdict carries a note saying so |
+| glTF / GLB | the `MSFT_lod` node extension: the node is LOD0 and its `ids` are LOD1, LOD2, ... (they sit outside the scene) | Babylon.js and other MSFT_lod readers |
+| glTF / GLB without MSFT_lod | nodes (or, for an unnamed node, meshes) named `<name>_LOD0`, `<name>_LOD1`, ... | the common export convention; we have not verified an engine that builds LODs from it on glTF import |
+| OBJ | nothing: an .obj cannot carry LODs, so `min_levels` above 1 fails it and says to export FBX | - |
+
+Details:
+
+* `_LOD<n>` matching ignores case and DCC namespaces (`props:Rock_LOD1`). A
+  plain `<name>` stands in for a missing `<name>_LOD0`. A chain stops at the
+  first missing number (`_LOD0`, `_LOD2` is one level), and a lone `_LOD0` is
+  a mesh without LODs.
+* A level's triangles are those of its node and everything under it, collision
+  meshes left out. The `max_triangles` budget is still LOD0's for an FBX LOD
+  group and for MSFT_lod (as before); objects that are LODs only by name are
+  all counted in it, as before.
+* A file with several LOD chains (several meshes, each with its own LOD group)
+  is judged by its weakest chain for `min_levels`, and every chain is checked
+  for `max_ratio`.
+* LODs kept as separate files (`Rock_LOD1.fbx` beside `Rock.fbx`) are not
+  joined up: each file is its own asset.
+* `--json` and telemetry carry `lod_levels` and `lod0_triangles`,
+  `lod1_triangles`, ... (for the chain with the fewest levels); the one-line
+  metric says `3 LODs` or `no LODs`. Nothing is added while `[lod]` is off.
+* `lod_min_levels` can be waived per asset with [[exceptions]] (`allow = 0`).
+
+## [collision]
+
+Unreal's collision convention: meshes named `UCX_` (convex hull), `UBX_` (box),
+`USP_` (sphere) or `UCP_` (capsule) followed by the name of the render mesh
+they belong to. Off until the table is there.
+
+```toml
+[collision]
+require = true            # a static mesh must carry collision (default false)
+name_must_match = true    # default true once [collision] exists
+convex = true             # default true once [collision] exists
+max_hulls = 8             # UCX_ hulls per asset (0 = off)
+max_hull_vertices = 32    # vertices per UCX_ hull (0 = off)
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `require` | bool | false | a static mesh must have at least one collision mesh. **Skinned meshes are exempt**: a skeletal mesh uses a physics asset, not UCX_ meshes. The failure gives the name to use: *no collision: a static mesh needs a UCX_ (or UBX_/USP_/UCP_) mesh named after its render mesh, such as UCX_Barrel_00* |
+| `name_must_match` | bool | true with a `[collision]` table | every collision mesh must be named after a render mesh, or Unreal ignores it on import and the asset ships without that collision. The failure names the stray mesh and the render meshes it could be named after |
+| `convex` | bool | true with a `[collision]` table | every `UCX_` hull must be convex. Unreal does not refuse a concave one: it silently replaces it with its convex hull, filling the dent (a U-shaped hull becomes a block). A flat `UCX_` (a single plane) fails too: there is no volume to build a hull from |
+| `max_hulls` | int | 0 (off) | at most this many `UCX_` hulls per asset (boxes, spheres and capsules are cheap and not counted). Each hull is a physics body to test |
+| `max_hull_vertices` | int | 0 (off) | at most this many distinct vertices per `UCX_` hull; 0, or 4 and more (a hull needs 4 corners) |
+
+The name rule, as Unreal's FBX importer reads it: `UCX_<RenderMeshName>`, or
+`UCX_<RenderMeshName>_<suffix>` where the suffix is anything after a last
+underscore, by convention a two-digit number (Unreal's documentation:
+`UCX_Tree_01_00` and `UCX_Tree_01_01` both belong to `Tree_01`). Names
+compare exactly, **case included**, as Unreal compares them; a DCC namespace is
+ignored. The render meshes are the LOD0 meshes, because Unreal imports collision
+for LOD0 only: in an FBX LOD group the hull is named after the LOD0 mesh
+(Unreal's own export writes `UCX_cube_LOD0` for `cube_LOD0`). In a glTF a hull
+may be named after the render node or its mesh.
+
+How convex is tested: for every face of the hull, all of the hull's vertices
+must lie on one side of that face's plane (the test does not depend on which
+way faces are wound). A vertex further than **1% of the hull's bounding-box
+diagonal** on the wrong side makes it concave: a 1.7 cm dent in a 1 m crate.
+Smaller deviations, such as a slightly bent quad, change nothing in play and
+pass. A hull thinner than 0.01% of its diagonal is flat. The failure gives the
+dent as a share of the hull's size and how to fix it (split it into convex
+pieces, `UCX_<mesh>_00`, `_01`, ...). Boxes, spheres and capsules (`UBX_`,
+`USP_`, `UCP_`) are fitted to their vertices by Unreal and are not tested.
+
+Choosing `max_hull_vertices`: PhysX (Unreal 4) cooks a convex hull of at most
+255 vertices, so 255 is the hard ceiling for a UCX_ hull that must survive
+import unchanged. Unreal 5's physics (Chaos) has no limit documented; large
+hulls are reported to be simplified on import. Unreal's own convex
+decomposition tool makes hulls of up to 32 vertices (16 by default), and that
+is a good budget for hand-made hulls: 8 for a box, 16 to 32 for a rounded
+shape. We have not measured Chaos's behaviour ourselves.
+
+What is read, and what is not:
+
+| Format | Collision read from |
+|---|---|
+| FBX (binary and ASCII) | objects named `UCX_`/`UBX_`/`USP_`/`UCP_` (as before, they are never part of the triangle budget) |
+| glTF / GLB | nodes named so (or, for an unnamed node, meshes). Unreal before 5.4 imports such nodes as ordinary meshes (a bug Epic confirmed and fixed for 5.4); not verified here in an editor |
+| OBJ | not checked: with `require` on, an .obj gets a note that its collision was not checked, not a failure |
+
+* Draco-compressed hulls are counted but not tested for convexity (the
+  verdict says so); so are hulls made of strips or fans.
+* Unreal's other collision sources are not read: simple collision added in the
+  Static Mesh editor, "Auto Generate Collision" on import, and `MCDCX_` hulls.
+* `--json` and telemetry carry `collision_shapes`, `collision_hulls` and
+  `max_hull_vertices`; the metric adds `1 collision`. Nothing is added while
+  `[collision]` is absent.
+* `collision_require` can be waived per asset with [[exceptions]]
+  (`allow = false`).
+
 ## [[exceptions]]
 
 A named, owned, dated waiver: "the boss may use 80,000 triangles until alpha",
@@ -301,8 +416,8 @@ expires = 2026-12-01            # the last day it applies
 | Key | Meaning |
 |---|---|
 | `path` | case-insensitive glob relative to the folder holding `rules.toml` (the watch folder for remote rules); a bare file name (`boss.fbx`) matches that file in any folder |
-| `rule` | one of `max_triangles`, `max_texture_edge`, `max_material_slots`, `max_bone_influences`, `max_uv_channels`, `require_power_of_two`, `enforce_texture_naming`, `allow_degenerate`, `check_references`, `pbr_check` |
-| `allow` | a whole number for the counts, `true`/`false` for the switches |
+| `rule` | one of `max_triangles`, `max_texture_edge`, `max_material_slots`, `max_bone_influences`, `max_uv_channels`, `require_power_of_two`, `enforce_texture_naming`, `allow_degenerate`, `check_references`, `pbr_check`, `max_texture_mb`, `max_mesh_mb`, `lod_min_levels`, `collision_require` |
+| `allow` | a whole number for the counts (`lod_min_levels = 0` waives the LOD rule), a number of MB for the memory budgets, `true`/`false` for the switches (`collision_require = false`) |
 | `reason`, `owner`, `expires` | all required: a waiver nobody owns, with no end date, becomes the real budget |
 
 While it applies, the asset passes with the note *exception: max_triangles =

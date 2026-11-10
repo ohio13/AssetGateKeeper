@@ -974,6 +974,7 @@ Or one at a time (each ends with `FAILURES: none`):
 python tests/gen_test_assets.py           # the fixture corpus, first
 python tests/test_gatekeeper.py           # rules, tags, healing, backups/undo, hooks, audits, CLI
 python tests/test_formats.py              # FBX, glTF, OBJ, textures, DCC plugin metadata
+python tests/test_lod_collision.py        # [lod] and [collision] on FBX and glTF
 python tests/test_server.py               # AssetHealth: ingest, tenants, alerts, planner, SSE
 python tests/test_admin.py                # accounts, roles, CSRF, audit, rescan
 python tests/test_enterprise.py           # config, RBAC, OIDC/SAML, SQL translation, migrations
@@ -999,6 +1000,7 @@ tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
   test_gatekeeper.py             rules, tags, healing, backups/undo, hooks, audits, packaging
   test_formats.py                FBX, glTF, OBJ, textures, DCC plugin metadata
+  test_lod_collision.py          [lod] and [collision]: LOD levels, Unreal UCX_ collision
   test_server.py                 tenancy, ingest, alerts, throttle, SSE
   test_admin.py                  accounts, roles, CSRF, audit, rescan
   test_workstation.py            storage, FBX preview, LODs, collision, notes, heal, security
