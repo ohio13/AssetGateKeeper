@@ -5378,10 +5378,15 @@ def lod_collision_problems(path: Path, structure: Optional[dict], budget: "Budge
                         problems.append(f"LOD{level} of '{name}' has no triangles: re-export it "
                                         "or remove the level")
                     elif above and here / above > limit:
+                        # The largest count that passes: int(0.29 * 100) is 28 in
+                        # floating point, yet 29 / 100 passes a 0.29 limit.
+                        allowed = int(limit * above)
+                        while (allowed + 1) / above <= limit:
+                            allowed += 1
                         problems.append(
                             f"LOD{level} of '{name}' keeps {here / above:.2f} of LOD{level - 1}'s "
                             f"triangles ({here:,} of {above:,}); at most {limit:g} is allowed: "
-                            f"reduce it to {int(limit * above):,} triangles or fewer")
+                            f"reduce it to {allowed:,} triangles or fewer")
 
     if collision_on:
         if structure is None:
