@@ -984,6 +984,12 @@ for suffix in (".fbx", ".tga", ".jpg", ".jpeg"):
     expect(f"Perforce trigger gates {suffix}", suffix in p4_pre_submit.ASSET_SUFFIXES)
     expect(f"the gate tracks {suffix}", suffix in agk.TRACKED_SUFFIXES)
 push_hook = (ROOT / "vcs_hooks" / "git_pre_push.sh").read_text(encoding="utf-8")
+_push_suffixes = {"." + item for item in push_hook.split('ASSET_EXTENSIONS="', 1)[1].split('"', 1)[0].split()}
+for _hook, _suffixes in (("git pre-commit", git_pre_commit.ASSET_SUFFIXES),
+                         ("Perforce trigger", p4_pre_submit.ASSET_SUFFIXES),
+                         ("git pre-push", _push_suffixes)):
+    expect(f"{_hook} gates every format the gate checks (.dds, .tif, .exr, .webp, .ktx2 too)",
+           set(agk.TRACKED_SUFFIXES) <= set(_suffixes), sorted(set(agk.TRACKED_SUFFIXES) - set(_suffixes)))
 expect("git pre-push gates fbx/tga/jpg", " fbx " in push_hook and " tga " in push_hook and " jpg " in push_hook)
 
 print()

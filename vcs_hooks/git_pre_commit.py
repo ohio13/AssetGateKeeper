@@ -19,7 +19,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg"}
+# Every format the gate checks (asset_gatekeeper.TRACKED_SUFFIXES): a hook that
+# skipped .dds or .tif let an 8K texture through that CI then failed.
+ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg",
+                  ".tif", ".tiff", ".webp", ".dds", ".exr", ".ktx2"}
 HOOK_NAME = "pre-commit"
 
 

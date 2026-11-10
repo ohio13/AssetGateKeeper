@@ -24,7 +24,7 @@
 # Exit codes: 0 allow the push, 1 block it, 2 the hook itself is misconfigured.
 set -u
 
-ASSET_EXTENSIONS=" obj gltf glb fbx png tga jpg jpeg "
+ASSET_EXTENSIONS=" obj gltf glb fbx png tga jpg jpeg tif tiff webp dds exr ktx2 "
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
   echo "AssetGatekeeper: not inside a git repository" >&2
