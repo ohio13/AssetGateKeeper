@@ -97,7 +97,7 @@ Reported as: `tag 'charcter' is not a known tag; closest match is 'character'`.
 | `--list-presets` | print the ten shipped budgets |
 | `--doctor` | environment report: interpreter, packages, ports, rules |
 | `--suggest-naming` | learn a `[naming]` block from the names already in `<folder>`; prints it, writes nothing |
-| `<file.obj> --bake-polypaint [--bake-triangles N] [--bake-texture PX]` | make a game asset from an `.obj` whose colour is ZBrush Polypaint or vertex colours: a reduced `.glb` with UVs and a baked `T_..._BaseColor.png`, written beside it (`_HP` in the name becomes `_LP`), sized to the folder's budget (at most 30,000 triangles and 2048 px unless set), then checked. The source is never changed. Needs `fast-simplification`, `xatlas` and `scipy` (`pip install "asset-gatekeeper[bake]"`) |
+| `<file.obj> --bake-polypaint [--bake-triangles N] [--bake-texture PX]` | make a game asset from an `.obj` whose colour is ZBrush Polypaint or vertex colours: a reduced `.glb` with UVs and a baked `T_..._BaseColor.png`, written beside it (`_HP` in the name becomes `_LP`), sized to the folder's budget (at most 30,000 triangles and 2048 px unless set), then checked. The source is never changed. Needs `fast-simplification`, `xatlas` and `scipy` on Python 3.10+ (double-click `Install_Extras.bat`, or `pip install "asset-gatekeeper[bake]"`) |
 | `--version` | print the version |
 
 ### The JSON shape

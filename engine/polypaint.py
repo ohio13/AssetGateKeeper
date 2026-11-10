@@ -47,6 +47,7 @@ from __future__ import annotations
 import argparse
 import io
 import json
+import os
 import struct
 import sys
 import time
@@ -63,6 +64,16 @@ import asset_gatekeeper as agk  # noqa: E402 - shared detection, so the gate and
 #: The exact command for the Python that is running this, so a Rules.bat user
 #: installs into the interpreter the servers use, not some other one on PATH.
 BAKE_EXTRA = f'"{sys.executable}" -m pip install fast-simplification xatlas scipy'
+
+
+def install_hint() -> str:
+    """How this user installs the bake libraries: the double-click file in a
+    downloaded Windows copy (it picks the same Python as Rules.bat), else the
+    exact pip command for the running Python."""
+    if os.name == "nt" and (REPO_ROOT / "Install_Extras.bat").is_file():
+        return (f"double-click Install_Extras.bat in {REPO_ROOT}, "
+                f"or run in a Command Prompt: {BAKE_EXTRA}")
+    return BAKE_EXTRA
 DEFAULT_TRIANGLES = 30_000
 DEFAULT_TEXTURE = 2048
 #: Bake presets: what each one sets unless the caller says otherwise.
@@ -238,7 +249,7 @@ def _require_bake_libraries():
                 "baking needs Python 3.10 or newer") from exc
     if missing:
         raise PolypaintError(f"baking needs {', '.join(missing)}, which are not installed. "
-                             f"Install them with: {BAKE_EXTRA}")
+                             f"Install them with: {install_hint()}")
     return modules["fast_simplification"], modules["xatlas"], modules["scipy.spatial"]
 
 

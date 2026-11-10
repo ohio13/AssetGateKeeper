@@ -2980,7 +2980,7 @@ serve._python_processes = lambda: [
 strays = [pid for pid, _ in serve.stray_servers()] if os.name != "nt" else [11]
 expect("only servers started from this copy count as its strays", strays == [11], str(strays))
 serve._python_processes = _real_processes
-for name in ("Stop.bat", "Allow_Folder.bat", "Rules.bat", "agk-serve.bat"):
+for name in ("Stop.bat", "Allow_Folder.bat", "Rules.bat", "agk-serve.bat", "Install_Extras.bat"):
     text = (ROOT_MODULE_DIR / name).read_bytes()
     expect(f"{name} has Windows line endings", b"\r\n" in text and b"\n" not in text.replace(b"\r\n", b""))
     expect(f"{name} leaves its folder before pausing, so it never locks it",
@@ -3305,6 +3305,119 @@ expect("no control characters in the README (a stray \\a once hid in it)",
        not re.search(r"[\x00-\x08\x0b\x0c\x0e-\x1f]",
                      (ROOT_MODULE_DIR / "README.md").read_text(encoding="utf-8")
                      + (ROOT_MODULE_DIR / "docs" / "REFERENCE.md").read_text(encoding="utf-8")))
+
+
+print("Install_Extras.bat: one double-click for the libraries (10 Nov 2026)")
+extras = load_module("agk_install_extras", "tools/install_extras.py")
+_pyproject = (ROOT_MODULE_DIR / "pyproject.toml").read_text(encoding="utf-8")
+_toml = agk.tomllib.loads(_pyproject) if getattr(agk, "tomllib", None) else None
+if _toml is None:                      # pragma: no cover - every supported Python has one
+    import tomllib as _tl
+    _toml = _tl.loads(_pyproject)
+
+
+def _bare(requirement):
+    for mark in "<>=!~;[ ":
+        requirement = requirement.split(mark, 1)[0]
+    return requirement.lower()
+
+
+_declared = {_bare(r) for r in _toml["project"]["dependencies"]}
+_declared |= {_bare(r) for r in _toml["project"]["optional-dependencies"]["full"]}
+_listed = {p.name.lower() for p in extras.PACKAGES}
+expect("the installer lists exactly the packages pyproject.toml declares (gate + [full])",
+       _declared == _listed, f"pyproject only: {sorted(_declared - _listed)}, "
+       f"installer only: {sorted(_listed - _declared)}")
+_needed = {_bare(r) for r in _toml["project"]["dependencies"]}
+expect("what the gate needs is marked needed, extras are not",
+       {p.name.lower() for p in extras.PACKAGES if p.needed} == _needed)
+_ranges = {_bare(r): r.split(";")[0].strip() for r in
+           _toml["project"]["dependencies"] + _toml["project"]["optional-dependencies"]["full"]}
+expect("... with the same version ranges", all(_ranges[p.name.lower()].replace(" ", "")
+       == p.pip_name.replace(" ", "") for p in extras.PACKAGES),
+       str([(p.pip_name, _ranges.get(p.name.lower())) for p in extras.PACKAGES]))
+_bake = {p.name for p in extras.PACKAGES if p.min_python == (3, 10)}
+expect("the bake libraries are skipped on Python 3.9 and installed on 3.10+",
+       _bake == {"fast-simplification", "xatlas", "scipy"}
+       and not any(p.applies((3, 9)) for p in extras.PACKAGES if p.name in _bake)
+       and all(p.applies((3, 12)) for p in extras.PACKAGES if p.name in _bake))
+_tomli = next(p for p in extras.PACKAGES if p.name == "tomli")
+expect("tomli is only for Pythons without tomllib", _tomli.applies((3, 10))
+       and not _tomli.applies((3, 11)))
+_cmd = extras.pip_command([p for p in extras.PACKAGES if p.name in _bake], "py.exe")
+expect("the pip command uses the chosen Python and pip's own syntax",
+       _cmd[:4] == ["py.exe", "-m", "pip", "install"] and "scipy>=1.7" in _cmd, str(_cmd))
+expect("ranges are quoted so cmd does not treat < and > as redirection",
+       '"trimesh>=4.0,<6"' in extras.quoted(["x", "-m", "pip", "install", "trimesh>=4.0,<6"]))
+expect("a module that imports counts as working", extras.loads("json")[0] is True)
+_ok, _why = extras.loads("agk_no_such_module_here")
+expect("a missing one does not, with Python's own reason", not _ok and "agk_no_such" in _why, _why)
+_real_loads = extras.loads
+extras.loads = lambda module, python=None: (module not in ("xatlas", "trimesh"), "")
+_w, _m, _s = extras.survey((3, 12))
+expect("survey sorts working from missing", {p.name for p in _m} == {"xatlas", "trimesh"}
+       and "tomli" not in {p.name for p in _w + _m + _s}, str([p.name for p in _m]))
+_w, _m, _s = extras.survey((3, 9))
+expect("on 3.9 the bake is reported as skipped, not missing",
+       {p.name for p in _s} == _bake and "xatlas" not in {p.name for p in _m})
+import contextlib as _ctx
+import io as _io
+_out = _io.StringIO()
+with _ctx.redirect_stdout(_out):
+    _code = extras.main(["--check"])
+expect("--check with a needed package missing exits 1 and prints the command",
+       _code == 1 and "pip install" in _out.getvalue() and "MISSING" in _out.getvalue(),
+       _out.getvalue()[-300:])
+extras.loads = lambda module, python=None: (module != "xatlas", "")
+_out = _io.StringIO()
+with _ctx.redirect_stdout(_out):
+    _code = extras.main(["--check"])
+expect("--check with only an extra missing exits 0 (the gate still runs)", _code == 0,
+       _out.getvalue()[-300:])
+_calls = []
+_real_call = extras.subprocess.call
+extras.subprocess.call = lambda command: _calls.append(command) or 0
+_out = _io.StringIO()
+with _ctx.redirect_stdout(_out):
+    _code = extras.main(["--dry-run"])
+expect("--dry-run runs nothing", _code == 0 and not _calls and "xatlas" in _out.getvalue())
+extras.loads = lambda module, python=None: (True, "")
+with _ctx.redirect_stdout(_io.StringIO()):
+    _code = extras.main([])
+expect("with everything installed it installs nothing", _code == 0 and not _calls)
+_state = {"installed": False}
+extras.loads = lambda module, python=None: (module != "xatlas" or _state["installed"], "")
+extras.pip_available = lambda python=None: True
+extras.subprocess.call = lambda command: (_calls.append(command), _state.update(installed=True))[0] and 0
+with _ctx.redirect_stdout(_io.StringIO()):
+    _code = extras.main([])
+expect("it installs only what is missing, then checks it loads",
+       _code == 0 and len(_calls) == 1 and _calls[0][-1] == "xatlas>=0.0.9", str(_calls))
+_state["installed"] = False
+_calls.clear()
+extras.subprocess.call = lambda command: _calls.append(command) or 1
+_out = _io.StringIO()
+with _ctx.redirect_stdout(_out):
+    _code = extras.main([])
+expect("a failed install exits 1 and says what still does not load",
+       _code == 1 and "still do not load" in _out.getvalue() and "xatlas" in _out.getvalue())
+extras.subprocess.call = _real_call
+extras.loads = _real_loads
+_bat = (ROOT_MODULE_DIR / "Install_Extras.bat").read_bytes()
+expect("Install_Extras.bat finds Python the way Rules.bat does",
+       all(line in (ROOT_MODULE_DIR / "Rules.bat").read_bytes() for line in _bat.split(b"\r\n")
+           if b"PYEXE=" in line and b"%%" in line))
+expect("Install_Extras.bat runs the installer with its arguments",
+       b'tools\\install_extras.py" %*' in _bat)
+expect("Rules.bat points a user with missing libraries at it",
+       b"Install_Extras.bat" in (ROOT_MODULE_DIR / "Rules.bat").read_bytes())
+_build = load_module("agk_build_release", "tools/build_release.py")
+expect("the release ZIP ships it", "Install_Extras.bat" in _build.DROP_IN_FILES)
+_pp = load_module("agk_polypaint_hint", "engine/polypaint.py")
+expect("the bake's install hint names the exact pip command",
+       "-m pip install fast-simplification xatlas scipy" in _pp.install_hint())
+if os.name == "nt":
+    expect("... and on Windows, the double-click file", "Install_Extras.bat" in _pp.install_hint())
 
 print("The reference and the CLI agree")
 # The long manual moved from README.md to docs/REFERENCE.md for the alpha (the

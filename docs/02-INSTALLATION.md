@@ -42,12 +42,16 @@ a double-click:
 
 | File | Runs |
 |---|---|
-| `Rules.bat` | prompts for a folder, runs the gate once |
-| `agk-serve.bat` | starts AssetHealth + Art Workstation and prints the URLs |
+| `Install_Extras.bat` | installs the libraries below into the Python `Rules.bat` uses, then checks they load |
+| `Rules.bat` | starts AssetHealth + Art Workstation in the background and opens the admin page |
+| `Stop.bat` | stops everything `Rules.bat` started |
+| `Allow_Folder.bat` | lets the project picker open another folder |
+| `agk-serve.bat` | the same launcher with a menu (status, logs, urls) |
 | `start_workstation.bat` | Art Workstation only (port 8100) |
 | `start_asset_health.bat` | AssetHealth only (port 8080) |
 
-Install `trimesh` and `Pillow` into the same Python if you want mesh and texture
+`Install_Extras.bat` (or `python tools/install_extras.py` on macOS and Linux)
+does this for you. By hand: install `trimesh` and `Pillow` into the same Python for mesh and texture
 measurement, and `charset-normalizer`, without which trimesh cannot read an `.obj`
 or `.mtl` that is not UTF-8 (a cp1252 material name from an older Windows exporter):
 

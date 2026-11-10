@@ -48,7 +48,7 @@ jobs:
       # ("syntax error in forward annotation"), so the engine and tests are
       # linted here and the plugins are syntax-checked below instead.
       - name: Lint engine, server + tests
-        run: python -m pyflakes asset_gatekeeper.py healer.py notifier.py engine/lod_manager.py engine/fbx_preview.py engine/lod_shippable.py engine/polypaint.py tools/upload_assets.py tools/houdini_export_hook.py server/asset_health_server.py server/art_workstation_server.py vcs_hooks/p4_pre_submit.py vcs_hooks/git_pre_commit.py tests/test_gatekeeper.py tests/test_server.py tests/test_workstation.py tests/test_viewer_browser.py tests/test_admin.py tests/gen_test_assets.py tests/run_headless_integration.py tests/test_formats.py tests/test_realworld.py tools/certify.py plugins/unreal/import_gatekeeper.py plugins/unreal/agk_validator.py
+        run: python -m pyflakes asset_gatekeeper.py healer.py notifier.py engine/lod_manager.py engine/fbx_preview.py engine/lod_shippable.py engine/polypaint.py tools/install_extras.py tests/fresh_install.py tools/upload_assets.py tools/houdini_export_hook.py server/asset_health_server.py server/art_workstation_server.py vcs_hooks/p4_pre_submit.py vcs_hooks/git_pre_commit.py tests/test_gatekeeper.py tests/test_server.py tests/test_workstation.py tests/test_viewer_browser.py tests/test_admin.py tests/gen_test_assets.py tests/run_headless_integration.py tests/test_formats.py tests/test_realworld.py tools/certify.py plugins/unreal/import_gatekeeper.py plugins/unreal/agk_validator.py
 
       - name: Syntax-check DCC plugins
         run: python -m compileall -q plugins
@@ -137,6 +137,38 @@ jobs:
           site=$(/tmp/agk/bin/python -c "import sysconfig; print(sysconfig.get_paths()['purelib'])")
           if ls "$site"/*.db "$site"/.agk 2>/dev/null; then echo "data written into site-packages"; exit 1; fi
           test -f /tmp/home/.local/share/asset-gatekeeper/asset_health.db
+
+  # A first-time user: GitHub's "Download ZIP" (git archive), unzipped into an
+  # empty folder, on a Python with nothing installed, through the same files the
+  # README names - Install_Extras.bat, Rules.bat, a scan, a Polypaint bake,
+  # Stop.bat. On Windows the .bat files themselves run (10 Nov 2026).
+  fresh-install:
+    name: fresh install · ${{ matrix.os }} · py${{ matrix.python }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.12" }
+          - { os: ubuntu-latest, python: "3.9" }
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - name: Download ZIP, the way a user gets it
+        shell: bash
+        run: |
+          git -C src archive --format=zip --prefix=AssetGateKeeper-main/ -o "$RUNNER_TEMP/agk.zip" HEAD
+          mkdir "$RUNNER_TEMP/user"
+          python -c "import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$RUNNER_TEMP/agk.zip" "$RUNNER_TEMP/user"
+      - name: Install, start, scan, bake, stop
+        shell: bash
+        working-directory: ${{ runner.temp }}/user/AssetGateKeeper-main
+        run: python tests/fresh_install.py
 
   # The Art Workstation viewer in a real browser. The API suite passed for
   # months while the page showed the wrong model, refused embedded glTF

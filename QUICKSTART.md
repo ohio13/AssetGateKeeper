@@ -49,16 +49,19 @@ Python and tick the PATH box — nothing else in this manual can work without it
 1. Unzip `asset-gatekeeper-1.0.0.zip` to a stable place, e.g.
    `C:\Tools\asset-gatekeeper`. Avoid a folder that syncs while it runs
    (OneDrive/GDrive) — the databases live in there.
-2. Create a private environment so the two required packages don't touch your
-   system Python:
+2. Double-click **`Install_Extras.bat`**. It installs what the gate needs
+   (trimesh, Pillow and two small readers) plus the optional extras (the
+   Polypaint bake and faster folder watching) into the same Python `Rules.bat`
+   uses, then checks each one loads. Running it again changes nothing.
+   `Install_Extras.bat --check` only reports.
+
+   Prefer a private environment that does not touch your system Python? Make
+   one first; `Rules.bat` and `Install_Extras.bat` both use `.venv` when it exists:
 
    ```bat
    cd C:\Tools\asset-gatekeeper
    py -3 -m venv .venv
-   .venv\Scripts\python.exe -m pip install trimesh pillow
    ```
-
-   `Rules.bat` prefers `.venv` automatically when it exists.
 3. Optional, if you want the `asset-gatekeeper` command on your PATH:
 
    ```bat
@@ -98,8 +101,8 @@ In the install folder, double-click **`Rules.bat`**.
 It does this, in order:
 
 1. finds an interpreter (`.venv`, then `py -3`);
-2. checks `trimesh` and `Pillow` are importable, and if not tells you the exact
-   `pip install` line;
+2. checks `trimesh` and `Pillow` are importable, and if not points you at
+   `Install_Extras.bat` (and the exact `pip install` line);
 3. starts **both** servers as detached background processes — free ports are
    chosen automatically (8080/8100, else the next free one), output goes to
    `.agk\logs\`, the chosen ports to `.agk\ports.json`;
@@ -115,6 +118,7 @@ keep running.
 | re-open the page later | double-click `Rules.bat` again (it reuses the running services) |
 | stop everything | double-click `Stop.bat` |
 | let the page open another folder | double-click `Allow_Folder.bat` |
+| install or repair the libraries | double-click `Install_Extras.bat` |
 | see if they are running | double-click `agk-serve.bat` (or `agk-serve.bat status`) |
 | read the server output | `agk-serve.bat logs --tail 60` |
 | start with the review screen too | `agk-serve.bat up --open both` |
@@ -434,7 +438,8 @@ Back up by copying the `.db` files while the services are stopped. Deleting
 |---|---|
 | `Rules.bat` closes instantly | Python not on PATH, or `trimesh`/`Pillow` missing — run it from `cmd` once; it prints which, with the exact fix |
 | "Python was not found" | reinstall Python and tick **Add python.exe to PATH**, then `py -3 --version` |
-| `trimesh`/`Pillow` missing | `.venv\Scripts\python.exe -m pip install trimesh pillow` |
+| `trimesh`/`Pillow` missing | double-click `Install_Extras.bat` |
+| "baking needs fast-simplification, xatlas, scipy" | double-click `Install_Extras.bat` (the bake needs Python 3.10 or newer) |
 | browser opens a dead page | the services took longer than the browser; wait 2 s and refresh, or run `agk-serve.bat status` |
 | `cannot bind … in use` | another process owns the port; the message prints the find/stop commands. `--port-auto` moves instead of failing |
 | "that folder is outside the allowed roots" | double-click `Allow_Folder.bat` and choose it |

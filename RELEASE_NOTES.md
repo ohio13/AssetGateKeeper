@@ -5,6 +5,20 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **Install_Extras.bat (10 Nov).** One double-click installs the libraries
+  into the same Python `Rules.bat` uses: what the gate needs (trimesh, Pillow,
+  charset-normalizer, DracoPy) if anything is missing, plus the Polypaint bake
+  (fast-simplification, xatlas, scipy; Python 3.10+) and watchdog. Only missing
+  or broken packages are installed, each one is then imported to prove it
+  loads, and `--check` only reports. Before this, the review page printed a pip
+  command and a Windows user had to know which Python it meant and type it in
+  cmd, not inside Python. `Rules.bat` and the bake's "needs ..." message now
+  point at it; on macOS and Linux it is `python tools/install_extras.py`.
+* **A first-time user's install, in CI (10 Nov).** A new `fresh-install` job
+  unzips GitHub's "Download ZIP" into an empty folder on a Python with nothing
+  installed (Windows 3.12, Ubuntu 3.12 and 3.9) and does what the README says:
+  Install_Extras.bat, Rules.bat, a scan, a Polypaint bake (and the N64 preset),
+  Stop.bat. On Windows the `.bat` files themselves run. `tests/fresh_install.py`.
 * **Polypaint bake, second pass (10 Nov).** The first bake of the 1.08 M
   triangle test sculpt at 15,000 triangles was "pretty good, needs fine tuning
   around the face": eyebrows came out as hollow outlines and the eyeliner

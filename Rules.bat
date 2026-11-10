@@ -57,7 +57,7 @@ exit /b 1
 :nodeps
 echo.
 echo   Python is here, but trimesh/Pillow are missing (the gate needs both).
-echo   Fix it with:
+echo   Fix it: double-click Install_Extras.bat in this folder, or run
 echo.
 echo       "%PYEXE%" -m pip install trimesh pillow
 echo.
