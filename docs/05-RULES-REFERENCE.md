@@ -7,6 +7,14 @@ the sharp edges are.
 `templates/rules.toml` is the short starting point; `asset_gatekeeper.example.toml`
 is the annotated long form. This page is the reasoning behind both.
 
+**Not sure where to start?** `asset-gatekeeper <folder> --wizard` (on Windows,
+double-click `tools\rules_wizard.bat`) asks which engines, art programs,
+platforms and kinds of asset the project has - several of each is fine - and
+writes one commented `rules.toml` using the keys below: `[naming] preset` for
+the engines and tools, the tightest platform as `[mesh]`/`[texture]` with a
+`[platforms.<name>]` block per platform, and `[tags.<folder>]` per kind of asset.
+See [06 - CLI reference](06-CLI-REFERENCE.md#the-rules-wizard).
+
 ## Precedence
 
 Highest wins:

@@ -32,6 +32,7 @@ It reads FBX (binary and ASCII), OBJ, glTF and GLB itself, with no Autodesk SDK.
 pip install "asset-gatekeeper[full]"                  # from PyPI
 
 asset-gatekeeper path/to/Exports --init                # write a rules.toml with your budget
+asset-gatekeeper path/to/Exports --wizard              # ...or answer six questions about your project
 asset-gatekeeper path/to/Exports --once --recursive    # check everything once
 asset-gatekeeper path/to/Exports --recursive           # keep watching; a pop-up on each failure
 ```
