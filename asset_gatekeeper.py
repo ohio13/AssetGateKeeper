@@ -3028,10 +3028,11 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float,
     if np is None:                                       # pragma: no cover
         raise AssetError("numpy is not installed; FBX cannot be analysed")
     try:
-        data = Path(path_string).read_bytes()
+        # One parse per file and modification time, shared with the skeleton,
+        # lightmap and preview/measure readers (_fbx_tree).
+        top = _fbx_tree_cached(path_string, modified_ns)
     except OSError as exc:
         raise AssetError(f"could not read FBX ({exc})") from exc
-    top = {node.name: node for node in parse_fbx_binary(data)}
     objects = top.get("Objects")
     if objects is None:
         return FbxSummary(0, 0, 0, 0, 0, ())
@@ -8109,4 +8110,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    # The engine modules (fbx_preview, polypaint, rules_wizard, ...) say
+    # "import asset_gatekeeper". Run as a script, this file is __main__, and
+    # that import would execute all of it a second time: a second copy of every
+    # table and cache (an FBX parsed twice per check) and ~0.3 s more start-up.
+    sys.modules.setdefault("asset_gatekeeper", sys.modules[__name__])
     sys.exit(main())

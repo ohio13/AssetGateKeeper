@@ -1,5 +1,10 @@
 # Unreleased (on `main`)
 
+* **Faster FBX checks with memory, texel, skeleton or lightmap rules
+  (11 Nov).** Run as a script, the gate loaded itself a second time whenever
+  it measured an FBX, and the FBX was parsed up to three times per check. It
+  now loads once and parses each file once: a small FBX with `[mesh] max_mb`
+  went from 1.1 s to 0.7 s.
 * **Wizard asks about the new checks; Switch, VR and mid-range presets
   (11 Nov).** A seventh question picks extra checks (LODs, Unreal collision,
   skeleton limits, lightmap UVs; none by default) and writes their tables:

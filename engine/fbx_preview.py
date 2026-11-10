@@ -179,15 +179,17 @@ def _axis_matrix(top: dict) -> tuple[list, float, str]:
 
 
 def _scene(path: Path):
+    """The parsed FBX (top-level records by name). The gate's own cache, so a
+    check that measures an FBX it has just read does not parse it again."""
     try:
-        data = path.read_bytes()
-    except OSError as exc:
-        raise FbxPreviewError(f"could not read FBX ({exc})") from exc
-    try:
-        nodes = agk.parse_fbx_binary(data)
+        return agk._fbx_tree(Path(path))
+    except agk.AssetError as exc:
+        message = str(exc)
+        if not isinstance(exc.__cause__, OSError):      # unreadable bytes, not a missing file
+            message = message.replace("could not read FBX", "could not parse FBX", 1)
+        raise FbxPreviewError(message) from exc
     except Exception as exc:
         raise FbxPreviewError(f"could not parse FBX ({type(exc).__name__}: {exc})") from exc
-    return {node.name: node for node in nodes}
 
 
 def _layer_values(geometry, layer_name: str, values_name: str, index_name: str, width: int,

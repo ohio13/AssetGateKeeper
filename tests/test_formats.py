@@ -192,6 +192,21 @@ expect("... and one inside the range passes on that count, with the number in it
        not any("texel density" in p for p in verdict.problems)
        and dict(verdict.stats).get("texel_density") == 8, (verdict.problems, verdict.stats))
 
+# 11 Nov 2026: run as a script the gate is __main__, and fbx_preview's
+# "import asset_gatekeeper" executed the whole file a second time (and parsed
+# the FBX again). The gate now registers itself under its module name.
+speed_dir = WORK / "one_import"
+speed_dir.mkdir()
+shutil.copy(FIXTURES / "cube_subd3.fbx", speed_dir / "SM_Cube.fbx")
+(speed_dir / "rules.toml").write_text("[mesh]\nmax_mb = 64\n", encoding="utf-8")
+timed = subprocess.run([sys.executable, "-X", "importtime", str(ROOT / "asset_gatekeeper.py"),
+                        str(speed_dir), "--once", "--no-cache", "--no-color"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+second = [line for line in timed.stderr.splitlines()
+          if line.startswith("import time:") and line.rstrip().endswith("| asset_gatekeeper")]
+expect("measuring an FBX does not load the gate a second time", timed.returncode == 0
+       and not second and "~51 KB" in timed.stdout + timed.stderr, second or timed.stderr[-300:])
+
 print("2. FBX texture references")
 expect("relative texture beside the FBX resolves",
        not agk.missing_references(FIXTURES / "tex_relative.fbx"),
