@@ -2,7 +2,12 @@
 
 **Catch an over-budget or broken 3D asset the moment it leaves Maya, Max or Blender, not three days later in a build review.**
 
-> **Alpha (0.1.0-alpha.1).** It works, it is tested, and it will still have rough edges. Please [report anything odd](https://github.com/ohio13/AssetGateKeeper/issues/new/choose), with the line the tool printed.
+> **Please read first: an early alpha (0.1.0-alpha.1), shared as it is.**
+> AssetGatekeeper started as a test tool for my own private game projects. It is public in case it helps someone else, but it is not finished: expect rough edges, missing features and changes between versions. It has not been used on a real studio project yet.
+>
+> **Please try it on a copy of your project, or on one in version control (Git, Perforce) that you can roll back.** Checking only reads your files. A few parts write to them: auto-heal (`--heal`, off unless you switch it on) resizes and repairs assets and keeps the originals in `.agk-backups`; the Polypaint bake writes new files next to the sculpt, replacing its own earlier output; and the Rules & Presets page saves `rules.toml`, noting every change in its history. Please don't rely on any of that for work you can't afford to lose. There is no warranty (see the [MIT licence](https://github.com/ohio13/AssetGateKeeper/blob/main/LICENSE)).
+>
+> Found something odd? [Tell me](https://github.com/ohio13/AssetGateKeeper/issues/new/choose), with the line the tool printed. That is the most useful thing anyone can do for it right now.
 
 AssetGatekeeper checks game assets against a budget you set: triangles, materials, textures, bone weights, UV sets, broken texture links and damaged geometry. It runs on a folder, in your editor, in Unreal, on every pull request, or as a Perforce trigger, and gives one line per asset with every problem and the number that broke it:
 
@@ -83,6 +88,7 @@ These ship in the repository but are newer and less tested than the gate itself.
 - glTF compressed with meshopt is counted exactly, but its shape checks are skipped. Draco needs DracoPy, which installs with the tool.
 - Mesh memory and texel density are measured for glTF and OBJ, not FBX yet.
 - Budgets are calibrated against Unreal Engine 5.3; other engines may count slightly differently.
+- It has been used by one person, on Windows 11 and Linux. macOS, Python 3.9 and 3.13 and the DCC plug-ins are covered by automated tests, not by daily use.
 
 ## Documentation
 
@@ -93,7 +99,7 @@ These ship in the repository but are newer and less tested than the gate itself.
 
 ## Contributing
 
-Bug reports, sample files that break it, and pull requests are all welcome. See [CONTRIBUTING.md](https://github.com/ohio13/AssetGateKeeper/blob/main/CONTRIBUTING.md). Security problems: please follow [SECURITY.md](https://github.com/ohio13/AssetGateKeeper/blob/main/SECURITY.md) instead of opening a public issue.
+Bug reports, sample files that break it, and pull requests are all welcome. It is a one-person, spare-time project, so a reply can take a few days. See [CONTRIBUTING.md](https://github.com/ohio13/AssetGateKeeper/blob/main/CONTRIBUTING.md). Security problems: please follow [SECURITY.md](https://github.com/ohio13/AssetGateKeeper/blob/main/SECURITY.md) instead of opening a public issue.
 
 ## Licence
 

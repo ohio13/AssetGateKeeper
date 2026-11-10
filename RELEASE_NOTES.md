@@ -5,6 +5,10 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **Going public (10 Nov).** The README and the setup manual open with a
+  plain note: an early alpha, built first as a test tool for private projects;
+  try it on a copy or under version control; which parts write to your files;
+  no warranty. Test fixtures no longer use the developer's PC and folder names.
 * **Long LOD jobs can be watched and stopped (10 Nov).** The developer left a Shippable
   LOD of the test sculpt running for 25 minutes and gave up: the page said "generating
   LOD1 (1 of 3)" the whole time, closing the page did not stop it, and a second

@@ -1,5 +1,9 @@
 # AssetGatekeeper — Setup manual
 
+> **Please read first:** an early alpha, built first as a test tool for private projects. Try it on a
+> **copy** of your project, or one in version control you can roll back. See the
+> note at the top of the [README](https://github.com/ohio13/AssetGateKeeper/blob/main/README.md).
+
 You are installing three things that share one config file:
 
 | Piece | What it is | Opened in |
