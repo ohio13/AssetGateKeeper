@@ -57,6 +57,25 @@ def is_lfs_tracked(path: Path, cwd: str | None = None) -> bool:
         return False  # no attributes file, or an old git: not our problem
 
 
+def nearest_rules(path: Path) -> list[str]:
+    """["--rules", <file>] for the nearest rules.toml at or above ``path``'s folder,
+    stopping at the repository root (the hook's working folder), or [].
+
+    The gate reads only the asset's own folder by default: a repository with one
+    rules.toml at the top had every asset in a subfolder checked against the
+    shipped defaults while CI, running --once at the top, used the project's.
+    """
+    top = Path.cwd().resolve()
+    folder = path.resolve().parent
+    while True:
+        candidate = folder / "rules.toml"
+        if candidate.is_file():
+            return ["--rules", str(candidate)]
+        if folder == top or folder.parent == folder or top not in folder.parents:
+            return []
+        folder = folder.parent
+
+
 def gatekeeper_command() -> list[str]:
     import os
 
@@ -90,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="git_pre_commit.py",
         description="Block commits containing assets that exceed the budget.")
-    parser.add_argument("--rules", help="rules file (default: <asset folder>/rules.toml)")
+    parser.add_argument("--rules", help="rules file (default: the nearest rules.toml at or above the asset's folder, up to the repository root, as a --once run of that folder uses)")
     parser.add_argument("--install", action="store_true",
                         help="write this script into .git/hooks/pre-commit and exit")
     parser.add_argument("--verbose", action="store_true")
@@ -146,7 +165,8 @@ def main(argv: list[str] | None = None) -> int:
             paths.remove(path)
     for path in paths:
         lfs = " [LFS]" if is_lfs_tracked(path) else ""
-        completed = subprocess.run([*gatekeeper_command(), str(path), *extra],
+        rules = [] if options.rules else nearest_rules(path)
+        completed = subprocess.run([*gatekeeper_command(), str(path), *extra, *rules],
                                    capture_output=True, text=True,
                                    encoding="utf-8", errors="replace")
         if completed.returncode == 0:

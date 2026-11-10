@@ -2228,6 +2228,21 @@ else:
            (swapped.returncode, swapped.stderr[-300:]))
     run(["git", "reset", "-q", "crate_swap.obj"], git_dir)
     (git_dir / "crate_swap.obj").unlink()
+    # One rules.toml at the top of the repository, the asset in a subfolder.
+    (git_dir / "rules.toml").write_text("[mesh]\nmax_triangles = 1\n", encoding="utf-8")
+    (git_dir / "Props").mkdir(exist_ok=True)
+    (git_dir / "Props" / "SM_two.obj").write_text(
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n", encoding="utf-8")
+    run(["git", "add", "Props/SM_two.obj"], git_dir)
+    nested = run([sys.executable, str(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py")],
+                 git_dir, {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
+    expect("an asset in a subfolder is judged by the repository's rules.toml above it, as CI's "
+           "--once run there judges it", nested.returncode == 1
+           and "exceeds the 1 budget (+1)  SM_two.obj" in nested.stderr,
+           (nested.returncode, nested.stderr[-300:]))
+    run(["git", "reset", "-q", "Props/SM_two.obj"], git_dir)
+    shutil.rmtree(git_dir / "Props")
+    (git_dir / "rules.toml").unlink()
 
     (git_dir / "notes.txt").write_text("not an asset", encoding="utf-8")
     run(["git", "add", "notes.txt"], git_dir)
