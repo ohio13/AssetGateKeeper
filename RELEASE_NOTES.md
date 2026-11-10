@@ -1,8 +1,8 @@
-# v0.1.0-alpha.1 (unreleased, on `main`)
+# v0.1.0-alpha.1 (10 Nov 2026)
 
 The first public alpha. The internal builds 1.0.0 to 1.1.1 (private testing,
-October-November 2026) are folded into it; their notes follow below for the
-record. The gate, the GitHub check and the editor plug-ins are the product;
+October-November 2026) are folded into it; their notes follow this section in
+RELEASE_NOTES.md, for the record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
 * **Going public (10 Nov).** The README and the setup manual open with a
