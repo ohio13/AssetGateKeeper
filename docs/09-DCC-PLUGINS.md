@@ -1,4 +1,4 @@
-# 09 - DCC plugins: Blender, Maya, 3ds Max, Houdini, Unreal
+# 09 - DCC plugins: Blender, Maya, 3ds Max, Houdini, Unreal, Unity, Godot
 
 Two things ship for every DCC, and they are the same engine:
 
@@ -21,8 +21,14 @@ plugins/
   max/max_preflight.py           scripted panel
   houdini/preflight_houdini.py   headless entry point
   unreal/unreal_preflight.py     editor script + headless entry point
+  unity/                         Unity package: checks on import (C#)
+  godot/addons/asset_gatekeeper/ Godot add-on: checks on import, dock (GDScript)
 tools/houdini_export_hook.py     the shell-out hook Houdini actually uses
 ```
+
+Unity and Godot are different: like Unreal's import check, they run the gate
+itself (`asset-gatekeeper <file> --once --json`) on the source file, so they
+need a Python with AssetGatekeeper installed on the machine.
 
 ## The shared report
 
@@ -376,6 +382,186 @@ must read the JSON for Unreal and not `$LASTEXITCODE`.
 
 ---
 
+## Unity (2021.3 LTS or newer)
+
+`plugins/unity` is an Editor-only Unity package. It checks every model and
+texture Unity imports into `Assets/` with the gate, in the background, and
+writes each failure to the Console.
+
+### Install (Windows)
+
+1. Install AssetGatekeeper's Python part once, if you have not:
+   `py -m pip install "asset-gatekeeper[full]"` in a Command Prompt, or use a
+   downloaded copy of the AssetGatekeeper folder (its `Install_Extras.bat`
+   installs what it needs).
+2. Open your project in Unity, then **Window > Package Manager**, the **+**
+   button at the top left, **Add package from disk...**, and choose
+   `plugins\unity\package.json` inside the AssetGatekeeper folder.
+   (Or copy the `plugins\unity` folder into your project's `Packages` folder,
+   or its `Editor` folder into `Assets\AssetGatekeeper\`.) The package does not
+   copy itself into the project when added from disk: keep the
+   AssetGatekeeper folder where it is.
+3. **Tools > AssetGatekeeper > Settings...** (it opens **Edit > Preferences >
+   AssetGatekeeper**):
+   * **Python executable**: the `python.exe` that has AssetGatekeeper's
+     packages, e.g. `C:\Users\you\AppData\Local\Programs\Python\Python312\python.exe`.
+     Empty: the `ASSETGATEKEEPER_PYTHON` environment variable, else `python`.
+   * **Gate folder**: the AssetGatekeeper folder (the one holding
+     `asset_gatekeeper.py`). Empty: `ASSETGATEKEEPER_HOME`, else the pip
+     install (`python -m asset_gatekeeper`).
+   * **Rules file** (optional): one `rules.toml` for everything. Empty:
+     `ASSETGATEKEEPER_RULES`, else the nearest `rules.toml` in the asset's
+     folder or above it, up to the project folder. A `rules.toml` next to
+     `Assets` (not inside it) covers the whole project and is not imported by
+     Unity.
+   * **Timeout per file**, **Check on import** (on/off) and **Log passing
+     assets**.
+4. Press **Test the gate**. It should say `asset-gatekeeper 0.1.0a1` (or a
+   later version). Anything else is the reason the checks will not run.
+
+The settings are per user and per machine (`EditorPrefs`), because the paths
+differ from one PC to the next; nothing is written into the project.
+
+### What happens on import
+
+* After Unity imports (or moves) `.fbx`, `.obj`, `.gltf`, `.glb`, `.png`,
+  `.tga`, `.jpg`, `.tif`, `.webp`, `.dds`, `.exr` or `.ktx2` files under
+  `Assets/`, the gate checks each source file, one at a time, on a background
+  thread. A background task ("AssetGatekeeper") shows the progress at the
+  bottom right of the editor and can be cancelled there.
+* A failure is a Console error naming the asset and the gate's own words,
+  e.g. `AssetGatekeeper: Assets/Models/crate.fbx FAILED: 5 material slots
+  exceeds the 4 slot budget`. Click it to highlight the asset.
+* A failing asset gets the label **AGK_Failed**. Type `l:AGK_Failed` in the
+  Project window's search box, or use **Tools > AssetGatekeeper > Select
+  Failed Assets**, to list them. The label goes when the asset passes.
+* When the gate cannot give a verdict (Python not found, packages missing,
+  the timeout reached) the asset is reported **NOT checked** as a warning,
+  once per reason per batch, and its label is left as it was. It is never
+  counted as a pass.
+* The import itself is never stopped or undone: Unity has already imported
+  the file when the check runs. This is a warning system, not a block.
+
+**Menu (Tools > AssetGatekeeper):** *Check Selected* (files, or everything
+in selected folders), *Check All* (every model and texture under `Assets/`),
+*Select Failed Assets*, *Stop Checking*, *Settings...*.
+
+### Limits
+
+* Each file starts the gate's Python once (about a second per file); a first
+  import of a big project, or *Check All*, takes a while in the background.
+* An unchanged file is not checked twice in one editor session, so a label
+  change (which rewrites the `.meta`) does not start another check. Use *Check
+  Selected* to force one.
+* The gate measures the **source file**, not Unity's imported mesh. Unity's
+  own triangle counts have **not been compared** with the gate's. Any
+  triangulation of an n-sided face gives n-2 triangles, so they should agree
+  on ordinary meshes, but Unity's import settings (mesh compression, *Keep
+  Quads*, welding, LOD groups) are not taken into account.
+* Textures inside a `.psd` and models inside a `.blend` are not checked (the
+  gate does not read those formats).
+
+### What is tested, and how
+
+Unity itself is **not** run by the tests: it cannot be installed on the
+build machines. `tests/test_engine_plugins.py --only unity` compiles the
+plug-in as netstandard2.1 / C# 9 (the defaults of Unity 2021.3) against
+stand-in `UnityEngine`/`UnityEditor` declarations (`tests/unity_stubs/`,
+warnings are errors) with the .NET 8 SDK, then runs it against the real gate:
+an import of a good and an over-budget FBX and two textures (one in a folder
+with a space, one with an accent), labels, the re-import loop guard, Check
+Selected after a fix, a missing Python, a hanging gate stopped at the
+timeout, an inherited `PYTHONHOME`, and argument quoting. The CI job
+*unity plug-in* runs it on every change. What it cannot prove: that Unity
+calls `OnPostprocessAllAssets`, the menu and the settings page the way its
+documentation says, and how the Console and labels look. Check that in your
+project the first time (import a file that fails, look for the error and the
+label).
+
+---
+
+## Godot (4.2 or newer)
+
+`plugins/godot/addons/asset_gatekeeper` is a Godot editor add-on in
+GDScript. It checks models and textures when Godot imports them and lists the
+failures in a dock.
+
+### Install (Windows)
+
+1. Install AssetGatekeeper's Python part (step 1 of the Unity install above).
+2. Copy the folder `plugins\godot\addons\asset_gatekeeper` into your Godot
+   project's `addons` folder (create `addons` next to `project.godot` if it is
+   not there), so that you have `addons\asset_gatekeeper\plugin.cfg`.
+3. In Godot: **Project > Project Settings > Plugins**, tick **Enable** next to
+   **AssetGatekeeper**. An **AssetGatekeeper** dock appears (top right, next
+   to the Inspector) and the Output panel says `[AssetGatekeeper] import check
+   active - <python> <gate>`.
+4. **Editor > Editor Settings**, section **Asset Gatekeeper** (type
+   "gatekeeper" in the filter):
+   * **Python**: the `python.exe` with AssetGatekeeper's packages. Empty:
+     `ASSETGATEKEEPER_PYTHON`, else `python`.
+   * **Gate Folder**: the AssetGatekeeper folder. Empty:
+     `ASSETGATEKEEPER_HOME`, else the pip install.
+   * **Rules File** (optional). Empty: `ASSETGATEKEEPER_RULES`, else the
+     nearest `rules.toml` from the asset's folder up to the project folder
+     (`res://`).
+   * **Check On Import**: on/off.
+
+   These are Editor Settings, so they are per user and not stored in the
+   project.
+5. Press **Check project** in the dock.
+
+### What happens on import
+
+* When Godot imports or reimports a file (the `resources_reimported` signal of
+  `EditorFileSystem`), the add-on checks the source files it measures (the
+  same formats as Unity above; `res://addons/` is skipped) on a background
+  thread, one at a time.
+* A failure is an error in the Output panel:
+  `AssetGatekeeper: res://models/crate.obj FAILED: 200 triangles exceeds the
+  100 budget (+100)`. The dock lists every failing asset with the reasons
+  (hover for all of them); double-click one to show it in the FileSystem
+  dock. A row goes when the asset passes.
+* **NOT checked** (no Python, missing packages, the gate not found) is a
+  warning, once per reason, and a row in the dock. It is never a pass.
+* **Check project** checks every model and texture under `res://`.
+* As in Unity, the import is not stopped: this reports, it does not block.
+
+### Limits
+
+* There is no per-file timeout: the add-on runs the gate with `OS.execute`,
+  which in Godot 4.2 waits for the program to end (`OS.execute_with_pipe`,
+  which does not, arrived in 4.3). A file the gate takes long over keeps the
+  background thread busy (the editor stays usable), and closing the editor
+  waits for that one file.
+* About a second per file, as in Unity. An unchanged file is not checked
+  twice in a session.
+* Godot 4.2 needs FBX2glTF to import `.fbx` (4.3+ reads FBX itself); the gate
+  checks the `.fbx` source either way. Godot's own triangle counts have not
+  been compared with the gate's.
+
+### What is tested, and how
+
+`tests/test_engine_plugins.py --only godot` (CI job *godot plug-in*, Godot
+4.2.2 downloaded and checked against its published SHA-512) copies
+`tests/godot_project` to `scratch/`, adds the add-on and some assets, and:
+
+1. runs `godot --headless --script res://test_runner.gd`, which calls the
+   add-on's own code: a good and an over-budget OBJ under the project's
+   `rules.toml`, a non-power-of-two texture, a missing file, a missing Python,
+   unreadable gate output, the dock's list, and the background queue (three
+   files queued, text and `addons/` skipped, one batch, unchanged files not
+   queued again), with a stray `PYTHONHOME` in the environment;
+2. opens the same project in the headless editor (`--headless --editor`),
+   where the add-on is enabled and Godot's first import of the project reaches
+   it: the test looks for the startup line, no script errors, and the
+   over-budget model's and texture's `push_error` lines.
+
+Verified with Godot 4.2.2 on Linux, 10 Nov 2026. Not tried yet: Windows, the
+dock as an artist sees it, and Godot 4.3/4.4.
+
+---
+
 ## Testing the DCC layer without opening a DCC
 
 ```
@@ -416,6 +602,10 @@ reaching `init_unreal.py`'s post-import warning. Unreal's own triangle counts
 | Unreal log says "import guard NOT active" | `on_asset_post_import` could not bind (engine signature changed) | drag-and-drop is unchecked; use `import_with_gatekeeper()` and report the engine version |
 | Unreal headless run hangs | editor waiting for a project or a splash | pass a `.uproject`, `-unattended -nopause -nosplash -NullRHI` |
 | Panel numbers differ from the gate | panel reads the scene, gate reads the export | that is expected; check the export settings, not the panel |
+| Unity/Godot: every asset "NOT checked: could not start python" | the Python setting is empty and `python` is not on PATH | set **Python executable** (Unity) / **Python** (Godot) to the full path of `python.exe` |
+| Unity/Godot: "NOT checked ... missing dependencies: trimesh" | that Python does not have the gate's packages | `"<that python.exe>" -m pip install "asset-gatekeeper[full]"`, or point the setting at the right Python |
+| Unity: no AssetGatekeeper menu | the package did not compile, or was added to a project older than 2021.3 | look for a red compile error in the Console; check Unity's version |
+| Godot: no AssetGatekeeper dock | the add-on is not enabled, or `plugin.cfg` is not at `addons/asset_gatekeeper/plugin.cfg` | Project Settings > Plugins; check the folder name |
 
 Next: [10 CI and version control](10-CI-AND-VERSION-CONTROL.md), or back to the
 [index](README.md).

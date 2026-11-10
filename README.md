@@ -32,6 +32,7 @@ It reads FBX (binary and ASCII), OBJ, glTF and GLB itself, with no Autodesk SDK.
 pip install "asset-gatekeeper[full]"                  # from PyPI
 
 asset-gatekeeper path/to/Exports --init                # write a rules.toml with your budget
+asset-gatekeeper path/to/Exports --wizard              # ...or answer six questions about your project
 asset-gatekeeper path/to/Exports --once --recursive    # check everything once
 asset-gatekeeper path/to/Exports --recursive           # keep watching; a pop-up on each failure
 ```
@@ -50,6 +51,8 @@ asset-gatekeeper path/to/Exports --recursive           # keep watching; a pop-up
 | | texture links that point at nothing | none allowed |
 | | textures packed inside the file | same rules as textures |
 | | mesh name prefix such as `SM_` | off |
+| | LOD levels, and how much each one saves | off |
+| | Unreal collision (`UCX_` hulls): present, named after the mesh, convex, how many | off |
 | `.png` `.tga` `.jpg` `.tif` `.webp` `.dds` `.exr` `.ktx2` | longest edge | 2,048 px |
 | | power of two | on |
 | | name ends in a map name (`_BaseColor`, `_Normal`, `_ORM`, …) | on, 28 names |
@@ -71,6 +74,7 @@ Nintendo 64 style one instead (about 1,200 triangles, 64 px, 16 colours).
 | A folder | `asset-gatekeeper <folder> --once` or a live watch |
 | Maya, 3ds Max, Blender, Houdini | a button that checks the selection before export ([DCC plug-ins](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/09-DCC-PLUGINS.md)) |
 | Unreal Engine | checks on import and in Data Validation ([DCC plug-ins](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/09-DCC-PLUGINS.md#unreal-engine-5)) |
+| Unity, Godot | checks on import: Console errors and an `AGK_Failed` label in Unity, a list of failures in a Godot dock (new; Godot tested headless, Unity not yet tested in Unity) ([Unity](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/09-DCC-PLUGINS.md#unity-20213-lts-or-newer), [Godot](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/09-DCC-PLUGINS.md#godot-42-or-newer)) |
 | GitHub | a ready-made workflow marks each failing asset on the pull request ([CI](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/10-CI-AND-VERSION-CONTROL.md)) |
 | Git, Perforce | a pre-commit hook and a submit trigger ([CI and version control](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/10-CI-AND-VERSION-CONTROL.md)) |
 

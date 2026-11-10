@@ -41,6 +41,7 @@ if "%CODE%"=="0" echo You can close this window - the pages keep running.
 echo.
 echo   To stop everything:       double-click Stop.bat
 echo   To allow another folder:  double-click Allow_Folder.bat
+echo   To write rules.toml from a few questions:  double-click tools\rules_wizard.bat
 echo.
 rem  Leave this folder before pausing, so this window never stops it being deleted.
 cd /d "%USERPROFILE%"

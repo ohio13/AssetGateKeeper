@@ -113,7 +113,9 @@ asset-gatekeeper --init
 ```
 
 `--init` writes a `rules.toml` with your answers, the three platform profiles, and
-healing explicitly off. `--yes` takes every default (safe for scripts), `--force`
+healing explicitly off. For a project that uses several engines, art programs or
+platforms, `asset-gatekeeper <folder> --wizard` asks about those instead and
+writes one commented file for all of them ([06](06-CLI-REFERENCE.md#the-rules-wizard)). `--yes` takes every default (safe for scripts), `--force`
 overwrites an existing file, and a prompt that hits EOF falls back to its default
 instead of hanging a CI job.
 
@@ -925,7 +927,9 @@ python asset_gatekeeper.py [folder] [options]
 | `--list-presets` | Print the shipped platform targets and their budgets, then exit |
 | `--init` | Interactive setup: create the watch folder and its `rules.toml` |
 | `--yes` | With `--init`: accept every default instead of prompting |
-| `--force` | With `--init`: overwrite an existing `rules.toml` |
+| `--force` | With `--init`: overwrite an existing `rules.toml`. With `--wizard`: replace it without asking (a copy is still kept) |
+| `--wizard` | The rules wizard: six questions (engines, art programs, platforms, kinds of asset, style, broken geometry; several answers each) and one commented `rules.toml` for all of them; asks before replacing one and keeps a copy. With `--yes`: every default. See [06 - CLI reference](06-CLI-REFERENCE.md#the-rules-wizard) |
+| `--wizard-answers FILE` | The `--wizard` answers from a JSON file, for scripts: `{"engines": ["unreal", "unity"], "platforms": ["pc", "switch"]}` |
 | `--version` | Print the version and exit (pipelines log this) |
 | `-v`, `--verbose` | Debug logging (including why a file was skipped) |
 
@@ -970,6 +974,7 @@ Or one at a time (each ends with `FAILURES: none`):
 python tests/gen_test_assets.py           # the fixture corpus, first
 python tests/test_gatekeeper.py           # rules, tags, healing, backups/undo, hooks, audits, CLI
 python tests/test_formats.py              # FBX, glTF, OBJ, textures, DCC plugin metadata
+python tests/test_lod_collision.py        # [lod] and [collision] on FBX and glTF
 python tests/test_server.py               # AssetHealth: ingest, tenants, alerts, planner, SSE
 python tests/test_admin.py                # accounts, roles, CSRF, audit, rescan
 python tests/test_enterprise.py           # config, RBAC, OIDC/SAML, SQL translation, migrations
@@ -995,6 +1000,7 @@ tests/
   gen_test_assets.py             builds the fixture corpus (dropbox/)
   test_gatekeeper.py             rules, tags, healing, backups/undo, hooks, audits, packaging
   test_formats.py                FBX, glTF, OBJ, textures, DCC plugin metadata
+  test_lod_collision.py          [lod] and [collision]: LOD levels, Unreal UCX_ collision
   test_server.py                 tenancy, ingest, alerts, throttle, SSE
   test_admin.py                  accounts, roles, CSRF, audit, rescan
   test_workstation.py            storage, FBX preview, LODs, collision, notes, heal, security

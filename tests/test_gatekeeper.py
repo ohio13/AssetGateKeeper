@@ -2989,7 +2989,8 @@ strays = [pid for pid, _ in serve.stray_servers()] if os.name != "nt" else [11]
 expect("only servers started from this copy count as its strays", strays == [11], str(strays))
 serve._python_processes = _real_processes
 for name in ("Stop.bat", "Allow_Folder.bat", "Start AssetGatekeeper.bat", "tools/agk-serve.bat",
-             "Install_Extras.bat", "tools/start_workstation.bat", "tools/start_asset_health.bat"):
+             "Install_Extras.bat", "tools/start_workstation.bat", "tools/start_asset_health.bat",
+             "tools/rules_wizard.bat"):
     text = (ROOT_MODULE_DIR / name).read_bytes()
     expect(f"{name} has Windows line endings", b"\r\n" in text and b"\n" not in text.replace(b"\r\n", b""))
     if not name.startswith("tools/start_"):    # those run the server in their window
@@ -3009,7 +3010,8 @@ _shim = (ROOT_MODULE_DIR / "Rules.bat").read_bytes()
 expect("Rules.bat only runs Start AssetGatekeeper.bat, passing its arguments and exit code",
        b'call "%~dp0Start AssetGatekeeper.bat" %*' in _shim and b"exit /b %ERRORLEVEL%" in _shim
        and b"\r\n" in _shim and len(_shim.splitlines()) <= 6, _shim[:200])
-for _moved in ("agk-serve.bat", "start_workstation.bat", "start_asset_health.bat"):
+for _moved in ("agk-serve.bat", "start_workstation.bat", "start_asset_health.bat",
+               "rules_wizard.bat"):
     _text = (ROOT_MODULE_DIR / "tools" / _moved).read_bytes()
     expect(f"tools\\{_moved} finds the install folder from tools\\",
            b'"%~dp0..\\.venv\\Scripts\\python.exe"' in _text

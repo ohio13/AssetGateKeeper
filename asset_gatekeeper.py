@@ -325,6 +325,34 @@ class Budget:
     texel_density_max: float = 0.0
     texel_texture: int = 1024             # assumed texture size when the mesh names none
 
+    # - LODs and collision ([lod], [collision]); every one off by default - #
+    # LOD levels: FBX LOD groups, glTF MSFT_lod, or _LOD0/_LOD1 names.
+    lod_min_levels: int = 0               # at least this many levels, LOD0 included
+    lod_max_ratio: float = 0.0            # each level <= this x the level above
+    # Unreal collision (UCX_/UBX_/USP_/UCP_ meshes). A [collision] table in a
+    # rules file turns name matching and the convexity test on (see
+    # _read_structure); Budget() itself checks nothing, so no verdict changes.
+    collision_require: bool = False       # a static mesh must carry collision
+    collision_name_match: bool = False    # UCX_<RenderMesh>[_NN], or Unreal drops it
+    collision_max_hulls: int = 0          # UCX_ hulls per asset
+    collision_max_hull_vertices: int = 0  # vertices per UCX_ hull
+    collision_convex: bool = False        # a UCX_ hull must be convex
+
+    # - skeleton ([skeleton]): the bones the asset's skinned meshes use; 0 / False = off - #
+    max_bones: int = 0                    # bones in the skeleton(s)
+    max_bones_per_section: int = 0        # bones weighting one material section (mobile: 75)
+    max_bone_depth: int = 0               # longest root-to-tip chain, the root counting 1
+    single_root_bone: bool = False        # exactly one root bone (Unreal imports one)
+
+    # - lightmap UVs ([lightmap]): an authored lightmap UV set on static meshes - #
+    # Off by default. Unrelated to mesh_lightmap_uv, which only says whether the
+    # memory estimate adds the set Unreal generates.
+    lightmap_require: bool = False        # static meshes must have the set
+    lightmap_uv_channel: int = 1          # which set: 1 = the second (Unreal's convention)
+    lightmap_inside_unit_square: bool = False   # every lightmap UV within 0-1
+    lightmap_max_overlap: float = -1.0    # percent of covered texels; below 0 = not checked
+    lightmap_resolution: int = 256        # the grid the overlap is measured on
+
     # Which platform profile produced this budget (for the log line only).
     platform: str = ""
 
@@ -338,12 +366,25 @@ class Budget:
         """
         for field, minimum in (("max_triangles", 0), ("max_texture_edge", 1),
                                ("max_material_slots", 0), ("max_bone_influences", 0),
-                               ("max_uv_channels", 1)):
+                               ("max_uv_channels", 1), ("max_bones", 0),
+                               ("max_bones_per_section", 0), ("max_bone_depth", 0),
+                               ("lightmap_uv_channel", 0), ("lightmap_resolution", 16)):
             value = getattr(self, field)
             if isinstance(value, bool) or not isinstance(value, int):
                 raise ConfigError(f"budget {field} must be an integer, got {value!r}")
             if value < minimum:
                 raise ConfigError(f"budget {field} must be at least {minimum}, got {value}")
+        if self.lightmap_uv_channel > LIGHTMAP_MAX_CHANNEL:
+            raise ConfigError(f"budget lightmap_uv_channel must be at most {LIGHTMAP_MAX_CHANNEL} "
+                              f"(engines read 8 UV sets), got {self.lightmap_uv_channel}")
+        if self.lightmap_resolution > LIGHTMAP_MAX_RESOLUTION:
+            raise ConfigError(f"budget lightmap_resolution must be at most "
+                              f"{LIGHTMAP_MAX_RESOLUTION}, got {self.lightmap_resolution}")
+        overlap = self.lightmap_max_overlap
+        if isinstance(overlap, bool) or not isinstance(overlap, (int, float)) \
+                or not math.isfinite(overlap) or overlap > 100:
+            raise ConfigError("budget lightmap_max_overlap must be a percentage from 0 to 100 "
+                              f"(or below 0 for not checked), got {overlap!r}")
         if self.degenerate_epsilon < 0:
             raise ConfigError("budget degenerate_epsilon cannot be negative, got "
                               f"{self.degenerate_epsilon}")
@@ -365,6 +406,22 @@ class Budget:
         if self.pbr_floor > self.pbr_ceiling:
             raise ConfigError("budget pbr_floor must not exceed pbr_ceiling "
                               f"({self.pbr_floor} > {self.pbr_ceiling})")
+        for field, where in (("lod_min_levels", "[lod].min_levels"),
+                             ("collision_max_hulls", "[collision].max_hulls"),
+                             ("collision_max_hull_vertices", "[collision].max_hull_vertices")):
+            value = getattr(self, field)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+                raise ConfigError(f"{where} must be a whole number, 0 (off) or more, got {value!r}")
+        if 0 < self.collision_max_hull_vertices < 4:
+            raise ConfigError("[collision].max_hull_vertices must be 0 (off) or at least 4: a "
+                              "convex hull needs 4 corners, got "
+                              f"{self.collision_max_hull_vertices}")
+        ratio = self.lod_max_ratio
+        if (isinstance(ratio, bool) or not isinstance(ratio, (int, float))
+                or not math.isfinite(ratio) or not 0.0 <= ratio <= 1.0):
+            raise ConfigError("[lod].max_ratio must be a fraction above 0 and at most 1, such as "
+                              f"0.6 (each level at most 60% of the triangles of the one above), "
+                              f"or 0 for off; got {ratio!r}")
 
         # Suffix lists. A blank entry is a typo that either matches every filename
         # ("") or none, and an empty texture list turns the naming rule into a
@@ -390,6 +447,18 @@ class Budget:
             raise ConfigError("budget mesh_name_prefixes contains an empty entry; remove it")
         object.__setattr__(self, "mesh_name_prefixes", prefixes)
 
+    @property
+    def skeleton_checked(self) -> bool:
+        """Any [skeleton] rule is on (the skeleton is only read then)."""
+        return bool(self.max_bones or self.max_bones_per_section or self.max_bone_depth
+                    or self.single_root_bone)
+
+    @property
+    def lightmap_checked(self) -> bool:
+        """Any [lightmap] rule is on (the lightmap UV set is only read then)."""
+        return bool(self.lightmap_require or self.lightmap_inside_unit_square
+                    or self.lightmap_max_overlap >= 0)
+
     @classmethod
     def from_mapping(cls, document: dict) -> "Budget":
         """Build a Budget from a parsed rules file, rejecting typos loudly.
@@ -402,7 +471,7 @@ class Budget:
         _reject_unknown(document, ("mesh", "texture", "server", "healer",
                                    "platforms", "platform", "tags", "tagging",
                                    "preset", "notify", "filters", "exceptions", "totals",
-                                   "naming"),
+                                   "naming", "lod", "collision", "skeleton", "lightmap"),
                         "the rules file")
         filters = document.get("filters") or {}
         if not isinstance(filters, dict):
@@ -429,6 +498,8 @@ class Budget:
                                   "pbr", "pbr_floor", "pbr_ceiling", "pbr_suffixes",
                                   "max_mb", "format", "normal_format"), "[texture]")
         memory = _read_memory(mesh, texture)
+        structure = _read_structure(document)
+        rigging = _read_skeleton_lightmap(document)
 
         max_triangles = _read_int(mesh, "max_triangles", "[mesh]", minimum=0)
         max_material_slots = _read_int(mesh, "max_material_slots", "[mesh]", minimum=0)
@@ -516,6 +587,8 @@ class Budget:
                 defaults.transform_epsilon if transform_epsilon is None else transform_epsilon
             ),
             **memory,
+            **structure,
+            **rigging,
         )
 
 
@@ -526,6 +599,13 @@ GPU_TEXTURE_FORMATS: dict[str, float] = {
     "etc2": 0.5, "etc2a": 1.0, "rgba8": 4.0, "rgba16f": 8.0,
 }
 MIP_FACTOR = 4.0 / 3.0
+
+#: [lightmap] limits: UV set indices engines read (Unreal: 8 sets, 0-7), the
+#: finest overlap grid, and how far outside 0-1 a lightmap UV may sit (float noise
+#: from an exporter, far below one texel of a 4096 lightmap).
+LIGHTMAP_MAX_CHANNEL = 7
+LIGHTMAP_MAX_RESOLUTION = 4096
+LIGHTMAP_UV_TOLERANCE = 1e-4
 
 
 def _read_memory(mesh: dict, texture: dict) -> dict:
@@ -561,6 +641,115 @@ def _read_memory(mesh: dict, texture: dict) -> dict:
         value = _read_bool(mesh, key, "[mesh]")
         if value is not None:
             found[field] = value
+    return found
+
+
+LOD_KEYS = ("min_levels", "max_ratio")
+COLLISION_KEYS = ("require", "name_must_match", "max_hulls", "max_hull_vertices", "convex")
+
+
+def _read_structure(document: dict) -> dict:
+    """[lod] and [collision], only the keys present (the rest default).
+
+    A [collision] table switches on the two checks every Unreal team wants once
+    it checks collision at all - names that match a render mesh, convex UCX_
+    hulls - unless the table says ``false``. Budget() alone checks neither, so
+    a rules file without the table judges exactly as before.
+    """
+    found: dict[str, object] = {}
+    lod = document.get("lod")
+    if lod is not None:
+        if not isinstance(lod, dict):
+            raise ConfigError("[lod] must be a table, such as [lod] min_levels = 3")
+        _reject_unknown(lod, LOD_KEYS, "[lod] (known: " + ", ".join(LOD_KEYS) + ")")
+        levels = _read_int(lod, "min_levels", "[lod]", minimum=0)
+        if levels is not None:
+            found["lod_min_levels"] = levels
+        ratio = _read_float(lod, "max_ratio", "[lod]")
+        if ratio is not None:
+            found["lod_max_ratio"] = ratio          # range checked by Budget
+    collision = document.get("collision")
+    if collision is not None:
+        if not isinstance(collision, dict):
+            raise ConfigError("[collision] must be a table, such as [collision] require = true")
+        _reject_unknown(collision, COLLISION_KEYS,
+                        "[collision] (known: " + ", ".join(COLLISION_KEYS) + ")")
+        for key, field, default in (("require", "collision_require", False),
+                                    ("name_must_match", "collision_name_match", True),
+                                    ("convex", "collision_convex", True)):
+            value = _read_bool(collision, key, "[collision]")
+            found[field] = default if value is None else value
+        for key, field in (("max_hulls", "collision_max_hulls"),
+                           ("max_hull_vertices", "collision_max_hull_vertices")):
+            value = _read_int(collision, key, "[collision]", minimum=0)
+            if value is not None:
+                found[field] = value
+    return found
+
+
+def _read_skeleton_lightmap(document: dict) -> dict:
+    """[skeleton] and [lightmap], only the keys present (the rest default to off).
+
+        [skeleton]
+        max_bones = 256              # 0 = off
+        max_bones_per_section = 75   # 0 = off; Unreal's mobile cap
+        max_depth = 0                # 0 = off
+        single_root = true
+
+        [lightmap]
+        require = true               # static meshes need an authored lightmap UV set
+        uv_channel = 1               # which set (0-7); 1 = the second, Unreal's convention
+        inside_unit_square = true    # on by default once require or max_overlap is set
+        max_overlap = 0.0            # percent of covered texels; absent = not checked
+        resolution = 256             # the overlap grid, 16-4096
+    """
+    found: dict[str, object] = {}
+    skeleton = document.get("skeleton", {})
+    lightmap = document.get("lightmap", {})
+    if not isinstance(skeleton, dict):
+        raise ConfigError("[skeleton] must be a table")
+    if not isinstance(lightmap, dict):
+        raise ConfigError("[lightmap] must be a table")
+    _reject_unknown(skeleton, ("max_bones", "max_bones_per_section", "max_depth", "single_root"),
+                    "[skeleton]")
+    _reject_unknown(lightmap, ("require", "uv_channel", "inside_unit_square", "max_overlap",
+                               "resolution"), "[lightmap]")
+    for key, field in (("max_bones", "max_bones"), ("max_bones_per_section", "max_bones_per_section"),
+                       ("max_depth", "max_bone_depth")):
+        value = _read_int(skeleton, key, "[skeleton]", minimum=0)
+        if value is not None:
+            found[field] = value
+    single_root = _read_bool(skeleton, "single_root", "[skeleton]")
+    if single_root is not None:
+        found["single_root_bone"] = single_root
+
+    require = _read_bool(lightmap, "require", "[lightmap]")
+    if require is not None:
+        found["lightmap_require"] = require
+    channel = _read_int(lightmap, "uv_channel", "[lightmap]", minimum=0)
+    if channel is not None:
+        if channel > LIGHTMAP_MAX_CHANNEL:
+            raise ConfigError(f"[lightmap].uv_channel must be 0-{LIGHTMAP_MAX_CHANNEL} (0 is the "
+                              f"first UV set, 1 the second), got {channel}")
+        found["lightmap_uv_channel"] = channel
+    resolution = _read_int(lightmap, "resolution", "[lightmap]", minimum=16)
+    if resolution is not None:
+        if resolution > LIGHTMAP_MAX_RESOLUTION:
+            raise ConfigError(f"[lightmap].resolution must be 16-{LIGHTMAP_MAX_RESOLUTION} "
+                              f"texels, got {resolution}")
+        found["lightmap_resolution"] = resolution
+    overlap = _read_float(lightmap, "max_overlap", "[lightmap]")
+    if overlap is not None:
+        if not math.isfinite(overlap) or not 0.0 <= overlap <= 100.0:
+            raise ConfigError("[lightmap].max_overlap must be a percentage from 0 to 100 "
+                              "(0 = no overlap allowed); leave it out to skip the overlap "
+                              f"check, got {overlap!r}")
+        found["lightmap_max_overlap"] = overlap
+    inside = _read_bool(lightmap, "inside_unit_square", "[lightmap]")
+    if inside is None and (require or overlap is not None):
+        inside = True               # a lightmap outside 0-1 is never right once you check
+    if inside is not None:
+        found["lightmap_inside_unit_square"] = inside
     return found
 
 
@@ -787,6 +976,9 @@ PLATFORM_KEYS = ("max_triangles", "max_material_slots", "max_texture_edge",
 PLATFORM_SECTION_KEYS: dict[str, tuple[str, ...]] = {
     "mesh": ("pivot_tolerance", "transform_epsilon", "max_mb"),
     "texture": ("pbr_floor", "pbr_ceiling", "max_mb", "format", "normal_format"),
+    # [platforms.mobile.skeleton] max_bones_per_section = 75: the bone limits
+    # are what differ between targets.
+    "skeleton": ("max_bones", "max_bones_per_section", "max_depth"),
 }
 
 
@@ -1082,7 +1274,10 @@ def _overlay_profile(document: dict, profile: dict, where: str,
                     f"{where}.{key} is not a known section "
                     f"(known: {', '.join(sorted(PLATFORM_SECTION_KEYS))})")
             _reject_unknown(value, allowed, f"{where}.{key}")
-            merged[key].update(value)
+            base = merged.get(key) or {}
+            if not isinstance(base, dict):
+                raise ConfigError(f"[{key}] must be a table")
+            merged[key] = {**base, **value}     # a copy: never edit the caller's document
         elif key == "max_texture_edge":
             merged["texture"]["max_edge"] = value
         else:
@@ -1148,6 +1343,8 @@ EXCEPTION_RULES: dict[str, type] = {
     "require_power_of_two": bool, "enforce_texture_naming": bool,
     "allow_degenerate": bool, "check_references": bool, "pbr_check": bool,
     "max_texture_mb": float, "max_mesh_mb": float,
+    "lod_min_levels": int, "collision_require": bool,
+    "max_bones": int, "max_bones_per_section": int,
 }
 EXCEPTION_WARN_DAYS = 14
 
@@ -2746,6 +2943,14 @@ class FbxSummary:
     lower_lod_meshes: int = 0
     #: (name, width, height) of each texture packed inside the FBX
     embedded_textures: tuple = ()
+    #: LOD chains: (name, (LOD0 triangles, LOD1 triangles, ...), "group" | "names")
+    lod_groups: tuple = ()
+    #: names of the LOD0 render meshes, which a collision mesh must be named after
+    render_names: tuple = ()
+    #: (name, distinct vertices, concavity or None, flat) per collision mesh
+    collision_shapes: tuple = ()
+    #: a rendered mesh is skinned (it uses a physics asset, not UCX_ collision)
+    skinned: bool = False
 
 
 def _fbx_id(node: _FbxNode) -> Optional[int]:
@@ -2864,10 +3069,12 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float,
     collision_models = {model for model, name in model_names.items()
                         if name.lower().startswith(FBX_COLLISION_PREFIXES)}
     lower_lod: set = set()
+    group_levels: dict = {}
     for group in lod_groups:
         # Unreal parents the UCX_ hull to the LOD group too; it is not a level.
         levels = [item for item in ordered_children.get(group, [])
                   if item in models and item not in collision_models]
+        group_levels[group] = levels
         for level in levels[1:]:
             lower_lod.add(level)
             lower_lod |= descendants(level)
@@ -2883,6 +3090,7 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float,
             rendered[geometry_id] = geometry
 
     triangles = degenerate = uv_channels = max_influences = 0
+    triangles_of: dict = {}
     for geometry_id, geometry in rendered.items():
         index_node = geometry.child("PolygonVertexIndex")
         vertex_node = geometry.child("Vertices")
@@ -2891,6 +3099,7 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float,
         corners, starts, sizes = _fbx_polygons(index_node.props[0])
         fan = np.clip(sizes - 2, 0, None)
         count = int(fan.sum())
+        triangles_of[geometry_id] = count
         triangles += count
         uv_channels = max(uv_channels, len(geometry.all("LayerElementUV")))
         if count and vertex_node is not None and vertex_node.props:
@@ -2934,6 +3143,9 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float,
     used = {material for material in materials
             if parents.get(material, set()) & mesh_models}
     slots = len(used) if used else (1 if triangles else 0)
+    lods, render_names, shapes, skinned = _fbx_structure(
+        geometries, models, model_names, parents, children_of, descendants, collision_models,
+        group_levels, rendered, mesh_models, triangles_of, skins)
 
     references = []
     packed: dict = {}
@@ -2958,7 +3170,74 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float,
         references.append((written, tuple(item for item in (relative, absolute) if item)))
     return FbxSummary(triangles, slots, uv_channels, max_influences, degenerate,
                       tuple(references), collision_meshes, lower_lod_meshes,
-                      tuple(packed.values()))
+                      tuple(packed.values()), lods, render_names, shapes, skinned)
+
+
+def _fbx_structure(geometries, models, model_names, parents, children_of, descendants,
+                   collision_models, group_levels, rendered, mesh_models, triangles_of, skins):
+    """LOD chains, render-mesh names, collision shapes and skinning of one FBX.
+
+    LOD chains come from LOD groups (what Unreal and Unity import); without one,
+    from _LOD0/_LOD1 model names (Unity builds an LOD group from those).
+    """
+    def geometry_triangles(geometry_id) -> int:
+        if geometry_id not in triangles_of:
+            index_node = geometries[geometry_id].child("PolygonVertexIndex")
+            count = 0
+            if index_node is not None and index_node.props:
+                _corners, _starts, sizes = _fbx_polygons(index_node.props[0])
+                count = int(np.clip(sizes - 2, 0, None).sum())
+            triangles_of[geometry_id] = count
+        return triangles_of[geometry_id]
+
+    owned: dict = {}
+    for geometry_id in geometries:
+        for owner in parents.get(geometry_id, set()) & models:
+            owned.setdefault(owner, []).append(geometry_id)
+
+    def subtree_triangles(model) -> int:
+        members = ({model} | (descendants(model) & models)) - collision_models
+        found = {item for member in members for item in owned.get(member, ())}
+        return sum(geometry_triangles(item) for item in found)
+
+    lods = [(_bare_name(model_names.get(group, "")), tuple(subtree_triangles(level) for level in levels),
+             "group") for group, levels in group_levels.items() if levels]
+    if not lods:
+        named = [(model_names.get(model, ""), sum(geometry_triangles(item) for item in owned[model]))
+                 for model in owned if model not in collision_models]
+        lods = [(base, levels, "names") for base, levels in lod_chains_by_name(named)]
+    render_names = tuple(sorted({_bare_name(model_names.get(model, "")) for model in mesh_models}
+                                - {""}))
+    shapes = []
+    for model in sorted(collision_models, key=lambda item: model_names.get(item, "")):
+        points, triangles, offset = [], [], 0
+        for geometry_id in owned.get(model, ()):
+            geometry = geometries[geometry_id]
+            vertex_node, index_node = geometry.child("Vertices"), geometry.child("PolygonVertexIndex")
+            if vertex_node is None or not vertex_node.props:
+                continue
+            positions = np.asarray(vertex_node.props[0], dtype=np.float64)
+            if positions.size % 3:
+                raise AssetError("corrupt FBX vertex array (not a multiple of 3)")
+            positions = positions.reshape(-1, 3)
+            if index_node is not None and index_node.props:
+                corners, starts, sizes = _fbx_polygons(index_node.props[0])
+                fan = np.clip(sizes - 2, 0, None)
+                owner = np.repeat(np.arange(len(sizes)), fan)
+                first = np.repeat(np.cumsum(fan) - fan, fan)
+                step = np.arange(int(fan.sum())) - first + 1
+                triangles.append(np.stack([corners[starts[owner]], corners[starts[owner] + step],
+                                           corners[starts[owner] + step + 1]], axis=1) + offset)
+            points.append(positions)
+            offset += len(positions)
+        if not points:
+            continue                          # a UCX_ null with no mesh: nothing to import
+        shapes.append((_bare_name(model_names.get(model, "")),
+                       *hull_shape(np.concatenate(points),
+                                   np.concatenate(triangles) if triangles else np.zeros((0, 3), int))))
+    skinned = any(item in skins for geometry_id in rendered
+                  for item in children_of.get(geometry_id, ()))
+    return tuple(lods), render_names, tuple(shapes), skinned
 
 
 def read_fbx(path: Path, epsilon: float = 0.0, ratio: float = 1e-6) -> FbxSummary:
@@ -3465,6 +3744,677 @@ def gltf_undecodable_compression(path: Path) -> str:
         return ("compressed with meshopt, which this version cannot decode, so the shape "
                 "checks (degenerate triangles, bone weights) were skipped; counts are exact")
     return ""
+
+
+# --- #
+# Skeleton and lightmap UVs ([skeleton], [lightmap]): read only when a rule is on
+# --- #
+
+#: FBX Model classes that are skeleton joints (Maya, Max and Blender write LimbNode).
+FBX_BONE_CLASSES = frozenset({"LimbNode", "Limb", "Root"})
+#: A weight at or below this does not bind a vertex to a bone (as max_bone_influences).
+BONE_WEIGHT_EPSILON = 1e-4
+#: The overlap grid is sampled in chunks of this many texel centres; above
+#: LIGHTMAP_MAX_SAMPLES centres in one mesh the grid is halved until it fits.
+LIGHTMAP_CHUNK = 1 << 20
+LIGHTMAP_MAX_SAMPLES = 1 << 23
+
+
+def _name_list(names: Sequence[str], shown: int = 3) -> str:
+    """'a', 'b', 'c' and 2 more: names in a one-line verdict."""
+    quoted = ", ".join(f"'{name}'" for name in list(names)[:shown])
+    return quoted + (f" and {len(names) - shown} more" if len(names) > shown else "")
+
+
+def _ordinal(number: int) -> str:
+    words = {1: "first", 2: "second", 3: "third", 4: "fourth", 5: "fifth", 6: "sixth",
+             7: "seventh", 8: "eighth"}
+    return words.get(number, f"{number}th")
+
+
+def _percent(value: float) -> str:
+    """12, 3.4, 0.05: enough digits to tell a small overlap from none."""
+    if value == 0:
+        return "0"
+    if value >= 10:
+        return f"{value:.0f}"
+    return f"{value:.1f}" if value >= 1 else f"{value:.2f}"
+
+
+@lru_cache(maxsize=1)
+def _fbx_tree_cached(path_string: str, modified_ns: int) -> dict:
+    return {node.name: node for node in parse_fbx_binary(Path(path_string).read_bytes())}
+
+
+def _fbx_tree(path: Path) -> dict:
+    """The parsed FBX, shared by the skeleton and lightmap readers of one check."""
+    try:
+        return _fbx_tree_cached(str(path), path.stat().st_mtime_ns)
+    except AssetError:
+        raise
+    except OSError as exc:
+        raise AssetError(f"could not read FBX ({exc})") from exc
+    except (ValueError, IndexError, TypeError, MemoryError) as exc:
+        raise AssetError(f"could not read FBX ({type(exc).__name__}: {exc})") from exc
+
+
+def _fbx_graph(top: dict) -> dict:
+    """Objects and connections of a parsed FBX, and its render geometry.
+
+    The render geometry is chosen as in _read_fbx_cached: no UCX_/UBX_/USP_/UCP_
+    collision meshes and no LOD1+ levels of an LOD group.
+    """
+    graph: dict = {"geometries": {}, "models": {}, "classes": {}, "names": {}, "materials": {},
+                   "skins": set(), "clusters": {}, "parents": {}, "children": {}, "rendered": []}
+    objects = top.get("Objects")
+    if objects is None:
+        return graph
+    lod_groups = []
+    for node in objects.children:
+        node_id, kind = _fbx_id(node), _fbx_class(node)
+        if node.name == "Geometry" and kind == "Mesh":
+            graph["geometries"][node_id] = node
+        elif node.name == "Model":
+            graph["models"][node_id] = node
+            graph["classes"][node_id] = kind
+            graph["names"][node_id] = _fbx_object_name(node)
+            if kind == "LodGroup":
+                lod_groups.append(node_id)
+        elif node.name == "Material":
+            graph["materials"][node_id] = node
+        elif node.name == "Deformer" and kind == "Skin":
+            graph["skins"].add(node_id)
+        elif node.name == "Deformer" and kind == "Cluster":
+            graph["clusters"][node_id] = node
+    parents, children = graph["parents"], graph["children"]
+    connections = top.get("Connections")
+    for link in (connections.all("C") if connections else []):
+        if len(link.props) < 3:
+            continue
+        child, parent = link.props[1], link.props[2]
+        if parent not in parents.setdefault(child, []):
+            parents[child].append(parent)
+        if child not in children.setdefault(parent, []):
+            children[parent].append(child)
+    models = graph["models"]
+    collision = {model for model, name in graph["names"].items()
+                 if name.lower().startswith(FBX_COLLISION_PREFIXES)}
+    lower_lod: set = set()
+    for group in lod_groups:
+        levels = [item for item in children.get(group, []) if item in models and item not in collision]
+        stack = list(levels[1:])
+        while stack:
+            item = stack.pop()
+            if item not in lower_lod:
+                lower_lod.add(item)
+                stack.extend(children.get(item, ()))
+    for geometry_id in graph["geometries"]:
+        owners = {parent for parent in parents.get(geometry_id, ()) if parent in models}
+        if owners and (owners <= collision or owners <= lower_lod):
+            continue
+        graph["rendered"].append(geometry_id)
+    return graph
+
+
+def _fbx_owner(graph: dict, geometry_id) -> object:
+    return next((parent for parent in graph["parents"].get(geometry_id, ())
+                 if parent in graph["models"]), None)
+
+
+def _fbx_mesh_label(graph: dict, geometry_id) -> str:
+    owner = _fbx_owner(graph, geometry_id)
+    name = graph["names"].get(owner, "") if owner is not None else ""
+    return name or _fbx_object_name(graph["geometries"][geometry_id]) or "mesh"
+
+
+def _fbx_skin_binds(graph: dict, geometry_id) -> list:
+    """(cluster node, bone model id) for every skin cluster deforming this geometry."""
+    binds = []
+    for skin_id in graph["children"].get(geometry_id, ()):
+        if skin_id not in graph["skins"]:
+            continue
+        for cluster_id in graph["children"].get(skin_id, ()):
+            cluster = graph["clusters"].get(cluster_id)
+            bone = next((item for item in graph["children"].get(cluster_id, ())
+                         if item in graph["models"]), None)
+            if cluster is not None and bone is not None:
+                binds.append((cluster, bone))
+    return binds
+
+
+def _fbx_polygon_materials(geometry, polygons: int):
+    """Material slot index of each polygon (LayerElementMaterial; 0 when absent)."""
+    per_polygon = np.zeros(polygons, dtype=np.int64)
+    layer = geometry.child("LayerElementMaterial")
+    values = layer.child("Materials") if layer is not None else None
+    if values is not None and values.props:
+        raw = np.asarray(values.props[0], dtype=np.int64).reshape(-1)
+        mapping = _fbx_string(layer.child("MappingInformationType"))
+        if mapping == "ByPolygon" and raw.size == polygons:
+            per_polygon = raw.copy()
+        elif raw.size:
+            per_polygon[:] = raw[0]
+    return np.clip(per_polygon, 0, None)
+
+
+def _fbx_layer_values(layer, values_name: str, index_name: str, width: int, corners):
+    """Per-corner values of one FBX layer element (a UV set), or None.
+
+    ByPolygonVertex or ByControlPoint mapping, Direct or IndexToDirect reference,
+    as engine/fbx_preview reads the first UV set.
+    """
+    values_node = layer.child(values_name)
+    if values_node is None or not values_node.props:
+        return None
+    values = np.asarray(values_node.props[0], dtype=np.float64).reshape(-1)
+    if values.size == 0 or values.size % width:
+        return None
+    values = values.reshape(-1, width)
+    mapping = _fbx_string(layer.child("MappingInformationType"))
+    reference = _fbx_string(layer.child("ReferenceInformationType"))
+    index_node = layer.child(index_name)
+    if mapping == "ByPolygonVertex":
+        lookup = np.arange(len(corners))
+    elif mapping in ("ByControlPoint", "ByVertice", "ByVertex"):
+        lookup = corners
+    else:
+        return None
+    if reference == "IndexToDirect" and index_node is not None and index_node.props:
+        indices = np.asarray(index_node.props[0], dtype=np.int64).reshape(-1)
+        if lookup.size and int(lookup.max()) >= len(indices):
+            return None
+        lookup = indices[lookup]
+    if lookup.size and (int(lookup.max()) >= len(values) or int(lookup.min()) < 0):
+        return None
+    return values[lookup]
+
+
+def _fbx_fan(starts, sizes):
+    """Fan triangulation as engines import it: corner indices (n, 3) of (c0, ck, ck+1)."""
+    fan = np.clip(sizes - 2, 0, None)
+    count = int(fan.sum())
+    owner = np.repeat(np.arange(len(sizes)), fan)
+    first = np.repeat(np.cumsum(fan) - fan, fan)
+    step = np.arange(count) - first + 1
+    return np.stack([starts[owner], starts[owner] + step, starts[owner] + step + 1], axis=1), owner
+
+
+_NUMPY_COMPONENTS = {5120: "<i1", 5121: "<u1", 5122: "<i2", 5123: "<u2", 5125: "<u4", 5126: "<f4"}
+_NORMALISED_SCALE = {5120: 127.0, 5121: 255.0, 5122: 32767.0, 5123: 65535.0, 5125: 4294967295.0}
+
+
+def _accessor_numpy(path: Path, document: dict, index, buffers: dict):
+    """One glTF accessor as a float64 (count, components) array (read_accessor, in numpy).
+
+    ``buffers`` caches each buffer's bytes for the caller. Normalised integers
+    (KHR_mesh_quantization UVs and weights) are scaled to 0-1.
+    """
+    accessors = document.get("accessors", [])
+    if not isinstance(index, int) or not 0 <= index < len(accessors):
+        raise AssetError(f"glTF references missing accessor {index}")
+    accessor = accessors[index]
+    component = accessor.get("componentType")
+    dtype = _NUMPY_COMPONENTS.get(component)
+    width = _TYPE_COMPONENTS.get(accessor.get("type", "SCALAR"))
+    if dtype is None or width is None:
+        raise AssetError(f"unsupported glTF accessor {index} ({component}, {accessor.get('type')})")
+    count = int(accessor.get("count", 0) or 0)
+    view_index = accessor.get("bufferView")
+    if view_index is None or count == 0:
+        return np.zeros((count, width))
+    views = document.get("bufferViews", [])
+    if not isinstance(view_index, int) or not 0 <= view_index < len(views):
+        raise AssetError(f"glTF references missing bufferView {view_index}")
+    view = views[view_index]
+    buffer_index = int(view.get("buffer", 0))
+    if buffer_index not in buffers:
+        buffers[buffer_index] = buffer_bytes(path, document, buffer_index)
+    raw = buffers[buffer_index]
+    item = np.dtype(dtype).itemsize
+    start = int(view.get("byteOffset", 0)) + int(accessor.get("byteOffset", 0))
+    stride = int(view.get("byteStride") or 0) or item * width
+    if start < 0 or start + stride * (count - 1) + item * width > len(raw):
+        raise AssetError("glTF accessor runs past the end of its buffer")
+    values = np.ndarray((count, width), dtype=dtype, buffer=raw, offset=start,
+                        strides=(stride, item)).astype(np.float64)
+    if accessor.get("normalized") and component in _NORMALISED_SCALE:
+        values = np.maximum(values / _NORMALISED_SCALE[component], -1.0)
+    return values
+
+
+def _gltf_triangles(path: Path, document: dict, primitive: dict, buffers: dict):
+    """Vertex indices (n, 3) of a triangle primitive (lists, strips and fans), or None."""
+    mode = primitive.get("mode", 4)
+    if mode not in _GLTF_TRIANGLE_MODES:
+        return None
+    if primitive.get("indices") is not None:
+        indices = _accessor_numpy(path, document, primitive["indices"], buffers)[:, 0]
+        indices = indices.astype(np.int64)
+    else:
+        position = (primitive.get("attributes") or {}).get("POSITION")
+        accessors = document.get("accessors", [])
+        if not isinstance(position, int) or not 0 <= position < len(accessors):
+            return None
+        indices = np.arange(int(accessors[position].get("count", 0) or 0), dtype=np.int64)
+    if mode == 4:
+        return indices[:len(indices) // 3 * 3].reshape(-1, 3)
+    if len(indices) < 3:
+        return np.zeros((0, 3), dtype=np.int64)
+    first = indices[:-2] if mode == 5 else np.full(len(indices) - 2, indices[0])
+    return np.stack([first, indices[1:-1], indices[2:]], axis=1)
+
+
+def _gltf_draco(primitive: dict) -> bool:
+    """This primitive's vertex data is in a Draco blob, not in its accessors."""
+    extensions = primitive.get("extensions") if isinstance(primitive, dict) else None
+    return isinstance(extensions, dict) and _GLTF_DRACO in extensions
+
+
+def _bone_tree(bones: set, parent_of, children_of) -> tuple:
+    """(roots, depth per bone): roots are bones whose parent is not a bone."""
+    roots = []
+    for bone in sorted(bones, key=str):
+        up = parent_of(bone)
+        if up is None or up not in bones:
+            roots.append(bone)
+    depth: dict = {}
+    stack = [(root, 1) for root in roots]
+    while stack:
+        bone, level = stack.pop()
+        if bone in depth:
+            continue
+        depth[bone] = level
+        stack.extend((child, level + 1) for child in children_of(bone)
+                     if child in bones and child not in depth)
+    return roots, depth
+
+
+def _fbx_skeleton(path: Path) -> Optional[dict]:
+    graph = _fbx_graph(_fbx_tree(path))
+    models, children, names = graph["models"], graph["children"], graph["names"]
+    skinned = [(geometry_id, binds) for geometry_id in graph["rendered"]
+               for binds in [_fbx_skin_binds(graph, geometry_id)] if binds]
+    if not skinned:
+        return None
+
+    def parent_of(model):
+        return next((item for item in graph["parents"].get(model, ()) if item in models), None)
+
+    def child_models(model):
+        return [item for item in children.get(model, ()) if item in models]
+
+    # A bone is a joint node (LimbNode) or any node a skin cluster binds to. The
+    # skeleton is every bone connected to a bound one: up to its root, and down
+    # through unweighted bones (IK targets, twist helpers, tips) below that root.
+    linked = {bone for _geometry, binds in skinned for _cluster, bone in binds}
+
+    def is_bone(model) -> bool:
+        return model in linked or graph["classes"].get(model) in FBX_BONE_CLASSES
+
+    tops = set()
+    for bone in linked:
+        node, seen = bone, {bone}
+        while True:
+            up = parent_of(node)
+            if up is None or up in seen or not is_bone(up):
+                break
+            seen.add(up)
+            node = up
+        tops.add(node)
+    bones: set = set()
+    stack = list(tops)
+    while stack:
+        model = stack.pop()
+        if model in bones:
+            continue
+        bones.add(model)
+        stack.extend(item for item in child_models(model) if is_bone(item))
+    roots, depth = _bone_tree(bones, parent_of, child_models)
+
+    # Bones per material section: the clusters with weight on a vertex of a
+    # polygon of that material. Sections of several meshes that share a
+    # material are one section, as Unreal builds them.
+    sections: dict = {}
+    for geometry_id, binds in skinned:
+        geometry = graph["geometries"][geometry_id]
+        index_node = geometry.child("PolygonVertexIndex")
+        if index_node is None or not index_node.props:
+            continue
+        corners, starts, sizes = _fbx_polygons(index_node.props[0])
+        if not corners.size:
+            continue
+        vertex_count = int(corners.max()) + 1
+        per_polygon = _fbx_polygon_materials(geometry, len(sizes))
+        per_corner = np.repeat(per_polygon, sizes)
+        owner = _fbx_owner(graph, geometry_id)
+        slots = [item for item in children.get(owner, []) if item in graph["materials"]]
+        weighted = []
+        for cluster, bone in binds:
+            indexes, weights = cluster.child("Indexes"), cluster.child("Weights")
+            if indexes is None or weights is None or not indexes.props or not weights.props:
+                continue
+            index = np.asarray(indexes.props[0], dtype=np.int64).reshape(-1)
+            weight = np.asarray(weights.props[0], dtype=np.float64).reshape(-1)
+            size = min(index.size, weight.size)
+            index = index[:size][weight[:size] > BONE_WEIGHT_EPSILON]
+            weighted.append((bone, index[(index >= 0) & (index < vertex_count)]))
+        for slot in np.unique(per_polygon).tolist():
+            used = np.zeros(vertex_count, dtype=bool)
+            used[corners[per_corner == slot]] = True
+            if slot < len(slots):
+                key = slots[slot]
+                label = _fbx_object_name(graph["materials"][key]) or f"material {slot}"
+            elif not slots:
+                key, label = "default", "default material"
+            else:
+                key, label = (owner, slot), f"material {slot}"
+            section = sections.setdefault(key, (label, set()))[1]
+            section.update(bone for bone, index in weighted if index.size and used[index].any())
+    deepest = max(depth, key=lambda bone: (depth[bone], str(names.get(bone)))) if depth else None
+    return {"bones": len(bones), "roots": sorted(names.get(root, "") or "bone" for root in roots),
+            "depth": max(depth.values()) if depth else 0,
+            "deepest": names.get(deepest, "") if deepest is not None else "",
+            "sections": [(label, len(found)) for label, found in sections.values()],
+            "unread_sections": 0}
+
+
+def _gltf_skeleton(path: Path) -> Optional[dict]:
+    document = read_gltf_document(path)
+    nodes = document.get("nodes") or []
+    skins = document.get("skins") or []
+    meshes = document.get("meshes") or []
+    uses = []
+    for node in nodes:
+        mesh, skin = node.get("mesh"), node.get("skin")
+        if isinstance(mesh, int) and isinstance(skin, int) and 0 <= mesh < len(meshes) \
+                and 0 <= skin < len(skins):
+            uses.append((mesh, skin))
+    if not uses:
+        return None
+    joints_of = {}
+    for skin in {skin for _mesh, skin in uses}:
+        # Kept whole: JOINTS_n values index this list. Invalid entries are not bones.
+        joints_of[skin] = [item if isinstance(item, int) and 0 <= item < len(nodes) else None
+                           for item in (skins[skin].get("joints") or [])]
+    bones = {item for joints in joints_of.values() for item in joints if item is not None}
+    parent: dict = {}
+    for index, node in enumerate(nodes):
+        for child in node.get("children") or []:
+            if isinstance(child, int):
+                parent.setdefault(child, index)
+
+    def child_nodes(index):
+        return [item for item in (nodes[index].get("children") or []) if isinstance(item, int)]
+
+    roots, depth = _bone_tree(bones, parent.get, child_nodes)
+    materials = document.get("materials") or []
+    sections: dict = {}
+    unread = 0
+    buffers: dict = {}
+    # meshopt-compressed buffers hold no plain weights to read
+    compressed = bool(gltf_undecodable_compression(path))
+    for mesh, skin in uses:
+        joints = joints_of[skin]
+        for primitive in meshes[mesh].get("primitives") or []:
+            attributes = primitive.get("attributes") or {}
+            material = primitive.get("material")
+            if isinstance(material, int) and 0 <= material < len(materials):
+                label = materials[material].get("name") or f"material {material}"
+            else:
+                material, label = "default", "default material"
+            section = sections.setdefault(material, (label, set()))[1]
+            if compressed or _gltf_draco(primitive):
+                unread += 1
+                continue
+            for name in attributes:
+                if not (name.startswith("JOINTS_") and name[7:].isdigit()):
+                    continue
+                weights_name = "WEIGHTS_" + name[7:]
+                if weights_name not in attributes:
+                    continue
+                local = _accessor_numpy(path, document, attributes[name], buffers)
+                weight = _accessor_numpy(path, document, attributes[weights_name], buffers)
+                size = min(len(local), len(weight))
+                used = np.unique(local[:size][weight[:size] > BONE_WEIGHT_EPSILON]).astype(np.int64)
+                section.update(joints[item] for item in used.tolist()
+                               if 0 <= item < len(joints) and joints[item] is not None)
+    names = {index: (nodes[index].get("name") or f"node {index}") for index in bones}
+    deepest = max(depth, key=lambda bone: (depth[bone], str(names.get(bone)))) if depth else None
+    return {"bones": len(bones), "roots": sorted(names[root] for root in roots),
+            "depth": max(depth.values()) if depth else 0,
+            "deepest": names.get(deepest, "") if deepest is not None else "",
+            "sections": [(label, len(found)) for label, found in sections.values()],
+            "unread_sections": unread}
+
+
+def skeleton_facts(path: Path) -> Optional[dict]:
+    """The skeleton the asset's skinned meshes use, or None when nothing is skinned.
+
+    {"bones", "roots" (names), "depth" (longest root-to-tip chain, root = 1),
+    "deepest" (its last bone), "sections" [(material, bones weighting it)],
+    "unread_sections" (compressed primitives whose weights were not read)}.
+    FBX: LimbNode joints and every node a skin cluster binds, connected to the
+    bound ones. glTF: the joints of every skin a mesh node uses. OBJ: no skins.
+    """
+    if np is None:                                         # pragma: no cover
+        raise AssetError("numpy is not installed; the skeleton cannot be read")
+    suffix = path.suffix.lower()
+    if suffix in FBX_SUFFIXES:
+        return _fbx_skeleton(path)
+    if suffix in GLTF_SUFFIXES:
+        return _gltf_skeleton(path)
+    return None
+
+
+def lightmap_coverage(triangles, resolution: int = 256) -> tuple[int, int, int]:
+    """(texels covered, texels covered more than once, grid used) of UV triangles.
+
+    ``triangles`` is an (n, 3, 2) array of UVs, rasterised into a resolution x
+    resolution grid over 0-1. A texel belongs to a triangle when its centre is
+    inside it. A centre exactly on an edge goes to one side only (the top-left
+    rule GPUs use), and the edge test is computed from the same end of the edge
+    for both triangles that share it, so it gives exactly opposite answers: the
+    triangles of one island, and islands that only touch, never overlap.
+
+    Cost: one test per texel centre inside each triangle's bounding box, in
+    chunks of LIGHTMAP_CHUNK. A clean layout tests about two centres per covered
+    texel whatever the triangle count (100,000 triangles at 256: ~0.05 s). A layout
+    whose triangles each cover the square many times over would test far more,
+    so above LIGHTMAP_MAX_SAMPLES the grid is halved until it fits (down to 4).
+    """
+    tri = np.asarray(triangles, dtype=np.float64).reshape(-1, 3, 2)
+    tri = tri[np.all(np.isfinite(tri), axis=(1, 2))]
+    a, b, c = tri[:, 0], tri[:, 1], tri[:, 2]
+    twice_area = (b[:, 0] - a[:, 0]) * (c[:, 1] - a[:, 1]) - (b[:, 1] - a[:, 1]) * (c[:, 0] - a[:, 0])
+    keep = twice_area != 0                  # zero-area triangles cover nothing
+    a, b, c, twice_area = a[keep], b[keep], c[keep], twice_area[keep]
+    mirrored = (twice_area < 0)[:, None]    # one winding for all: mirrored islands too
+    b, c = np.where(mirrored, c, b), np.where(mirrored, b, c)
+    res = max(4, int(resolution))
+    while True:
+        low = np.minimum(np.minimum(a, b), c) * res
+        high = np.maximum(np.maximum(a, b), c) * res
+        x0 = np.clip(np.ceil(low[:, 0] - 0.5), 0, res - 1).astype(np.int64)
+        y0 = np.clip(np.ceil(low[:, 1] - 0.5), 0, res - 1).astype(np.int64)
+        x1 = np.clip(np.floor(high[:, 0] - 0.5), -1, res - 1).astype(np.int64)
+        y1 = np.clip(np.floor(high[:, 1] - 0.5), -1, res - 1).astype(np.int64)
+        width = np.clip(x1 - x0 + 1, 0, None)
+        samples = width * np.clip(y1 - y0 + 1, 0, None)
+        total = int(samples.sum())
+        if total <= LIGHTMAP_MAX_SAMPLES or res <= 4:
+            break
+        res = max(4, res // 2)
+    if total == 0:
+        return 0, 0, res
+    pa, pb, pc = a * res, b * res, c * res
+    edges = []
+    for p, q in ((pa, pb), (pb, pc), (pc, pa)):
+        dx, dy = q[:, 0] - p[:, 0], q[:, 1] - p[:, 1]
+        # Counter-clockwise, interior on the left: a centre on a left or top edge
+        # is inside. The neighbour sees the edge reversed, so not its left or top.
+        own = (dy < 0) | ((dy == 0) & (dx < 0))
+        # Measure from the lexicographically smaller end: the neighbour's value
+        # is then the exact negative of this one, bit for bit.
+        swap = (p[:, 0] > q[:, 0]) | ((p[:, 0] == q[:, 0]) & (p[:, 1] > q[:, 1]))
+        origin = np.where(swap[:, None], q, p)
+        edges.append((origin[:, 0].copy(), origin[:, 1].copy(), dx, dy, own))
+    counts = np.zeros(res * res, dtype=np.int64)
+    ends = np.cumsum(samples)
+    begins = ends - samples
+    for start in range(0, total, LIGHTMAP_CHUNK):
+        k = np.arange(start, min(start + LIGHTMAP_CHUNK, total), dtype=np.int64)
+        t = np.searchsorted(ends, k, side="right")
+        iy, ix = np.divmod(k - begins[t], width[t])
+        ix += x0[t]
+        iy += y0[t]
+        px, py = ix + 0.5, iy + 0.5
+        inside = np.ones(len(k), dtype=bool)
+        for ox, oy, dx, dy, own in edges:
+            value = dx[t] * (py - oy[t]) - dy[t] * (px - ox[t])
+            inside &= (value > 0) | ((value == 0) & own[t])
+        counts += np.bincount(iy[inside] * res + ix[inside], minlength=res * res)
+    return int(np.count_nonzero(counts)), int(np.count_nonzero(counts > 1)), res
+
+
+def _lightmap_meshes(path: Path, channel: int) -> dict:
+    """The static meshes of an asset and their lightmap UV set.
+
+    {"meshes": [(name, uv points (n, 2), uv triangles (m, 3, 2))], "missing":
+    [names of static meshes without the set], "unread": why some were not read}.
+    Skinned meshes are left out: a skeletal mesh is not lightmapped.
+    """
+    found: dict = {"meshes": [], "missing": [], "unread": ""}
+    suffix = path.suffix.lower()
+    if suffix in FBX_SUFFIXES:
+        graph = _fbx_graph(_fbx_tree(path))
+        for geometry_id in graph["rendered"]:
+            if _fbx_skin_binds(graph, geometry_id):
+                continue
+            geometry = graph["geometries"][geometry_id]
+            index_node = geometry.child("PolygonVertexIndex")
+            if index_node is None or not index_node.props:
+                continue
+            corners, starts, sizes = _fbx_polygons(index_node.props[0])
+            if not int(np.clip(sizes - 2, 0, None).sum()):
+                continue
+            name = _fbx_mesh_label(graph, geometry_id)
+            # A UV layer element carries its set index; files without one are
+            # read in order, as the sets appear.
+            layers = geometry.all("LayerElementUV")
+            indexed = [item for item in layers if item.props and isinstance(item.props[0], int)]
+            if indexed:
+                layer = next((item for item in indexed if item.props[0] == channel), None)
+            else:
+                layer = layers[channel] if len(layers) > channel else None
+            if layer is None:
+                found["missing"].append(name)
+                continue
+            uv = _fbx_layer_values(layer, "UV", "UVIndex", 2, corners)
+            if uv is None:
+                found["unread"] = (f"'{name}' has a UV set {channel} this version cannot read "
+                                   "(unusual mapping)")
+                continue
+            triangles, _owner = _fbx_fan(starts, sizes)
+            found["meshes"].append((name, uv, uv[triangles]))
+        return found
+    if suffix in GLTF_SUFFIXES:
+        document = read_gltf_document(path)
+        undecodable = gltf_undecodable_compression(path)
+        if undecodable:
+            found["unread"] = "the vertex data is compressed in a way this machine cannot decode"
+            return found
+        buffers: dict = {}
+        attribute = f"TEXCOORD_{channel}"
+        for index, mesh in enumerate(document.get("meshes") or []):
+            name = mesh.get("name") or f"mesh {index}"
+            points, triangles, missing = [], [], False
+            for primitive in mesh.get("primitives") or []:
+                attributes = primitive.get("attributes") or {}
+                if any(key.startswith("JOINTS_") for key in attributes):
+                    continue                              # skinned: not lightmapped
+                if primitive.get("mode", 4) not in _GLTF_TRIANGLE_MODES:
+                    continue
+                if attribute not in attributes:
+                    missing = True
+                    continue
+                if _gltf_draco(primitive):
+                    found["unread"] = f"'{name}' is Draco-compressed"
+                    continue
+                uv = _accessor_numpy(path, document, attributes[attribute], buffers)[:, :2]
+                corners = _gltf_triangles(path, document, primitive, buffers)
+                if corners is None or not len(corners):
+                    continue
+                if int(corners.max()) >= len(uv) or int(corners.min()) < 0:
+                    raise AssetError(f"damaged glTF: '{name}' indexes past its {attribute}; "
+                                     "re-export it")
+                points.append(uv[np.unique(corners)])
+                triangles.append(uv[corners])
+            if missing:
+                found["missing"].append(name)
+            if triangles:
+                found["meshes"].append((name, np.concatenate(points), np.concatenate(triangles)))
+        return found
+    if suffix == ".obj":
+        if channel > 0:
+            found["obj_single_set"] = True
+            return found
+        scene = load_scene(path)
+        items = scene.geometry.items() if hasattr(scene, "geometry") else [(path.stem, scene)]
+        for name, geometry in items:
+            faces = getattr(geometry, "faces", None)
+            if faces is None or not len(faces):
+                continue
+            uv = getattr(getattr(geometry, "visual", None), "uv", None)
+            if uv is None or len(uv) != len(geometry.vertices):
+                found["missing"].append(str(name))
+                continue
+            uv = np.asarray(uv, dtype=np.float64)[:, :2]
+            faces = np.asarray(faces, dtype=np.int64)
+            found["meshes"].append((str(name), uv[np.unique(faces)], uv[faces]))
+    return found
+
+
+def lightmap_facts(path: Path, channel: int = 1, resolution: int = 256,
+                   overlap: bool = True) -> dict:
+    """What the [lightmap] rules need about an asset's lightmap UV set.
+
+    {"static": static meshes found, "missing": [names without the set],
+    "obj_single_set": an OBJ asked for a set past its one, "uvs": lightmap UVs
+    read, "outside": how many lie outside 0-1, "worst": (u, v) farthest outside,
+    "overlap": (percent, texels overlapped, texels covered, mesh, grid) of the
+    worst mesh or None, "collapsed": [meshes whose set covers no texel],
+    "unread": why part of the asset was not read, or ""}.
+    """
+    if np is None:                                         # pragma: no cover
+        raise AssetError("numpy is not installed; lightmap UVs cannot be read")
+    found = _lightmap_meshes(path, channel)
+    facts: dict = {"static": len(found["meshes"]) + len(found["missing"]),
+                   "missing": found["missing"], "obj_single_set": found.get("obj_single_set", False),
+                   "uvs": 0, "outside": 0, "worst": None, "overlap": None, "collapsed": [],
+                   "unread": found["unread"]}
+    farthest = 0.0
+    for name, points, triangles in found["meshes"]:
+        points = points[np.all(np.isfinite(points), axis=1)]
+        beyond = np.max(np.stack([-points[:, 0], points[:, 0] - 1.0,
+                                  -points[:, 1], points[:, 1] - 1.0], axis=1), axis=1) \
+            if len(points) else np.zeros(0)
+        outside = beyond > LIGHTMAP_UV_TOLERANCE
+        facts["uvs"] += len(points)
+        facts["outside"] += int(np.count_nonzero(outside))
+        if outside.any():
+            worst = int(np.argmax(beyond))
+            if beyond[worst] > farthest:
+                farthest = float(beyond[worst])
+                facts["worst"] = (float(points[worst, 0]), float(points[worst, 1]))
+        if overlap and len(triangles):
+            covered, overlapped, grid = lightmap_coverage(triangles, resolution)
+            if not covered:
+                facts["collapsed"].append(name)
+                continue
+            percent = 100.0 * overlapped / covered
+            if facts["overlap"] is None or percent > facts["overlap"][0]:
+                facts["overlap"] = (percent, overlapped, covered, name, grid)
+    return facts
 
 
 #: Corners closer than this (in file units) are the same point, whatever the scale.
@@ -4089,6 +5039,381 @@ def transform_audit(path: Path, budget: Budget) -> list[str]:
     return problems
 
 
+# --- #
+# LOD levels and collision ([lod], [collision]): what Unreal and Unity import
+# --- #
+
+#: Unity's LOD naming (Rock_LOD0, Rock_LOD1, ...): case-insensitive, "_LOD<n>" at the end.
+LOD_NAME = re.compile(r"^(?P<base>.+?)_LOD(?P<level>\d+)$", re.IGNORECASE)
+#: A UCX_ hull with a vertex further than this fraction of its bounding-box
+#: diagonal in front of one of its own faces is not convex. 1%: a dent of 1.7 cm
+#: in a 1 m crate. Smaller dents (a slightly bent quad) change nothing in play.
+HULL_CONCAVITY_TOLERANCE = 0.01
+#: A hull thinner than this fraction of its diagonal is flat: no volume to build.
+HULL_FLAT_TOLERANCE = 1e-4
+#: The convexity test compares every vertex with every face; above this many
+#: comparisons (a hull far too big to be a hull) it is not run.
+HULL_TEST_LIMIT = 20_000_000
+
+
+def _bare_name(name: str) -> str:
+    """An object name without its DCC namespace ("props:Rock" -> "Rock"), as Unreal reads it."""
+    return str(name or "").rsplit(":", 1)[-1]
+
+
+def lod_chains_by_name(items) -> list[tuple[str, tuple[int, ...]]]:
+    """LOD chains from (object name, triangles) pairs named <base>_LOD<n>.
+
+    A chain is LOD0, LOD1, ... up to the first missing number; an object named
+    just <base> stands in for a missing _LOD0. Only chains of two levels or more
+    are returned: a lone Rock_LOD0 is a mesh without LODs.
+    """
+    plain: dict[str, int] = {}
+    chains: dict[str, dict[int, int]] = {}
+    labels: dict[str, str] = {}
+    for name, triangles in items:
+        name = _bare_name(name)
+        match = LOD_NAME.match(name)
+        if match is None:
+            plain[name.lower()] = plain.get(name.lower(), 0) + int(triangles)
+            continue
+        key = match.group("base").lower()
+        labels.setdefault(key, match.group("base"))
+        level = int(match.group("level"))
+        levels = chains.setdefault(key, {})
+        levels[level] = levels.get(level, 0) + int(triangles)
+    found = []
+    for key, levels in chains.items():
+        if 0 not in levels and key in plain:
+            levels[0] = plain[key]
+        counts = []
+        while len(counts) in levels:
+            counts.append(levels[len(counts)])
+        if len(counts) >= 2:
+            found.append((labels[key], tuple(counts)))
+    return sorted(found)
+
+
+def hull_shape(points, triangles) -> tuple[int, Optional[float], bool]:
+    """(distinct vertices, concavity, flat) of one collision mesh.
+
+    Concavity is how far the worst vertex lies in front of one of the mesh's own
+    faces, as a fraction of its bounding-box diagonal: 0 for a convex hull (every
+    vertex on or behind every face plane). The test does not care which way a
+    face is wound: it asks whether a face plane has vertices on both sides. None
+    when it could not be run (no faces, or too big to compare).
+    """
+    if np is None:                                       # pragma: no cover
+        return len(points), None, False
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 3)
+    if not len(points):
+        return 0, None, True
+    unique, inverse = np.unique(points, axis=0, return_inverse=True)
+    inverse = np.asarray(inverse).reshape(-1)
+    count = len(unique)
+    diagonal = float(np.linalg.norm(unique.max(axis=0) - unique.min(axis=0)))
+    if count < 4 or diagonal <= 0:
+        return count, None, True
+    centred = unique - unique.mean(axis=0)
+    thinnest = np.linalg.svd(centred, full_matrices=False)[2][-1]
+    spread = centred @ thinnest
+    if float(spread.max() - spread.min()) <= HULL_FLAT_TOLERANCE * diagonal:
+        return count, None, True
+    triangles = np.asarray(triangles, dtype=np.int64).reshape(-1, 3)
+    if not len(triangles) or int(triangles.max()) >= len(points) or int(triangles.min()) < 0:
+        return count, None, False
+    corners = unique[inverse[triangles]]
+    normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    lengths = np.linalg.norm(normals, axis=1)
+    keep = lengths > 1e-12 * diagonal * diagonal
+    if not keep.any() or count * int(keep.sum()) > HULL_TEST_LIMIT:
+        return count, None, False
+    normals = normals[keep] / lengths[keep, None]
+    offsets = np.einsum("ij,ij->i", corners[keep, 0], normals)
+    worst = 0.0
+    block = max(1, 1_000_000 // count)
+    for start in range(0, len(normals), block):
+        distances = unique @ normals[start:start + block].T - offsets[start:start + block]
+        both_sides = np.minimum(distances.max(axis=0), -distances.min(axis=0))
+        worst = max(worst, float(both_sides.max()))
+    return count, round(max(worst, 0.0) / diagonal, 6), False
+
+
+def _gltf_points_and_triangles(path: Path, document: dict, mesh: dict):
+    """POSITION points and triangle indices of one glTF mesh; triangles None if unreadable."""
+    accessors = document.get("accessors") or []
+    points: list = []
+    triangles: Optional[list] = []
+    for primitive in mesh.get("primitives") or []:
+        position = (primitive.get("attributes") or {}).get("POSITION")
+        if not isinstance(position, int) or not 0 <= position < len(accessors):
+            continue
+        accessor = accessors[position]
+        compressed = (accessor.get("bufferView") is None
+                      or "KHR_draco_mesh_compression" in (primitive.get("extensions") or {}))
+        if compressed:
+            # No readable positions: count them, but they cannot be tested.
+            points.extend([(float(len(points) + i), 0.0, 0.0)
+                           for i in range(int(accessor.get("count", 0) or 0))])
+            triangles = None
+            continue
+        offset = len(points)
+        points.extend(read_accessor(path, document, position))
+        mode = primitive.get("mode", 4)
+        if triangles is None or mode != 4:
+            triangles = None
+            continue
+        index = primitive.get("indices")
+        flat = ([item[0] for item in read_accessor(path, document, index)]
+                if isinstance(index, int) else list(range(len(points) - offset)))
+        triangles.extend((offset + flat[i], offset + flat[i + 1], offset + flat[i + 2])
+                         for i in range(0, len(flat) - 2, 3))
+    return points, triangles
+
+
+def gltf_structure(path: Path, document: dict) -> dict:
+    """LOD chains, render-mesh names, collision shapes and skinning of one glTF.
+
+    LOD chains come from the MSFT_lod node extension (its ``ids`` are the
+    coarser levels, which sit outside the scene); without it, from node names
+    ending _LOD0, _LOD1 ... Collision meshes are nodes (or, for an unnamed node,
+    meshes) named UCX_/UBX_/USP_/UCP_, as Unreal's glTF import reads them.
+    """
+    nodes = document.get("nodes") or []
+    meshes = document.get("meshes") or []
+    per_mesh = [sum(_primitive_triangles(document, primitive)
+                    for primitive in (mesh.get("primitives") or []))
+                if isinstance(mesh, dict) else 0 for mesh in meshes]
+
+    def node(index):
+        return nodes[index] if isinstance(index, int) and 0 <= index < len(nodes) \
+            and isinstance(nodes[index], dict) else None
+
+    def mesh_of(index):
+        item = node(index)
+        mesh = item.get("mesh") if item else None
+        return mesh if isinstance(mesh, int) and 0 <= mesh < len(meshes) else None
+
+    def name_of(index):
+        item = node(index) or {}
+        mesh = mesh_of(index)
+        mesh_name = meshes[mesh].get("name", "") if mesh is not None and isinstance(meshes[mesh], dict) else ""
+        return _bare_name(item.get("name") or mesh_name or "")
+
+    def walk(roots):
+        order, seen, stack = [], set(), list(reversed(list(roots)))
+        while stack:
+            index = stack.pop()
+            if node(index) is None or index in seen:
+                continue                             # malformed or cyclic: never loop
+            seen.add(index)
+            order.append(index)
+            stack.extend(reversed([child for child in node(index).get("children", []) or []]))
+        return order
+
+    scenes = document.get("scenes") or []
+    scene_index = document.get("scene", 0)
+    if scenes:
+        scene = scenes[scene_index] if isinstance(scene_index, int) and 0 <= scene_index < len(scenes) \
+            else scenes[0]
+        reachable = walk((scene or {}).get("nodes", []) if isinstance(scene, dict) else [])
+    else:
+        reachable = walk(range(len(nodes)))
+
+    def is_collision(index):
+        return name_of(index).lower().startswith(FBX_COLLISION_PREFIXES)
+
+    def subtree_triangles(index):
+        return sum(per_mesh[mesh_of(item)] for item in walk([index])
+                   if mesh_of(item) is not None and not is_collision(item))
+
+    lods = []
+    for index in reachable:
+        extension = ((node(index) or {}).get("extensions") or {}).get("MSFT_lod")
+        ids = extension.get("ids") if isinstance(extension, dict) else None
+        if isinstance(ids, list) and ids:
+            levels = [index] + [item for item in ids if node(item) is not None]
+            lods.append((name_of(index) or f"node {index}",
+                         tuple(subtree_triangles(item) for item in levels), "MSFT_lod"))
+    if not lods:
+        named = [(name_of(index), per_mesh[mesh_of(index)]) for index in reachable
+                 if mesh_of(index) is not None and not is_collision(index)]
+        lods = [(base, levels, "names") for base, levels in lod_chains_by_name(named)]
+
+    render_names, shapes, skinned = set(), [], False
+    for index in reachable:
+        mesh = mesh_of(index)
+        if "skin" in (node(index) or {}):
+            skinned = True
+        if mesh is None:
+            continue
+        if any("JOINTS_0" in (primitive.get("attributes") or {})
+               for primitive in (meshes[mesh].get("primitives") or [])):
+            skinned = True
+        if is_collision(index):
+            points, triangles = _gltf_points_and_triangles(path, document, meshes[mesh])
+            if triangles is None:
+                shapes.append((name_of(index), len(points), None, False))
+            else:
+                shapes.append((name_of(index), *hull_shape(points, triangles)))
+            continue
+        render_names.update(name for name in (_bare_name((node(index) or {}).get("name", "")),
+                                               _bare_name(meshes[mesh].get("name", ""))) if name)
+    return {"lod_groups": tuple(lods), "render_names": tuple(sorted(render_names)),
+            "collision_shapes": tuple(shapes), "skinned": skinned}
+
+
+def asset_structure(path: Path) -> Optional[dict]:
+    """LOD chains and collision of a mesh file, or None for a format with neither (.obj)."""
+    suffix = path.suffix.lower()
+    if suffix in FBX_SUFFIXES:
+        summary = read_fbx(path)
+        return {"lod_groups": summary.lod_groups, "render_names": summary.render_names,
+                "collision_shapes": summary.collision_shapes, "skinned": summary.skinned}
+    if suffix in GLTF_SUFFIXES:
+        try:
+            return gltf_structure(path, read_gltf_document(path))
+        except AssetError:
+            raise
+        except (ValueError, TypeError, KeyError, AttributeError, IndexError, OSError) as exc:
+            raise AssetError(f"damaged glTF ({_describe_unexpected(exc)}); re-export it") from exc
+    return None
+
+
+def collision_target(name: str, render_names: Sequence[str]) -> bool:
+    """Whether Unreal attaches collision mesh *name* to one of *render_names*.
+
+    Unreal's FBX import reads UCX_<RenderMeshName> and UCX_<RenderMeshName>_<suffix>
+    (its documentation: UCX_Tree_01_00 and UCX_Tree_01_01 both belong to Tree_01).
+    Names compare exactly, case included, as Unreal compares them.
+    """
+    _prefix, _sep, rest = _bare_name(name).partition("_")
+    candidates = {rest}
+    if "_" in rest:
+        candidates.add(rest.rsplit("_", 1)[0])
+    candidates.discard("")
+    return bool(candidates & set(render_names))
+
+
+def _share(fraction: float) -> str:
+    """12%, 3.4%: a fraction (0-1) as a percentage, for the LOD and collision lines."""
+    return f"{fraction:.0%}" if fraction >= 0.1 else f"{fraction:.1%}"
+
+
+def lod_collision_problems(path: Path, structure: Optional[dict], budget: "Budget",
+                           ) -> tuple[list[str], list[str], list[str], list[tuple[str, int]]]:
+    """(problems, warnings, metrics, stats) of the [lod] and [collision] rules."""
+    problems: list[str] = []
+    warnings: list[str] = []
+    metrics: list[str] = []
+    stats: list[tuple[str, int]] = []
+    suffix = path.suffix.lower()
+    lod_on = budget.lod_min_levels > 0 or budget.lod_max_ratio > 0
+    collision_on = (budget.collision_require or budget.collision_name_match
+                    or budget.collision_convex or budget.collision_max_hulls > 0
+                    or budget.collision_max_hull_vertices > 0)
+
+    if lod_on:
+        chains = tuple((structure or {}).get("lod_groups", ()))
+        levels = min((len(chain[1]) for chain in chains), default=1)
+        shortest = min(chains, key=lambda chain: len(chain[1]), default=None)
+        stats.append(("lod_levels", levels))
+        if shortest is not None:
+            stats.extend((f"lod{level}_triangles", count) for level, count in enumerate(shortest[1]))
+        metrics.append(f"{levels} LODs" if levels > 1 else "no LODs")
+        if any(chain[2] == "names" for chain in chains) and suffix in FBX_SUFFIXES:
+            warnings.append("LODs found by name only (_LOD1, ...): Unity builds an LOD group from "
+                            "these, but Unreal reads an FBX's LODs only from an LOD group")
+        need = budget.lod_min_levels
+        if need and levels < need:
+            missing = f"LOD{levels}" + (f"-LOD{need - 1}" if need - 1 > levels else "")
+            if not chains:
+                how = {".obj": ".obj cannot carry LODs: export FBX with an LOD group"}.get(
+                    suffix, "export an LOD group" if suffix in FBX_SUFFIXES
+                    else "add them as MSFT_lod levels or as nodes named <mesh>_LOD1, ...")
+                problems.append(f"no LODs (LOD0 only); at least {need} levels are required: "
+                                f"add {missing} ({how})")
+            else:
+                problems.append(f"{levels} LOD levels in '{shortest[0]}'; at least {need} are "
+                                f"required: add {missing}")
+        limit = budget.lod_max_ratio
+        if limit:
+            for name, counts, _source in chains:
+                for level in range(1, len(counts)):
+                    above, here = counts[level - 1], counts[level]
+                    if here == 0:
+                        problems.append(f"LOD{level} of '{name}' has no triangles: re-export it "
+                                        "or remove the level")
+                    elif above and here / above > limit:
+                        problems.append(
+                            f"LOD{level} of '{name}' keeps {here / above:.2f} of LOD{level - 1}'s "
+                            f"triangles ({here:,} of {above:,}); at most {limit:g} is allowed: "
+                            f"reduce it to {int(limit * above):,} triangles or fewer")
+
+    if collision_on:
+        if structure is None:
+            if budget.collision_require:
+                warnings.append(f"collision not checked: {suffix or 'this format'} carries no "
+                                "collision Unreal reads; export FBX for UCX_ collision")
+            return problems, warnings, metrics, stats
+        shapes = tuple(structure.get("collision_shapes", ()))
+        render_names = tuple(structure.get("render_names", ()))
+        hulls = [shape for shape in shapes if shape[0].upper().startswith("UCX_")]
+        stats.append(("collision_shapes", len(shapes)))
+        if hulls:
+            stats.append(("collision_hulls", len(hulls)))
+            stats.append(("max_hull_vertices", max(shape[1] for shape in hulls)))
+        metrics.append(f"{len(shapes)} collision")
+        if budget.collision_require and not shapes and not structure.get("skinned"):
+            example = render_names[0] if render_names else path.stem
+            problems.append(f"no collision: a static mesh needs a UCX_ (or UBX_/USP_/UCP_) mesh "
+                            f"named after its render mesh, such as UCX_{example}_00 (a skinned mesh "
+                            "is exempt: it uses a physics asset)")
+        if budget.collision_name_match and render_names:
+            orphans = [shape[0] for shape in shapes if not collision_target(shape[0], render_names)]
+            if orphans:
+                prefix = orphans[0].split("_", 1)[0].upper()
+                problems.append(
+                    f"collision mesh{'es' if len(orphans) > 1 else ''} {_name_list(orphans)} "
+                    f"match{'' if len(orphans) > 1 else 'es'} no render mesh, so Unreal ignores "
+                    f"{'them' if len(orphans) > 1 else 'it'} on import: name "
+                    f"{'each' if len(orphans) > 1 else 'it'} {prefix}_<mesh> or {prefix}_<mesh>_00 "
+                    f"after {'one of ' if len(render_names) > 1 else ''}{_name_list(render_names)} "
+                    "(case matters)")
+        if budget.collision_max_hulls and len(hulls) > budget.collision_max_hulls:
+            problems.append(f"{len(hulls)} convex hulls (UCX_) exceed the {budget.collision_max_hulls} "
+                            f"hull budget: merge or remove {len(hulls) - budget.collision_max_hulls}")
+        cap = budget.collision_max_hull_vertices
+        if cap:
+            heavy = [shape for shape in hulls if shape[1] > cap]
+            if heavy:
+                named = ", ".join(f"'{shape[0]}' ({shape[1]:,} vertices)" for shape in heavy[:3])
+                if len(heavy) > 3:
+                    named += f" and {len(heavy) - 3} more"
+                problems.append(f"collision hull{'s' if len(heavy) > 1 else ''} {named} "
+                                f"{'are' if len(heavy) > 1 else 'is'} over the {cap}-vertex hull "
+                                f"limit: simplify {'them' if len(heavy) > 1 else 'it'}")
+        if budget.collision_convex:
+            flat = [shape[0] for shape in hulls if shape[3]]
+            dented = [shape for shape in hulls if not shape[3] and shape[2] is not None
+                      and shape[2] > HULL_CONCAVITY_TOLERANCE]
+            untested = [shape[0] for shape in hulls if not shape[3] and shape[2] is None]
+            if flat:
+                problems.append(f"collision hull{'s' if len(flat) > 1 else ''} {_name_list(flat)} "
+                                f"{'are' if len(flat) > 1 else 'is'} flat (no volume): Unreal "
+                                "cannot build a convex hull from a plane; give it thickness")
+            for name, _vertices, concavity, _flat in dented:
+                problems.append(f"collision hull '{name}' is not convex (a dent {_share(concavity)} "
+                                "of its size): Unreal replaces it with its convex hull on import, "
+                                "filling the dent; split it into convex pieces "
+                                f"({name.split('_', 1)[0]}_<mesh>_00, _01, ...)")
+            if untested:
+                warnings.append(f"collision hull{'s' if len(untested) > 1 else ''} "
+                                f"{_name_list(untested)} not tested for convexity (compressed, "
+                                "not triangles, or too large to compare)")
+    return problems, warnings, metrics, stats
+
+
 class Gatekeeper:
     """Applies the budget rules and returns a Verdict. No I/O side effects.
 
@@ -4351,6 +5676,12 @@ class Gatekeeper:
                 if uv_channels > limit:
                     problems.append(f"{uv_channels} UV channels exceeds the {limit} channel limit")
 
+        # [skeleton] and [lightmap]: off by default, read only when a rule is on.
+        if self.budget.skeleton_checked:
+            self._check_skeleton(path, problems, warnings, metrics, stats)
+        if self.budget.lightmap_checked:
+            self._check_lightmap(path, problems, warnings, metrics, stats)
+
         if (not self.budget.allow_degenerate and self.budget.degenerate_mode != "allow"
                 and not undecodable):
             try:
@@ -4480,8 +5811,135 @@ class Gatekeeper:
             except Exception as exc:      # an audit must never break the verdict
                 LOG.debug("transform audit failed for %s: %s", path.name, exc)
 
+        # LODs and collision ([lod], [collision]): opt-in, every key off by default.
+        budget = self.budget
+        if triangles and (budget.lod_min_levels or budget.lod_max_ratio or budget.collision_require
+                          or budget.collision_name_match or budget.collision_convex
+                          or budget.collision_max_hulls or budget.collision_max_hull_vertices):
+            try:
+                found = lod_collision_problems(path, asset_structure(path), budget)
+            except AssetError as exc:
+                problems.append(f"LODs / collision not read ({exc})")
+            else:
+                problems.extend(found[0])
+                warnings.extend(found[1])
+                metrics.extend(found[2])
+                stats.extend(found[3])
+
         return Verdict(path, tuple(problems), " / ".join(metrics), tuple(stats),
                        warnings=tuple(warnings))
+
+    def _check_skeleton(self, path: Path, problems: list, warnings: list, metrics: list,
+                        stats: list) -> None:
+        """[skeleton]: bones, bones per material section, roots and chain depth."""
+        budget = self.budget
+        try:
+            skeleton = skeleton_facts(path)
+        except AssetError as exc:
+            problems.append(str(exc))
+            return
+        except Exception as exc:              # a skeleton read must never break the verdict
+            warnings.append(f"skeleton not checked ({_describe_unexpected(exc)})")
+            return
+        if not skeleton or not skeleton["bones"]:
+            return                            # nothing skinned: the rules do not apply
+        bones, roots, depth = skeleton["bones"], skeleton["roots"], skeleton["depth"]
+        metrics.append(f"{bones} bones")
+        stats.extend((("bones", bones), ("root_bones", len(roots)), ("bone_depth", depth)))
+        if budget.max_bones and bones > budget.max_bones:
+            problems.append(f"{bones:,} bones in the skeleton exceeds the {budget.max_bones:,} "
+                            f"bone budget (+{bones - budget.max_bones:,}): remove helper or "
+                            "unused bones before export, or split the character")
+        sections = skeleton["sections"]
+        if skeleton["unread_sections"]:
+            sections = []      # not counted, rather than counted as 0 bones
+            warnings.append("bones per material section not counted: the skin weights are "
+                            "compressed, and this check reads plain vertex data only")
+        if sections:
+            stats.append(("max_bones_per_section", max(count for _label, count in sections)))
+        limit = budget.max_bones_per_section
+        over = sorted(((count, label) for label, count in sections if limit and count > limit),
+                      reverse=True)
+        if over:
+            count, label = over[0]
+            where = (f"material section '{label}' is skinned to {count} bones" if len(over) == 1
+                     else f"{len(over)} material sections are skinned to more than {limit} bones "
+                          f"(worst '{label}': {count})")
+            problems.append(f"{where}, over the {limit} bones-per-section limit: the engine "
+                            "splits such a section into extra draw calls (Unreal on mobile "
+                            "allows 75); weight it to fewer bones or give some of its faces "
+                            "another material")
+        if budget.single_root_bone and len(roots) != 1:
+            problems.append(f"skeleton has {len(roots)} root bones ({_name_list(roots)}): Unreal "
+                            "imports one root only (\"Multiple roots are found in the bone "
+                            "hierarchy\"); parent every bone under a single root bone")
+        if budget.max_bone_depth and depth > budget.max_bone_depth:
+            problems.append(f"bone chain is {depth} bones deep (root to "
+                            f"'{skeleton['deepest']}'), over the {budget.max_bone_depth} depth "
+                            "limit: shorten the chain or remove in-between bones")
+
+    def _check_lightmap(self, path: Path, problems: list, warnings: list, metrics: list,
+                        stats: list) -> None:
+        """[lightmap]: an authored lightmap UV set on static meshes, inside 0-1, no overlap."""
+        budget = self.budget
+        channel = budget.lightmap_uv_channel
+        wanted_overlap = budget.lightmap_max_overlap >= 0
+        try:
+            facts = lightmap_facts(path, channel, budget.lightmap_resolution, wanted_overlap)
+        except AssetError as exc:
+            problems.append(str(exc))
+            return
+        except Exception as exc:              # a lightmap read must never break the verdict
+            warnings.append(f"lightmap UVs not checked ({_describe_unexpected(exc)})")
+            return
+        label = f"UV channel {channel}, the {_ordinal(channel + 1)} set"
+        if facts["unread"]:
+            warnings.append(f"lightmap UVs not fully checked: {facts['unread']}")
+        if budget.lightmap_require:
+            if facts["obj_single_set"]:
+                problems.append(f"no lightmap UV set: an OBJ file holds one UV set, so {label} "
+                                "cannot exist; export FBX or glTF with a lightmap UV set, or set "
+                                "[lightmap] uv_channel = 0 if the first set is the lightmap")
+                stats.append(("lightmap_missing", 1))
+            elif facts["missing"]:
+                missing = facts["missing"]
+                which = (f"static mesh '{missing[0]}'" if len(missing) == 1
+                         else f"{len(missing)} static meshes ({_name_list(missing)})")
+                problems.append(f"no lightmap UV set ({label}) on {which}: add a UV set unwrapped "
+                                "for lightmaps (no overlaps, inside 0-1), or switch off "
+                                "[lightmap] require to let the engine generate one")
+                stats.append(("lightmap_missing", len(missing)))
+        if budget.lightmap_inside_unit_square and facts["uvs"]:
+            stats.append(("lightmap_uvs_outside", facts["outside"]))
+            if facts["outside"]:
+                u, v = facts["worst"]
+                problems.append(f"{facts['outside']:,} of {facts['uvs']:,} lightmap UVs ({label}) "
+                                f"are outside 0-1 (worst at u {u:.3f}, v {v:.3f}): a lightmap does "
+                                "not tile, so those texels get another surface's light; move "
+                                "every lightmap island inside the 0-1 square")
+        if wanted_overlap:
+            collapsed = facts["collapsed"]
+            if collapsed:
+                which = (f"'{collapsed[0]}'" if len(collapsed) == 1
+                         else f"{len(collapsed)} meshes ({_name_list(collapsed)})")
+                problems.append(f"lightmap UVs ({label}) of {which} cover no texel of a "
+                                f"{budget.lightmap_resolution}x{budget.lightmap_resolution} grid "
+                                "(collapsed or far too small): unwrap the lightmap UVs again")
+            if facts["overlap"] is not None:
+                percent, overlapped, covered, name, grid = facts["overlap"]
+                stats.extend((("lightmap_overlap_texels", overlapped), ("lightmap_texels", covered)))
+                metrics.append(f"lightmap {_percent(percent)}% overlap")
+                if grid < budget.lightmap_resolution:
+                    warnings.append(f"lightmap overlap measured on a {grid}x{grid} grid, not "
+                                    f"{budget.lightmap_resolution}x{budget.lightmap_resolution}: "
+                                    "its triangles cover the square many times over")
+                if overlapped and percent > budget.lightmap_max_overlap:
+                    problems.append(f"lightmap UVs ({label}) overlap on {_percent(percent)}% of "
+                                    f"their texels in '{name}' ({overlapped:,} of {covered:,} on a "
+                                    f"{grid}x{grid} grid), over the "
+                                    f"{budget.lightmap_max_overlap:g}% limit: overlapping islands "
+                                    "share baked light and bleed into each other; repack the "
+                                    "lightmap UVs so no islands overlap")
 
     # - textures - #
 
@@ -5078,6 +6536,27 @@ def describe_budget(budget: Budget) -> str:
            if budget.naming_conventions else "")
         + (f"  texel={budget.texel_density_min:g}-{budget.texel_density_max:g}px/m"
            if budget.texel_density_max else "")
+        + (f"  lod>={budget.lod_min_levels}" if budget.lod_min_levels else "")
+        + (f"  lod_ratio<={budget.lod_max_ratio:g}" if budget.lod_max_ratio else "")
+        + ("  collision=" + ",".join(name for name, on in (
+            ("required", budget.collision_require), ("names", budget.collision_name_match),
+            ("convex", budget.collision_convex),
+            (f"hulls<={budget.collision_max_hulls}", budget.collision_max_hulls),
+            (f"hull_verts<={budget.collision_max_hull_vertices}",
+             budget.collision_max_hull_vertices)) if on)
+           if (budget.collision_require or budget.collision_name_match or budget.collision_convex
+               or budget.collision_max_hulls or budget.collision_max_hull_vertices) else "")
+        + (f"  bones<={budget.max_bones}" if budget.max_bones else "")
+        + (f"  bones/section<={budget.max_bones_per_section}"
+           if budget.max_bones_per_section else "")
+        + (f"  bone-depth<={budget.max_bone_depth}" if budget.max_bone_depth else "")
+        + ("  single-root" if budget.single_root_bone else "")
+        + (f"  lightmap=uv{budget.lightmap_uv_channel}"
+           + ("(required)" if budget.lightmap_require else "")
+           + ("(0-1)" if budget.lightmap_inside_unit_square else "")
+           + (f"(overlap<={budget.lightmap_max_overlap:g}%)"
+              if budget.lightmap_max_overlap >= 0 else "")
+           if budget.lightmap_checked else "")
         + (f"  platform={budget.platform}" if budget.platform else "")
     )
 
@@ -6141,6 +7620,7 @@ def build_parser() -> argparse.ArgumentParser:
             "common first runs:\n"
             "  asset-gatekeeper <folder> --recursive --once     one scan, then exit\n"
             "  asset-gatekeeper <folder> --init                 write a rules.toml\n"
+            "  asset-gatekeeper <folder> --wizard               ...from questions about your project\n"
             "  asset-gatekeeper --doctor                        check this machine\n"
             "  asset-gatekeeper <folder> --recursive            watch and toast\n"
             "\n"
@@ -6234,9 +7714,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init", action="store_true",
                         help="interactive setup: create the watch folder and its rules.toml")
     parser.add_argument("--yes", action="store_true",
-                        help="with --init: accept every default instead of prompting")
+                        help="with --init or --wizard: accept every default instead of prompting")
     parser.add_argument("--force", action="store_true",
-                        help="with --init: overwrite an existing rules.toml")
+                        help="with --init: overwrite an existing rules.toml (with --wizard: replace "
+                             "it without asking; a copy is still kept)")
+    parser.add_argument("--wizard", action="store_true",
+                        help="ask six plain-English questions (engines, art tools, platforms, "
+                             "kinds of asset, style, broken geometry; several answers each) and "
+                             "write one commented rules.toml for all of them. Asks before "
+                             "replacing a rules.toml and keeps a copy. With --yes: every "
+                             "default, no questions")
+    parser.add_argument("--wizard-answers", metavar="FILE", default=None, dest="wizard_answers",
+                        help="the --wizard answers from a JSON file instead of a terminal "
+                             "(for scripts), e.g. {\"engines\": [\"unreal\", \"unity\"], "
+                             "\"platforms\": [\"pc\", \"switch\"]}")
     parser.add_argument("--audit", action="store_true",
                         help="audit the whole folder for broken references and orphaned "
                              "textures, then exit")
@@ -6352,6 +7843,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return run_doctor(target, args)
 
     # The wizard runs before anything touches the folder: it may be creating it.
+    if getattr(args, "wizard", False) or getattr(args, "wizard_answers", None):
+        target = Path(args.folder).expanduser() if args.folder else None
+        answers = Path(args.wizard_answers).expanduser() if args.wizard_answers else None
+        return engine_module("rules_wizard").run_wizard(
+            target, answers_file=answers, force=args.force, assume_yes=args.yes)
     if getattr(args, "init", False):
         target = Path(args.folder).expanduser() if args.folder else None
         return run_init(target, ask=input, assume_yes=args.yes, force=args.force,

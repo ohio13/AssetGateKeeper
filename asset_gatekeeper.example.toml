@@ -80,6 +80,53 @@ pbr_ceiling = 0.94        # 240/255
 pbr_suffixes = ["_Albedo", "_Diffuse", "_BaseColor"]   # normal/roughness maps are not albedo
 
 # --------------------------------------------------------------------------- #
+# LODs and collision (optional, off until you uncomment a table;
+# docs/05-RULES-REFERENCE.md says what each format can carry)
+#
+# [lod]
+# min_levels = 3          # LOD0 + LOD1 + LOD2 at least: an FBX LOD group, glTF
+#                         # MSFT_lod, or objects named _LOD0, _LOD1 ... (0 = off)
+# max_ratio = 0.6         # each level at most 60% of the triangles of the one above
+#
+# Unreal collision: UCX_ (convex), UBX_ (box), USP_ (sphere), UCP_ (capsule)
+# meshes named after the render mesh: UCX_SM_Crate or UCX_SM_Crate_00.
+# [collision]
+# require = true          # a static mesh must carry collision (skinned: exempt)
+# name_must_match = true  # a hull named after no mesh is dropped by Unreal
+# convex = true           # Unreal silently fills a concave UCX_ hull
+# max_hulls = 8           # UCX_ hulls per asset (0 = off)
+# max_hull_vertices = 32  # per hull; PhysX's ceiling is 255 (0 = off)
+
+# --------------------------------------------------------------------------- #
+# Optional: skeleton budgets. Off unless this table is written; 0 = not checked.
+# Read from the skeleton the skinned meshes use (FBX LimbNodes and skin
+# clusters, glTF skins[].joints). A mesh with no skin is never checked.
+# --------------------------------------------------------------------------- #
+
+# [skeleton]
+# max_bones = 256              # bones in the whole skeleton
+# max_bones_per_section = 75   # bones weighting one material section. Unreal splits a
+#                              # section over its platform's limit into extra draw
+#                              # calls; mobile allows 75 (desktop 65,536)
+# single_root = true           # exactly one root bone: Unreal refuses "multiple roots"
+# max_depth = 0                # longest root-to-tip chain, the root counting 1
+
+# --------------------------------------------------------------------------- #
+# Optional: authored lightmap UVs on static (non-skinned) meshes. Off unless
+# this table is written. Unrelated to [mesh] lightmap_uv, which only adds the
+# set Unreal generates to the memory estimate.
+# --------------------------------------------------------------------------- #
+
+# [lightmap]
+# require = true               # the set must exist (an OBJ holds only one UV set)
+# uv_channel = 1               # 0-7; 1 = the second set, Unreal's convention
+# inside_unit_square = true    # every lightmap UV within 0-1; on by default once
+#                              # require or max_overlap is set
+# max_overlap = 0              # percent of covered texels covered twice or more;
+#                              # leave it out to skip the overlap check
+# resolution = 256             # the overlap grid (16-4096); finer finds smaller overlaps
+
+# --------------------------------------------------------------------------- #
 # Optional: studio platform integration. Delete this table for a standalone tool.
 # --------------------------------------------------------------------------- #
 

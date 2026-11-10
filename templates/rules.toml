@@ -63,6 +63,42 @@ pbr_ceiling = 0.94
 pbr_suffixes = ["_Albedo", "_Diffuse"]
 
 # --------------------------------------------------------------------------- #
+# LODs and collision (optional, off until you uncomment a table)
+#
+# [lod]
+# min_levels = 3          # LOD0 + LOD1 + LOD2 at least: an FBX LOD group, glTF
+#                         # MSFT_lod, or objects named _LOD0, _LOD1 ... (0 = off)
+# max_ratio = 0.6         # each level at most 60% of the triangles of the one above
+#
+# Unreal collision: UCX_ (convex), UBX_ (box), USP_ (sphere), UCP_ (capsule)
+# meshes named after the render mesh: UCX_SM_Crate or UCX_SM_Crate_00.
+# [collision]
+# require = true          # a static mesh must carry collision (skinned: exempt)
+# name_must_match = true  # a hull named after no mesh is dropped by Unreal
+# convex = true           # Unreal silently fills a concave UCX_ hull
+# max_hulls = 8           # UCX_ hulls per asset (0 = off)
+# max_hull_vertices = 32  # per hull; PhysX's ceiling is 255 (0 = off)
+
+# --------------------------------------------------------------------------- #
+# Skeletons and lightmap UVs (optional, off unless you add these tables)
+# --------------------------------------------------------------------------- #
+
+# Bones of the skeleton the skinned meshes use. 0 = not checked.
+# [skeleton]
+# max_bones = 256              # whole skeleton
+# max_bones_per_section = 75   # bones weighting one material: Unreal's mobile cap
+# single_root = true           # Unreal imports exactly one root bone
+# max_depth = 0                # longest root-to-tip chain; 0 = not checked
+
+# An authored lightmap UV set on every static (non-skinned) mesh.
+# [lightmap]
+# require = true               # the set must exist
+# uv_channel = 1               # 1 = the second UV set (Unreal's convention)
+# inside_unit_square = true    # on by default once require or max_overlap is set
+# max_overlap = 0              # percent of lightmap texels covered twice; leave out = not checked
+# resolution = 256             # the grid the overlap is measured on
+
+# --------------------------------------------------------------------------- #
 # Platform profiles
 #
 # A profile is what the target can afford. It overrides [mesh]/[texture] above
@@ -85,6 +121,9 @@ max_triangles = 15000
 max_material_slots = 2
 max_texture_edge = 1024
 max_bone_influences = 4
+# With a [skeleton] table, phones can be stricter about bones per material:
+# [platforms.mobile.skeleton]
+# max_bones_per_section = 75
 
 # Desktop: uncompressed, non-power-of-two, PBR textures are all fine.
 [platforms.pc]

@@ -1,8 +1,58 @@
 # Unreleased (on `main`)
 
+* **A rules wizard for projects that use several tools.** `asset-gatekeeper
+  <folder> --wizard` (or double-click `tools\rules_wizard.bat`) asks six
+  questions - engines, art programs, platforms, kinds of asset, art style,
+  broken geometry; the first four take several answers - and writes one
+  commented `rules.toml` that works for all of them: the engines' and tools'
+  naming presets combined, the tightest platform as the base budget with a
+  `[platforms.<name>]` block for each platform (`--platform <name>`), and
+  per-folder budgets for characters, props and environment. The numbers come
+  from the shipped presets; the file says which answers made it. It asks
+  before replacing a `rules.toml` and keeps a copy. `--wizard-answers
+  answers.json` gives the same answers from a file for scripts; without a
+  terminal it refuses instead of waiting. Plain `--init` is unchanged.
+
+* **LOD and collision checks (off by default).** A `[lod]` table can require a
+  number of LOD levels (`min_levels`, LOD0 included) and how much each level
+  must save (`max_ratio`: LOD2 at most 0.6 of LOD1's triangles, say). Levels
+  are read from FBX LOD groups, glTF `MSFT_lod`, or objects named `_LOD0`,
+  `_LOD1`, ...; an asset without LODs fails saying it has LOD0 only. A
+  `[collision]` table checks Unreal's UCX_/UBX_/USP_/UCP_ meshes in FBX and
+  glTF: `require` (skinned meshes exempt), names that match a render mesh
+  (Unreal drops a hull that does not; on by default once the table exists),
+  convex UCX_ hulls (Unreal silently fills a dent; also on by default),
+  `max_hulls` and `max_hull_vertices`. Every failure names the mesh or level
+  and the number that broke the rule; `--json` gets `lod_levels`,
+  `lodN_triangles`, `collision_hulls` and `max_hull_vertices`. Without the
+  tables nothing changes. See docs/05-RULES-REFERENCE.md.
 * **Install from PyPI.** `pip install "asset-gatekeeper[full]"` now works:
   v0.1.0-alpha.1 is on PyPI, published by the release workflow. The README
   and the installation guide use it instead of the git URL.
+* **Unity and Godot plug-ins (new, early).** `plugins/unity` (Unity 2021.3+,
+  added with Package Manager > Add package from disk) and
+  `plugins/godot/addons/asset_gatekeeper` (Godot 4.2+) check models and
+  textures when the engine imports them, in the background: failures go to
+  the Console (Unity, plus an `AGK_Failed` label) or the Output panel and a
+  dock (Godot), with a Check All / Check project command and settings for the
+  Python, the gate folder and the rules file. They report, they do not block
+  the import. The Godot add-on is tested in Godot 4.2.2 (headless, in CI);
+  the Unity package is compiled and run against stand-ins for Unity's API but
+  has not yet been tried in Unity itself. See docs/09-DCC-PLUGINS.md.
+
+* **Skeleton and lightmap UV checks.** Two new rule tables, both off unless
+  written. `[skeleton]` budgets the skeleton a skinned FBX or glTF uses:
+  `max_bones`, `max_bones_per_section` (bones weighting one material; Unreal
+  caps mobile at 75 and splits a larger section into extra draw calls),
+  `single_root` (Unreal's FBX importer refuses "multiple roots") and
+  `max_depth`; `[platforms.<name>.skeleton]` can tighten the numbers per
+  target. `[lightmap]` checks an authored lightmap UV set on static meshes
+  (`uv_channel`, 1 by default): `require` it, keep it `inside_unit_square`,
+  and cap `max_overlap`, measured by rasterising the lightmap triangles on a
+  `resolution` grid (256 by default) so touching islands never count as
+  overlapping; a 100,000-triangle mesh takes a fraction of a second. Each
+  failure names the section, bone, mesh or percentage and says what to change.
+  See docs/05-RULES-REFERENCE.md.
 
 # v0.1.0-alpha.1 (10 Nov 2026)
 
