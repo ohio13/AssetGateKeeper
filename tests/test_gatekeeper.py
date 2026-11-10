@@ -3470,6 +3470,9 @@ expect("... and a dated one with a matching tag goes ahead",
 _wf = (ROOT_MODULE_DIR / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
 expect("the release workflow checks the tag before it builds",
        _wf.index("--check-tag") < _wf.index("python tools/build_release.py\n"))
+expect("... and writes nothing beside the code before the build (it refuses a dirty tree)",
+       "--notes notes.md" not in _wf and "--notes dist/notes.md" in _wf
+       and _wf.index("python tools/build_release.py\n") < _wf.index("--notes dist/notes.md"))
 expect("PyPI publishing is opt-in and uses trusted publishing (no stored token)",
        "vars.PUBLISH_TO_PYPI == 'true'" in _wf and "id-token: write" in _wf
        and "password" not in _wf.replace("no password", ""))
