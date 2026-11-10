@@ -1265,11 +1265,19 @@ _tot = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.p
                        "--once", "--recursive", "--no-color"], capture_output=True, text=True,
                       encoding="utf-8", errors="replace")
 _tot_out = _tot.stdout + _tot.stderr
-expect("a total that holds an FBX (no memory estimate) fails and names it, never counts it as 0 MB",
-       _tot.returncode == 1 and "1 not measured" in _tot_out and "hero.fbx" in _tot_out
-       and "cannot check the 12 MB budget" in _tot_out, _tot_out[-500:])
-expect("... and the FBX itself says it was not measured",
-       "not measured for FBX yet" in _tot_out)
+# Until 10 Nov 2026 an FBX had no memory estimate and failed every total it
+# was in ("1 not measured"); engine/fbx_preview.measure() now gives one.
+expect("a total that holds an FBX counts its memory too (3 assets, none unmeasured)",
+       _tot.returncode == 0 and "Props/*: ~10.7 MB of 12 MB (3 assets)" in _tot_out
+       and "not measured" not in _tot_out, _tot_out[-500:])
+with patch.object(agk, "engine_module", side_effect=RuntimeError("measuring broke")):
+    _broken = agk.Gatekeeper(agk.Budget(max_mesh_mb=8)).check(mem_dir / "Props" / "hero.fbx")
+expect("... and if measuring ever fails, the verdict still comes with a warning, not a crash",
+       any("not measured (measuring broke)" in w for w in _broken.warnings), _broken.warnings)
+_unmeasured = agk.check_totals([agk.MemoryTotal("Props/*", 12, mem_dir)], [_broken])
+expect("... and a total holding an unmeasured asset fails and names it, never counts it as 0 MB",
+       len(_unmeasured) == 1 and "1 asset(s) have no memory estimate (hero.fbx" in _unmeasured[0].problems[0],
+       [v.problems for v in _unmeasured])
 (mem_dir / "Props" / "hero.fbx").unlink()
 
 
@@ -3440,6 +3448,31 @@ _build = load_module("agk_build_release", "tools/build_release.py")
 expect("the release ZIP ships it", "Install_Extras.bat" in _build.DROP_IN_FILES)
 expect("the release is named by the version string alone, not the comment after it",
        _build.read_version() == agk.__version__, _build.read_version())
+
+print("Release workflow: the tag, the source and the notes agree (10 Nov 2026)")
+# .github/workflows/release.yml runs build_release.py --check-tag on the pushed
+# tag before it builds or publishes anything.
+for _tag, _norm in (("v0.1.0-alpha.1", "0.1.0a1"), ("0.1.0a1", "0.1.0a1"), ("v1.2.0-beta.3", "1.2.0b3"),
+                    ("v1.0.0rc1", "1.0.0rc1"), ("v1.0.0", "1.0.0"), ("v2.0.post1", "2.0.post1")):
+    expect(f"tag {_tag} reads as version {_norm}", _build.normalise_version(_tag) == _norm,
+           _build.normalise_version(_tag))
+_notes_text = ("# v0.2.0 (unreleased)\n\n* new\n\n# v0.1.0-alpha.1 (12 Nov 2026)\n\n* first\n\n"
+               "# v1.1.1 (internal)\n\n* old\n")
+_heading, _body = _build.release_notes("0.1.0a1", _notes_text)
+expect("the notes for a version are its own section only",
+       _heading == "v0.1.0-alpha.1 (12 Nov 2026)" and _body == "* first\n", repr((_heading, _body)))
+expect("a tag that is not the source's version is refused",
+       any("is not the version" in p for p in _build.check_tag("v9.9.9", "0.1.0a1")))
+expect("a release whose notes still say 'unreleased' is refused",
+       any("unreleased" in p for p in _build.check_tag("v0.2.0", "0.2.0", _notes_text)))
+expect("... and a dated one with a matching tag goes ahead",
+       _build.check_tag("v0.1.0-alpha.1", "0.1.0a1", _notes_text) == [])
+_wf = (ROOT_MODULE_DIR / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+expect("the release workflow checks the tag before it builds",
+       _wf.index("--check-tag") < _wf.index("python tools/build_release.py\n"))
+expect("PyPI publishing is opt-in and uses trusted publishing (no stored token)",
+       "vars.PUBLISH_TO_PYPI == 'true'" in _wf and "id-token: write" in _wf
+       and "password" not in _wf.replace("no password", ""))
 _pp = load_module("agk_polypaint_hint", "engine/polypaint.py")
 expect("the bake's install hint names the exact pip command",
        "-m pip install fast-simplification xatlas scipy" in _pp.install_hint())

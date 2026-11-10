@@ -2092,6 +2092,23 @@ jb_server = aws.build_server("127.0.0.1", 0, jb_db, jb_data, quiet=True)
 threading.Thread(target=jb_server.serve_forever, daemon=True).start()
 jb = Client(jb_server.server_address[1])
 _big_glb, _big_tris = textured_sphere(rings=160, segments=320)
+# Hold the first run a third of the way through until the test lets go, so a
+# fast machine cannot finish it before Cancel arrives (CI on Windows and macOS
+# did, 10 Nov). The held run keeps reporting, so Cancel still reaches it.
+_hold = threading.Event()
+_real_generate = aws.lod_shippable.generate
+
+
+def _held_generate(*args, report=None, **kwargs):
+    def held_report(fraction, detail):
+        report(fraction, detail)
+        while fraction > 0.3 and not _hold.is_set():
+            time.sleep(0.05)
+            report(fraction, detail)
+    return _real_generate(*args, report=held_report if report else None, **kwargs)
+
+
+aws.lod_shippable.generate = _held_generate
 status, big = jb.json("/api/assets?filename=globe_big.glb", method="POST", body=_big_glb)
 status, small = jb.json("/api/assets?filename=globe_small.glb", method="POST",
                         body=textured_sphere(rings=16, segments=32)[0])
@@ -2136,6 +2153,8 @@ expect("... and the job stops within seconds, leaving no LODs", first["state"] =
        and not jb.json(f"/api/assets/{big['id']}")[1]["lods"], str(first)[:200])
 expect("Cancel on an unknown job is a 404", jb.call("/api/jobs/9999/cancel", method="POST",
                                                      body=b"{}")[0] == 404)
+_hold.set()
+aws.lod_shippable.generate = _real_generate
 status, again = jb.json(f"/api/assets/{small['id']}/lods?async=1", method="POST",
                         body={"ratios": [0.5], "shippable": True})
 job = again["job"]

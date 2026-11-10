@@ -124,6 +124,74 @@ verdict = agk.Gatekeeper(generous).check(FIXTURES / "linked3.fbx")
 expect("linked duplicates count the shared mesh once (320, not 960)",
        verdict.metric.startswith("320 tris"), verdict.metric)
 
+print("1b. FBX mesh memory and texel density (10 Nov 2026)")
+# Measured for glTF and OBJ since 2 Nov; an FBX only warned "not measured for
+# FBX yet". engine/fbx_preview.measure() places the FBX the way the preview
+# does (transforms, axes, unit scale) and counts vertices as an engine builds
+# them (a UV seam or a hard edge splits a vertex). Density is cross-checked
+# against the glTF path: the same geometry converted to .glb and measured by
+# mesh_facts() must give the same number.
+sys.path.insert(0, str(ROOT / "engine"))
+import fbx_preview  # noqa: E402
+cube = fbx_preview.measure(FIXTURES / "mats5.fbx")
+expect("a hard-edged, UV-mapped cube is 24 vertices (4 per face), not its 8 corners",
+       cube["vertices"] == 24, cube)
+expect("... its density with the assumed 1,024 px texture is 128 px/m (2 m cube, quarter-width UVs)",
+       round(cube["texel_density"]) == 128 and cube["assumed_texture"], cube)
+# Flat-shaded fixtures: every polygon corner is its own vertex.
+for name, corners in (("cube_subd3.fbx", 1536), ("linked3.fbx", 960), ("uv3.fbx", 4)):
+    facts = fbx_preview.measure(FIXTURES / name)
+    expect(f"{name}: {corners} vertices (flat shading: one per polygon corner)",
+           facts["vertices"] == corners, facts)
+for name in ("cube_subd3.fbx", "linked3.fbx", "uv3.fbx", "skin4.fbx", "mats5.fbx"):
+    facts = fbx_preview.measure(FIXTURES / name)
+    glb = WORK / (Path(name).stem + "_measure.glb")
+    fbx_preview.convert(FIXTURES / name, glb)
+    as_gltf = agk.mesh_facts(glb, 1024)
+    expect(f"{name}: density matches the glTF path ({facts['texel_density']:.1f} px/m)",
+           as_gltf["texel_density"] and abs(facts["texel_density"] - as_gltf["texel_density"])
+           < 0.01 * as_gltf["texel_density"], (facts, as_gltf))
+
+
+def fake_scene(uvs):
+    """Two triangles sharing an edge, smooth normals: a quad drawn with 6 corners."""
+    corners = np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 0, 0], [1, 1, 0], [0, 1, 0]], float)
+    return {"positions": corners.astype(np.float32), "uvs": np.asarray(uvs, np.float32),
+            "normals": np.tile([0, 0, 1], (6, 1)).astype(np.float32),
+            "groups": [(0, np.array([[0, 1, 2], [3, 4, 5]], np.uint32))],
+            "material_names": ["m"], "textures": [""], "colours": False, "info": {}}
+
+
+import numpy as np  # noqa: E402
+shared = [[0, 0], [1, 0], [1, 1], [0, 0], [1, 1], [0, 1]]
+seam = [[0, 0], [1, 0], [1, 1], [0.5, 0.5], [1, 1], [0, 1]]
+with patch.object(fbx_preview, "_collect", lambda path: fake_scene(shared)):
+    welded = fbx_preview.measure(Path("quad.fbx"))
+with patch.object(fbx_preview, "_collect", lambda path: fake_scene(seam)):
+    split = fbx_preview.measure(Path("quad.fbx"))
+expect("corners with the same position, normal and UV are one vertex (quad: 6 corners -> 4)",
+       welded["vertices"] == 4, welded)
+expect("... a UV seam splits the shared corner (-> 5)", split["vertices"] == 5, split)
+textured = fbx_preview.measure(FIXTURES / "tex_relative.fbx")
+expect("the texture beside the FBX sets the density (64 px wood: 1/16 of the assumed 1,024)",
+       not textured["assumed_texture"]
+       and abs(textured["texel_density"] * 16 - cube["texel_density"]) < 0.5, textured)
+expect("an FBX with no mesh measures as nothing, not as an error",
+       fbx_preview.measure(FIXTURES / "empty.fbx")["vertices"] == 0)
+verdict = agk.Gatekeeper(agk.Budget(max_mesh_mb=0.0001, max_material_slots=8)).check(FIXTURES / "mats5.fbx")
+expect("an FBX over a mesh-memory budget fails with its vertex count",
+       any("estimated GPU memory exceeds" in p and "(24 vertices)" in p for p in verdict.problems)
+       and not any("not measured" in w for w in verdict.warnings), (verdict.problems, verdict.warnings))
+verdict = agk.Gatekeeper(agk.Budget(texel_density_min=256, texel_density_max=2048,
+                                    max_material_slots=8)).check(FIXTURES / "mats5.fbx")
+expect("an FBX under a texel-density minimum fails, naming the assumed texture",
+       any("texel density 128 px/m is below the 256 px/m minimum (assuming a 1024px texture)" in p
+           for p in verdict.problems), verdict.problems)
+verdict = agk.Gatekeeper(agk.Budget(texel_density_min=4, texel_density_max=64)).check(FIXTURES / "tex_relative.fbx")
+expect("... and one inside the range passes on that count, with the number in its stats",
+       not any("texel density" in p for p in verdict.problems)
+       and dict(verdict.stats).get("texel_density") == 8, (verdict.problems, verdict.stats))
+
 print("2. FBX texture references")
 expect("relative texture beside the FBX resolves",
        not agk.missing_references(FIXTURES / "tex_relative.fbx"),

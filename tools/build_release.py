@@ -91,6 +91,83 @@ def read_version() -> str:
     return found.group(1)
 
 
+_PRE = {"alpha": "a", "a": "a", "beta": "b", "b": "b", "rc": "rc", "c": "rc", "pre": "rc",
+        "preview": "rc"}
+
+
+def normalise_version(text: str) -> str:
+    """PEP 440's normal form of a version or tag: 'v0.1.0-alpha.1' -> '0.1.0a1'.
+
+    Covers what this project tags (release, alpha/beta/rc, .postN, .devN); the
+    tag a person types and the string in the source must name the same release.
+    """
+    text = text.strip().lower()
+    if text.startswith("v"):
+        text = text[1:]
+    found = re.fullmatch(
+        r"(\d+(?:\.\d+)*)"
+        r"(?:[-_.]?(alpha|beta|preview|pre|rc|a|b|c)[-_.]?(\d*))?"
+        r"(?:[-_.]?post[-_.]?(\d*))?"
+        r"(?:[-_.]?dev[-_.]?(\d*))?", text)
+    if not found:
+        raise ValueError(f"not a version: {text!r}")
+    release, pre, pre_n, post, dev = found.groups()
+    out = release
+    if pre:
+        out += _PRE[pre] + (pre_n or "0")
+    if post is not None:
+        out += ".post" + (post or "0")
+    if dev is not None:
+        out += ".dev" + (dev or "0")
+    return out
+
+
+def release_notes(version: str, text: str | None = None) -> tuple[str, str]:
+    """(heading, body) of this version's section of RELEASE_NOTES.md.
+
+    Sections start with '# v<version> ...'; the body runs to the next one. The
+    GitHub release shows the body, so it must exist and be dated: a heading
+    still saying 'unreleased' means the notes were not finished for the tag.
+    """
+    if text is None:
+        text = (ROOT / "RELEASE_NOTES.md").read_text(encoding="utf-8")
+    sections = re.split(r"(?m)^(?=# v)", text)
+    for section in sections:
+        heading, _, body = section.partition("\n")
+        found = re.match(r"# (v\S+)", heading)
+        if not found:
+            continue
+        try:
+            same = normalise_version(found.group(1)) == normalise_version(version)
+        except ValueError:
+            continue
+        if same:
+            return heading[2:].strip(), body.strip() + "\n"
+    raise LookupError(f"RELEASE_NOTES.md has no '# v...' section for {version}")
+
+
+def check_tag(tag: str, version: str | None = None, notes_text: str | None = None) -> list[str]:
+    """Problems that should stop a release from this tag ([] = go)."""
+    version = version or read_version()
+    problems = []
+    try:
+        if normalise_version(tag) != normalise_version(version):
+            problems.append(f"tag {tag} is not the version in asset_gatekeeper.py ({version}): "
+                            "change one of them")
+    except ValueError as exc:
+        problems.append(str(exc))
+    try:
+        heading, body = release_notes(version, notes_text)
+        if "unreleased" in heading.lower():
+            problems.append(f"RELEASE_NOTES.md still says '{heading}': put the date in the "
+                            "heading before tagging")
+        if not body.strip():
+            problems.append("the release notes section is empty")
+    except LookupError as exc:
+        problems.append(str(exc))
+    return problems
+
+
 def git(*args: str) -> str:
     try:
         result = subprocess.run(("git",) + args, cwd=str(ROOT), capture_output=True,
@@ -235,9 +312,28 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--allow-dirty", action="store_true",
                         help="build even though the working tree has changes")
     parser.add_argument("--json", action="store_true", help="machine-readable summary")
+    parser.add_argument("--check-tag", metavar="TAG",
+                        help="refuse unless TAG names this version and its release notes are dated")
+    parser.add_argument("--notes", metavar="FILE",
+                        help="write this version's section of RELEASE_NOTES.md to FILE")
+    parser.add_argument("--no-build", action="store_true",
+                        help="only --check-tag / --notes; build nothing")
     args = parser.parse_args(argv)
 
     version = read_version()
+    if args.check_tag:
+        problems = check_tag(args.check_tag, version)
+        for problem in problems:
+            print(f"release refused: {problem}", file=sys.stderr)
+        if problems:
+            return 1
+        print(f"tag {args.check_tag} matches {version}")
+    if args.notes:
+        _heading, body = release_notes(version)
+        Path(args.notes).write_text(body, encoding="utf-8")
+        print(f"release notes for {version} -> {args.notes}")
+    if args.no_build:
+        return 0
     if not tree_is_clean() and not args.allow_dirty:
         print("working tree is dirty - commit first, or pass --allow-dirty", file=sys.stderr)
         return 2
