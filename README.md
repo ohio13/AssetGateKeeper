@@ -5,11 +5,11 @@
 > **Please read first: an early alpha (0.1.0-alpha.1), shared as it is.**
 > AssetGatekeeper started as a test tool for my own private game projects. It is public in case it helps someone else, but it is not finished: expect rough edges, missing features and changes between versions. It has not been used on a real studio project yet.
 >
-> **Built with AI.** Nearly all of the code, tests and documentation were written by AI assistants (mostly Anthropic's Claude), directed and tested by one developer. Keep that in mind when you judge how far to trust it, and please report anything that looks wrong.
+> **Built with AI.** Nearly all of the code, tests and documentation were written by AI assistants (mostly Anthropic's Claude), directed and tested by one developer. Keep that in mind when you judge how far to trust it.
 >
 > **Please try it on a copy of your project, or on one in version control (Git, Perforce) that you can roll back.** Checking only reads your files. A few parts write to them: auto-heal (`--heal`, off unless you switch it on) resizes and repairs assets and keeps the originals in `.agk-backups`; the Polypaint bake writes new files next to the sculpt, replacing its own earlier output; and the Rules & Presets page saves `rules.toml`, noting every change in its history. Please don't rely on any of that for work you can't afford to lose. There is no warranty (see the [MIT licence](https://github.com/ohio13/AssetGateKeeper/blob/main/LICENSE)).
 >
-> Found something odd? [Tell me](https://github.com/ohio13/AssetGateKeeper/issues/new/choose), with the line the tool printed. That is the most useful thing anyone can do for it right now.
+> **How it's developed.** Development is ongoing, in spare time and guided by the projects it was built for: I fix the bugs I run into and add the features I need, and every fix reaches everyone who uses it. It's shared openly so anyone can use it, not as a community project, so I'm not taking feature requests, and replies to bug reports may be slow. If you need it to do something different, the MIT licence lets you fork it and make it your own. There's more in [Development and contributions](#development-and-contributions).
 
 AssetGatekeeper checks game assets against a budget you set: triangles, materials, textures, bone weights, UV sets, broken texture links and damaged geometry. It runs on a folder, in your editor, in Unreal, on every pull request, or as a Perforce trigger, and gives one line per asset with every problem and the number that broke it:
 
@@ -99,9 +99,16 @@ These ship in the repository but are newer and less tested than the gate itself.
 - [Reference](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/REFERENCE.md): the long single-page manual.
 - [Release notes](https://github.com/ohio13/AssetGateKeeper/blob/main/RELEASE_NOTES.md).
 
-## Contributing
+## Development and contributions
 
-Bug reports, sample files that break it, and pull requests are all welcome. It is a one-person, spare-time project, so a reply can take a few days. See [CONTRIBUTING.md](https://github.com/ohio13/AssetGateKeeper/blob/main/CONTRIBUTING.md). Security problems: please follow [SECURITY.md](https://github.com/ohio13/AssetGateKeeper/blob/main/SECURITY.md) instead of opening a public issue.
+AssetGatekeeper is a one-person project that I develop in my spare time for my own work, and that is what sets its direction. Thank you for understanding that this is what keeps it manageable:
+
+- **Development is ongoing.** I fix the bugs I come across, and the fixes reach everyone.
+- **I'm not taking feature requests.** New features come from what my own projects need.
+- **I read bug reports, but replies can be slow,** and not every report will get one.
+- **I probably won't review or merge pull requests.** A fork is the better route: the MIT licence lets you change it however you like.
+
+See [CONTRIBUTING.md](https://github.com/ohio13/AssetGateKeeper/blob/main/CONTRIBUTING.md) for the details and for how to run the tests on your own copy. Security problems are the exception: please report them privately, as [SECURITY.md](https://github.com/ohio13/AssetGateKeeper/blob/main/SECURITY.md) describes.
 
 ## Licence
 

@@ -11,6 +11,11 @@ AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
   no warranty; and that it was built with AI (nearly all of the code, tests and
   docs written by AI assistants, mostly Claude, directed and tested by one
   developer). Test fixtures no longer use the developer's PC and folder names.
+  The README, CONTRIBUTING.md, SECURITY.md and the GitHub issue and pull
+  request forms say how the project is run: one person, spare time, guided by
+  their own projects; development continues, feature requests aren't taken,
+  bug-report replies can be slow, pull requests probably won't be merged, and
+  forks are welcome under the MIT licence.
   THIRD_PARTY_NOTICES.md lists the two libraries copied in (three.js and
   tomli, both MIT) and three.js's licence now sits beside it in
   `server/static/vendor/`. Personal notes and AI-assistant files are

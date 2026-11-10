@@ -8,7 +8,6 @@
 [![Dependencies](https://img.shields.io/badge/deps-watchdog%20%C2%B7%20trimesh%20%C2%B7%20Pillow-informational?style=flat-square)](https://pypi.org/)
 [![Tests](https://img.shields.io/badge/tests-1134%20assertions%2C%20green-brightgreen?style=flat-square)](#testing)
 [![License](https://img.shields.io/badge/license-MIT-black?style=flat-square)](#license)
-[![PRs](https://img.shields.io/badge/PRs-welcome-ff69b4?style=flat-square)](#contributing)
 
 *One file. Three dependencies. Zero excuses for a 214k-triangle hero asset.*
 
@@ -1321,11 +1320,9 @@ not allowed to guess: an unparseable file is `UNKNOWN` with the error attached.
 
 ## Contributing
 
-Issues and PRs are genuinely welcome — especially from technical artists, because the hard part of this tool is never the Python.
+AssetGatekeeper is a one-person, spare-time project, developed for the developer's own work. Development is ongoing and bug fixes reach everyone, but feature requests aren't being taken, replies to bug reports can be slow, and pull requests probably won't be merged. If you need a different rule or behaviour, fork it: the MIT licence allows it, and rules are data that live in one dataclass, so a new rule costs about twenty lines. See [CONTRIBUTING.md](../CONTRIBUTING.md).
 
-**The most valuable contribution is not code, it's a rule.** If your studio has a budget that saves you pain — texture memory, bone counts, LOD chain completeness, naming for engine import — open an issue describing the rule and how it fails in practice. Rules are data and they live in one dataclass; a good rule costs twenty lines.
-
-Housekeeping:
+If you change your own copy, these keep it consistent with the rest of the tool:
 
 - Keep `Gatekeeper.check()` pure. If your rule needs the filesystem, put the I/O in an analyzer and return a plain value.
 - Add a case to `tests/test_gatekeeper.py` that *fails* before your fix. Generate the fixture if it doesn't exist.
