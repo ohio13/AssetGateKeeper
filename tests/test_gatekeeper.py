@@ -2195,6 +2195,18 @@ else:
                   git_dir, {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
     expect("a passing asset is allowed through", allowed.returncode == 0,
            f"exit {allowed.returncode} {allowed.stderr[:120]}")
+    # Staged: the 4-material crate. On disk: the 1-material one, not staged. The
+    # commit would hold the failing version; the hook read the passing one.
+    shutil.copy(DROP / "crate_4mtl.obj", git_dir / "crate_swap.obj")
+    run(["git", "add", "crate_swap.obj"], git_dir)
+    shutil.copy(DROP / "crate_1mtl.obj", git_dir / "crate_swap.obj")
+    swapped = run([sys.executable, str(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py")],
+                  git_dir, {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
+    expect("a staged asset whose file on disk has unstaged changes is not passed on the disk copy",
+           swapped.returncode == 1 and "not staged" in swapped.stderr,
+           (swapped.returncode, swapped.stderr[-300:]))
+    run(["git", "reset", "-q", "crate_swap.obj"], git_dir)
+    (git_dir / "crate_swap.obj").unlink()
 
     (git_dir / "notes.txt").write_text("not an asset", encoding="utf-8")
     run(["git", "add", "notes.txt"], git_dir)

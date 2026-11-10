@@ -128,6 +128,22 @@ def main(argv: list[str] | None = None) -> int:
         extra += ["--rules", options.rules]
 
     failures: list[str] = []
+    # The gate reads the file on disk, but the commit holds the staged version:
+    # stage a failing mesh, fix it on disk without `git add`, and the fixed copy
+    # passed while the failing one was committed. Such a file is not checked.
+    try:
+        unstaged = {Path(line.strip()).as_posix() for line in
+                    git("diff", "--name-only", "--", *[str(path) for path in paths]).splitlines()
+                    if line.strip()}
+    except RuntimeError as exc:
+        print(f"AssetGatekeeper: {exc}", file=sys.stderr)
+        return 2
+    for path in list(paths):
+        if path.as_posix() in unstaged:
+            failures.append(f"{path}\n    has changes that are not staged, so the commit would "
+                            "hold a version this hook cannot check: `git add` it to commit what is on "
+                            "disk, or `git stash --keep-index` to check the staged version")
+            paths.remove(path)
     for path in paths:
         lfs = " [LFS]" if is_lfs_tracked(path) else ""
         completed = subprocess.run([*gatekeeper_command(), str(path), *extra],
