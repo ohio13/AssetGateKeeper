@@ -1241,12 +1241,19 @@ expect("a platform profile sets its own memory budgets and format",
        (_bs.max_texture_mb, _bs.texture_format, _bs.max_mesh_mb) == (2, "astc8x8", 1))
 for _bad, _why in (({"texture": {"format": "dxt99"}}, "format"), ({"mesh": {"max_mb": -1}}, "max_mb"),
                    ({"mesh": {"texel_density": [800, 400]}}, "texel_density"),
-                   ({"totals": [{"path": "Props/*"}]}, "max_mb")):
+                   ({"totals": [{"path": "Props/*"}]}, "max_mb"),
+                   # nan compares False with every size: the budget checked nothing,
+                   # and a total of nan or inf ended the run in a traceback
+                   ({"mesh": {"max_mb": float("nan")}}, "max_mb"),
+                   ({"texture": {"max_mb": float("inf")}}, "max_mb"),
+                   ({"mesh": {"texel_density": [10, float("nan")]}}, "texel_density"),
+                   ({"totals": [{"path": "*", "max_mb": float("nan")}]}, "got nan"),
+                   ({"totals": [{"path": "*", "max_mb": float("inf")}]}, "got inf")):
     try:
         agk.Budget.from_mapping(_bad) if "totals" not in _bad else agk.parse_totals(_bad)
-        expect(f"a bad memory setting is refused ({_why})", False)
+        expect(f"a bad memory setting is refused ({_why}, {_bad})", False)
     except agk.ConfigError as exc:
-        expect(f"a bad memory setting is refused ({_why})", _why in str(exc), str(exc))
+        expect(f"a bad memory setting is refused ({_why}, {_bad})", _why in str(exc), str(exc))
 _ex = agk.parse_exceptions({"exceptions": [{"path": "*", "rule": "max_texture_mb", "allow": 6,
                                             "reason": "r", "owner": "o", "expires": "2099-01-01"}]})
 expect("an exception can raise a memory budget",
@@ -1385,6 +1392,8 @@ for _bad, _why in (({"rule": "max_triangles", "allow": 1, "owner": "o", "expires
                      "expires": "next week", "path": "x"}, "date"),
                    ({"rule": "max_triangles", "allow": 1, "reason": "r", "owner": "o",
                      "expires": "2030-01-01", "path": "x", "approved": True}, "approved"),
+                   ({"rule": "max_mesh_mb", "allow": float("nan"), "reason": "r", "owner": "o",
+                     "expires": "2030-01-01", "path": "x"}, "number of MB"),
                    # a value no budget can hold: refused here, not a traceback mid-run
                    ({"rule": "max_texture_edge", "allow": 0, "reason": "r", "owner": "o",
                      "expires": "2030-01-01", "path": "x"}, "max_texture_edge must be at least 1"),

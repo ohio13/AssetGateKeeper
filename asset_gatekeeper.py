@@ -615,7 +615,9 @@ def _read_memory(mesh: dict, texture: dict) -> dict:
                                      (mesh, "max_mb", "max_mesh_mb", "[mesh]")):
         value = _read_float(table, key, where)
         if value is not None:
-            if value < 0:
+            # not finite: nan compares False with every size, so the budget
+            # silently checked nothing
+            if not math.isfinite(value) or value < 0:
                 raise ConfigError(f"{where}.{key} must be 0 (off) or more, got {value}")
             found[field] = value
     for key, field in (("format", "texture_format"), ("normal_format", "normal_format")):
@@ -629,7 +631,8 @@ def _read_memory(mesh: dict, texture: dict) -> dict:
         value = mesh["texel_density"]
         if (not isinstance(value, (list, tuple)) or len(value) != 2
                 or any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0
-                       for v in value) or float(value[0]) > float(value[1]) or not value[1]):
+                       or not math.isfinite(v) for v in value)
+                or float(value[0]) > float(value[1]) or not value[1]):
             raise ConfigError("[mesh].texel_density must be [min, max] in pixels per metre, "
                               f"with min <= max, got {value!r}")
         found["texel_density_min"], found["texel_density_max"] = float(value[0]), float(value[1])
@@ -1439,7 +1442,8 @@ def parse_exceptions(document: Optional[dict], base: Optional[Path] = None,
         if kind is bool and not isinstance(allow, bool):
             raise ConfigError(f"{label}.allow must be true or false for {rule}, got {allow!r}")
         if kind is float:
-            if isinstance(allow, bool) or not isinstance(allow, (int, float)) or allow < 0:
+            if isinstance(allow, bool) or not isinstance(allow, (int, float)) or allow < 0 \
+                    or not math.isfinite(allow):
                 raise ConfigError(f"{label}.allow must be a number of MB for {rule}, got {allow!r}")
             allow = float(allow)
         try:
@@ -1502,8 +1506,9 @@ def parse_totals(document: Optional[dict], base: Optional[Path] = None) -> tuple
         if not str(entry.get("path", "")).strip():
             raise ConfigError(f"{where} needs path")
         limit = _read_float(entry, "max_mb", where)
-        if limit is None or limit <= 0:
-            raise ConfigError(f"{where} needs max_mb above 0")
+        if limit is None or not math.isfinite(limit) or limit <= 0:
+            raise ConfigError(f"{where} needs max_mb above 0 (a number of MB)"
+                              + (f", got {limit}" if limit is not None else ""))
         found.append(MemoryTotal(str(entry["path"]).strip(), limit, base))
     return tuple(found)
 
