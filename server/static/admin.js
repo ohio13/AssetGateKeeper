@@ -321,11 +321,15 @@ function watchScan() {
       setCounts(event.totals || {});
     } else if (event.type === "log") {
       scanLine(event.text, "muted");
+    } else if (event.type === "skipped") {
+      scanLine(event.text, "muted");
     } else if (event.type === "scan_end") {
       setCounts(event.totals || {});
       $("scan-status").textContent = event.status === "done" ? "complete" : "failed";
+      const skipped = (event.skipped && event.skipped.total)
+        ? `, ${event.skipped.total} skipped (not a supported type)` : "";
       scanLine(event.status === "done"
-        ? `done: ${event.totals.passed} passed, ${event.totals.failed} failed`
+        ? `done: ${event.totals.passed} passed, ${event.totals.failed} failed${skipped}`
         : `scan failed: ${event.error || "see the server log"}`, "muted");
       stream.close();
       state.stream = null;

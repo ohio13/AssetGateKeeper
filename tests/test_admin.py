@@ -333,6 +333,35 @@ expect("the asset passed under a 1,200 triangle budget",
        snapshot["totals"]["passed"] >= 1, json.dumps(snapshot["totals"]))
 expect("events are buffered for a late subscriber", len(server.scanner.recent()) >= 2)
 
+# 10 Nov 2026: a scan that found a failing asset ended "scan failed: <last log
+# line>" (the gate exits 1 when something fails), the gate's closing summary
+# line was counted as one more failed asset, and files it skipped (the developer's .jfif
+# reference images) were never mentioned.
+_saved_root = server.scan_root
+mixed = Path(tempfile.mkdtemp(prefix="agk-mixed-"))
+from PIL import Image as _Image
+_Image.new("RGB", (64, 64), (90, 90, 90)).save(mixed / "T_Good_BaseColor.png")
+_Image.new("RGB", (1000, 1000), (90, 90, 90)).save(mixed / "T_Bad_BaseColor.png")
+_Image.new("RGB", (64, 64), (90, 90, 90)).save(mixed / "reference.jfif", "JPEG")
+server.scan_root = str(mixed)
+status, body = anon.post("/admin/api/scan", csrf=csrf)
+expect("a scan of a folder with a failing asset starts", status == 200, body[:200])
+deadline = time.time() + 120
+while time.time() < deadline:
+    snapshot = anon.state()["scan"]
+    if snapshot["status"] != "running":
+        break
+    time.sleep(0.4)
+expect("... and finishes as done, not 'scan failed'", snapshot["status"] == "done"
+       and not snapshot["error"], json.dumps(snapshot)[:300])
+expect("... counting exactly the two assets (the summary line is not an asset)",
+       snapshot["totals"] == {"total": 2, "passed": 1, "failed": 1}, json.dumps(snapshot["totals"]))
+expect("... and saying the .jfif was skipped, with what to do",
+       snapshot["skipped"].get("unsupported") == {".jfif": 1}
+       and any(e.get("type") == "skipped" and "rename it to .jpg" in e.get("text", "")
+               for e in server.scanner.recent()), json.dumps(snapshot.get("skipped")))
+server.scan_root = _saved_root
+
 # 9 Nov 2026 audit, B1: with no project picked, the fallback folder was the
 # install itself, and a first scan filled the dashboard with the tool's own
 # test files. The install folder (and the launcher's data folder) is never scanned.

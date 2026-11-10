@@ -92,7 +92,7 @@ from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 from functools import lru_cache
 from pathlib import Path
-from typing import Callable, Optional, Sequence
+from typing import Callable, Iterable, Optional, Sequence
 from urllib.parse import quote, unquote
 
 # --- #
@@ -4816,13 +4816,17 @@ class Reporter:
             for warning in verdict.warnings:
                 LOG.info("       %s", self._paint(f"note: {warning}", self.DIM))
 
-    def summary(self) -> None:
+    def summary(self, skipped: Optional[dict] = None) -> None:
         total = self.passed + self.failed
         if self.json_mode:
-            print(json.dumps({"summary": {"total": total, "passed": self.passed,
-                                          "failed": self.failed}}), flush=True)
+            document = {"total": total, "passed": self.passed, "failed": self.failed}
+            if skipped is not None:
+                document["skipped"] = skipped
+            print(json.dumps({"summary": document}), flush=True)
             return
         LOG.info("%d asset(s): %d passed, %d failed", total, self.passed, self.failed)
+        if skipped and skipped.get("total"):
+            LOG.info("%s", describe_skipped(skipped))
 
     def close(self, timeout: Optional[float] = None) -> None:
         """Flush pending telemetry and toasts. Bounded, and a no-op when off."""
@@ -4835,6 +4839,72 @@ class Reporter:
 # --- #
 # Watching
 # --- #
+
+#: Files that belong to the tool or the system, never mentioned as "skipped".
+QUIET_NAMES = frozenset({"rules.toml", "rules.example.toml", "asset_gatekeeper.toml",
+                         "thumbs.db", "desktop.ini", ".ds_store"})
+#: A word of advice for the unsupported types people most often drop in.
+SKIPPED_HINTS = {
+    ".jfif": "a JPEG: rename it to .jpg to check it",
+    ".jpe": "a JPEG: rename it to .jpg to check it",
+    ".bmp": "engines want PNG or TGA",
+    ".gif": "engines want PNG or TGA",
+    ".psd": "a Photoshop file: export a PNG or TGA",
+    ".kra": "a Krita file: export a PNG",
+    ".blend": "a Blender scene: export FBX, glTF or OBJ",
+    ".ztl": "a ZBrush tool: export an OBJ",
+    ".zpr": "a ZBrush project: export an OBJ",
+    ".ma": "a Maya scene: export FBX", ".mb": "a Maya scene: export FBX",
+    ".max": "a 3ds Max scene: export FBX",
+    ".spp": "a Substance Painter project: export the textures",
+    ".stl": "a print mesh: export OBJ or glTF for a game",
+    ".dae": "Collada: export FBX or glTF",
+    ".usd": "USD is not read yet", ".usda": "USD is not read yet", ".usdz": "USD is not read yet",
+}
+
+
+def skipped_files(files: Iterable[Path], exclude: Sequence[str] = ()) -> dict:
+    """What a run walked past and why: {"total", "unsupported": {".jfif": 6},
+    "excluded": n}. Scratch files, hidden files and the tool's own (rules.toml,
+    .agk folders) are not counted - only what a person put there and might
+    expect to be checked. Reference images saved as .jfif used to be ignored
+    without a word, so a folder looked checked when half of it was not."""
+    unsupported: dict[str, int] = {}
+    excluded = 0
+    for path in files:
+        name = path.name
+        if (name.startswith(IGNORED_PREFIXES) or name.startswith(".")
+                or name.lower() in QUIET_NAMES or name.lower().endswith(IGNORED_SUFFIXES)
+                or any(part.startswith(IGNORED_DIR_PREFIXES) or part == ".agk"
+                       for part in path.parts[:-1])):
+            continue
+        suffix = path.suffix.lower()
+        if suffix not in TRACKED_SUFFIXES:
+            key = suffix or "(no extension)"
+            unsupported[key] = unsupported.get(key, 0) + 1
+        elif not is_candidate(path, exclude):
+            excluded += 1
+    ordered = dict(sorted(unsupported.items(), key=lambda item: (-item[1], item[0])))
+    return {"total": sum(ordered.values()) + excluded, "unsupported": ordered,
+            "excluded": excluded}
+
+
+def describe_skipped(skipped: dict, limit: int = 5) -> str:
+    """6 file(s) skipped: unsupported type .jfif x6 (a JPEG: rename it to .jpg to check it)"""
+    parts = []
+    kinds = list(skipped.get("unsupported", {}).items())
+    for suffix, count in kinds[:limit]:
+        hint = SKIPPED_HINTS.get(suffix)
+        parts.append(f"{suffix} x{count}" + (f" ({hint})" if hint else ""))
+    if len(kinds) > limit:
+        parts.append(f"{len(kinds) - limit} more type(s)")
+    pieces = []
+    if parts:
+        pieces.append("unsupported type " + ", ".join(parts))
+    if skipped.get("excluded"):
+        pieces.append(f"{skipped['excluded']} by [filters] exclude / --exclude")
+    return f"{skipped.get('total', 0)} file(s) skipped: " + "; ".join(pieces)
+
 
 def is_candidate(path: Path, exclude: Sequence[str] = ()) -> bool:
     """Cheap pre-filter: right extension, not a hidden/scratch/excluded file.
@@ -5459,10 +5529,11 @@ def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
              totals: Sequence["MemoryTotal"] = (), cache: Optional[VerdictCache] = None,
              jobs: int = 1) -> int:
     unreadable: list[str] = []
-    candidates = sorted(p for p in walk_files(root, recursive=recursive,
-                                              follow_symlinks=follow_symlinks,
-                                              on_skip=unreadable.append)
-                        if is_candidate(p, exclude))
+    walked = walk_files(root, recursive=recursive, follow_symlinks=follow_symlinks,
+                        on_skip=unreadable.append)
+    candidates = sorted(p for p in walked if is_candidate(p, exclude))
+    skipped = skipped_files(walked, exclude)
+    del walked
 
     # An entry the walker could not even list used to disappear without a word:
     # a locked 90,000-triangle mesh reported "no tracked assets found" and exit 0,
@@ -5472,11 +5543,12 @@ def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
                                 unreadable=True))
 
     if not candidates and not unreadable:
+        found = f" ({describe_skipped(skipped)})" if skipped["total"] else ""
         if allow_empty:
-            LOG.info("no tracked assets found in %s (--allow-empty)", root)
+            LOG.info("no tracked assets found in %s%s (--allow-empty)", root, found)
             return 0
-        LOG.error("no tracked assets found in %s - check the path, or pass "
-                  "--allow-empty if this folder is meant to be empty", root)
+        LOG.error("no tracked assets found in %s%s - check the path, or pass "
+                  "--allow-empty if this folder is meant to be empty", root, found)
         return 1
 
     checked: list[Verdict] = []
@@ -5536,7 +5608,7 @@ def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
         LOG.error("FAILED: %s  %s", verdict.reason, str(verdict.path).replace("\\", "/"))
         if reporter.keep_verdicts:
             reporter.verdicts.append(verdict)
-    reporter.summary()
+    reporter.summary(skipped)
     return 1 if (reporter.failed or over) else 0
 
 

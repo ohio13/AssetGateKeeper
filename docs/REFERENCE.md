@@ -150,6 +150,7 @@ python asset_gatekeeper.py Assets/Exports --once --recursive
 
 ```
 14:31:02 842 asset(s): 837 passed, 5 failed
+14:31:02 6 file(s) skipped: unsupported type .jfif x6 (a JPEG: rename it to .jpg to check it)
 $ echo $?
 1
 ```

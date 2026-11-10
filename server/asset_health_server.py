@@ -4124,6 +4124,7 @@ class ScanRunner:
         self.started_at = ""
         self.finished_at = ""
         self.totals = {"total": 0, "passed": 0, "failed": 0}
+        self.skipped: dict = {}
         self._recent: list[dict] = []
 
     def busy(self) -> bool:
@@ -4134,7 +4135,7 @@ class ScanRunner:
         with self._lock:
             return {"status": self.status, "root": self.root, "error": self.error,
                     "started_at": self.started_at, "finished_at": self.finished_at,
-                    "totals": dict(self.totals)}
+                    "totals": dict(self.totals), "skipped": dict(self.skipped)}
 
     def recent(self) -> list[dict]:
         with self._lock:
@@ -4156,6 +4157,7 @@ class ScanRunner:
             self.started_at = _utc_now()
             self.finished_at = ""
             self.totals = {"total": 0, "passed": 0, "failed": 0}
+            self.skipped = {}
             self._recent = []
             self._thread = threading.Thread(
                 target=self._run, args=(str(root), Path(rules_path), telemetry_url),
@@ -4185,6 +4187,7 @@ class ScanRunner:
         with self._lock:
             self._process = process
         assert process.stdout is not None
+        summary_seen = False
         try:
             for line in process.stdout:
                 line = line.strip()
@@ -4196,6 +4199,17 @@ class ScanRunner:
                     self._emit({"type": "log", "text": line[:400]})
                     continue
                 if not isinstance(payload, dict):
+                    continue
+                if isinstance(payload.get("summary"), dict):
+                    # The gate's closing line, not an asset: it used to be counted
+                    # as one more failure on every scan.
+                    summary_seen = True
+                    skipped = payload["summary"].get("skipped") or {}
+                    if skipped.get("total"):
+                        with self._lock:
+                            self.skipped = dict(skipped)
+                        self._emit({"type": "skipped", "skipped": skipped,
+                                    "text": agk.describe_skipped(skipped)})
                     continue
                 with self._lock:
                     self.totals["total"] += 1
@@ -4215,7 +4229,11 @@ class ScanRunner:
             if process.stderr is not None:
                 tail = process.stderr.read() or ""
                 detail = tail.strip().splitlines()[-1] if tail.strip() else ""
-            self._finish("done" if code == 0 else "failed", detail,
+            # Exit 1 with a summary is a finished scan that found failing assets
+            # (the gate's normal "something failed" code); it used to be shown as
+            # "scan failed", with the last log line as the reason.
+            finished = code == 0 or (code == 1 and summary_seen)
+            self._finish("done" if finished else "failed", "" if finished else detail,
                          exit_code=code)
 
     def _finish(self, status: str, error: str = "", exit_code: int = 0) -> None:
@@ -4226,8 +4244,10 @@ class ScanRunner:
             self.finished_at = _utc_now()
             self._process = None
             totals = dict(self.totals)
+        with self._lock:
+            skipped = dict(self.skipped)
         self._emit({"type": "scan_end", "status": status, "error": error,
-                    "exit_code": exit_code, "totals": totals,
+                    "exit_code": exit_code, "totals": totals, "skipped": skipped,
                     "at": self.finished_at})
 
 

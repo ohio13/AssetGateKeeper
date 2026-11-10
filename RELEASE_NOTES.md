@@ -5,6 +5,19 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **Say what was skipped (10 Nov).** A run used to ignore files it does not
+  read without a word: the six `.jfif` reference images in the developer's test folder
+  were never mentioned, so the folder looked checked. Each run now ends with
+  `6 file(s) skipped: unsupported type .jfif x6 (a JPEG: rename it to .jpg to
+  check it)`, with a hint for common source files (.psd, .blend, .ztl, Maya, 3ds
+  Max ...); `--exclude` matches are counted too, and `--json`'s summary line
+  carries the same as `skipped`. "No tracked assets found" now says what was
+  there instead. The admin page's scan prints it as well.
+* **The admin page's scan reported failures as a failed scan (10 Nov).** A
+  scan that found a failing asset ended "scan failed: <the last log line>" (the
+  gate exits 1 when something fails), and the gate's closing summary line was
+  counted as one more failed asset, so two assets showed as three. Both fixed;
+  the test scans a folder with one pass, one fail and a `.jfif`.
 * **N64 face texture (10 Nov).** At 64 px the whole test figure shared one
   texture and her face got about 6 x 6 texels: the eyes were dark blobs. The
   bake can now give the face a texture of its own, the same size, as a second

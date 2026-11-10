@@ -3421,6 +3421,48 @@ expect("the bake's install hint names the exact pip command",
 if os.name == "nt":
     expect("... and on Windows, the double-click file", "Install_Extras.bat" in _pp.install_hint())
 
+
+print("Say what was skipped (10 Nov 2026)")
+# The developer's test folder held six .jfif reference images; the gate ignored them
+# without a word, so a folder looked checked when half of it was not.
+import tempfile as _tempfile
+_skip_dir = Path(_tempfile.mkdtemp(prefix="agk-skip-"))
+make_png(_skip_dir / "T_Crate_BaseColor.png", (64, 64))
+for _n in range(3):
+    (_skip_dir / f"ref{_n}.jfif").write_bytes(b"\xff\xd8\xff\xe0")
+(_skip_dir / "scene.blend").write_bytes(b"BLENDER")
+(_skip_dir / "rules.toml").write_text("", encoding="utf-8")
+(_skip_dir / ".hidden.png").write_bytes(b"")
+(_skip_dir / "T_Draft_BaseColor.png.tmp").write_bytes(b"")
+make_png(_skip_dir / "T_Wip_BaseColor.png", (64, 64))
+_info = agk.skipped_files(sorted(_skip_dir.iterdir()), ("*Wip*",))
+expect("unsupported types are counted by extension, most first",
+       _info["unsupported"] == {".jfif": 3, ".blend": 1}, str(_info))
+expect("rules.toml, hidden and scratch files are not mentioned; --exclude is counted",
+       _info["excluded"] == 1 and _info["total"] == 5, str(_info))
+_text = agk.describe_skipped(_info)
+expect("the line says what to do with the common ones",
+       _text.startswith("5 file(s) skipped: unsupported type .jfif x3 (a JPEG: rename it to .jpg")
+       and "a Blender scene: export FBX" in _text and "1 by [filters] exclude" in _text, _text)
+_code, _out = gate_run(str(_skip_dir), "--once", "--exclude", "*Wip*")
+expect("each run ends with the skipped line", "file(s) skipped: unsupported type .jfif x3"
+       in _out, _out[-400:])
+_code, _out = gate_run(str(_skip_dir), "--once", "--json", "--exclude", "*Wip*")
+_summary = json.loads([line for line in _out.splitlines() if line.startswith('{"summary"')][-1])
+expect("--json puts it in the summary", _summary["summary"]["skipped"]["unsupported"]
+       == {".jfif": 3, ".blend": 1}, _out[-300:])
+_refs = _skip_dir / "refs"
+_refs.mkdir()
+for _n in range(2):
+    (_refs / f"ref{_n}.jfif").write_bytes(b"\xff\xd8\xff\xe0")
+_code, _out = gate_run(str(_refs), "--once")
+expect("'no tracked assets' says what was there instead",
+       _code == 1 and "no tracked assets found" in _out and ".jfif x2" in _out, _out[-300:])
+_many = agk.describe_skipped({"total": 7, "unsupported": {f".x{i}": 1 for i in range(7)},
+                              "excluded": 0}, limit=5)
+expect("a long list is cut short", "2 more type(s)" in _many, _many)
+shutil.rmtree(_skip_dir, ignore_errors=True)
+
 print("The reference and the CLI agree")
 # The long manual moved from README.md to docs/REFERENCE.md for the alpha (the
 # front page is now short); the flag table lives there.

@@ -119,7 +119,13 @@ Reported as: `tag 'charcter' is not a known tag; closest match is 'character'`.
 ```
 
 One object per asset, stable keys. `status` is `PASSED`, `FAILED`, `HEALED` or
-`ERROR`; `problems` is empty for a pass. Parsers should key off `status`, not
+`ERROR`; `problems` is empty for a pass. A `--once` run ends with one more
+line, `{"summary": {"total", "passed", "failed", "skipped"}}`, where `skipped`
+counts the files it walked past: `{"total": 7, "unsupported": {".jfif": 6,
+".blend": 1}, "excluded": 0}` (scratch, hidden and the tool's own files are not
+counted). The text output says the same in one line, with a hint for the common
+ones: `7 file(s) skipped: unsupported type .jfif x6 (a JPEG: rename it to .jpg
+to check it), .blend x1 (a Blender scene: export FBX, glTF or OBJ)`. Parsers should key off `status`, not
 `passed` - a healed asset is both.
 
 `ERROR` means the gate could not read the file at all (a locked handle, a
