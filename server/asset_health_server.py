@@ -3073,6 +3073,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def _is_loopback(self) -> bool:
         address = (self.client_address[0] if self.client_address else "") or ""
+        # A reverse proxy on this PC (docs/04 puts the dashboard behind one)
+        # connects from 127.0.0.1 for every intranet user: in solo mode each of
+        # them was "this PC", a director with no password. A forwarded request
+        # came from somewhere else.
+        if any(self.headers.get(name) for name in ("Forwarded", "X-Forwarded-For",
+                                                   "X-Real-IP", "X-Forwarded-Host")):
+            return False
         return address in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
     def _admin_bootstrap(self) -> None:

@@ -615,7 +615,9 @@ def _read_memory(mesh: dict, texture: dict) -> dict:
                                      (mesh, "max_mb", "max_mesh_mb", "[mesh]")):
         value = _read_float(table, key, where)
         if value is not None:
-            if value < 0:
+            # not finite: nan compares False with every size, so the budget
+            # silently checked nothing
+            if not math.isfinite(value) or value < 0:
                 raise ConfigError(f"{where}.{key} must be 0 (off) or more, got {value}")
             found[field] = value
     for key, field in (("format", "texture_format"), ("normal_format", "normal_format")):
@@ -629,7 +631,8 @@ def _read_memory(mesh: dict, texture: dict) -> dict:
         value = mesh["texel_density"]
         if (not isinstance(value, (list, tuple)) or len(value) != 2
                 or any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0
-                       for v in value) or float(value[0]) > float(value[1]) or not value[1]):
+                       or not math.isfinite(v) for v in value)
+                or float(value[0]) > float(value[1]) or not value[1]):
             raise ConfigError("[mesh].texel_density must be [min, max] in pixels per metre, "
                               f"with min <= max, got {value!r}")
         found["texel_density_min"], found["texel_density_max"] = float(value[0]), float(value[1])
@@ -1318,7 +1321,15 @@ def parse_rules(path: Path) -> dict:
     """
     # utf-8-sig strips a leading BOM, which Notepad and PowerShell add by default
     # on Windows; tomllib would otherwise reject the file on its very first byte.
-    text = path.read_text(encoding="utf-8-sig")
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        # Notepad's "ANSI" (Windows-1252) turns an accent in a comment into a
+        # byte that is not UTF-8; the bare codec error did not say what to do.
+        line = path.read_bytes()[:exc.start].count(b"\n") + 1
+        raise ConfigError(f"{path.name} is not saved as UTF-8 (byte 0x{exc.object[exc.start]:02x} "
+                          f"on line {line}): save it as UTF-8 (Notepad: Save As, Encoding "
+                          "UTF-8)") from exc
     if path.suffix.lower() == ".json":
         try:
             return json.loads(text)
@@ -1455,9 +1466,17 @@ def parse_exceptions(document: Optional[dict], base: Optional[Path] = None,
         if kind is bool and not isinstance(allow, bool):
             raise ConfigError(f"{label}.allow must be true or false for {rule}, got {allow!r}")
         if kind is float:
-            if isinstance(allow, bool) or not isinstance(allow, (int, float)) or allow < 0:
+            if isinstance(allow, bool) or not isinstance(allow, (int, float)) or allow < 0 \
+                    or not math.isfinite(allow):
                 raise ConfigError(f"{label}.allow must be a number of MB for {rule}, got {allow!r}")
             allow = float(allow)
+        try:
+            # The value must make a budget: max_texture_edge = 0 used to pass here
+            # and then stop the run with a traceback on the first matching asset.
+            replace(Budget(), **{rule: allow})
+        except ConfigError as exc:
+            raise ConfigError(f"{label}.allow = {allow!r} cannot be used for {rule}: "
+                              f"{str(exc).replace('budget ', '', 1)}") from exc
         found.append(BudgetException(
             path=str(entry["path"]).strip(), rule=rule, allow=allow,
             reason=str(entry["reason"]).strip()[:300], owner=str(entry["owner"]).strip()[:80],
@@ -1511,8 +1530,9 @@ def parse_totals(document: Optional[dict], base: Optional[Path] = None) -> tuple
         if not str(entry.get("path", "")).strip():
             raise ConfigError(f"{where} needs path")
         limit = _read_float(entry, "max_mb", where)
-        if limit is None or limit <= 0:
-            raise ConfigError(f"{where} needs max_mb above 0")
+        if limit is None or not math.isfinite(limit) or limit <= 0:
+            raise ConfigError(f"{where} needs max_mb above 0 (a number of MB)"
+                              + (f", got {limit}" if limit is not None else ""))
         found.append(MemoryTotal(str(entry["path"]).strip(), limit, base))
     return tuple(found)
 
@@ -3312,7 +3332,7 @@ def read_gltf_document(path: Path) -> dict:
         if path.suffix.lower() == ".gltf":
             document = json.loads(path.read_text(encoding="utf-8-sig"))
         else:
-            document = _glb_json(path.read_bytes())
+            document = _glb_json(_glb_json_prefix(path))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         # Corrupt text used to escape as an uncaught UnicodeDecodeError (6 Nov
         # fuzzing) and stop a folder scan; it is a damaged file like any other.
@@ -3327,6 +3347,23 @@ def read_gltf_document(path: Path) -> dict:
         raise AssetError("glTF 1.0 file: this format was replaced by glTF 2.0 in 2017; "
                          "re-export it as glTF 2.0")
     return document
+
+
+def _glb_json_prefix(path: Path) -> bytes:
+    """The bytes of a .glb up to the end of its JSON chunk, not the whole file.
+
+    One check reads the document a dozen times (triangles, materials, UV sets,
+    compression, ...): reading all of a 500 MB .glb for each, binary chunk
+    included, was a dozen full reads of the file for a few kilobytes of JSON.
+    """
+    with path.open("rb") as handle:
+        blob = handle.read(20)                 # header (12) + first chunk header (8)
+        if blob[:4] != GLB_MAGIC or len(blob) < 20:
+            return blob
+        chunk_length, chunk_type = struct.unpack_from("<II", blob, 12)
+        if chunk_type == GLB_JSON_CHUNK:       # the glTF spec puts it first
+            return blob + handle.read(chunk_length)
+        return blob + handle.read()            # out of order: read it all, as before
 
 
 def _glb_json(blob: bytes) -> dict:
@@ -4301,12 +4338,35 @@ def lightmap_coverage(triangles, resolution: int = 256) -> tuple[int, int, int]:
     return int(np.count_nonzero(counts)), int(np.count_nonzero(counts > 1)), res
 
 
+def _gltf_collision_meshes(document: dict) -> set:
+    """Indices of glTF meshes that are collision only (UCX_/UBX_/USP_/UCP_).
+
+    A mesh is collision when every node placing it is named so (or, for an
+    unnamed node, the mesh is), as gltf_structure reads them; a mesh no node
+    places is judged by its own name.
+    """
+    meshes = document.get("meshes") or []
+    users: dict = {}
+    for node in document.get("nodes") or []:
+        if isinstance(node, dict) and isinstance(node.get("mesh"), int) \
+                and 0 <= node["mesh"] < len(meshes):
+            users.setdefault(node["mesh"], []).append(node.get("name") or "")
+    found = set()
+    for index, mesh in enumerate(meshes):
+        own = (mesh.get("name") or "") if isinstance(mesh, dict) else ""
+        names = [_bare_name(name or own).lower() for name in users.get(index, [own])]
+        if names and all(name.startswith(FBX_COLLISION_PREFIXES) for name in names):
+            found.add(index)
+    return found
+
+
 def _lightmap_meshes(path: Path, channel: int) -> dict:
     """The static meshes of an asset and their lightmap UV set.
 
     {"meshes": [(name, uv points (n, 2), uv triangles (m, 3, 2))], "missing":
     [names of static meshes without the set], "unread": why some were not read}.
-    Skinned meshes are left out: a skeletal mesh is not lightmapped.
+    Skinned meshes are left out: a skeletal mesh is not lightmapped. So are
+    UCX_/UBX_/USP_/UCP_ collision meshes, which are never rendered.
     """
     found: dict = {"meshes": [], "missing": [], "unread": ""}
     suffix = path.suffix.lower()
@@ -4350,7 +4410,10 @@ def _lightmap_meshes(path: Path, channel: int) -> dict:
             return found
         buffers: dict = {}
         attribute = f"TEXCOORD_{channel}"
+        collision = _gltf_collision_meshes(document)
         for index, mesh in enumerate(document.get("meshes") or []):
+            if index in collision:
+                continue                                  # UCX_ & co: not lit, no lightmap
             name = mesh.get("name") or f"mesh {index}"
             points, triangles, missing = [], [], False
             for primitive in mesh.get("primitives") or []:
@@ -5370,10 +5433,15 @@ def lod_collision_problems(path: Path, structure: Optional[dict], budget: "Budge
                         problems.append(f"LOD{level} of '{name}' has no triangles: re-export it "
                                         "or remove the level")
                     elif above and here / above > limit:
+                        # The largest count that passes: int(0.29 * 100) is 28 in
+                        # floating point, yet 29 / 100 passes a 0.29 limit.
+                        allowed = int(limit * above)
+                        while (allowed + 1) / above <= limit:
+                            allowed += 1
                         problems.append(
                             f"LOD{level} of '{name}' keeps {here / above:.2f} of LOD{level - 1}'s "
                             f"triangles ({here:,} of {above:,}); at most {limit:g} is allowed: "
-                            f"reduce it to {int(limit * above):,} triangles or fewer")
+                            f"reduce it to {allowed:,} triangles or fewer")
 
     if collision_on:
         if structure is None:
@@ -6927,6 +6995,12 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
     except module.PolypaintError as exc:
         LOG.error("%s", exc)
         return 2
+    except MemoryError:
+        # --bake-texture 65536 asked numpy for 16 GB and ended in a traceback.
+        LOG.error("not enough memory to bake %s at %dx%d with %s triangles; use a smaller "
+                  "--bake-texture (2048 is the default; 8192 needs about 4 GB) or "
+                  "--bake-triangles", source.name, edge, edge, f"{settings['triangles']:,}")
+        return 2
     made = [Path(result["mesh"]), Path(result["texture"])]
     for key in ("normal", "face_texture", "face_normal"):
         if result.get(key):
@@ -7529,11 +7603,27 @@ def _relative_name(path: Path, root: Optional[Path]) -> str:
     return path.name
 
 
+#: Characters XML 1.0 cannot carry at all (control characters, lone surrogates).
+_XML_INVALID = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
+
+
 def junit_report(verdicts: Sequence[Verdict], root: Optional[Path] = None) -> str:
     """JUnit XML: one test case per asset. Jenkins, TeamCity, Horde, GitLab and
     Azure DevOps all show these per test, so a failing asset is a red line with
     its path, not a word in a build log."""
-    from xml.sax.saxutils import escape, quoteattr
+    from xml.sax.saxutils import escape as _escape, quoteattr as _quoteattr
+
+    # XML 1.0 has no way to write most control characters, even escaped: one in
+    # a file or node name made the whole report unreadable to a CI server.
+    def clean(text: str) -> str:
+        return _XML_INVALID.sub("�", text)
+
+    def escape(text: str) -> str:
+        return _escape(clean(text))
+
+    def quoteattr(text: str) -> str:
+        return _quoteattr(clean(text))
+
     failures = sum(1 for verdict in verdicts if not verdict.passed and not verdict.unreadable)
     errors = sum(1 for verdict in verdicts if verdict.unreadable)
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
@@ -7633,7 +7723,9 @@ def write_reports(targets: Sequence[tuple[str, str]], verdicts: Sequence[Verdict
         text = writers[kind](verdicts, root)
         path = Path(destination).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        # errors="replace": a file name that is not valid UTF-8 (Linux allows any
+        # bytes) reaches Python as surrogates, and used to stop the run here.
+        path.write_text(text, encoding="utf-8", errors="replace")
         LOG.info("report  %s written to %s (%d assets)", kind, path, len(verdicts))
 
 
@@ -8042,10 +8134,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except ConfigError as exc:
         LOG.error("invalid totals: %s", exc)
         return 2
+    # One file checked with --rules from a folder above it (the Perforce trigger,
+    # a Git hook, --heal): that folder is the project, as in a --once run there.
+    # With the file's own folder as the root, [tags.props] never matched
+    # Props/crate.fbx and a ../Textures reference "left the project".
+    project_dir = watch_dir
+    if root.is_file() and args.rules:
+        rules_dir = Path(args.rules).expanduser().resolve().parent
+        try:
+            root.relative_to(rules_dir)
+            project_dir = rules_dir
+        except ValueError:
+            pass
     gatekeeper = Gatekeeper(budget, healer=healer, overrides=overrides,
                             tag_budgets=tag_budgets,
                             tag_mode=tag_mode, tag_similarity=tag_similarity,
-                            tag_root=watch_dir, exceptions=exceptions)
+                            tag_root=project_dir, exceptions=exceptions)
     gatekeeper.want_memory = bool(totals)
     reporter = Reporter(color=not args.no_color and not args.json, root=watch_dir,
                         json_mode=args.json, telemetry=telemetry, notifier=notifier)

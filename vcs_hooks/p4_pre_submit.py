@@ -22,7 +22,7 @@ that can read the depot. Each can also come from ``AGK_P4PORT``,
 
 Behaviour
     * only inspects ``add``/``edit``/``branch``/``move/add``/``integrate`` revs of
-      .obj/.gltf/.glb/.png — deleted files have nothing to inspect;
+      the meshes and textures the gate checks — deleted files have nothing to inspect;
     * materialises each rev with ``p4 print -q -o`` at ``@=<change>`` into a temp
       folder and gates that copy, so the check reflects the *received* content,
       not the shelf;
@@ -51,11 +51,13 @@ import urllib.request
 from pathlib import Path
 from typing import Optional
 
-ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg"}
+# Every format the gate checks (asset_gatekeeper.TRACKED_SUFFIXES).
+ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg",
+                  ".tif", ".tiff", ".webp", ".dds", ".exr", ".ktx2"}
 #: Files an asset carries that the gate does not measure on their own. With
 #: --require-approval they still need an approved version holding these exact
 #: bytes: a changelist that only edits rock.bin changes an approved rock.gltf.
-APPROVAL_ONLY_SUFFIXES = {".bin", ".mtl", ".tif", ".tiff", ".dds", ".exr", ".hdr"}
+APPROVAL_ONLY_SUFFIXES = {".bin", ".mtl", ".hdr"}
 # Actions that put bytes into the depot. "delete" and "move/delete" carry none.
 CONTENT_ACTIONS = {"add", "edit", "branch", "move/add", "integrate", "merge"}
 

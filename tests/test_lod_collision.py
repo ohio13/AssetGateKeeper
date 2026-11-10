@@ -231,6 +231,14 @@ expect("a level that keeps 80% of the one above fails max_ratio = 0.6, with the 
        "LOD2 of 'Tree' keeps 0.80 of LOD1's triangles (80 of 100); at most 0.6 is allowed: "
        "reduce it to 60 triangles or fewer" in text, text)
 expect("... and only that level is named (LOD1 at 0.50 is fine)", "LOD1 of" not in text, text)
+_ratio_budget = rules(lod={"max_ratio": 0.29})
+_found = agk.lod_collision_problems(Path("SM_Rock.fbx"), {"lod_groups": (("Rock", (100, 30), "group"),)},
+                                    _ratio_budget)[0]
+expect("the count to get under is one that passes (0.29 x 100: 29, not 28 from float rounding)",
+       any("reduce it to 29 triangles or fewer" in item for item in _found)
+       and not agk.lod_collision_problems(Path("SM_Rock.fbx"),
+                                          {"lod_groups": (("Rock", (100, 29), "group"),)},
+                                          _ratio_budget)[0], _found)
 
 no_lods = fbx_scene(WORK / "SM_Crate_nolod.fbx", [("Crate", "Mesh", None, box(), False),
                                                  ("UCX_Crate", "Mesh", None, box(), False)])

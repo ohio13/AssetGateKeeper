@@ -233,6 +233,17 @@ bom_cfg.mkdir(exist_ok=True)
 bom_budget, _, _ = agk.resolve_budget(bom_cfg, agk.build_parser().parse_args([str(bom_cfg)]))
 expect("rules.toml written with a BOM still loads (Notepad / PowerShell)",
        bom_budget.max_triangles == 64, str(bom_budget.max_triangles))
+(bom_cfg / "rules.toml").write_bytes(b"# R\xe9gles\r\n[mesh]\r\nmax_triangles = 64 # caf\xe9\r\n")
+try:
+    agk.parse_rules(bom_cfg / "rules.toml")
+    _ansi = "loaded"
+except agk.ConfigError as exc:
+    _ansi = str(exc)
+except UnicodeDecodeError as exc:
+    _ansi = f"bare {exc!r}"
+expect("a rules.toml saved as Windows-1252 ('ANSI') is refused saying to save it as UTF-8, "
+       "with the line", "save it as UTF-8" in _ansi and "line 1" in _ansi, _ansi)
+(bom_cfg / "rules.toml").write_bytes(b"\xef\xbb\xbf[mesh]\nmax_triangles = 64\n")
 
 for label, blob in (
     ("unknown key is rejected", "[mesh]\nmax_triange = 10\n"),
@@ -1230,12 +1241,19 @@ expect("a platform profile sets its own memory budgets and format",
        (_bs.max_texture_mb, _bs.texture_format, _bs.max_mesh_mb) == (2, "astc8x8", 1))
 for _bad, _why in (({"texture": {"format": "dxt99"}}, "format"), ({"mesh": {"max_mb": -1}}, "max_mb"),
                    ({"mesh": {"texel_density": [800, 400]}}, "texel_density"),
-                   ({"totals": [{"path": "Props/*"}]}, "max_mb")):
+                   ({"totals": [{"path": "Props/*"}]}, "max_mb"),
+                   # nan compares False with every size: the budget checked nothing,
+                   # and a total of nan or inf ended the run in a traceback
+                   ({"mesh": {"max_mb": float("nan")}}, "max_mb"),
+                   ({"texture": {"max_mb": float("inf")}}, "max_mb"),
+                   ({"mesh": {"texel_density": [10, float("nan")]}}, "texel_density"),
+                   ({"totals": [{"path": "*", "max_mb": float("nan")}]}, "got nan"),
+                   ({"totals": [{"path": "*", "max_mb": float("inf")}]}, "got inf")):
     try:
         agk.Budget.from_mapping(_bad) if "totals" not in _bad else agk.parse_totals(_bad)
-        expect(f"a bad memory setting is refused ({_why})", False)
+        expect(f"a bad memory setting is refused ({_why}, {_bad})", False)
     except agk.ConfigError as exc:
-        expect(f"a bad memory setting is refused ({_why})", _why in str(exc), str(exc))
+        expect(f"a bad memory setting is refused ({_why}, {_bad})", _why in str(exc), str(exc))
 _ex = agk.parse_exceptions({"exceptions": [{"path": "*", "rule": "max_texture_mb", "allow": 6,
                                             "reason": "r", "owner": "o", "expires": "2099-01-01"}]})
 expect("an exception can raise a memory budget",
@@ -1373,7 +1391,14 @@ for _bad, _why in (({"rule": "max_triangles", "allow": 1, "owner": "o", "expires
                    ({"rule": "max_triangles", "allow": 1, "reason": "r", "owner": "o",
                      "expires": "next week", "path": "x"}, "date"),
                    ({"rule": "max_triangles", "allow": 1, "reason": "r", "owner": "o",
-                     "expires": "2030-01-01", "path": "x", "approved": True}, "approved")):
+                     "expires": "2030-01-01", "path": "x", "approved": True}, "approved"),
+                   ({"rule": "max_mesh_mb", "allow": float("nan"), "reason": "r", "owner": "o",
+                     "expires": "2030-01-01", "path": "x"}, "number of MB"),
+                   # a value no budget can hold: refused here, not a traceback mid-run
+                   ({"rule": "max_texture_edge", "allow": 0, "reason": "r", "owner": "o",
+                     "expires": "2030-01-01", "path": "x"}, "max_texture_edge must be at least 1"),
+                   ({"rule": "max_uv_channels", "allow": 0, "reason": "r", "owner": "o",
+                     "expires": "2030-01-01", "path": "x"}, "max_uv_channels must be at least 1")):
     try:
         agk.parse_exceptions({"exceptions": [_bad]})
         expect(f"a bad exception is refused ({_why})", False)
@@ -1461,6 +1486,24 @@ _angle_xml = _ET.fromstring(agk.junit_report([_angle], rep_dir))
 expect("names and reasons with < > & stay well-formed XML (no such file on Windows, so built here)",
        _angle_xml.find(".//testcase").get("name") == "a<b>.gltf"
        and _angle_xml.find(".//failure").get("message") == "x < y & z")
+_control = agk.Verdict(rep_dir / "SM_\x01Crate.gltf", ("collision mesh 'UCX_\x01Bad\x1b[31m' matches no render mesh",),
+                       warnings=("note \x07",))
+try:
+    _control_xml = _ET.fromstring(agk.junit_report([_control], rep_dir))
+    _control_ok = "UCX_" in _control_xml.find(".//failure").get("message")
+except _ET.ParseError as exc:
+    _control_ok = exc
+expect("a control character in a node or file name keeps the JUnit report readable XML",
+       _control_ok is True, _control_ok)
+_undecodable = agk.Verdict(rep_dir / "SM_\udcff\udcfe.obj", ("1 degenerate triangles",))
+try:
+    agk.write_reports([("github", str(rep_dir / "odd.txt")), ("junit", str(rep_dir / "odd.xml"))],
+                      [_undecodable], rep_dir)
+    _odd = (rep_dir / "odd.txt").read_text(encoding="utf-8")
+except Exception as exc:          # UnicodeEncodeError: the run stopped with a traceback
+    _odd = repr(exc)
+expect("a file name that is not UTF-8 (bytes Linux allows) is written to every report, no traceback",
+       "degenerate" in _odd and (rep_dir / "odd.xml").is_file(), _odd)
 _total_sarif = json.loads(agk.sarif_report([agk.Verdict(Path("[total] Props/*"), ("over",))], rep_dir))
 expect("SARIF: a folder total points at rules.toml, not at '[total] Props/*' (not a URI)",
        _total_sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
@@ -1654,6 +1697,36 @@ _json_run = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekee
 _json_line = json.loads(_json_run.stdout.splitlines()[0])
 expect("--json carries the numbers behind the verdict (memory_kb, as docs/05 says)",
        _json_line.get("stats", {}).get("memory_kb", 0) > 0, _json_line)
+_cli_doc = (Path(ROOT_MODULE_DIR) / "docs" / "06-CLI-REFERENCE.md").read_text(encoding="utf-8")
+_shape = _cli_doc.split("### The JSON shape", 1)[1].split("```json", 1)[1].split("```", 1)[0]
+try:
+    _documented = json.loads(_shape)
+except ValueError:
+    _documented = json.loads(_shape.strip().splitlines()[0])
+_documented = _documented[0] if isinstance(_documented, list) else _documented
+expect("docs/06's JSON example has the keys a verdict line really carries (file, not path)",
+       set(_documented) == set(_json_line), (sorted(_documented), sorted(_json_line)))
+
+_proj = scratch / "single_file_project"
+if _proj.exists():
+    shutil.rmtree(_proj)
+(_proj / "Props").mkdir(parents=True)
+(_proj / "Materials").mkdir()
+(_proj / "rules.toml").write_text("[tags.props]\nmax_triangles = 1\n", encoding="utf-8")
+(_proj / "Materials" / "a.mtl").write_text("newmtl m\nKd 1 1 1\n", encoding="utf-8")
+(_proj / "Props" / "SM_two.obj").write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n",
+                                             encoding="utf-8")
+(_proj / "Props" / "SM_shared.obj").write_text("mtllib ../Materials/a.mtl\nusemtl m\nv 0 0 0\nv 1 0 0\n"
+                                                "v 0 1 0\nf 1 2 3\n", encoding="utf-8")
+_one = {name: subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"),
+                              str(_proj / "Props" / name), "--rules", str(_proj / "rules.toml"),
+                              "--no-color"], capture_output=True, text=True).returncode
+        for name in ("SM_two.obj", "SM_shared.obj")}
+expect("one file with --rules from the project above it gets the project's folder tags "
+       "([tags.props] for Props/), as a --once run there does (the Perforce trigger's case)",
+       _one["SM_two.obj"] == 1, _one)
+expect("... and a ../Materials reference inside that project is not 'outside the project'",
+       _one["SM_shared.obj"] == 0, _one)
 
 print("15. VCS hook integrations")
 
@@ -2163,12 +2236,49 @@ else:
                   git_dir, {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
     expect("a passing asset is allowed through", allowed.returncode == 0,
            f"exit {allowed.returncode} {allowed.stderr[:120]}")
+    # Staged: the 4-material crate. On disk: the 1-material one, not staged. The
+    # commit would hold the failing version; the hook read the passing one.
+    shutil.copy(DROP / "crate_4mtl.obj", git_dir / "crate_swap.obj")
+    run(["git", "add", "crate_swap.obj"], git_dir)
+    shutil.copy(DROP / "crate_1mtl.obj", git_dir / "crate_swap.obj")
+    swapped = run([sys.executable, str(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py")],
+                  git_dir, {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
+    expect("a staged asset whose file on disk has unstaged changes is not passed on the disk copy",
+           swapped.returncode == 1 and "not staged" in swapped.stderr,
+           (swapped.returncode, swapped.stderr[-300:]))
+    run(["git", "reset", "-q", "crate_swap.obj"], git_dir)
+    (git_dir / "crate_swap.obj").unlink()
+    # One rules.toml at the top of the repository, the asset in a subfolder.
+    (git_dir / "rules.toml").write_text("[mesh]\nmax_triangles = 1\n", encoding="utf-8")
+    (git_dir / "Props").mkdir(exist_ok=True)
+    (git_dir / "Props" / "SM_two.obj").write_text(
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n", encoding="utf-8")
+    run(["git", "add", "Props/SM_two.obj"], git_dir)
+    nested = run([sys.executable, str(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py")],
+                 git_dir, {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
+    expect("an asset in a subfolder is judged by the repository's rules.toml above it, as CI's "
+           "--once run there judges it", nested.returncode == 1
+           and "exceeds the 1 budget (+1)  SM_two.obj" in nested.stderr,
+           (nested.returncode, nested.stderr[-300:]))
+    run(["git", "reset", "-q", "Props/SM_two.obj"], git_dir)
+    shutil.rmtree(git_dir / "Props")
+    (git_dir / "rules.toml").unlink()
 
     (git_dir / "notes.txt").write_text("not an asset", encoding="utf-8")
     run(["git", "add", "notes.txt"], git_dir)
     only_text = run([sys.executable, str(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py")],
                     git_dir, {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
     expect("a commit with no assets is not gated", only_text.returncode == 0)
+    _copied = (git_dir / ".git" / "copied_pre_commit.py").resolve()     # copied, as people do
+    shutil.copy(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py", _copied)
+    shutil.copy(DROP / "crate_1mtl.obj", git_dir / "crate_copied.obj")
+    run(["git", "add", "crate_copied.obj"], git_dir)
+    _lost = run([sys.executable, str(_copied)], git_dir, {"AGK_GATEKEEPER": ""})
+    expect("a copied hook that cannot find the gate exits 2 saying how to install it, "
+           "not a traceback", _lost.returncode == 2 and "Traceback" not in _lost.stderr
+           and "--install" in _lost.stderr, (_lost.returncode, _lost.stderr[-300:]))
+    run(["git", "reset", "-q", "crate_copied.obj"], git_dir)
+    _copied.unlink()
 
     install = run([sys.executable, str(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py"),
                    "--install"], git_dir)
@@ -2219,6 +2329,21 @@ else:
                f"err={push_blocked.stderr[-200:]}")
         expect("pre-push reports the offending asset",
                "crate_4mtl.obj" in push_blocked.stderr, push_blocked.stderr[-160:])
+        _push_dir = (scratch / "push_nested_rules").resolve()
+        if _push_dir.exists():
+            force_rmtree(_push_dir)
+        (_push_dir / "Props").mkdir(parents=True)
+        run(["git", "init", "-q", "-b", "main"], _push_dir)
+        (_push_dir / "rules.toml").write_text("[mesh]\nmax_triangles = 1\n", encoding="utf-8")
+        (_push_dir / "Props" / "SM_two.obj").write_text(
+            "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n", encoding="utf-8")
+        run(["git", "add", "."], _push_dir)
+        run(["git", "commit", "-q", "--no-verify", "-m", "nested"], _push_dir)
+        _nested_push = run([bash, push_script], _push_dir,
+                           {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
+        expect("pre-push judges Props/SM_two.obj by the rules.toml at the repository's top",
+               _nested_push.returncode == 1 and "SM_two.obj" in _nested_push.stderr,
+               (_nested_push.returncode, _nested_push.stderr[-200:]))
 
 print("16. references, platforms, PBR and transforms")
 

@@ -1179,7 +1179,9 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     about a tenth of the surface. A sculpt with no such detail keeps one."""
     import numpy as np
     from PIL import Image
-    if texture < 16 or texture & (texture - 1):
+    if texture < 16:
+        raise PolypaintError(f"the texture size must be at least 16 px (got {texture})")
+    if texture & (texture - 1):
         raise PolypaintError(f"the texture size must be a power of two (got {texture})")
     if triangles < 100:
         raise PolypaintError(f"a triangle budget of {triangles} is too small to bake into")

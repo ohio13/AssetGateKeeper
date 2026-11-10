@@ -104,22 +104,13 @@ Reported as: `tag 'charcter' is not a known tag; closest match is 'character'`.
 ### The JSON shape
 
 ```json
-[
-  {
-    "path": "C:\\Proj\\assets\\env\\cliff.obj",
-    "name": "cliff.obj",
-    "passed": false,
-    "status": "FAILED",
-    "metric": "72,500 tris / 4 mat",
-    "problems": [
-      "72,500 triangles exceeds the 50,000 budget (+22,500)",
-      "4 material slots exceeds the 3 slot budget (draw calls)"
-    ]
-  }
-]
+{"file": "C:\\Proj\\assets\\env\\cliff.obj", "name": "cliff.obj", "passed": false, "status": "FAILED", "metric": "72,500 tris / 4 mat", "problems": ["72,500 triangles exceeds the 50,000 budget (+22,500)", "4 material slots exceeds the 3 slot budget (draw calls)"], "modifications": [], "warnings": [], "stats": {"triangles": 72500, "material_slots": 4, "degenerate_triangles": 0}}
 ```
 
-One object per asset, stable keys. `status` is `PASSED`, `FAILED`, `HEALED` or
+One JSON object per asset, one per line (JSON Lines, not one array), stable
+keys: `file` (the full path), `name`, `passed`, `status`, `metric`, `problems`,
+`modifications` (what a heal changed), `warnings` (notes that never fail the
+asset) and `stats` (the numbers behind the metric). `status` is `PASSED`, `FAILED`, `HEALED` or
 `ERROR`; `problems` is empty for a pass. A `--once` run ends with one more
 line, `{"summary": {"total", "passed", "failed", "skipped"}}`, where `skipped`
 counts the files it walked past: `{"total": 7, "unsupported": {".jfif": 6,
