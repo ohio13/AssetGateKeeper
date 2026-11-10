@@ -14,7 +14,8 @@ two implementations, they are two front doors.
 ```
 plugins/
   preflight_core.py              the decision engine (budgets, degenerate faces,
-                                 texture sizes, fuzzy tag near-miss)
+                                 texture sizes, fuzzy tag near-miss, and the
+                                 gate's [lod]/[collision]/[skeleton]/[lightmap])
   blender/preflight_panel.py     add-on, N-panel
   blender/preflight_blender.py   headless entry point
   maya/maya_preflight.py         window + shelf button
@@ -48,6 +49,61 @@ SUGGESTED character  (rename the folder)
 
 `SUGGESTED` is the line artists actually act on: the folder is misspelled, and
 the panel knows which folder was meant.
+
+## LODs, collision, skeleton and lightmap UVs
+
+When `rules.toml` has a `[lod]`, `[collision]`, `[skeleton]` or `[lightmap]`
+table ([05 Rules reference](05-RULES-REFERENCE.md)), the Maya, 3ds Max and
+Blender panels and the Houdini SOP check it on the live scene, before export.
+They run the gate's own code on what they read from the scene, so the limits
+and the sentences are the gate's:
+
+```
+[x] LOD1 of 'Crate' keeps 1.00 of LOD0's triangles (12 of 12); at most 0.6 is allowed: reduce it to 7 triangles or fewer
+[x] collision mesh 'UCX_Crat' matches no render mesh, so Unreal ignores it on import: name it UCX_<mesh> or UCX_<mesh>_00 after 'Crate_LOD0' (case matters)
+[-] bones per material section ([skeleton] max_bones_per_section) not checked in the panel; the gate checks it on export
+```
+
+Without these tables nothing is read and nothing new is shown. When a panel
+cannot read what a rule needs, it prints a `[-]` line saying the gate checks
+it on export: never a pass, never a fail.
+
+| Host | LODs | Collision (UCX_/UBX_/USP_/UCP_) | Skeleton | Lightmap UV set *n* |
+|---|---|---|---|---|
+| Maya | a `lodGroup` above the selection (its children in outliner order are LOD0, LOD1, ...); without one, `<name>_LOD<n>` names | selected, or beside the selected mesh (same parent); points and polygons through OpenMaya 2 | the `skinCluster` influences, up to the root joint and down through child joints | the *n*-th UV set in `polyUVSet` order, per face corner (OpenMaya 2) |
+| 3ds Max | `<name>_LOD<n>` names | selected, or beside a selected mesh (same parent); `snapshotAsMesh` points and faces (hulls up to 5,000 vertices) | Skin modifier bones (`skinOps.GetBoneNodes`, else bone names), with the Bone / Biped / CAT bones connected to them | the (*n*+1)-th map channel the mesh has, from channel 1 up; meshes over 20,000 faces are only checked for having it |
+| Blender | `<name>_LOD<n>` object names | selected, or beside a selected mesh (same parent, or the same collection at the top) | the armature (modifier or armature parent): bones connected to a bone that weights a vertex, and bones per material section | UV layer *n*, per face corner |
+| Houdini SOP | pieces of the `name` prim attribute named `<name>_LOD<n>` | `name` pieces with those prefixes | not read (see below) | `uv` for set 0, `uv<n+1>` for set *n* (vertex or point attribute), per piece |
+
+What the panels count changes with them, to match the gate: collision meshes
+are no longer part of the triangle and material totals in Maya, 3ds Max and
+Blender (of the triangle total in the Houdini SOP, for `name` pieces), and in a
+Maya LOD group only LOD0 is (LODs found by name are all counted, as the gate
+counts them). A selected Maya LOD group
+stands for its levels; skinned meshes' intermediate ("Orig") shapes are not
+counted twice.
+
+Left to the gate, which reads the exported file:
+
+* **bones per material section** in Maya and 3ds Max (it needs every vertex
+  weight); Blender counts it;
+* **skeletons in Houdini**: a stream with a `boneCapture` attribute gets the
+  `[-]` line; one without has no skeleton to check;
+* **LOD groups in 3ds Max** and **collections in Blender** (not read; use
+  `_LOD<n>` names), and a Houdini `path` hierarchy (only `name` is read);
+* **what the exporter decides**: Blender's *Only Deform Bones*, whether LOD
+  groups are exported, Unreal's own collision sources;
+* **`[[exceptions]]`**: a waived rule still shows in the panel;
+* anything a host's Python could not read (no OpenMaya 2, a `skinOps` call that
+  fails, no numpy): a `[-]` line per rule, the rest is still judged.
+
+Counts can differ where the scene and the file count differently: 3ds Max
+counts the lightmap UVs as map vertices, the gate as exported face corners, so
+"N of M lightmap UVs" may say other numbers; the verdict is the same.
+
+Verified against stand-ins for each host's API (`tests/test_formats.py`,
+section 9c: every host's verdict compared with the gate's on the same scene
+exported as FBX); not yet run inside Maya, 3ds Max, Blender or Houdini.
 
 ---
 

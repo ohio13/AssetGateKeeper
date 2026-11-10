@@ -1,5 +1,19 @@
 # Unreleased (on `main`)
 
+* **The DCC panels check LODs, collision, skeletons and lightmap UVs.** With a
+  `[lod]`, `[collision]`, `[skeleton]` or `[lightmap]` table in `rules.toml`,
+  the Maya, 3ds Max and Blender pre-flight panels and the Houdini SOP read the
+  LOD groups or `_LOD<n>` names, the UCX_/UBX_/USP_/UCP_ meshes beside the
+  selection, the skin's bones and the lightmap UV set from the scene and judge
+  them with the gate's own code, so the panel says what the gate will say on
+  export, in the same words. What a host cannot read (bones per material
+  section in Maya and Max, Houdini skeletons) is shown as "not checked in the
+  panel; the gate checks it on export", never as a pass. Collision meshes, and
+  LOD1+ in a Maya LOD group, no longer count towards the panels' triangle
+  totals (and material totals in Maya, Max and Blender), as they never did in
+  the gate. Without the tables nothing
+  changes. Tested against stand-ins for each host's API, not yet inside the
+  hosts. See docs/09-DCC-PLUGINS.md.
 * **A rules wizard for projects that use several tools.** `asset-gatekeeper
   <folder> --wizard` (or double-click `tools\rules_wizard.bat`) asks six
   questions - engines, art programs, platforms, kinds of asset, art style,
