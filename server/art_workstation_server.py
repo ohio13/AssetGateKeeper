@@ -34,6 +34,7 @@ Routes
     DEL  /api/assets/<id>/lods/<lvl>
     GET  /api/assets/<id>/lods/<lvl>/file
     GET  /api/jobs/<id>             -> a background job's state and progress
+    POST /api/jobs/<id>/cancel      -> stop a queued or running job
     POST /api/assets/<id>/files?filename=...       -> add a file the asset references
     GET  /api/assets/<id>/files/<path>             -> serve it
     GET  /api/assets/<id>/preview   -> converted preview (FBX .glb, texture .png)
@@ -1871,10 +1872,29 @@ def delete_asset(db_path: str | Path, data_dir: Path, asset_id: int) -> None:
     shutil.rmtree(lods_dir / str(asset_id), ignore_errors=True)
 
 
+#: Memory a Shippable LOD needs per source triangle: 1.68 GB peak for the test sculpt's
+#: 1,082,096 triangles on the developer's PC (the decimator keeps Python lists).
+SHIPPABLE_BYTES_PER_TRIANGLE = 1700
+
+
+def shippable_memory_warning(asset: dict) -> str:
+    """A sentence when this PC looks short of memory for a Shippable LOD of
+    ``asset``, else "". Short of memory, Windows pages to disk and the job runs
+    many times slower - the likeliest reason a 3-minute job seems to take 25."""
+    triangles = int(asset.get("triangle_count") or 0)
+    need = triangles * SHIPPABLE_BYTES_PER_TRIANGLE
+    free = agk.available_memory()
+    if not triangles or free is None or need < 0.8 * free:
+        return ""
+    return (f"needs about {need / 2**30:.1f} GB of memory and this PC has "
+            f"{free / 2**30:.1f} GB free: close other programs (ZBrush, Blender, browser "
+            "tabs), or it may run many times slower")
+
+
 def generate_lods(db_path: str | Path, data_dir: Path, asset_id: int,
                   ratios: list[float] | None = None,
                   max_triangles: list[int] | None = None, progress=None,
-                  shippable: bool = False) -> list[dict]:
+                  shippable: bool = False, report=None) -> list[dict]:
     """Decimate the asset into LOD files and record them.
 
     ``shippable`` uses ``engine/lod_shippable.py``: slower, but UVs, normals and
@@ -1920,7 +1940,7 @@ def generate_lods(db_path: str | Path, data_dir: Path, asset_id: int,
             folder = asset_folder(Path(data_dir), asset)
             shipped = lod_shippable.generate(source, out_dir, ratios, max_triangles or None,
                                              name=lod_name, progress=progress,
-                                             resources=folder)
+                                             resources=folder, report=report)
             results = shipped
             extra = {lod.level: ("shippable", lod.error_m, "; ".join(lod.notes))
                      for lod in shipped}
@@ -2060,8 +2080,19 @@ def delete_lod(db_path: str | Path, data_dir: Path, asset_id: int, level: str) -
     return list_lods(db_path, asset_id)
 
 
+class JobCancelled(Exception):
+    """Raised inside a job's own progress call once someone asked to cancel it."""
+
+
 class JobRunner:
     """LOD generation off the request thread, one job per asset at a time.
+
+    10 Nov 2026: the developer left a Shippable LOD of the test sculpt running for 25 minutes and
+    gave up; the page had said "generating LOD1 (1 of 3)" for the whole run with
+    nothing moving, there was no way to stop it, and a second request sat
+    queued behind the first without saying so. Jobs now carry ``fraction``,
+    ``detail`` and ``eta_s``, a queued job names what it is ``waiting_for``, and
+    POST /api/jobs/<id>/cancel stops one at its next progress call.
 
     A 1.3-million-triangle mesh took 201 s; as a request that is a browser tab
     waiting three minutes with no feedback, and a proxy timing out. Jobs run on
@@ -2092,38 +2123,107 @@ class JobRunner:
             self._next += 1
             job = {"id": job_id, "asset_id": asset_id, "kind": kind, "state": "queued",
                    "level": "", "step": 0, "steps": 0, "error": "", "result": None,
-                   "created_at": utc_now()}
+                   "created_at": utc_now(), "fraction": 0.0, "detail": "", "eta_s": None,
+                   "started": 0.0, "cancel": False, "warning": ""}
             self._jobs[job_id] = job
             for old in sorted(self._jobs)[:-self.KEEP]:
-                if self._jobs[old]["state"] in ("done", "failed"):
+                if self._jobs[old]["state"] in ("done", "failed", "cancelled"):
                     del self._jobs[old]
         self._queue.put((job_id, work))
-        return dict(job)
+        return self.get(job_id)
+
+    def _view(self, job: dict) -> dict:
+        """A job as the API shows it (caller holds the lock)."""
+        view = {key: value for key, value in job.items() if key not in ("started", "cancel")}
+        view["cancelling"] = bool(job["cancel"]) and job["state"] in ("queued", "running")
+        if job["state"] == "queued":
+            ahead = [other for other in self._jobs.values()
+                     if other["id"] < job["id"] and other["state"] in ("queued", "running")]
+            view["queue_position"] = len(ahead) + 1
+            running = [other for other in ahead if other["state"] == "running"]
+            view["waiting_for"] = ({"id": running[0]["id"], "kind": running[0]["kind"],
+                                    "asset_id": running[0]["asset_id"]} if running else None)
+        return view
 
     def get(self, job_id: int) -> dict:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
                 raise WorkstationError(f"no job {job_id}", 404)
-            return dict(job)
+            return self._view(job)
 
-    def _update(self, job_id: int, **fields) -> None:
+    def cancel(self, job_id: int) -> dict:
+        """Ask a job to stop: a queued one never starts, a running one stops at
+        its next progress call (every 2,000 collapses in a Shippable LOD)."""
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise WorkstationError(f"no job {job_id}", 404)
+            if job["state"] in ("queued", "running"):
+                job["cancel"] = True
+                if job["state"] == "queued":
+                    job["state"] = "cancelled"
+                    job["error"] = "cancelled before it started"
+            view = self._view(job)
+        if self._publish is not None:
+            self._publish({"type": "job", "asset_id": view["asset_id"], "job": view})
+        return view
+
+    def set_warning(self, job_id: int, text: str) -> None:
+        with self._lock:
+            if job_id in self._jobs:
+                self._jobs[job_id]["warning"] = text
+
+    def _update(self, job_id: int, publish: bool = True, **fields) -> None:
         with self._lock:
             self._jobs[job_id].update(fields)
-            job = dict(self._jobs[job_id])
-        if self._publish is not None:
+            job = self._view(self._jobs[job_id])
+        if publish and self._publish is not None:
             self._publish({"type": "job", "asset_id": job["asset_id"], "job": job})
+
+    def _check_cancel(self, job_id: int) -> None:
+        with self._lock:
+            wanted = self._jobs[job_id]["cancel"]
+        if wanted:
+            raise JobCancelled()
 
     def _work(self) -> None:
         while True:
             job_id, work = self._queue.get()
-            self._update(job_id, state="running")
+            with self._lock:
+                skipped = self._jobs[job_id]["state"] == "cancelled"
+            if skipped:
+                continue
+            self._update(job_id, state="running", started=time.time())
 
             def progress(level, index, total, _job=job_id):
+                self._check_cancel(_job)
                 self._update(_job, level=level, step=index + 1, steps=total)
+
+            last = [0.0]
+
+            def report(fraction, detail="", _job=job_id):
+                """Fine progress (0..1 of the whole job); raises to cancel."""
+                self._check_cancel(_job)
+                now = time.time()
+                with self._lock:
+                    started = self._jobs[_job]["started"] or now
+                elapsed = now - started
+                eta = (elapsed * (1.0 - fraction) / fraction
+                       if fraction >= 0.03 and elapsed >= 3.0 else None)
+                # Every call updates the job; only about one a second is pushed
+                # to the live page.
+                loud = now - last[0] >= 1.0
+                if loud:
+                    last[0] = now
+                self._update(_job, publish=loud, fraction=round(float(fraction), 4),
+                             detail=str(detail), eta_s=None if eta is None else round(eta))
+            progress.report = report                  # type: ignore[attr-defined]
             try:
                 result = work(progress)
-                self._update(job_id, state="done", result=result)
+                self._update(job_id, state="done", result=result, fraction=1.0, eta_s=0)
+            except JobCancelled:
+                self._update(job_id, state="cancelled", error="cancelled", eta_s=None)
             except WorkstationError as exc:
                 self._update(job_id, state="failed", error=str(exc))
             except Exception as exc:                 # a job must never kill the worker
@@ -2587,6 +2687,7 @@ ASSET_BAKE_RE = re.compile(r"^/api/assets/(\d+)/bake-polypaint$")
 ASSET_LOD_FILE_RE = re.compile(r"^/api/assets/(\d+)/lods/(LOD[1-4])/file$")
 ASSET_LOD_RE = re.compile(r"^/api/assets/(\d+)/lods/(LOD[1-4])$")
 JOB_RE = re.compile(r"^/api/jobs/(\d+)$")
+JOB_CANCEL_RE = re.compile(r"^/api/jobs/(\d+)/cancel$")
 ASSET_NOTES_RE = re.compile(r"^/api/assets/(\d+)/notes$")
 ASSET_COLLISION_RE = re.compile(r"^/api/assets/(\d+)/collision$")
 ASSET_REFERENCES_RE = re.compile(r"^/api/assets/(\d+)/references$")
@@ -3332,6 +3433,12 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(202, {"job": job})
                 return
 
+            match = JOB_CANCEL_RE.match(path)
+            if match:
+                self._drain_request_body()
+                self._json(200, {"job": server.jobs.cancel(int(match.group(1)))})
+                return
+
             match = ASSET_LODS_RE.match(path)
             if match:
                 payload = self._json_body()
@@ -3374,10 +3481,16 @@ class Handler(BaseHTTPRequestHandler):
                     def work(progress, _asset=asset_id, _ratios=ratio_list, _caps=caps,
                              _shippable=shippable):
                         lods = generate_lods(db_path, data_dir, _asset, _ratios, _caps, progress,
-                                             shippable=_shippable)
+                                             shippable=_shippable,
+                                             report=getattr(progress, "report", None))
                         publish("lod", _asset)
                         return {"lods": lods}
                     job = server.jobs.submit(asset_id, work)
+                    warning = shippable_memory_warning(get_asset(server.db_path, asset_id)) \
+                        if shippable else ""
+                    if warning:
+                        server.jobs.set_warning(job["id"], warning)
+                        job = server.jobs.get(job["id"])
                     self._json(202, {"job": job})
                     return
                 lods = generate_lods(server.db_path, Path(server.data_dir),

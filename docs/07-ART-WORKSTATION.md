@@ -251,8 +251,17 @@ ways to fill it:
     placed in world space: download one with the arrow on its row and import it
     into Unreal, Unity or Blender. In the viewer they are drawn with their
     materials, not the grey preview.
-  * Slower: about 4 seconds for 65,000 triangles and 80 seconds for a million,
-    all levels, in the background.
+  * Slower, in the background: about 4 seconds for 65,000 triangles; for the developer's
+    1.08 million triangle test sculpt about 3-4 minutes on his PC (reading 9 s,
+    preparing 27 s, reducing 2.3 min to 3 %), all levels in one pass. It needs
+    about 1.7 GB of memory per million triangles; with less free, the page warns
+    before it starts (Windows then pages to disk and it runs many times slower).
+    The plain decimator (Shippable unticked) does the same sculpt in 13 seconds.
+  * While it runs, a bar shows how far it is, what it is doing ("LOD1: 412,000
+    triangles, going to 270,000") and **about how long is left**; **Cancel**
+    stops it within a second or two and changes nothing. A job that has to wait
+    for another (one job runs at a time, LODs and bakes alike) says so and where
+    it is in the queue. `POST /api/jobs/<id>/cancel`.
 * **Upload your own LOD** - choose the level and a `.glb`, self-contained `.gltf`,
   `.obj` or `.fbx`. It is measured like the source (an FBX by the gate's reader,
   viewed through a converted `.glb`). A file named `<asset>_LOD1` ... `_LOD4`

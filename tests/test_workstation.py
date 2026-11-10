@@ -2083,6 +2083,86 @@ aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET = _saved_limit
 lp_server.shutdown()
 lp_server.server_close()
 
+print("31. long LOD jobs: a bar, the time left, the queue, Cancel (10 Nov 2026)")
+# The developer left a Shippable LOD of the test sculpt running 25 minutes: the page said
+# "generating LOD1 (1 of 3)" throughout, nothing could stop it, and a second
+# request waited behind the first without a word.
+jb_db, jb_data = fresh("jobs")
+jb_server = aws.build_server("127.0.0.1", 0, jb_db, jb_data, quiet=True)
+threading.Thread(target=jb_server.serve_forever, daemon=True).start()
+jb = Client(jb_server.server_address[1])
+_big_glb, _big_tris = textured_sphere(rings=160, segments=320)
+status, big = jb.json("/api/assets?filename=globe_big.glb", method="POST", body=_big_glb)
+status, small = jb.json("/api/assets?filename=globe_small.glb", method="POST",
+                        body=textured_sphere(rings=16, segments=32)[0])
+status, first = jb.json(f"/api/assets/{big['id']}/lods?async=1", method="POST",
+                        body={"ratios": [0.25, 0.1, 0.03], "shippable": True})
+first = first["job"]
+status, second = jb.json(f"/api/assets/{small['id']}/lods?async=1", method="POST",
+                         body={"ratios": [0.5], "shippable": True})
+second = second["job"]
+deadline = time.time() + 60
+while time.time() < deadline:
+    first = jb.json(f"/api/jobs/{first['id']}")[1]
+    if first["state"] == "running" and first.get("fraction", 0) > 0.2 and first.get("eta_s") is not None:
+        break
+    time.sleep(0.2)
+expect("a running Shippable job reports how far it is, what it is doing and the time left",
+       first["state"] == "running" and 0 < first["fraction"] < 1 and first["eta_s"] >= 0
+       and first["detail"], str({k: first.get(k) for k in ("state", "fraction", "detail", "eta_s")}))
+second = jb.json(f"/api/jobs/{second['id']}")[1]
+expect("a job behind it says what it is waiting for and where it is in the queue",
+       second["state"] == "queued" and second["queue_position"] == 2
+       and second["waiting_for"] == {"id": first["id"], "kind": "lods", "asset_id": big["id"]},
+       str(second)[:300])
+_fractions = []
+for _ in range(10):
+    _fractions.append(jb.json(f"/api/jobs/{first['id']}")[1]["fraction"])
+    time.sleep(0.15)
+expect("... and the bar only moves forward", _fractions == sorted(_fractions), str(_fractions))
+status, cancelled_q = jb.json(f"/api/jobs/{second['id']}/cancel", method="POST", body={})
+expect("Cancel on a queued job stops it before it starts",
+       status == 200 and cancelled_q["job"]["state"] == "cancelled", str(cancelled_q)[:200])
+status, cancelling = jb.json(f"/api/jobs/{first['id']}/cancel", method="POST", body={})
+expect("Cancel on a running job is acknowledged at once", status == 200
+       and cancelling["job"]["cancelling"] is True, str(cancelling)[:200])
+deadline = time.time() + 30
+while time.time() < deadline:
+    first = jb.json(f"/api/jobs/{first['id']}")[1]
+    if first["state"] != "running":
+        break
+    time.sleep(0.2)
+expect("... and the job stops within seconds, leaving no LODs", first["state"] == "cancelled"
+       and not jb.json(f"/api/assets/{big['id']}")[1]["lods"], str(first)[:200])
+expect("Cancel on an unknown job is a 404", jb.call("/api/jobs/9999/cancel", method="POST",
+                                                     body=b"{}")[0] == 404)
+status, again = jb.json(f"/api/assets/{small['id']}/lods?async=1", method="POST",
+                        body={"ratios": [0.5], "shippable": True})
+job = again["job"]
+deadline = time.time() + 60
+while job["state"] in ("queued", "running") and time.time() < deadline:
+    time.sleep(0.2)
+    job = jb.json(f"/api/jobs/{job['id']}")[1]
+expect("the worker carries on with the next job after a cancel",
+       job["state"] == "done" and job["fraction"] == 1.0, str(job)[:200])
+_real_free = aws.agk.available_memory
+aws.agk.available_memory = lambda: 512 * 2**20
+expect("a Shippable job on a PC short of memory says so before it starts",
+       "close other programs" in aws.shippable_memory_warning(
+           {"triangle_count": 1_082_096}), aws.shippable_memory_warning({"triangle_count": 1_082_096}))
+aws.agk.available_memory = lambda: 64 * 2**20       # the test globe needs ~170 MB
+status, warned = jb.json(f"/api/assets/{big['id']}/lods?async=1", method="POST",
+                         body={"ratios": [0.5], "shippable": True})
+expect("... and the job carries the warning for the page",
+       "GB of memory" in warned["job"].get("warning", ""), str(warned)[:300])
+jb.json(f"/api/jobs/{warned['job']['id']}/cancel", method="POST", body={})
+aws.agk.available_memory = lambda: 64 * 2**30
+expect("with memory to spare, no warning", aws.shippable_memory_warning(
+    {"triangle_count": 1_082_096}) == "")
+aws.agk.available_memory = _real_free
+jb_server.shutdown()
+jb_server.server_close()
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

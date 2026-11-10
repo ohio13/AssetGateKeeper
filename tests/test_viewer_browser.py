@@ -790,6 +790,35 @@ with sync_playwright() as playwright:
            page.locator("#materials").inner_text()[:200])
     page.uncheck("#lod-shippable")
 
+    print("8j. long LOD jobs: a bar, the time left, Cancel (10 Nov 2026)")
+    # A long Shippable job showed one unchanging line and could not be stopped.
+    _gv = _trimesh.creation.uv_sphere(count=[200, 400])
+    ids["bigglobe"] = aws.create_asset(db, data, "bigglobe.glb",
+                                       _trimesh.Scene(_gv).export(file_type="glb"))["id"]
+    page.goto(f"{BASE}/viewer?live=0&asset={ids['bigglobe']}")
+    page.wait_for_function("() => document.getElementById('status').textContent === 'bigglobe.glb'",
+                           timeout=30000)
+    page.select_option("#lod-preset", "0.25,0.1,0.03")
+    page.check("#lod-shippable")
+    page.click("#lod-generate")
+    page.wait_for_function("() => /\\d+% - about .* left/.test(document.getElementById('lod-progress').textContent)",
+                           timeout=60000)
+    expect("a long Shippable job shows a moving bar, a percentage and the time left",
+           page.locator("#lod-job-row").is_visible()
+           and float(page.locator("#lod-bar").get_attribute("value") or 0) > 0,
+           page.locator("#lod-progress").inner_text())
+    page.click("#lod-cancel")
+    page.wait_for_function("() => /cancelled/.test(document.getElementById('lod-progress').textContent)",
+                           timeout=30000)
+    expect("Cancel stops it, says nothing was changed, and Generate is back",
+           not page.locator("#lod-job-row").is_visible()
+           and page.locator("#lod-generate").is_enabled()
+           and page.locator("#lod-list .lod-row").count() == 0,
+           [page.locator("#lod-job-row").is_visible(), page.locator("#lod-generate").is_enabled(),
+            page.locator("#lod-list").inner_text()[:200]])
+    page.uncheck("#lod-shippable")
+    page.select_option("#lod-preset", "0.5,0.25,0.125")
+
     print("8b. a big model: a lighter preview first, a progress bar, then full detail (10 Nov 2026)")
     if aws.light_preview.available():
         _saved = (aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET)

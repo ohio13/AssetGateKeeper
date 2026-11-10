@@ -5,6 +5,18 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **Long LOD jobs can be watched and stopped (10 Nov).** The developer left a Shippable
+  LOD of the test sculpt running for 25 minutes and gave up: the page said "generating
+  LOD1 (1 of 3)" the whole time, closing the page did not stop it, and a second
+  request waited behind it without a word. Measured on his PC, the job takes
+  3-4 minutes (the plain decimator 13 s), so something on the PC slowed it
+  further; the likeliest is memory (1.7 GB for the test sculpt). Now a job carries a
+  fraction, a line saying what it is doing and the time left, shown as a bar;
+  **Cancel** (`POST /api/jobs/<id>/cancel`) stops a queued job before it starts
+  and a running one at its next progress call; a queued job names the job it is
+  waiting for; a Shippable job on a PC with too little free memory warns before
+  it starts. The tooltip's "about a minute per million triangles" was wrong and
+  now gives the test sculpt's real figure.
 * **Ready for PyPI (10 Nov).** `twine check` passes on the wheel and sdist and
   the build prints no warnings: the licence is an SPDX string (`license =
   "MIT"`, setuptools 77+; the TOML table and the licence classifier stop

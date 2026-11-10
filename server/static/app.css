@@ -339,3 +339,7 @@ label.check { display: flex; align-items: center; gap: 6px; font-size: 12px; col
   box-shadow: 0 6px 24px rgba(0, 0, 0, .45); display: grid; gap: 10px; }
 .version-choice[hidden] { display: none; }
 .version-choice .row { display: flex; gap: 8px; flex-wrap: wrap; }
+/* LOD jobs (10 Nov 2026): a bar, the time left and Cancel. */
+.job-row { align-items: center; gap: 8px; margin-top: 4px; }
+.job-row[hidden], #lod-job-row[hidden] { display: none !important; }
+.job-row progress { flex: 1 1 auto; min-width: 120px; accent-color: var(--accent); }

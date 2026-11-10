@@ -1073,8 +1073,7 @@ async function bakePolypaint() {
     });
     let job = (await response.json()).job;
     while (job.state === "queued" || job.state === "running") {
-      $("bake-progress").textContent = job.state === "queued" ? "queued"
-        : `${job.level || "baking"} (${job.step} of ${job.steps})`;
+      $("bake-progress").textContent = describeJob(job, "");
       await new Promise((resolve) => setTimeout(resolve, 500));
       job = await json(`/api/jobs/${job.id}`);
     }
@@ -1107,12 +1106,49 @@ function setLodTools(asset) {
   disarmDelete();
 }
 
+/* How a background job reads in one line (10 Nov 2026: a Shippable LOD of
+ * The test sculpt said "generating LOD1 (1 of 3)" for minutes with nothing moving, and
+ * The developer gave up after 25). */
+function minutesSeconds(seconds) {
+  const s = Math.max(0, Math.round(seconds));
+  return s >= 60 ? `${Math.floor(s / 60)} min ${String(s % 60).padStart(2, "0")} s` : `${s} s`;
+}
+
+function describeJob(job, verb) {
+  if (job.cancelling) return "cancelling...";
+  if (job.state === "queued") {
+    const waiting = job.waiting_for;
+    return waiting
+      ? `waiting: a ${waiting.kind === "bake" ? "bake" : "LOD job"} for asset ${waiting.asset_id} `
+        + `is running first (yours is number ${job.queue_position} in the queue)`
+      : "queued";
+  }
+  const percent = job.fraction ? ` ${Math.floor(job.fraction * 100)}%` : "";
+  const left = job.eta_s !== null && job.eta_s !== undefined
+    ? ` - about ${minutesSeconds(job.eta_s)} left` : "";
+  const what = job.detail || (job.level
+    ? `${verb}${job.level} (${job.step} of ${job.steps})` : `${verb || "working"}`.trim());
+  return `${what}${percent}${left}`;
+}
+
+async function cancelLodJob() {
+  if (!state.lodJob) return;
+  $("lod-cancel").disabled = true;
+  try {
+    await api(`/api/jobs/${state.lodJob}/cancel`, { method: "POST" });
+  } catch (error) {
+    $("lod-progress").textContent = `could not cancel: ${error.message}`;
+  }
+}
+
 async function generateLods() {
   if (!state.asset) return;
   const asset = state.asset;
   const ratios = $("lod-preset").value.split(",").map(Number);
   $("lod-generate").disabled = true;
   $("lod-progress").textContent = "queued";
+  $("lod-bar").removeAttribute("value");
+  $("lod-cancel").disabled = false;
   try {
     const response = await api(`/api/assets/${asset.id}/lods?async=1`, {
       method: "POST",
@@ -1121,11 +1157,17 @@ async function generateLods() {
     });
     let job = (await response.json()).job;
     state.lodJob = job.id;
+    $("lod-job-row").hidden = false;
     while (job.state === "queued" || job.state === "running") {
-      $("lod-progress").textContent = job.state === "queued" ? "queued"
-        : `generating ${job.level || "LODs"} (${job.step} of ${job.steps})`;
+      $("lod-progress").textContent = describeJob(job, "generating ")
+        + (job.warning ? ` - ${job.warning}` : "");
+      if (job.fraction) $("lod-bar").value = job.fraction;
       await new Promise((resolve) => setTimeout(resolve, 400));
       job = await json(`/api/jobs/${job.id}`);
+    }
+    if (job.state === "cancelled") {
+      $("lod-progress").textContent = "cancelled - nothing was changed";
+      return;
     }
     if (job.state === "failed") throw new Error(job.error || "LOD generation failed");
     if (state.asset && state.asset.id === asset.id) {
@@ -1139,6 +1181,7 @@ async function generateLods() {
     $("lod-progress").textContent = `error: ${error.message}`;
   } finally {
     state.lodJob = null;
+    $("lod-job-row").hidden = true;
     setLodTools(state.asset);
   }
 }
@@ -1779,6 +1822,7 @@ async function uploadFiles(files) {
 
 $("lod-generate").addEventListener("click", () => { generateLods(); });
 $("bake-run").addEventListener("click", () => { bakePolypaint(); });
+$("lod-cancel").addEventListener("click", () => { cancelLodJob(); });
 $("full-detail").addEventListener("click", async () => {
   if (!state.asset) return;
   const id = state.asset.id;
