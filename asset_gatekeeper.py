@@ -3294,7 +3294,7 @@ def read_gltf_document(path: Path) -> dict:
         if path.suffix.lower() == ".gltf":
             document = json.loads(path.read_text(encoding="utf-8-sig"))
         else:
-            document = _glb_json(path.read_bytes())
+            document = _glb_json(_glb_json_prefix(path))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         # Corrupt text used to escape as an uncaught UnicodeDecodeError (6 Nov
         # fuzzing) and stop a folder scan; it is a damaged file like any other.
@@ -3309,6 +3309,23 @@ def read_gltf_document(path: Path) -> dict:
         raise AssetError("glTF 1.0 file: this format was replaced by glTF 2.0 in 2017; "
                          "re-export it as glTF 2.0")
     return document
+
+
+def _glb_json_prefix(path: Path) -> bytes:
+    """The bytes of a .glb up to the end of its JSON chunk, not the whole file.
+
+    One check reads the document a dozen times (triangles, materials, UV sets,
+    compression, ...): reading all of a 500 MB .glb for each, binary chunk
+    included, was a dozen full reads of the file for a few kilobytes of JSON.
+    """
+    with path.open("rb") as handle:
+        blob = handle.read(20)                 # header (12) + first chunk header (8)
+        if blob[:4] != GLB_MAGIC or len(blob) < 20:
+            return blob
+        chunk_length, chunk_type = struct.unpack_from("<II", blob, 12)
+        if chunk_type == GLB_JSON_CHUNK:       # the glTF spec puts it first
+            return blob + handle.read(chunk_length)
+        return blob + handle.read()            # out of order: read it all, as before
 
 
 def _glb_json(blob: bytes) -> dict:

@@ -277,6 +277,46 @@ expect("an ASCII FBX with no version fails with a re-export hint",
 expect("the decompression bomb is refused by size, not by running out of memory",
        "too large" in " ".join(rows.get("bomb.fbx", {}).get("problems", [])))
 
+# A .glb's JSON is read a dozen times per check; each read used to load the
+# whole file, binary chunk and all.
+_json = json.dumps({"asset": {"version": "2.0"}}).encode() + b"  "
+_bin = b"\0" * (4 << 20)
+_glb = WORK / "big_bin.glb"
+_glb.write_bytes(b"glTF" + struct.pack("<II", 2, 28 + len(_json) + len(_bin))
+                 + struct.pack("<II", len(_json), 0x4E4F534A) + _json
+                 + struct.pack("<II", len(_bin), 0x004E4942) + _bin)
+_read = {"bytes": 0}
+_real_open = Path.open
+
+
+def _counting_open(self, *args, **kwargs):
+    handle = _real_open(self, *args, **kwargs)
+    if self == _glb:
+        _real_read = handle.read
+
+        def read(*a):
+            data = _real_read(*a)
+            _read["bytes"] += len(data)
+            return data
+        handle.read = read
+    return handle
+
+
+_real_read_bytes = Path.read_bytes
+with patch.object(Path, "open", _counting_open), \
+        patch.object(Path, "read_bytes", lambda self: (_read.__setitem__("bytes", _read["bytes"] + self.stat().st_size)
+                                                       if self == _glb else None) or _real_read_bytes(self)):
+    _document = agk.read_gltf_document(_glb)
+expect("a .glb's JSON is read without reading its binary chunk",
+       _document == {"asset": {"version": "2.0"}} and _read["bytes"] < 1024, _read)
+for _data, _why in ((b"", "not a GLB container"), (b"glTF\x02\0\0\0\xff\xff\xff\xff", "no JSON chunk")):
+    _glb.write_bytes(_data)
+    try:
+        agk.read_gltf_document(_glb)
+        expect(f"a broken .glb still says what is wrong ({_why})", False)
+    except agk.AssetError as exc:
+        expect(f"a broken .glb still says what is wrong ({_why})", _why in str(exc), str(exc))
+
 print("4. TGA and JPG textures")
 try:
     from PIL import Image
