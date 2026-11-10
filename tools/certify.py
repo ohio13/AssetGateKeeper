@@ -33,6 +33,7 @@ SUITES = (
     ("test_realworld", "tests/test_realworld.py", (), "gate"),
     ("test_gatekeeper", "tests/test_gatekeeper.py", (), "gate"),
     ("test_formats", "tests/test_formats.py", (), "gate"),
+    ("test_lod_collision", "tests/test_lod_collision.py", (), "gate"),
     ("test_server", "tests/test_server.py", (), "gate"),
     ("test_admin", "tests/test_admin.py", (), "gate"),
     ("test_enterprise", "tests/test_enterprise.py", (), "gate"),

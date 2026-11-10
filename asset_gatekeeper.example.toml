@@ -80,6 +80,24 @@ pbr_ceiling = 0.94        # 240/255
 pbr_suffixes = ["_Albedo", "_Diffuse", "_BaseColor"]   # normal/roughness maps are not albedo
 
 # --------------------------------------------------------------------------- #
+# LODs and collision (optional, off until you uncomment a table;
+# docs/05-RULES-REFERENCE.md says what each format can carry)
+#
+# [lod]
+# min_levels = 3          # LOD0 + LOD1 + LOD2 at least: an FBX LOD group, glTF
+#                         # MSFT_lod, or objects named _LOD0, _LOD1 ... (0 = off)
+# max_ratio = 0.6         # each level at most 60% of the triangles of the one above
+#
+# Unreal collision: UCX_ (convex), UBX_ (box), USP_ (sphere), UCP_ (capsule)
+# meshes named after the render mesh: UCX_SM_Crate or UCX_SM_Crate_00.
+# [collision]
+# require = true          # a static mesh must carry collision (skinned: exempt)
+# name_must_match = true  # a hull named after no mesh is dropped by Unreal
+# convex = true           # Unreal silently fills a concave UCX_ hull
+# max_hulls = 8           # UCX_ hulls per asset (0 = off)
+# max_hull_vertices = 32  # per hull; PhysX's ceiling is 255 (0 = off)
+
+# --------------------------------------------------------------------------- #
 # Optional: studio platform integration. Delete this table for a standalone tool.
 # --------------------------------------------------------------------------- #
 

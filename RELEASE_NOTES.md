@@ -1,5 +1,18 @@
 # Unreleased (on `main`)
 
+* **LOD and collision checks (off by default).** A `[lod]` table can require a
+  number of LOD levels (`min_levels`, LOD0 included) and how much each level
+  must save (`max_ratio`: LOD2 at most 0.6 of LOD1's triangles, say). Levels
+  are read from FBX LOD groups, glTF `MSFT_lod`, or objects named `_LOD0`,
+  `_LOD1`, ...; an asset without LODs fails saying it has LOD0 only. A
+  `[collision]` table checks Unreal's UCX_/UBX_/USP_/UCP_ meshes in FBX and
+  glTF: `require` (skinned meshes exempt), names that match a render mesh
+  (Unreal drops a hull that does not; on by default once the table exists),
+  convex UCX_ hulls (Unreal silently fills a dent; also on by default),
+  `max_hulls` and `max_hull_vertices`. Every failure names the mesh or level
+  and the number that broke the rule; `--json` gets `lod_levels`,
+  `lodN_triangles`, `collision_hulls` and `max_hull_vertices`. Without the
+  tables nothing changes. See docs/05-RULES-REFERENCE.md.
 * **Install from PyPI.** `pip install "asset-gatekeeper[full]"` now works:
   v0.1.0-alpha.1 is on PyPI, published by the release workflow. The README
   and the installation guide use it instead of the git URL.

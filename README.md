@@ -50,6 +50,8 @@ asset-gatekeeper path/to/Exports --recursive           # keep watching; a pop-up
 | | texture links that point at nothing | none allowed |
 | | textures packed inside the file | same rules as textures |
 | | mesh name prefix such as `SM_` | off |
+| | LOD levels, and how much each one saves | off |
+| | Unreal collision (`UCX_` hulls): present, named after the mesh, convex, how many | off |
 | `.png` `.tga` `.jpg` `.tif` `.webp` `.dds` `.exr` `.ktx2` | longest edge | 2,048 px |
 | | power of two | on |
 | | name ends in a map name (`_BaseColor`, `_Normal`, `_ORM`, …) | on, 28 names |
