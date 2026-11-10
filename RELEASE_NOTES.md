@@ -1,5 +1,35 @@
 # Unreleased (on `main`)
 
+* **Fixes from a full sweep (10 Nov).**
+  * *Hooks let failing assets through.* The Git pre-commit and pre-push hooks
+    and the Perforce trigger skipped .tif, .tiff, .webp, .dds, .exr and .ktx2,
+    which the gate checks; the Git hooks judged an asset in a subfolder by the
+    shipped defaults instead of the repository's `rules.toml` above it; the
+    pre-commit hook checked the file on disk when a different version was
+    staged; and one file checked with `--rules` from a folder above it (the
+    Perforce trigger, `--heal`) never got that project's folder tags. All now
+    judge as a `--once` run of the project does. A hook copied into
+    `.git/hooks`, as docs/10 used to say, exits 2 with a fix instead of a
+    traceback; docs/10 gives `git_pre_commit.py --install`.
+  * *AssetHealth solo mode behind a reverse proxy on the same PC* treated
+    every intranet user as "this PC" (a director, no password). A request
+    with `X-Forwarded-For`/`Forwarded` now counts as from elsewhere.
+  * *Rules that checked nothing or crashed:* `nan`/`inf` in `max_mb`,
+    `texel_density`, `[[totals]]` and exceptions are refused; an
+    `[[exceptions]]` value no budget can hold (`max_texture_edge = 0`) is
+    refused at start instead of a traceback mid-run; a rules.toml saved as
+    Windows-1252 says to save it as UTF-8.
+  * *New checks:* `[lightmap] require` no longer asks a glTF `UCX_` hull for a
+    lightmap; `[lod] max_ratio` names a count that passes (29, not 28, for
+    0.29 of 100).
+  * *Reports:* JUnit stays valid XML when a node or file name holds a control
+    character; a file name that is not UTF-8 no longer stops `--report`;
+    docs/06 shows the real `--json` shape (JSON Lines, `file`, not `path`).
+  * *Bake:* below 16 px says so (not "not a power of two"); running out of
+    memory (`--bake-texture 65536`) is a message, not a traceback.
+  * *Speed:* a .glb's JSON is read without loading its binary chunk; a check
+    read a large .glb in full about nine times.
+
 * **A rules wizard for projects that use several tools.** `asset-gatekeeper
   <folder> --wizard` (or double-click `tools\rules_wizard.bat`) asks six
   questions - engines, art programs, platforms, kinds of asset, art style,
