@@ -48,7 +48,7 @@ jobs:
       # ("syntax error in forward annotation"), so the engine and tests are
       # linted here and the plugins are syntax-checked below instead.
       - name: Lint engine, server + tests
-        run: python -m pyflakes asset_gatekeeper.py healer.py notifier.py engine/lod_manager.py engine/fbx_preview.py engine/lod_shippable.py engine/polypaint.py tools/install_extras.py tests/fresh_install.py tools/upload_assets.py tools/houdini_export_hook.py server/asset_health_server.py server/art_workstation_server.py vcs_hooks/p4_pre_submit.py vcs_hooks/git_pre_commit.py tests/test_gatekeeper.py tests/test_server.py tests/test_workstation.py tests/test_viewer_browser.py tests/test_admin.py tests/gen_test_assets.py tests/run_headless_integration.py tests/test_formats.py tests/test_lod_collision.py tests/test_realworld.py tools/certify.py tools/build_release.py plugins/unreal/import_gatekeeper.py plugins/unreal/agk_validator.py
+        run: python -m pyflakes asset_gatekeeper.py healer.py notifier.py engine/lod_manager.py engine/fbx_preview.py engine/lod_shippable.py engine/polypaint.py tools/install_extras.py tests/fresh_install.py tools/upload_assets.py tools/houdini_export_hook.py server/asset_health_server.py server/art_workstation_server.py vcs_hooks/p4_pre_submit.py vcs_hooks/git_pre_commit.py tests/test_gatekeeper.py tests/test_server.py tests/test_workstation.py tests/test_viewer_browser.py tests/test_admin.py tests/gen_test_assets.py tests/run_headless_integration.py tests/test_formats.py tests/test_lod_collision.py tests/test_realworld.py tools/certify.py tools/build_release.py plugins/unreal/import_gatekeeper.py plugins/unreal/agk_validator.py tests/test_engine_plugins.py engine/rules_wizard.py tests/test_rules_wizard.py
 
       - name: Syntax-check DCC plugins
         run: python -m compileall -q plugins
@@ -109,6 +109,55 @@ jobs:
 
       - name: Headless integration (synthetic exporter)
         run: python tests/run_headless_integration.py --synthetic
+
+      # The --json fields the Unity and Godot plug-ins read, and that every
+      # plug-in file ships. The engines themselves run in the two jobs below.
+      - name: Engine plug-ins (gate contract, packaging)
+        run: python tests/test_engine_plugins.py --only contract
+
+  # plugins/unity without Unity: the C# compiled as netstandard2.1 / C# 9 (what
+  # Unity 2021.3 uses) against stand-ins for UnityEngine/UnityEditor
+  # (tests/unity_stubs), then driven end to end against the real gate.
+  unity-plugin:
+    name: unity plug-in · compile + run (stand-in editor)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "trimesh<6" "pillow<13" numpy charset-normalizer DracoPy
+      - name: Unity plug-in suite
+        run: python tests/test_engine_plugins.py --only unity --require
+
+  # plugins/godot in a real Godot: the add-on's check code headless, then the
+  # editor itself importing a project with the add-on enabled.
+  godot-plugin:
+    name: godot plug-in · headless 4.2.2
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install "trimesh<6" "pillow<13" numpy charset-normalizer DracoPy
+      - name: Download Godot 4.2.2 (checksum from the release's SHA512-SUMS.txt)
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/godot.zip" https://github.com/godotengine/godot/releases/download/4.2.2-stable/Godot_v4.2.2-stable_linux.x86_64.zip
+          echo "4c0294f437b97cf14f848d921ed028cb6e100ebbfcf6480f2d50292d001221cf29cda73f0a96a8c0e80b145b65cdbf7e422252dbbe17e79d883753e500306276  $RUNNER_TEMP/godot.zip" | sha512sum -c -
+          unzip -q "$RUNNER_TEMP/godot.zip" -d "$RUNNER_TEMP/godot"
+          echo "GODOT=$RUNNER_TEMP/godot/Godot_v4.2.2-stable_linux.x86_64" >> "$GITHUB_ENV"
+      - name: Godot plug-in suite
+        run: python tests/test_engine_plugins.py --only godot --require
 
   # What `pip install` gives a user: a wheel whose packages sit under agk_suite/
   # (not top-level server/, tools/ ...) and servers that keep their data out of

@@ -29,6 +29,16 @@
 * **Install from PyPI.** `pip install "asset-gatekeeper[full]"` now works:
   v0.1.0-alpha.1 is on PyPI, published by the release workflow. The README
   and the installation guide use it instead of the git URL.
+* **Unity and Godot plug-ins (new, early).** `plugins/unity` (Unity 2021.3+,
+  added with Package Manager > Add package from disk) and
+  `plugins/godot/addons/asset_gatekeeper` (Godot 4.2+) check models and
+  textures when the engine imports them, in the background: failures go to
+  the Console (Unity, plus an `AGK_Failed` label) or the Output panel and a
+  dock (Godot), with a Check All / Check project command and settings for the
+  Python, the gate folder and the rules file. They report, they do not block
+  the import. The Godot add-on is tested in Godot 4.2.2 (headless, in CI);
+  the Unity package is compiled and run against stand-ins for Unity's API but
+  has not yet been tried in Unity itself. See docs/09-DCC-PLUGINS.md.
 
 # v0.1.0-alpha.1 (10 Nov 2026)
 

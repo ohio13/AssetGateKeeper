@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    Compiles plugins/unity/Editor/*.cs against the stand-in Unity API in UnityStubs.cs.
+    netstandard2.1 and C# 9 are what Unity 2021.3 compiles editor scripts with by
+    default (Api Compatibility Level ".NET Standard 2.1"), so an API or language
+    feature Unity does not have fails here too. Warnings are errors.
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <AssemblyName>AssetGatekeeper.Editor</AssemblyName>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="UnityStubs.cs" />
+    <Compile Include="../../plugins/unity/Editor/*.cs" />
+  </ItemGroup>
+</Project>
