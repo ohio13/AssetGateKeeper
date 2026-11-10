@@ -1,3 +1,9 @@
+# Unreleased (on `main`)
+
+* **Install from PyPI.** `pip install "asset-gatekeeper[full]"` now works:
+  v0.1.0-alpha.1 is on PyPI, published by the release workflow. The README
+  and the installation guide use it instead of the git URL.
+
 # v0.1.0-alpha.1 (10 Nov 2026)
 
 The first public alpha. The internal builds 1.0.0 to 1.1.1 (private testing,

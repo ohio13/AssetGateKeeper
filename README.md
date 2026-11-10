@@ -29,7 +29,7 @@ It reads FBX (binary and ASCII), OBJ, glTF and GLB itself, with no Autodesk SDK.
 **Anywhere, from a terminal** (Python 3.9 or newer):
 
 ```bash
-pip install "asset-gatekeeper[full] @ git+https://github.com/ohio13/AssetGateKeeper"
+pip install "asset-gatekeeper[full]"                  # from PyPI
 
 asset-gatekeeper path/to/Exports --init                # write a rules.toml with your budget
 asset-gatekeeper path/to/Exports --once --recursive    # check everything once
