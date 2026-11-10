@@ -76,3 +76,6 @@ CLAUDE.md
 CLAUDE.local.md
 .claude/
 HANDOFF*.md
+
+# Godot writes its import cache here when tests/godot_project is opened in the editor.
+.godot/

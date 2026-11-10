@@ -1,0 +1,10 @@
+{
+  "name": "com.assetgatekeeper.unity",
+  "version": "0.1.0-alpha.1",
+  "displayName": "AssetGatekeeper",
+  "description": "Checks imported models and textures against the budgets in rules.toml with the AssetGatekeeper command-line gate, logs failures to the Console and labels failing assets AGK_Failed. Editor only. Needs Python with AssetGatekeeper installed.",
+  "unity": "2021.3",
+  "license": "MIT",
+  "keywords": ["budget", "assets", "validation", "pipeline"],
+  "author": { "name": "AssetGatekeeper contributors" }
+}

@@ -1,0 +1,14 @@
+; The test project for plugins/godot (tests/test_engine_plugins.py). The test
+; copies it to scratch/, adds the add-on under addons/asset_gatekeeper and the
+; test assets, then runs test_runner.gd headless. Nothing here is shipped.
+
+config_version=5
+
+[application]
+
+config/name="AssetGatekeeper plug-in test"
+config/features=PackedStringArray("4.2")
+
+[editor_plugins]
+
+enabled=PackedStringArray("res://addons/asset_gatekeeper/plugin.cfg")

@@ -100,7 +100,11 @@ packages = ["agk_suite", "agk_suite.server", "agk_suite.engine", "agk_suite.tool
             "agk_suite.server.static.vendor.loaders", "agk_suite.server.static.vendor.math",
             "agk_suite.server.static.vendor.utils",
             "agk_suite.plugins.blender", "agk_suite.plugins.houdini", "agk_suite.plugins.max",
-            "agk_suite.plugins.maya", "agk_suite.plugins.unreal"]
+            "agk_suite.plugins.maya", "agk_suite.plugins.unreal",
+            # The game-engine plug-ins: C# (a Unity package) and GDScript (a Godot add-on).
+            "agk_suite.plugins.unity", "agk_suite.plugins.unity.Editor",
+            "agk_suite.plugins.godot", "agk_suite.plugins.godot.addons",
+            "agk_suite.plugins.godot.addons.asset_gatekeeper"]
 
 [tool.setuptools.package-dir]
 "agk_suite.server" = "server"
@@ -113,7 +117,8 @@ packages = ["agk_suite", "agk_suite.server", "agk_suite.engine", "agk_suite.tool
 # Without the static folder the workstation serves a 404 at /viewer and the
 # dashboard renders unstyled, so this is not optional decoration.
 "agk_suite.server" = ["static/*", "static/vendor/*", "static/vendor/**/*"]
-"agk_suite.plugins" = ["**/*.py", "**/*.md", "**/*.mel", "**/*.ms", "**/*.json"]
+"agk_suite.plugins" = ["**/*.py", "**/*.md", "**/*.mel", "**/*.ms", "**/*.json",
+                       "**/*.cs", "**/*.asmdef", "**/*.meta", "**/*.gd", "**/*.cfg"]
 "agk_vendor.tomli" = ["LICENSE", "py.typed"]
 
 [tool.setuptools.dynamic]
