@@ -185,9 +185,9 @@ def _send_failure(exc: BaseException, name: str, size: int) -> str:
     if isinstance(reason, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
         return (f"the Art Workstation hung up while {name} ({_megabytes(size)}) was being "
                 "sent - usually the file is bigger than it accepts, or it was stopped. "
-                "Check it is running (agk-serve.bat status) and try a lighter copy")
+                "Check it is running (tools\\agk-serve.bat status) and try a lighter copy")
     if isinstance(reason, ConnectionRefusedError):
-        return "the Art Workstation is not running - start it (Rules.bat) and try again"
+        return "the Art Workstation is not running - start it (double-click Start AssetGatekeeper.bat) and try again"
     if isinstance(reason, (TimeoutError, socket.timeout)):
         return f"the Art Workstation took too long to take {name} ({_megabytes(size)})"
     return str(reason)
@@ -2897,7 +2897,7 @@ class Handler(BaseHTTPRequestHandler):
         """The folder a scan checks, or None when there is nothing sensible.
 
         With no project picked the fallback used to be the server's own working
-        folder - for Rules.bat, the AssetGatekeeper install itself - so a first
+        folder - for the start file, the AssetGatekeeper install itself - so a first
         scan filled the dashboard with the tool's test files and screenshots
         marked as failures (9 Nov 2026). The install folder is never scanned.
         """
@@ -3597,7 +3597,7 @@ class Handler(BaseHTTPRequestHandler):
         base = self._workstation_url()
         if not base:
             self._json(400, {"error": "no Art Workstation to send to: start it "
-                                      "(agk-serve.bat up) or pass --workstation-url"})
+                                      "(tools\\agk-serve.bat up) or pass --workstation-url"})
             return
         results = []
         limit = self._workstation_upload_limit(base)
@@ -3632,7 +3632,7 @@ class Handler(BaseHTTPRequestHandler):
                                          "Send a lighter copy (decimate it first), or raise "
                                          "the limit with --max-upload-mb "
                                          f"{-(-size // (1024 * 1024)) + 1} (for example: "
-                                         "Rules.bat --max-upload-mb "
+                                         "\"Start AssetGatekeeper.bat\" --max-upload-mb "
                                          f"{-(-size // (1024 * 1024)) + 1})"})
                 continue
             tags = self._asset_tags(source)

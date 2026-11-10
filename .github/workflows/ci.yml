@@ -140,7 +140,7 @@ jobs:
 
   # A first-time user: GitHub's "Download ZIP" (git archive), unzipped into an
   # empty folder, on a Python with nothing installed, through the same files the
-  # README names - Install_Extras.bat, Rules.bat, a scan, a Polypaint bake,
+  # README names - Install_Extras.bat, Start AssetGatekeeper.bat, a scan, a Polypaint bake,
   # Stop.bat. On Windows the .bat files themselves run (10 Nov 2026).
   fresh-install:
     name: fresh install · ${{ matrix.os }} · py${{ matrix.python }}

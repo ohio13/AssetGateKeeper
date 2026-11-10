@@ -5,6 +5,14 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **One front door (10 Nov).** Six `.bat` files sat at the top of the folder.
+  Now there is one to start with, **`Start AssetGatekeeper.bat`** (the old
+  `Rules.bat`), with `Stop.bat`, `Allow_Folder.bat` and `Install_Extras.bat`
+  beside it. `agk-serve.bat`, `start_workstation.bat` and
+  `start_asset_health.bat` moved to `tools\` and find the install folder from
+  there. **`Rules.bat` still works**: it is a two-line file that runs the new
+  one, so shortcuts and pinned icons keep working. Messages that named
+  `Rules.bat` or `agk-serve.bat` now name the new files.
 * **A first-run wizard (10 Nov).** A first start offered a page of budget
   fields, and Scan with no project picked used to check the tool's own test
   files. The Rules & Presets page now opens with **Get started**: your project

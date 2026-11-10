@@ -51,12 +51,12 @@ Python and tick the PATH box — nothing else in this manual can work without it
    (OneDrive/GDrive) — the databases live in there.
 2. Double-click **`Install_Extras.bat`**. It installs what the gate needs
    (trimesh, Pillow and two small readers) plus the optional extras (the
-   Polypaint bake and faster folder watching) into the same Python `Rules.bat`
+   Polypaint bake and faster folder watching) into the same Python `Start AssetGatekeeper.bat`
    uses, then checks each one loads. Running it again changes nothing.
    `Install_Extras.bat --check` only reports.
 
    Prefer a private environment that does not touch your system Python? Make
-   one first; `Rules.bat` and `Install_Extras.bat` both use `.venv` when it exists:
+   one first; `Start AssetGatekeeper.bat` and `Install_Extras.bat` both use `.venv` when it exists:
 
    ```bat
    cd C:\Tools\asset-gatekeeper
@@ -94,9 +94,9 @@ third-party packages in the system.
 
 ---
 
-## 3. First run: double-click `Rules.bat`
+## 3. First run: double-click `Start AssetGatekeeper.bat`
 
-In the install folder, double-click **`Rules.bat`**.
+In the install folder, double-click **`Start AssetGatekeeper.bat`**.
 
 It does this, in order:
 
@@ -110,18 +110,18 @@ It does this, in order:
 5. prints the URLs, the ready-to-paste gate command, and how to stop everything.
 
 Two console windows do **not** open, and you do not have to keep any window
-alive. The console window `Rules.bat` itself opened can be closed; the services
+alive. The console window `Start AssetGatekeeper.bat` itself opened can be closed; the services
 keep running.
 
 | I want to… | Do |
 |---|---|
-| re-open the page later | double-click `Rules.bat` again (it reuses the running services) |
+| re-open the page later | double-click `Start AssetGatekeeper.bat` again (it reuses the running services) |
 | stop everything | double-click `Stop.bat` |
 | let the page open another folder | double-click `Allow_Folder.bat` |
 | install or repair the libraries | double-click `Install_Extras.bat` |
-| see if they are running | double-click `agk-serve.bat` (or `agk-serve.bat status`) |
-| read the server output | `agk-serve.bat logs --tail 60` |
-| start with the review screen too | `agk-serve.bat up --open both` |
+| see if they are running | double-click `tools\agk-serve.bat` (or `tools\agk-serve.bat status`) |
+| read the server output | `tools\agk-serve.bat logs --tail 60` |
+| start with the review screen too | `tools\agk-serve.bat up --open both` |
 
 ### The first start: three questions
 
@@ -163,9 +163,9 @@ On a brand-new install the browser offers two ways in:
 Later accounts (producers, other directors) are added with one command:
 
 ```bat
-agk-serve.bat down
+tools\agk-serve.bat down
 .venv\Scripts\python.exe server\asset_health_server.py --add-admin sam --admin-role producer
-agk-serve.bat up
+tools\agk-serve.bat up
 ```
 
 The password is printed once. `--admin-role artist` gives a read-only account.
@@ -189,7 +189,7 @@ so it goes when the install folder does.
 
 Studios that script the setup can instead set `AGK_PROJECT_ROOTS` once
 (`setx AGK_PROJECT_ROOTS "D:\Projects;C:\Work\MyGame"`, `;`-separated; `:` and
-`export` on macOS/Linux) or pass `Rules.bat --allow-root "D:\Projects"`.
+`export` on macOS/Linux) or pass `"Start AssetGatekeeper.bat" --allow-root "D:\Projects"`.
 
 Then, in the page:
 
@@ -324,11 +324,11 @@ Optional Slack/Discord/Teams alerts — set the webhook once, then restart:
 
 ```bat
 setx AGK_WEBHOOK_URL "https://hooks.slack.com/services/…"
-:: then close Rules.bat's window and double-click it again
-agk-serve.bat status
+:: then close Start AssetGatekeeper.bat's window and double-click it again
+tools\agk-serve.bat status
 ```
 
-`Rules.bat` and `agk-serve.bat up` both read `AGK_WEBHOOK_URL` (or `--webhook-url`
+`Start AssetGatekeeper.bat` and `tools\agk-serve.bat up` both read `AGK_WEBHOOK_URL` (or `--webhook-url`
 / `--webhook-provider slack|discord|teams`). Only *critical* failures alert, and
 at most one message per project per 5 minutes — a nightly sweep that breaks a
 hundred files is one notification, not a hundred.
@@ -429,16 +429,16 @@ total across four suites).
 
 | Task | Command |
 |---|---|
-| start / re-open | `Rules.bat` |
-| stop | `Stop.bat` (or `agk-serve.bat down`) |
+| start / re-open | `Start AssetGatekeeper.bat` |
+| stop | `Stop.bat` (or `tools\agk-serve.bat down`) |
 | allow another project folder | `Allow_Folder.bat` |
-| restart with the same options | `agk-serve.bat restart` |
-| status | `agk-serve.bat status` |
-| URLs + gate command | `agk-serve.bat urls` |
-| tail the logs | `agk-serve.bat logs --tail 60` |
-| start without a browser | `agk-serve.bat up` |
-| different ports | `agk-serve.bat up --health-port 9000 --workstation-port 9100` |
-| review screen takes bigger files | `Rules.bat --max-upload-mb 1024` (default 512 MB per file) |
+| restart with the same options | `tools\agk-serve.bat restart` |
+| status | `tools\agk-serve.bat status` |
+| URLs + gate command | `tools\agk-serve.bat urls` |
+| tail the logs | `tools\agk-serve.bat logs --tail 60` |
+| start without a browser | `tools\agk-serve.bat up` |
+| different ports | `tools\agk-serve.bat up --health-port 9000 --workstation-port 9100` |
+| review screen takes bigger files | `"Start AssetGatekeeper.bat" --max-upload-mb 1024` (default 512 MB per file) |
 
 ### Where things live
 
@@ -460,14 +460,14 @@ Back up by copying the `.db` files while the services are stopped. Deleting
 
 | Symptom | Cause and fix |
 |---|---|
-| `Rules.bat` closes instantly | Python not on PATH, or `trimesh`/`Pillow` missing — run it from `cmd` once; it prints which, with the exact fix |
+| `Start AssetGatekeeper.bat` closes instantly | Python not on PATH, or `trimesh`/`Pillow` missing — run it from `cmd` once; it prints which, with the exact fix |
 | "Python was not found" | reinstall Python and tick **Add python.exe to PATH**, then `py -3 --version` |
 | `trimesh`/`Pillow` missing | double-click `Install_Extras.bat` |
 | "baking needs fast-simplification, xatlas, scipy" | double-click `Install_Extras.bat` (the bake needs Python 3.10 or newer) |
-| browser opens a dead page | the services took longer than the browser; wait 2 s and refresh, or run `agk-serve.bat status` |
+| browser opens a dead page | the services took longer than the browser; wait 2 s and refresh, or run `tools\agk-serve.bat status` |
 | `cannot bind … in use` | another process owns the port; the message prints the find/stop commands. `--port-auto` moves instead of failing |
 | "that folder is outside the allowed roots" | double-click `Allow_Folder.bat` and choose it |
-| "… is 600 MB; the Art Workstation takes files up to 512 MB" | upload a decimated copy, or start with `Rules.bat --max-upload-mb 700` |
+| "… is 600 MB; the Art Workstation takes files up to 512 MB" | upload a decimated copy, or start with `"Start AssetGatekeeper.bat" --max-upload-mb 700` |
 | Windows will not delete the install folder ("in use") | double-click `Stop.bat`, close every window open on that folder, then delete. Still locked: Task Manager → end the Python entries |
 | page says "sign in" and I have no password | the account exists but the password is lost. Stop the services and create another: `.venv\Scripts\python.exe server\asset_health_server.py --add-admin <name> --admin-role director` (or `asset-health …` if the wheel is installed) |
 | admin page is blank | a JS error blanks the module: open the browser console (F12). `tests\test_admin.py` checks every element id the script uses exists |

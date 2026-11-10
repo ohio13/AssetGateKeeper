@@ -121,7 +121,7 @@ def too_large_message(name: str, size: int, limit: int) -> str:
     needed = max(1, -(-size // (1024 * 1024)) + 1)
     return (f"{name or 'this file'} is {megabytes(size)}; the Art Workstation takes files "
             f"up to {megabytes(limit)}. Upload a lighter copy (decimate it first), or raise "
-            f"the limit with --max-upload-mb {needed} (for example: Rules.bat "
+            f"the limit with --max-upload-mb {needed} (for example: \"Start AssetGatekeeper.bat\" "
             f"--max-upload-mb {needed})")
 
 

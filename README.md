@@ -17,7 +17,9 @@ It reads FBX (binary and ASCII), OBJ, glTF and GLB itself, with no Autodesk SDK.
 
 ## Quick start (5 minutes)
 
-You need Python 3.9 or newer.
+**On Windows, no command line:** [download the ZIP](https://github.com/ohio13/AssetGateKeeper/archive/refs/heads/main.zip), unzip it, double-click **`Install_Extras.bat`**, then **`Start AssetGatekeeper.bat`**. The page that opens offers *Just me on this PC* (no account) and asks three things: your project folder, your engine and what it has to run on. Then it checks the project. `Stop.bat` stops it. You need [Python](https://www.python.org/downloads/) 3.10 or newer (tick "Add python.exe to PATH").
+
+**Anywhere, from a terminal** (Python 3.9 or newer):
 
 ```bash
 pip install "asset-gatekeeper[full] @ git+https://github.com/ohio13/AssetGateKeeper"

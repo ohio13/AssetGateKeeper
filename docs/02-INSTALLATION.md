@@ -42,13 +42,15 @@ a double-click:
 
 | File | Runs |
 |---|---|
-| `Install_Extras.bat` | installs the libraries below into the Python `Rules.bat` uses, then checks they load |
-| `Rules.bat` | starts AssetHealth + Art Workstation in the background and opens the admin page |
-| `Stop.bat` | stops everything `Rules.bat` started |
+| `Install_Extras.bat` | installs the libraries below into the Python `Start AssetGatekeeper.bat` uses, then checks they load |
+| `Start AssetGatekeeper.bat` | starts AssetHealth + Art Workstation in the background and opens the admin page |
+| `Stop.bat` | stops everything `Start AssetGatekeeper.bat` started |
 | `Allow_Folder.bat` | lets the project picker open another folder |
-| `agk-serve.bat` | the same launcher with a menu (status, logs, urls) |
-| `start_workstation.bat` | Art Workstation only (port 8100) |
-| `start_asset_health.bat` | AssetHealth only (port 8080) |
+| `tools\agk-serve.bat` | the same launcher with a menu (status, logs, urls) |
+| `Rules.bat` | the start file's old name, kept so old shortcuts work; it runs `Start AssetGatekeeper.bat` |
+| `tools\start_workstation.bat`, `tools\start_asset_health.bat` | one server in its own window, for reading its errors |
+| `tools\start_workstation.bat` | Art Workstation only (port 8100) |
+| `tools\start_asset_health.bat` | AssetHealth only (port 8080) |
 
 `Install_Extras.bat` (or `python tools/install_extras.py` on macOS and Linux)
 does this for you. By hand: install `trimesh` and `Pillow` into the same Python for mesh and texture
@@ -156,7 +158,7 @@ used, and whether the default ports are free.
 ## Where it writes
 
 Nothing writes to `Program Files` or the registry. The servers started by
-`agk-serve` / `Rules.bat` keep their data in one folder:
+`agk-serve` / `Start AssetGatekeeper.bat` keep their data in one folder:
 
 | Installed as | Data folder |
 |---|---|

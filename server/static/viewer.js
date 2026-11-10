@@ -55,7 +55,7 @@ function checkUploadSize(file) {
     const needed = Math.ceil(file.size / (1024 * 1024)) + 1;
     throw new Error(`${file.name} is ${megabytes(file.size)}; the Art Workstation takes files `
       + `up to ${megabytes(state.maxUpload)}. Upload a lighter copy (decimate it first), `
-      + `or raise the limit with --max-upload-mb ${needed} (for example: Rules.bat --max-upload-mb ${needed})`);
+      + `or raise the limit with --max-upload-mb ${needed} (for example: "Start AssetGatekeeper.bat" --max-upload-mb ${needed})`);
   }
 }
 

@@ -61,7 +61,7 @@ selected, drop the missing files onto the page to complete it.
 | Source files | `.blend`, `.max`, `.ma`, `.mb`, `.usd*` | stored as **unverified**: reviewable, noteable, **excluded from triangle totals** |
 | Executables | `.exe`, `.dll`, `.ps1`, `.sh`, `.msi`, `.bat`, `.cmd` | **refused with HTTP 415** |
 
-Any upload is capped at 512 MB per file; `--max-upload-mb` (or `Rules.bat
+Any upload is capped at 512 MB per file; `--max-upload-mb` (or `Start AssetGatekeeper.bat
 --max-upload-mb`, or `$AGK_MAX_UPLOAD_MB`) moves it. A file over the limit is
 refused in words before it is sent, naming its size and the limit. Names in any script are kept (`岩石_rock.fbx`
 stays `岩石_rock.fbx`, and downloads under that name); characters a file system

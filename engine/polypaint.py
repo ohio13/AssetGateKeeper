@@ -61,14 +61,14 @@ if str(REPO_ROOT) not in sys.path:
 
 import asset_gatekeeper as agk  # noqa: E402 - shared detection, so the gate and this agree
 
-#: The exact command for the Python that is running this, so a Rules.bat user
+#: The exact command for the Python that is running this, so a Start AssetGatekeeper.bat user
 #: installs into the interpreter the servers use, not some other one on PATH.
 BAKE_EXTRA = f'"{sys.executable}" -m pip install fast-simplification xatlas scipy'
 
 
 def install_hint() -> str:
     """How this user installs the bake libraries: the double-click file in a
-    downloaded Windows copy (it picks the same Python as Rules.bat), else the
+    downloaded Windows copy (it picks the same Python as Start AssetGatekeeper.bat), else the
     exact pip command for the running Python."""
     if os.name == "nt" and (REPO_ROOT / "Install_Extras.bat").is_file():
         return (f"double-click Install_Extras.bat in {REPO_ROOT}, "

@@ -55,13 +55,11 @@ DROP_IN_FILES = (
     "pyproject.toml",
     "MANIFEST.in",
     "setup.py",
+    "Start AssetGatekeeper.bat",
     "Rules.bat",
     "Stop.bat",
     "Allow_Folder.bat",
     "Install_Extras.bat",
-    "agk-serve.bat",
-    "start_workstation.bat",
-    "start_asset_health.bat",
 )
 
 #: Directories copied whole into the drop-in tree (code + assets, no tests).

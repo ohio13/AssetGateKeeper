@@ -2,8 +2,8 @@
 rem ===========================================================================
 rem  AssetGatekeeper - install the libraries it uses.  Double-click it.
 rem
-rem  Installs anything missing into the same Python that Rules.bat uses:
-rem    - what the gate needs (trimesh, Pillow, ...), if Rules.bat said so
+rem  Installs anything missing into the same Python that Start AssetGatekeeper.bat uses:
+rem    - what the gate needs (trimesh, Pillow, ...), if the start file said so
 rem    - the Polypaint bake (fast-simplification, xatlas, scipy; Python 3.10+)
 rem    - watchdog (faster folder watching)
 rem  Nothing that already works is changed, so running it twice is harmless.
@@ -24,7 +24,7 @@ set "CODE=%ERRORLEVEL%"
 rem  Leave this folder before pausing, so this window never stops it being deleted.
 cd /d "%USERPROFILE%"
 echo.
-if "%CODE%"=="0" echo You can close this window. Start AssetGatekeeper with Rules.bat.
+if "%CODE%"=="0" echo You can close this window. Double-click Start AssetGatekeeper.bat to begin.
 if not "%CODE%"=="0" echo Something was not installed - the lines above say what and why.
 echo.
 pause

@@ -2980,14 +2980,38 @@ serve._python_processes = lambda: [
 strays = [pid for pid, _ in serve.stray_servers()] if os.name != "nt" else [11]
 expect("only servers started from this copy count as its strays", strays == [11], str(strays))
 serve._python_processes = _real_processes
-for name in ("Stop.bat", "Allow_Folder.bat", "Rules.bat", "agk-serve.bat", "Install_Extras.bat"):
+for name in ("Stop.bat", "Allow_Folder.bat", "Start AssetGatekeeper.bat", "tools/agk-serve.bat",
+             "Install_Extras.bat", "tools/start_workstation.bat", "tools/start_asset_health.bat"):
     text = (ROOT_MODULE_DIR / name).read_bytes()
     expect(f"{name} has Windows line endings", b"\r\n" in text and b"\n" not in text.replace(b"\r\n", b""))
-    expect(f"{name} leaves its folder before pausing, so it never locks it",
-           b'cd /d "%USERPROFILE%"' in text)
+    if not name.startswith("tools/start_"):    # those run the server in their window
+        expect(f"{name} leaves its folder before pausing, so it never locks it",
+               b'cd /d "%USERPROFILE%"' in text)
 expect("Stop.bat stops everything", b"agk_serve.py\" down" in (ROOT_MODULE_DIR / "Stop.bat").read_bytes())
 expect("agk-serve.bat with no command waits instead of flashing its help",
-       b'if "%~1"=="" goto :menu' in (ROOT_MODULE_DIR / "agk-serve.bat").read_bytes())
+       b'if "%~1"=="" goto :menu' in (ROOT_MODULE_DIR / "tools" / "agk-serve.bat").read_bytes())
+# 10 Nov 2026, one front door: six .bat files sat at the top level. Now one
+# start file, with Stop, Allow_Folder and Install_Extras beside it; the rest
+# live in tools\ and find the install from there. Rules.bat stays as a shim.
+_top_bats = sorted(path.name for path in ROOT_MODULE_DIR.glob("*.bat"))
+expect("the top level holds the start file, its three helpers and the Rules.bat shim",
+       _top_bats == ["Allow_Folder.bat", "Install_Extras.bat", "Rules.bat",
+                     "Start AssetGatekeeper.bat", "Stop.bat"], str(_top_bats))
+_shim = (ROOT_MODULE_DIR / "Rules.bat").read_bytes()
+expect("Rules.bat only runs Start AssetGatekeeper.bat, passing its arguments and exit code",
+       b'call "%~dp0Start AssetGatekeeper.bat" %*' in _shim and b"exit /b %ERRORLEVEL%" in _shim
+       and b"\r\n" in _shim and len(_shim.splitlines()) <= 6, _shim[:200])
+for _moved in ("agk-serve.bat", "start_workstation.bat", "start_asset_health.bat"):
+    _text = (ROOT_MODULE_DIR / "tools" / _moved).read_bytes()
+    expect(f"tools\\{_moved} finds the install folder from tools\\",
+           b'"%~dp0..\\.venv\\Scripts\\python.exe"' in _text
+           and b'"%~dp0tools\\' not in _text and b'"%~dp0server\\' not in _text, _moved)
+for _moved in ("start_workstation.bat", "start_asset_health.bat"):
+    _text = (ROOT_MODULE_DIR / "tools" / _moved).read_bytes()
+    expect(f"... and {_moved} runs the server from the install folder",
+           b'cd /d "%~dp0.."' in _text and b'"%~dp0..\\server\\' in _text)
+expect("a copy with only the new start file is still a checkout",
+       serve.is_checkout.__doc__ and "Start AssetGatekeeper.bat" in serve.is_checkout.__doc__)
 # 9 Nov 2026 audit: B2 (pip installs kept their databases in site-packages) and
 # B6 (pip users were told to run a tools/ script they do not have).
 expect("this repository is a downloaded copy", serve.is_checkout() is True)
@@ -3404,13 +3428,14 @@ expect("a failed install exits 1 and says what still does not load",
 extras.subprocess.call = _real_call
 extras.loads = _real_loads
 _bat = (ROOT_MODULE_DIR / "Install_Extras.bat").read_bytes()
-expect("Install_Extras.bat finds Python the way Rules.bat does",
-       all(line in (ROOT_MODULE_DIR / "Rules.bat").read_bytes() for line in _bat.split(b"\r\n")
+expect("Install_Extras.bat finds Python the way the start file does",
+       all(line in (ROOT_MODULE_DIR / "Start AssetGatekeeper.bat").read_bytes()
+           for line in _bat.split(b"\r\n")
            if b"PYEXE=" in line and b"%%" in line))
 expect("Install_Extras.bat runs the installer with its arguments",
        b'tools\\install_extras.py" %*' in _bat)
-expect("Rules.bat points a user with missing libraries at it",
-       b"Install_Extras.bat" in (ROOT_MODULE_DIR / "Rules.bat").read_bytes())
+expect("the start file points a user with missing libraries at it",
+       b"Install_Extras.bat" in (ROOT_MODULE_DIR / "Start AssetGatekeeper.bat").read_bytes())
 _build = load_module("agk_build_release", "tools/build_release.py")
 expect("the release ZIP ships it", "Install_Extras.bat" in _build.DROP_IN_FILES)
 expect("the release is named by the version string alone, not the comment after it",
