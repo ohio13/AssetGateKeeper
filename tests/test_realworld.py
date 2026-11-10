@@ -704,6 +704,13 @@ try:
         except polypaint.PolypaintError:
             refused = True
         expect("an unknown preset is refused", refused)
+        for _edge, _why in ((8, "at least 16 px (got 8)"), (100, "a power of two (got 100)")):
+            try:
+                polypaint.bake(paint / "SM_Ball_HP.obj", WORK / "unused", 600, _edge)
+                _said = "baked"
+            except polypaint.PolypaintError as exc:
+                _said = str(exc)
+            expect(f"a {_edge} px bake texture is refused saying why ({_why})", _why in _said, _said)
         retro = WORK / "retro"
         retro.mkdir()
         (retro / "SM_Ball_HP.obj").write_text(text, encoding="utf-8")
