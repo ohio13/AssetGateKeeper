@@ -27,6 +27,7 @@ ask in, the wizard refuses instead of waiting for input that never comes.
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import sys
@@ -712,6 +713,28 @@ def _backup_path(rules_path: Path) -> Path:
     return candidate
 
 
+def stdin_is_terminal(stream=None) -> bool:
+    """Is someone at a keyboard to answer? Windows calls the NUL device (a
+    script's empty input) a tty, so there a console handle must also answer
+    GetConsoleMode; without this the wizard waited on NUL in CI (10 Nov 2026)."""
+    stream = sys.stdin if stream is None else stream
+    try:
+        if stream is None or not stream.isatty():
+            return False
+    except (AttributeError, ValueError, OSError):
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        import msvcrt
+        handle = msvcrt.get_osfhandle(stream.fileno())
+        mode = ctypes.c_uint32()
+        return bool(ctypes.windll.kernel32.GetConsoleMode(handle, ctypes.byref(mode)))
+    except Exception:              # no console API: trust isatty
+        return True
+
+
 def _write(rules_path: Path, text: str) -> Optional[Path]:
     """Write atomically; an existing file is copied aside first. Returns the copy."""
     backup = None
@@ -719,7 +742,9 @@ def _write(rules_path: Path, text: str) -> Optional[Path]:
         backup = _backup_path(rules_path)
         shutil.copy2(rules_path, backup)
     temporary = rules_path.with_name(f".{rules_path.name}.wizard-tmp")
-    temporary.write_text(text, encoding="utf-8", newline="\n")
+    # open(newline=) rather than write_text(newline=), which needs Python 3.10.
+    with temporary.open("w", encoding="utf-8", newline="\n") as handle:
+        handle.write(text)
     temporary.replace(rules_path)
     return backup
 
@@ -733,7 +758,7 @@ def run_wizard(target: Optional[Path], *, answers_file: Optional[Path] = None,
     complain = err or (lambda text: print(text, file=sys.stderr))
     scripted = answers_file is not None or assume_yes
     if interactive is None:
-        interactive = not scripted and bool(getattr(sys.stdin, "isatty", lambda: False)())
+        interactive = not scripted and stdin_is_terminal()
     if not scripted and not interactive:
         complain("error: the rules wizard asks its questions in a terminal, and this input is "
                  "not one.\n"
