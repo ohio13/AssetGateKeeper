@@ -3,6 +3,19 @@
 * **Install from PyPI.** `pip install "asset-gatekeeper[full]"` now works:
   v0.1.0-alpha.1 is on PyPI, published by the release workflow. The README
   and the installation guide use it instead of the git URL.
+* **Skeleton and lightmap UV checks.** Two new rule tables, both off unless
+  written. `[skeleton]` budgets the skeleton a skinned FBX or glTF uses:
+  `max_bones`, `max_bones_per_section` (bones weighting one material; Unreal
+  caps mobile at 75 and splits a larger section into extra draw calls),
+  `single_root` (Unreal's FBX importer refuses "multiple roots") and
+  `max_depth`; `[platforms.<name>.skeleton]` can tighten the numbers per
+  target. `[lightmap]` checks an authored lightmap UV set on static meshes
+  (`uv_channel`, 1 by default): `require` it, keep it `inside_unit_square`,
+  and cap `max_overlap`, measured by rasterising the lightmap triangles on a
+  `resolution` grid (256 by default) so touching islands never count as
+  overlapping; a 100,000-triangle mesh takes a fraction of a second. Each
+  failure names the section, bone, mesh or percentage and says what to change.
+  See docs/05-RULES-REFERENCE.md.
 
 # v0.1.0-alpha.1 (10 Nov 2026)
 

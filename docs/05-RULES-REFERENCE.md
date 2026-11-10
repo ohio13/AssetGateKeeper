@@ -142,7 +142,9 @@ allow_degenerate = false
 ```
 
 Allowed keys: `max_triangles`, `max_material_slots`, `max_texture_edge`,
-`max_bone_influences`, `max_uv_channels`, plus nested `[mesh]`/`[texture]`.
+`max_bone_influences`, `max_uv_channels`, plus nested `[mesh]`/`[texture]`
+and `[skeleton]` (`max_bones`, `max_bones_per_section`, `max_depth`; see
+[\[skeleton\]](#skeleton)). `[tags.<name>]` takes the same nested tables.
 
 Two rules:
 
@@ -275,6 +277,123 @@ format = "astc8x8"
   budget on them. `max_texture_mb` and `max_mesh_mb` can be relaxed per asset
   with [[exceptions]].
 
+## [skeleton]
+
+Budgets for the skeleton a skinned mesh uses. Off by default: without a
+`[skeleton]` table no skeleton is read. A mesh with no skin is never checked.
+
+```toml
+[skeleton]
+max_bones = 256              # bones in the skeleton (0 = off)
+max_bones_per_section = 75   # bones weighting one material section (0 = off)
+single_root = true           # exactly one root bone
+max_depth = 0                # longest root-to-tip chain, the root counting 1 (0 = off)
+
+[platforms.mobile.skeleton]  # a target can be stricter
+max_bones_per_section = 75
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `max_bones` | int | 0 (off) | bones in the skeleton(s) the asset's skinned meshes use |
+| `max_bones_per_section` | int | 0 (off) | bones with weight on the triangles of one material |
+| `single_root` | bool | false | the skeleton must have exactly one root bone |
+| `max_depth` | int | 0 (off) | bones in the longest chain from a root to a tip |
+
+What counts as a bone:
+
+* **glTF**: the joints (`skins[].joints`) of every skin a mesh node uses. A
+  root is a joint whose parent node is not a joint.
+* **FBX**: every `LimbNode` joint, and every node a skin cluster binds
+  vertices to, connected to the bound ones - up to the root and down through
+  unweighted bones (IK targets, twist helpers, tip bones), which are still part
+  of the skeleton the engine imports. A plain group above the skeleton (the
+  armature object Blender writes, a Maya group) is not a bone, so Blender bones
+  without a parent bone are each a root: `skin4.fbx` in the tests has four.
+
+Why each rule exists:
+
+* **`max_bones_per_section`**. A section is one material slot. The engine
+  skins a section in one draw call with at most a fixed number of bones; a
+  section weighted to more is split into chunks, each an extra draw call.
+  Unreal Engine's default limit is 65,536 bones per section (256 without 16-bit
+  bone indices), and mobile platforms are capped at **75 bones per section**
+  (Epic's [Skeletal Mesh Rendering Paths](https://dev.epicgames.com/documentation/en-us/unreal-engine/skeletal-mesh-rendering-paths-in-unreal-engine)
+  page; Project Settings > Engine > Rendering > Skinning). A bone counts for a
+  section when its weight on a vertex of that section's triangles is above
+  0.0001. Meshes that share a material are one section, as Unreal imports them
+  into one skeletal mesh. The failure names the section: give some of its faces
+  another material, or weight it to fewer bones.
+* **`single_root`**. Unreal's FBX importer refuses a skeleton with more than
+  one root ("Multiple roots are found in the bone hierarchy. We only support
+  single root bone"). Unreal can also take a plain group node directly above
+  the bones as the root bone (it skips Blender's object named `Armature`), so
+  such a file may still import; the gate does not guess at that and asks for
+  one root bone, which imports everywhere.
+* **`max_bones`** and **`max_depth`** are budgets for animation cost (every bone
+  is evaluated every frame) and for targets with a hard skeleton limit. A hero
+  character can get more with an [[exceptions]] entry (`rule = "max_bones"`).
+
+`--json` and telemetry carry `bones`, `root_bones`, `bone_depth` and
+`max_bones_per_section` for a skinned mesh whenever a `[skeleton]` rule is on.
+An OBJ has no skin. A meshopt- or Draco-compressed glTF whose weights cannot be
+decoded gets a warning that the per-section count was skipped.
+
+## [lightmap]
+
+An authored lightmap UV set on static (non-skinned) meshes. Off by default:
+without a `[lightmap]` table no lightmap UV is read. Not the same as `[mesh]
+lightmap_uv`, which only adds the set Unreal *generates* to the memory estimate.
+
+```toml
+[lightmap]
+require = true               # every static mesh has the set
+uv_channel = 1               # which set: 0-7, 1 = the second (Unreal's convention)
+inside_unit_square = true    # every lightmap UV within 0-1
+max_overlap = 0              # percent of lightmap texels covered twice or more
+resolution = 256             # the grid the overlap is measured on
+```
+
+| Key | Type | Default | Meaning |
+|---|---|---|---|
+| `require` | bool | false | a static mesh without UV set `uv_channel` fails |
+| `uv_channel` | int | 1 | the lightmap set: FBX's UV layer of that index, glTF `TEXCOORD_<n>` |
+| `inside_unit_square` | bool | true once `require` or `max_overlap` is set, else false | every lightmap UV within 0-1 (0.0001 tolerance) |
+| `max_overlap` | float | not checked | 0-100: the largest share of covered texels that may be covered more than once; 0 = none |
+| `resolution` | int | 256 | 16-4096 texels per side of the overlap grid |
+
+Why: a lightmap stores the baked light of every surface at its own place in
+the texture. Two triangles at the same place share one value, so one side's
+shadow shows on the other ("bleeding"), and a lightmap does not tile, so a UV
+outside 0-1 lands on another surface's texels. Unreal's Generate Lightmap UVs
+avoids both, which is why `require` is off unless the studio authors its own.
+
+How the overlap is measured: each lightmap triangle is rasterised into a
+`resolution` x `resolution` grid; a texel belongs to a triangle when its centre
+is inside it, with the top-left rule GPUs use for a centre exactly on an edge.
+So the triangles of one island, and islands that only touch along an edge, never
+overlap; mirrored islands count like any other. The figure is texels covered
+twice or more, as a percentage of texels covered at all, for the worst mesh of
+the asset (each mesh has its own lightmap). A mesh whose lightmap covers no
+texel at all (collapsed to a point) fails when `max_overlap` is set. Islands
+smaller than a texel are not seen: raise `resolution` to find them. Padding
+between islands (bilinear filtering bleeds across one or two texels) is not
+checked.
+
+Cost: about two sampled texel centres per covered texel, whatever the
+triangle count. A
+100,000-triangle glTF checks in about 0.15 s at 256 and 0.4 s at 1024 (one core).
+A layout whose triangles each cover the square many times over would need far
+more, so above 8.4 million samples the grid is halved until it fits, and a
+warning names the grid used. An FBX is parsed once more for these checks.
+
+Formats: FBX (the `LayerElementUV` with that index, `ByPolygonVertex` or
+`ByControlPoint`), glTF (`TEXCOORD_<uv_channel>`, also quantised; a
+Draco-compressed primitive is skipped with a warning). An OBJ holds one UV set,
+so `require` with `uv_channel = 1` fails it and says so; with `uv_channel = 0`
+its set is checked like any other. `--json` carries `lightmap_missing`,
+`lightmap_uvs_outside`, `lightmap_overlap_texels` and `lightmap_texels`.
+
 ## [[exceptions]]
 
 A named, owned, dated waiver: "the boss may use 80,000 triangles until alpha",
@@ -293,7 +412,7 @@ expires = 2026-12-01            # the last day it applies
 | Key | Meaning |
 |---|---|
 | `path` | case-insensitive glob relative to the folder holding `rules.toml` (the watch folder for remote rules); a bare file name (`boss.fbx`) matches that file in any folder |
-| `rule` | one of `max_triangles`, `max_texture_edge`, `max_material_slots`, `max_bone_influences`, `max_uv_channels`, `require_power_of_two`, `enforce_texture_naming`, `allow_degenerate`, `check_references`, `pbr_check` |
+| `rule` | one of `max_triangles`, `max_texture_edge`, `max_material_slots`, `max_bone_influences`, `max_uv_channels`, `max_bones`, `max_bones_per_section`, `require_power_of_two`, `enforce_texture_naming`, `allow_degenerate`, `check_references`, `pbr_check`, `max_texture_mb`, `max_mesh_mb` |
 | `allow` | a whole number for the counts, `true`/`false` for the switches |
 | `reason`, `owner`, `expires` | all required: a waiver nobody owns, with no end date, becomes the real budget |
 
