@@ -7559,11 +7559,27 @@ def _relative_name(path: Path, root: Optional[Path]) -> str:
     return path.name
 
 
+#: Characters XML 1.0 cannot carry at all (control characters, lone surrogates).
+_XML_INVALID = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
+
+
 def junit_report(verdicts: Sequence[Verdict], root: Optional[Path] = None) -> str:
     """JUnit XML: one test case per asset. Jenkins, TeamCity, Horde, GitLab and
     Azure DevOps all show these per test, so a failing asset is a red line with
     its path, not a word in a build log."""
-    from xml.sax.saxutils import escape, quoteattr
+    from xml.sax.saxutils import escape as _escape, quoteattr as _quoteattr
+
+    # XML 1.0 has no way to write most control characters, even escaped: one in
+    # a file or node name made the whole report unreadable to a CI server.
+    def clean(text: str) -> str:
+        return _XML_INVALID.sub("�", text)
+
+    def escape(text: str) -> str:
+        return _escape(clean(text))
+
+    def quoteattr(text: str) -> str:
+        return _quoteattr(clean(text))
+
     failures = sum(1 for verdict in verdicts if not verdict.passed and not verdict.unreadable)
     errors = sum(1 for verdict in verdicts if verdict.unreadable)
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',

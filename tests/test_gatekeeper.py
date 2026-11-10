@@ -1466,6 +1466,15 @@ _angle_xml = _ET.fromstring(agk.junit_report([_angle], rep_dir))
 expect("names and reasons with < > & stay well-formed XML (no such file on Windows, so built here)",
        _angle_xml.find(".//testcase").get("name") == "a<b>.gltf"
        and _angle_xml.find(".//failure").get("message") == "x < y & z")
+_control = agk.Verdict(rep_dir / "SM_\x01Crate.gltf", ("collision mesh 'UCX_\x01Bad\x1b[31m' matches no render mesh",),
+                       warnings=("note \x07",))
+try:
+    _control_xml = _ET.fromstring(agk.junit_report([_control], rep_dir))
+    _control_ok = "UCX_" in _control_xml.find(".//failure").get("message")
+except _ET.ParseError as exc:
+    _control_ok = exc
+expect("a control character in a node or file name keeps the JUnit report readable XML",
+       _control_ok is True, _control_ok)
 _total_sarif = json.loads(agk.sarif_report([agk.Verdict(Path("[total] Props/*"), ("over",))], rep_dir))
 expect("SARIF: a folder total points at rules.toml, not at '[total] Props/*' (not a URI)",
        _total_sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
