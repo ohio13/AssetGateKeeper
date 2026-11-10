@@ -94,7 +94,7 @@ Reported as: `tag 'charcter' is not a known tag; closest match is 'character'`.
 | `--no-color` | plain text (CI logs, redirected output) |
 | `-v` | verbose |
 | `--init [--yes]` | write a commented starter `rules.toml` |
-| `--wizard [--yes] [--force]` · `--wizard-answers FILE` | the rules wizard: six questions about the project (several answers each), one commented `rules.toml` for all of them - see [below](#the-rules-wizard) |
+| `--wizard [--yes] [--force]` · `--wizard-answers FILE` | the rules wizard: seven questions about the project (several answers each), one commented `rules.toml` for all of them - see [below](#the-rules-wizard) |
 | `--list-presets` | print the ten shipped budgets |
 | `--doctor` | environment report: interpreter, packages, ports, rules |
 | `--suggest-naming` | learn a `[naming]` block from the names already in `<folder>`; prints it, writes nothing |
@@ -208,8 +208,8 @@ asset-gatekeeper <folder> --wizard --yes                  # every default, no qu
 
 On Windows, double-click `tools\rules_wizard.bat` (or drag the export folder
 onto it). `--init --wizard` is the same as `--wizard`; plain `--init` is
-unchanged. Six questions, each with a default on Enter; the first four take
-several answers (`1,3` or `unreal, unity`):
+unchanged. Seven questions, each with a default on Enter; the first four and
+the extra checks take several answers (`1,3` or `unreal, unity`):
 
 | Question (answers-file key) | Choices | Becomes |
 |---|---|---|
@@ -218,11 +218,12 @@ several answers (`1,3` or `unreal, unity`):
 | Platforms (`platforms`) | `pc` (high-end PC / current console), `midrange` (mid PC / last-gen console), `switch`, `mobile`, `vr`, `n64` (retro) | the tightest limit of all of them is the `[mesh]`/`[texture]` budget; each platform gets a `[platforms.<name>]` block for `--platform <name>` |
 | Kinds of asset (`assets`) | `characters` `props` `environment` `ui` | two or more kinds of mesh: `[tags.characters]`, `[tags.props]`, `[tags.environment]` (a tag is a folder name). With several platforms they are written as comments, because a tag's budget wins over `--platform`. `ui` lets textures named `UI_...` skip the map suffix |
 | Style (`style`) | `realistic` `stylised` `lowpoly` | the albedo brightness check (`pbr`) is on for realistic art only |
+| Extra checks (`checks`) | `lod` `collision` `skeleton` `lightmap` `none` (default) | `[lod] min_levels = 3` (2 for a retro-only project), `max_ratio = 0.6`; `[collision] require = true` (as a comment unless Unreal is one of the engines); `[skeleton] single_root = true` with Unreal and `max_bones_per_section = 75` for mobile and VR, with a `[platforms.<name>.skeleton]` block per platform; `[lightmap] require = true`, `uv_channel = 1`, `max_overlap = 0` |
 | Broken geometry (`broken_geometry`) | `block` `warn` | `[mesh] degenerate` |
 
-The numbers come from the shipped tables, not from the wizard: `pc`, `mobile`
-and `n64` are those `--preset` targets, `switch` uses the `ps3` target, `vr`
-the `mobile` one, and `midrange` the built-in default budget. The file's header
+The numbers come from the shipped tables, not from the wizard: every platform
+is the `--preset` target of the same name (`pc`, `midrange`, `switch`,
+`mobile`, `vr`, `n64`). The file's header
 lists the answers (and a `# wizard-answers:` line you can save as
 `answers.json`); every value has a comment saying where it came from.
 

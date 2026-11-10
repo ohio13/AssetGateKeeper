@@ -1,6 +1,6 @@
 @echo off
 rem ===========================================================================
-rem  AssetGatekeeper - write a rules.toml by answering six questions.
+rem  AssetGatekeeper - write a rules.toml by answering seven questions.
 rem
 rem  Double-click it, then type your export folder or drag it into this window.
 rem  Or drag the folder onto this file. Several engines, programs and platforms

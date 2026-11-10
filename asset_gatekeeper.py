@@ -979,6 +979,12 @@ PLATFORM_SECTION_KEYS: dict[str, tuple[str, ...]] = {
     # [platforms.mobile.skeleton] max_bones_per_section = 75: the bone limits
     # are what differ between targets.
     "skeleton": ("max_bones", "max_bones_per_section", "max_depth"),
+    # [platforms.mobile.lod] min_levels = 4, [tags.ui.lod] min_levels = 1: how
+    # many levels a target needs, and how much each must save, differ by target.
+    "lod": ("min_levels", "max_ratio"),
+    # The hull limits are numbers a target can tighten; require, name matching
+    # and convexity are switches and stay project-wide.
+    "collision": ("max_hulls", "max_hull_vertices"),
 }
 
 
@@ -1088,6 +1094,24 @@ PLATFORM_PRESETS: dict[str, dict[str, object]] = {
     "ps3": _preset("Sony PlayStation 3", "256 MB RSX, specular/gloss workflow, no PBR maps",
                     character=20_000, prop=8_000, texture=1_024, slots=4,
                     power_of_two=False, pbr=False, uv=2, influences=8),
+    # Added 11 Nov 2026 (the rules wizard borrowed ps3 / mobile / the defaults
+    # for these). Starting points, as everything here: Switch from typical
+    # third-party character budgets on a Tegra X1 with 4 GB shared memory; VR
+    # from Meta's guidance for Quest 2/Pro of 750k-1M triangles and 80-200 draw
+    # calls a frame, drawn for two eyes at 72-90 Hz; mid-range from the
+    # PS4 / Xbox One generation.
+    "switch": _preset("Nintendo Switch-class handheld",
+                       "4 GB shared memory, Tegra X1, ASTC textures, docked 1080p / handheld 720p",
+                       character=20_000, prop=5_000, texture=1_024, slots=4,
+                       power_of_two=False, pbr=True, uv=2, influences=4),
+    "vr": _preset("Standalone VR (Quest-class)",
+                   "750k-1M triangles and 80-200 draw calls a frame for two eyes at 72-90 Hz",
+                   character=15_000, prop=3_000, texture=2_048, slots=2,
+                   power_of_two=True, pbr=True, uv=2, influences=4),
+    "midrange": _preset("Mid-range PC / last-gen console",
+                         "PS4 / Xbox One generation: 5-8 GB shared memory, PBR with mip chains",
+                         character=50_000, prop=10_000, texture=2_048, slots=6,
+                         power_of_two=False, pbr=True, uv=3, influences=8, naming=True),
     "pc": _preset("Modern PC", "8 GB+ VRAM, PBR metal/roughness with mip chains",
                    character=120_000, prop=30_000, texture=4_096, slots=8,
                    power_of_two=False, pbr=True, uv=4, influences=8, naming=True),
@@ -7719,8 +7743,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --init: overwrite an existing rules.toml (with --wizard: replace "
                              "it without asking; a copy is still kept)")
     parser.add_argument("--wizard", action="store_true",
-                        help="ask six plain-English questions (engines, art tools, platforms, "
-                             "kinds of asset, style, broken geometry; several answers each) and "
+                        help="ask seven plain-English questions (engines, art tools, platforms, "
+                             "kinds of asset, style, extra checks, broken geometry; several "
+                             "answers each) and "
                              "write one commented rules.toml for all of them. Asks before "
                              "replacing a rules.toml and keeps a copy. With --yes: every "
                              "default, no questions")

@@ -33,6 +33,9 @@ asset-gatekeeper --list-presets
 | `wii` | 5,000 / 2,000 | 512 | 3 | yes | no |
 | `xbox` | 9,000 / 3,000 | 1,024 | 4 | yes | no |
 | `ps3` | 20,000 / 8,000 | 1,024 | 4 | no | no |
+| `vr` | 15,000 / 3,000 | 2,048 | 2 | yes | yes |
+| `switch` | 20,000 / 5,000 | 1,024 | 4 | no | yes |
+| `midrange` | 50,000 / 10,000 | 2,048 | 6 | no | yes |
 | `pc` | 120,000 / 30,000 | 4,096 | 8 | no | yes |
 
 Run it once with a preset and no rules file:

@@ -296,7 +296,7 @@ When the dashboard sends a `.gltf`, the sibling files that make it loadable
 |---|---|
 | `--doctor` | machine check, then exit |
 | `--init` `--yes` `--force` | write a starter `rules.toml` |
-| `--wizard` · `--wizard-answers FILE` | write a `rules.toml` from six questions about the project (several engines, tools and platforms at once) |
+| `--wizard` · `--wizard-answers FILE` | write a `rules.toml` from seven questions about the project (several engines, tools and platforms at once) |
 | `--audit` | whole-folder report: broken references + orphaned textures |
 | `--version` | print the version |
 | `--list-presets` | print the ten hardware targets and their budgets, then exit |

@@ -1,5 +1,18 @@
 # Unreleased (on `main`)
 
+* **Wizard asks about the new checks; Switch, VR and mid-range presets
+  (11 Nov).** A seventh question picks extra checks (LODs, Unreal collision,
+  skeleton limits, lightmap UVs; none by default) and writes their tables:
+  collision only as a comment unless Unreal is chosen, 75 bones per material
+  for mobile and VR with a per-platform `[platforms.<name>.skeleton]` block.
+  `--preset`/the admin page gain `switch`, `vr` (from Meta's Quest guidance:
+  750k-1M triangles and 80-200 draw calls a frame) and `midrange` (PS4 / Xbox
+  One generation), which the wizard now uses instead of borrowing `ps3`,
+  `mobile` and the defaults. `[platforms.<name>]` and `[tags.<name>]` can set
+  `[lod] min_levels`/`max_ratio` and `[collision] max_hulls`/
+  `max_hull_vertices` (a folder of small props: `[tags.props.lod] min_levels
+  = 1`). The docs' `[platforms.ps2.mesh] allow_degenerate` example, which
+  the parser refuses, is replaced.
 * **A rules wizard for projects that use several tools.** `asset-gatekeeper
   <folder> --wizard` (or double-click `tools\rules_wizard.bat`) asks six
   questions - engines, art programs, platforms, kinds of asset, art style,

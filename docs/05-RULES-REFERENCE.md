@@ -146,13 +146,20 @@ max_bone_influences = 4
 max_uv_channels = 1
 
 [platforms.ps2.mesh]
-allow_degenerate = false
+max_mb = 2              # a nested table tightens a threshold
+
+[platforms.ps2.lod]
+min_levels = 2
 ```
 
 Allowed keys: `max_triangles`, `max_material_slots`, `max_texture_edge`,
 `max_bone_influences`, `max_uv_channels`, plus nested `[mesh]`/`[texture]`
-and `[skeleton]` (`max_bones`, `max_bones_per_section`, `max_depth`; see
-[\[skeleton\]](#skeleton)). `[tags.<name>]` takes the same nested tables.
+`[skeleton]` (`max_bones`, `max_bones_per_section`, `max_depth`; see
+[\[skeleton\]](#skeleton)), `[lod]` (`min_levels`, `max_ratio`) and
+`[collision]` (`max_hulls`, `max_hull_vertices`). `[tags.<name>]` takes the same
+nested tables, so a folder of small props can say `[tags.props.lod] min_levels = 1`.
+Switches (`[collision] require`, `[lightmap]`, `[skeleton] single_root`) stay
+project-wide.
 
 Two rules:
 

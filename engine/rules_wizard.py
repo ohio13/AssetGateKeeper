@@ -98,18 +98,17 @@ MIDRANGE_PROP_TRIANGLES = 8_000
 PLATFORMS: tuple[Platform, ...] = (
     Platform("pc", "High-end PC / current console", "pc",
              'the shipped "pc" target (8 GB+ VRAM, PBR with mip chains)', False, True),
-    Platform("midrange", "Mid-range PC / last-gen console", "",
-             "the gate's built-in default budget (50k suits indie characters); "
-             "the prop number is the [tags.prop] example in templates/rules.toml",
-             True, True),
-    Platform("switch", "Nintendo Switch-class handheld", "ps3",
-             'the shipped "ps3" target: there is no Switch table, and a Switch-class '
-             "handheld has about a PS3-generation budget", False, True),
+    Platform("midrange", "Mid-range PC / last-gen console", "midrange",
+             'the shipped "midrange" target (PS4 / Xbox One generation, PBR with mip chains)',
+             False, True),
+    Platform("switch", "Nintendo Switch-class handheld", "switch",
+             'the shipped "switch" target (4 GB shared memory, Tegra X1, ASTC textures)',
+             False, True),
     Platform("mobile", "Mobile (phones, tablets)", "mobile",
              'the shipped "mobile" target', True, True),
-    Platform("vr", "VR headset", "mobile",
-             'the shipped "mobile" target: a standalone headset is a phone chip that '
-             "draws every frame twice (for PC-only VR, choose high-end PC instead)",
+    Platform("vr", "VR headset", "vr",
+             'the shipped "vr" target: a standalone (Quest-class) headset draws every frame '
+             "twice at 72-90 Hz (for PC-only VR, choose high-end PC instead)",
              True, True),
     Platform("n64", "Retro / N64 style", "n64",
              'the shipped "n64" target (4 MB RDRAM, 4 KB texture memory)', True, False),
@@ -156,6 +155,16 @@ QUESTIONS: tuple[Question, ...] = (
         Choice("stylised", "Stylised", ("stylized", "handpainted")),
         Choice("lowpoly", "Low-poly / retro", ("retro", "low")),
     ), ("realistic",), False),
+    Question("checks", "Which extra checks should run? (each is off unless chosen)", (
+        Choice("lod", "LOD levels: how many, and how much each one saves", ("lods", "levels")),
+        Choice("collision", "Collision meshes: Unreal's UCX_/UBX_/USP_/UCP_ convention",
+               ("ucx", "collisions")),
+        Choice("skeleton", "Skeleton limits: one root bone, bones per material on mobile",
+               ("bones", "skeletons", "rig")),
+        Choice("lightmap", "Lightmap UVs: an unwrapped second UV set, no overlaps",
+               ("lightmaps", "uv2")),
+        Choice("none", "None of these", ("no", "off")),
+    ), ("none",), True),
     Question("broken_geometry", "Broken or degenerate geometry (zero-area triangles):", (
         Choice("block", "Block: the asset fails", ("fail", "strict")),
         Choice("warn", "Warn: the asset passes with a note", ("note", "lenient")),
@@ -352,6 +361,7 @@ def plan(answers: dict) -> dict:
         "tags": mesh_kinds if len(mesh_kinds) > 1 else [],
         "tags_active": len(platforms) == 1,
         "degenerate": answers["broken_geometry"][0],
+        "checks": [check for check in answers.get("checks", ("none",)) if check != "none"],
     }
 
 
@@ -387,6 +397,84 @@ def answers_json(answers: dict) -> str:
     return json.dumps({question.key: (list(answers[question.key]) if question.multi
                                       else answers[question.key][0])
                        for question in QUESTIONS}, separators=(", ", ": "))
+
+
+#: Bones one material section may use, by wizard platform (0 = no limit to
+#: budget). Unreal caps mobile at 75 and splits a larger section into extra
+#: draw calls; a standalone headset runs the mobile renderer.
+SECTION_BONES = {"mobile": 75, "vr": 75}
+
+
+def _extra_checks(p: dict, answers: dict) -> list[str]:
+    """The [lod], [collision], [skeleton] and [lightmap] tables the answers chose."""
+    checks, platforms = p["checks"], p["platforms"]
+    engines = answers["engines"]
+    out: list[str] = []
+    if not checks:
+        return out
+    add = out.append
+    add("# " + "-" * 75)
+    add("# Extra checks you chose (docs/05-RULES-REFERENCE.md explains every key)")
+    add("# " + "-" * 75)
+    if "lod" in checks:
+        retro_only = all(key == "n64" for key in platforms)
+        levels = 2 if retro_only else 3
+        add("")
+        add("[lod]")
+        out.extend(_wrap(f"At least {levels} levels, LOD0 included: an FBX LOD group, glTF "
+                         "MSFT_lod, or objects named _LOD0, _LOD1... An asset without LODs "
+                         "fails, saying so."))
+        add(f"min_levels = {levels}")
+        out.extend(_wrap("Each level keeps at most 60% of the triangles of the one above, so "
+                         "every level is worth its memory."))
+        add("max_ratio = 0.6")
+        out.extend(_wrap("Small props and UI meshes rarely need LODs: give their folder its own "
+                         "number, e.g. [tags.props.lod] min_levels = 1."))
+    if "collision" in checks:
+        add("")
+        if "unreal" in engines:
+            out.extend(_wrap("Unreal collision: a static mesh carries UCX_ (convex), UBX_ (box), "
+                             "USP_ (sphere) or UCP_ (capsule) meshes named after it "
+                             "(UCX_SM_Crate or UCX_SM_Crate_00). Skinned meshes are exempt; "
+                             "names that match no mesh and dented UCX_ hulls fail too."))
+            add("[collision]")
+            add("require = true")
+        else:
+            out.extend(_wrap("Collision meshes named UCX_/UBX_/USP_/UCP_ are Unreal's "
+                             "convention, and none of your engines reads them, so the table is "
+                             "written as a comment. Uncomment it if you use the convention."))
+            add("# [collision]")
+            add("# require = true")
+    if "skeleton" in checks:
+        add("")
+        add("[skeleton]")
+        if "unreal" in engines:
+            out.extend(_wrap('Unreal imports one root bone only ("Multiple roots are found in '
+                             'the bone hierarchy"): parent every bone under one root.'))
+            add("single_root = true")
+        limited = [key for key in platforms if SECTION_BONES.get(key)]
+        if limited:
+            labels = ", ".join(PLATFORM_BY_KEY[key].label for key in limited)
+            out.extend(_wrap(f"Bones weighting one material: at most {SECTION_BONES[limited[0]]} "
+                             f"on {labels}; Unreal splits a larger section into extra draw calls."
+                             + (" The [platforms.*.skeleton] blocks below set each platform's "
+                                "own number." if len(platforms) > 1 else "")))
+            add(f"max_bones_per_section = {SECTION_BONES[limited[0]]}")
+        add("# Optional: max_bones = 256 for the whole skeleton, max_depth for long chains.")
+    if "lightmap" in checks:
+        add("")
+        add("[lightmap]")
+        out.extend(_wrap("Static meshes need a second UV set unwrapped for baked lighting "
+                         "(UV channel 1 in Unreal, UV2 in Unity and Godot), inside 0-1. "
+                         "Skinned meshes are exempt. Unreal can generate one on import "
+                         "instead: delete this table if you rely on that."))
+        add("require = true")
+        add("uv_channel = 1")
+        out.extend(_wrap("Overlapping lightmap islands share baked light, so a shadow shows "
+                         "on both: none allowed (percent of covered texels)."))
+        add("max_overlap = 0")
+    add("")
+    return out
 
 
 def build_rules(answers: dict, folder: str = "<folder>", today: Optional[str] = None) -> str:
@@ -516,6 +604,10 @@ def build_rules(answers: dict, folder: str = "<folder>", today: Optional[str] = 
         add('texture_prefixes = ["UI_", "T_UI_"]')
     add("")
 
+    # - extra checks - #
+    for line in _extra_checks(p, answers):
+        add(line)
+
     # - platforms - #
     add("# " + "-" * 75)
     add("# Platforms: check against one with --platform <name>")
@@ -535,6 +627,12 @@ def build_rules(answers: dict, folder: str = "<folder>", today: Optional[str] = 
         add(f"max_texture_edge = {numbers_here['edge']}")
         add(f"max_bone_influences = {numbers_here['influences']}")
         add(f"max_uv_channels = {numbers_here['uv']}")
+        if "skeleton" in p["checks"] and multi:
+            per_section = SECTION_BONES.get(key, 0)
+            add(f"[platforms.{key}.skeleton]")
+            add(f"max_bones_per_section = {per_section}"
+                + ("   # Unreal's mobile limit" if per_section else
+                   "   # no per-material bone limit worth budgeting here"))
     add("")
 
     # - kinds of asset - #
