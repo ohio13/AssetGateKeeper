@@ -61,14 +61,19 @@ or `.mtl` that is not UTF-8 (a cp1252 material name from an older Windows export
 python -m pip install "trimesh>=4" "pillow>=10" charset-normalizer DracoPy
 ```
 
-## Path B - wheel into a virtual environment
+## Path B - from PyPI (or a wheel) into a virtual environment
 
 ```
 python -m venv C:\Tools\agk-venv
 C:\Tools\agk-venv\Scripts\activate
-pip install asset_gatekeeper-<version>-py3-none-any.whl
+pip install "asset-gatekeeper[full]"
 asset-gatekeeper --version
 ```
+
+Each tagged release is published to PyPI as `asset-gatekeeper`. Offline, or to
+pin an exact build, install the wheel from the
+[GitHub release](https://github.com/ohio13/AssetGateKeeper/releases) instead:
+`pip install asset_gatekeeper-<version>-py3-none-any.whl`.
 
 Optional extras, installed only if you need them:
 
