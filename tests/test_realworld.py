@@ -711,6 +711,18 @@ try:
             except polypaint.PolypaintError as exc:
                 _said = str(exc)
             expect(f"a {_edge} px bake texture is refused saying why ({_why})", _why in _said, _said)
+
+        def _out_of_memory(*_args, **_kwargs):
+            raise MemoryError("Unable to allocate 16.0 GiB")
+        _args = agk.build_parser().parse_args([str(paint / "SM_Ball_HP.obj"), "--bake-polypaint",
+                                               "--bake-texture", "65536"])
+        with patch.object(agk.polypaint_module(), "bake", _out_of_memory):
+            try:
+                _code = agk.run_bake_polypaint(paint / "SM_Ball_HP.obj", agk.Budget(), _args)
+            except MemoryError as exc:
+                _code = repr(exc)
+        expect("a bake that runs out of memory (--bake-texture 65536) exits 2 with advice, "
+               "not a traceback", _code == 2, _code)
         retro = WORK / "retro"
         retro.mkdir()
         (retro / "SM_Ball_HP.obj").write_text(text, encoding="utf-8")

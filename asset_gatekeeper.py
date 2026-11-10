@@ -6957,6 +6957,12 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
     except module.PolypaintError as exc:
         LOG.error("%s", exc)
         return 2
+    except MemoryError:
+        # --bake-texture 65536 asked numpy for 16 GB and ended in a traceback.
+        LOG.error("not enough memory to bake %s at %dx%d with %s triangles; use a smaller "
+                  "--bake-texture (2048 is the default; 8192 needs about 4 GB) or "
+                  "--bake-triangles", source.name, edge, edge, f"{settings['triangles']:,}")
+        return 2
     made = [Path(result["mesh"]), Path(result["texture"])]
     for key in ("normal", "face_texture", "face_normal"):
         if result.get(key):
