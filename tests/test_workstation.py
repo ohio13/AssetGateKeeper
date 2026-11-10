@@ -1962,6 +1962,41 @@ if _bake_ready():
     status, library = pp.json("/api/assets")
     expect("... beside the sculpt, which is kept",
            {row["filename"] for row in library["assets"]} >= {"SM_Ball_HP.obj", "SM_Ball_LP.glb"})
+    result = job.get("result") or {}
+    expect("... with a normal map by default (10 Nov 2026)",
+           result.get("normal_map") is True and result.get("colours") == 0, str(result)[:300])
+    for body, wording in (({"colours": 7}, "colours must be one of"),
+                          ({"preset": "ps9"}, "preset must be one of"),
+                          ({"normal_map": "yes"}, "normal_map must be true or false"),
+                          ({"shiny": True}, "unknown field")):
+        status, refused = pp.json(f"/api/assets/{made['id']}/bake-polypaint", method="POST",
+                                  body=body)
+        expect(f"a bad bake request is refused in words: {body}",
+               status == 400 and wording in refused.get("error", ""), str(refused)[:160])
+    status, queued = pp.json(f"/api/assets/{made['id']}/bake-polypaint", method="POST",
+                             body={"preset": "n64"})
+    job = queued["job"]
+    deadline = time.time() + 120
+    while job["state"] in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.3)
+        job = pp.json(f"/api/jobs/{job['id']}")[1]
+    result = job.get("result") or {}
+    retro = result.get("asset") or {}
+    expect("the N64 preset bakes ~1,200 tris, 64 px, 16 colours, no normal map",
+           job["state"] == "done" and 0 < retro.get("triangle_count", 0) <= 1200
+           and result.get("texture_size") == 64 and result.get("colours") == 16
+           and result.get("normal_map") is False and result.get("preset") == "n64",
+           str(job)[:400])
+    status, queued = pp.json(f"/api/assets/{made['id']}/bake-polypaint", method="POST",
+                             body={"triangles": 300, "texture": 128, "normal_map": False})
+    job = queued["job"]
+    deadline = time.time() + 120
+    while job["state"] in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.3)
+        job = pp.json(f"/api/jobs/{job['id']}")[1]
+    expect("... and the normal map can be switched off",
+           job["state"] == "done" and (job.get("result") or {}).get("normal_map") is False,
+           str(job)[:300])
 else:
     print("  skip baking: pip install fast-simplification xatlas scipy")
 pp_server.shutdown()

@@ -5,6 +5,33 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **Polypaint bake, second pass (10 Nov).** The first bake of the 1.08 M
+  triangle test sculpt at 15,000 triangles was "pretty good, needs fine tuning
+  around the face": eyebrows came out as hollow outlines and the eyeliner
+  wings were missing, because each texel took the average colour of the four
+  nearest sculpt vertices, and the eyebrows and eyeliner are separate shells
+  floating just above the skin. Now:
+  * Colour comes from the sculpt's surface, not its vertices: the sculpt's own
+    triangles are drawn into the texture, the outermost one wins (as a ray from
+    a cage outside the model would see it), and colours are blended across each
+    triangle. Every texel is sampled 4 times at 2048 px, 16 at 256-512 px and 64
+    at 64-128 px, so small textures are an average of the surface, not a guess.
+    Islands are packed to the exact texture size with a few texels of gap, and
+    the empty background takes the nearest island's colour (no black seams).
+    From 512 px up, the face and other fine colour detail get up to twice the
+    texels along each side.
+  * A tangent-space **normal map** (`T_<name>_Normal.png`, also inside the
+    `.glb`): glTF/OpenGL convention, green up, with MikkTSpace-style tangents
+    written into the file. On by default; `--bake-no-normal` or the **Normal
+    map** box on the review page turns it off.
+  * **`--bake-preset n64`** (and **N64 style** on the review page): about 1,200
+    triangles, a 64 px texture in 16 colours (a 4-bit palette texture fits the
+    N64's 4 KB texture memory), no normal map, nearest-texel filtering - and
+    never more than the folder's `rules.toml` allows. `--bake-colours 16|256`
+    reduces any bake's colours on its own.
+  * The bake writes its own `.glb` (one mesh, one material, metallic 0,
+    roughness 0.8); the test sculpt bakes at 15,000 triangles in about 35-50 s
+    and under 2 GB of memory, the N64 preset in about 15-25 s.
 * **First outside test (9 Nov).** A fresh download from GitHub, used on a real
   90 MB ZBrush sculpt (1,082,096 triangles):
   * The review screen refused any file over 64 MB with "body must be at most

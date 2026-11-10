@@ -51,8 +51,9 @@ Naming is yours to define: pick one or more ready-made conventions (`unreal`, `u
 
 Sculpts are covered too: an `.obj` whose colour is ZBrush Polypaint is flagged
 (most programs show it grey), and `asset-gatekeeper <file.obj> --bake-polypaint`
-turns it into a game asset: a reduced `.glb` with UVs and a baked BaseColor
-texture, sized to your budget.
+turns it into a game asset: a reduced `.glb` with UVs, a baked BaseColor
+texture and a normal map, sized to your budget. `--bake-preset n64` makes a
+Nintendo 64 style one instead (about 1,200 triangles, 64 px, 16 colours).
 
 ## Where it runs
 

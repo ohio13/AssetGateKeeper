@@ -5298,33 +5298,60 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
     if not source.is_file() or source.suffix.lower() != ".obj":
         LOG.error("--bake-polypaint takes one .obj file with ZBrush Polypaint or vertex colours")
         return 2
-    triangles, edge = bake_defaults(budget)
-    # The defaults follow the folder's rules, so a strict rules.toml makes a tiny
-    # asset; say so, with the flag that overrides it.
-    if not args.bake_texture and edge < 512:
-        LOG.warning("the texture budget here is %d px, so the baked texture will be %dx%d; "
-                    "use --bake-texture 2048 for more detail", edge, edge, edge)
-    if not args.bake_triangles and triangles < 5000:
-        LOG.warning("the triangle budget here is %s, so the baked mesh will have %s triangles; "
-                    "use --bake-triangles 30000 for more", f"{triangles:,}", f"{triangles:,}")
-    triangles = args.bake_triangles or triangles
-    edge = args.bake_texture or edge
     module = polypaint_module()
-    LOG.info("bake    %s -> %d triangles, %dx%d BaseColor", source.name, triangles, edge, edge)
+    preset = getattr(args, "bake_preset", None) or ""
+    triangles, edge = bake_defaults(budget)
+    if preset:
+        # A preset sets everything, within the folder's rules: n64 under a
+        # 1,200-triangle, 64 px rules.toml is exactly that.
+        try:
+            settings = module.resolve_settings(
+                preset, args.bake_triangles or 0, args.bake_texture or 0,
+                getattr(args, "bake_normal", None), getattr(args, "bake_colours", None),
+                max_triangles=budget.max_triangles, max_texture=budget.max_texture_edge)
+        except module.PolypaintError as exc:
+            LOG.error("%s", exc)
+            return 2
+    else:
+        # The defaults follow the folder's rules, so a strict rules.toml makes a
+        # tiny asset; say so, with the flag that overrides it.
+        if not args.bake_texture and edge < 512:
+            LOG.warning("the texture budget here is %d px, so the baked texture will be %dx%d; "
+                        "use --bake-texture 2048 for more detail, or --bake-preset n64 for a "
+                        "retro asset (16 colours, no normal map)", edge, edge, edge)
+        if not args.bake_triangles and triangles < 5000:
+            LOG.warning("the triangle budget here is %s, so the baked mesh will have %s triangles; "
+                        "use --bake-triangles 30000 for more", f"{triangles:,}", f"{triangles:,}")
+        normal = getattr(args, "bake_normal", None)
+        settings = {"preset": "", "triangles": args.bake_triangles or triangles,
+                    "texture": args.bake_texture or edge,
+                    "normal_map": True if normal is None else normal,
+                    "colours": getattr(args, "bake_colours", None) or 0}
+    edge = settings["texture"]
+    LOG.info("bake    %s -> %s triangles, %dx%d BaseColor%s%s%s", source.name,
+             f"{settings['triangles']:,}", edge, edge,
+             " + Normal" if settings["normal_map"] else "",
+             f" in {settings['colours']} colours" if settings["colours"] else "",
+             f" (preset {preset})" if preset else "")
     try:
-        result = module.bake(source, source.parent, triangles=triangles, texture=edge,
+        result = module.bake(source, source.parent, triangles=settings["triangles"],
+                             texture=edge, normal_map=settings["normal_map"],
+                             colours=settings["colours"], preset=preset,
                              progress=lambda name, i, n: LOG.info("bake    %d/%d %s", i + 1, n, name))
     except module.PolypaintError as exc:
         LOG.error("%s", exc)
         return 2
-    LOG.info("bake    wrote %s and %s in %s s (%s)", Path(result["mesh"]).name,
-             Path(result["texture"]).name, result["seconds"], result["note"])
+    made = [Path(result["mesh"]), Path(result["texture"])]
+    if result.get("normal"):
+        made.append(Path(result["normal"]))
+    LOG.info("bake    wrote %s in %s s (%s)", ", ".join(path.name for path in made),
+             result["seconds"], result["note"])
     gatekeeper = Gatekeeper(budget)
     reporter = Reporter(color=not getattr(args, "no_color", False), root=source.parent,
                         json_mode=bool(getattr(args, "json", False)))
     failed = 0
-    for made in (Path(result["mesh"]), Path(result["texture"])):
-        verdict = gatekeeper.check(made)
+    for path in made:
+        verdict = gatekeeper.check(path)
         reporter.report(verdict)
         failed += 0 if verdict.passed else 1
     return 1 if failed else 0
@@ -6078,8 +6105,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="check this machine can run the gate (deps, rules, ports), then exit")
     parser.add_argument("--bake-polypaint", action="store_true", dest="bake_polypaint",
                         help="turn an .obj with ZBrush Polypaint (or vertex colours) into a game "
-                             "asset beside it: a reduced .glb with UVs and a baked _BaseColor "
-                             "texture, sized to the folder's rules, then check it. The source "
+                             "asset beside it: a reduced .glb with UVs, a baked _BaseColor "
+                             "texture and a _Normal map, sized to the folder's rules, then "
+                             "check them. The source "
                              "is never changed. Needs: pip install \"asset-gatekeeper[bake]\"")
     parser.add_argument("--bake-triangles", type=int, default=None, metavar="N",
                         help="with --bake-polypaint: triangles to reduce to (default: the "
@@ -6087,6 +6115,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bake-texture", type=int, default=None, metavar="PX",
                         help="with --bake-polypaint: texture size, a power of two (default: "
                              "the texture budget, at most 2048)")
+    parser.add_argument("--bake-preset", default=None, metavar="NAME", choices=("n64",),
+                        help="with --bake-polypaint: n64 = Nintendo 64 style: about 1,200 "
+                             "triangles, a 64 px texture in 16 colours, no normal map "
+                             "(never more than the folder's rules allow)")
+    parser.add_argument("--bake-no-normal", action="store_false", dest="bake_normal",
+                        default=None,
+                        help="with --bake-polypaint: do not bake a normal map (one is made "
+                             "by default, except with --bake-preset n64)")
+    parser.add_argument("--bake-colours", type=int, default=None, metavar="N",
+                        help="with --bake-polypaint: reduce the BaseColor to N colours "
+                             "(16 or 256 like the N64's palette textures; 0 keeps them all)")
     parser.add_argument("--suggest-naming", action="store_true", dest="suggest_naming",
                         help="read the names in <folder> and print a [naming] block for "
                              "rules.toml that fits them, then exit (nothing is written)")

@@ -569,6 +569,169 @@ try:
                len(made.faces) <= 600 and getattr(made.visual, "uv", None) is not None,
                str(len(made.faces)))
         expect("the source is never changed", (paint / "SM_Ball_HP.obj").read_text(encoding="utf-8") == text)
+
+        # 10 Nov 2026: closest-surface sampling, a normal map, an N64 preset.
+        def read_glb_parts(path):
+            """(json document, {accessor index: numpy array}, [image bytes]) of a .glb."""
+            data = path.read_bytes()
+            json_length = int.from_bytes(data[12:16], "little")
+            document = json.loads(data[20:20 + json_length])
+            binary = data[28 + json_length:]
+            kinds = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4}
+            types = {5126: _np.float32, 5123: _np.uint16, 5125: _np.uint32}
+            arrays = {}
+            for index, accessor in enumerate(document["accessors"]):
+                view = document["bufferViews"][accessor["bufferView"]]
+                width = kinds[accessor["type"]]
+                values = _np.frombuffer(binary, types[accessor["componentType"]],
+                                        count=accessor["count"] * width,
+                                        offset=view.get("byteOffset", 0))
+                arrays[index] = values.reshape(accessor["count"], width) if width > 1 else values
+            images = []
+            for image in document.get("images", []):
+                view = document["bufferViews"][image["bufferView"]]
+                start = view.get("byteOffset", 0)
+                images.append(binary[start:start + view["byteLength"]])
+            return document, arrays, images
+
+        def dome_sculpt(cells=90):
+            """A 2 x 2 sheet with a smooth dome in the middle, coloured by position:
+            the 'sculpt' whose colour and shape a bake must reproduce."""
+            lines, faces = ["# File exported by ZBrush version 2022"], []
+            groups = []
+            for i in range(cells + 1):
+                for j in range(cells + 1):
+                    x, z = -1 + 2 * j / cells, -1 + 2 * i / cells
+                    r2 = (x * x + z * z) / 0.36
+                    y = 0.25 * (1 - r2) ** 2 if r2 < 1 else 0.0
+                    lines.append(f"v {x:.6f} {y:.6f} {z:.6f}")
+                    red, green = int(60 + 150 * (x + 1) / 2), int(60 + 150 * (z + 1) / 2)
+                    groups.append(f"ff{red:02x}{green:02x}80")
+            for start in range(0, len(groups), 64):
+                lines.append("#MRGB " + "".join(groups[start:start + 64]))
+            for i in range(cells):
+                for j in range(cells):
+                    a = i * (cells + 1) + j
+                    b, c, d = a + 1, a + cells + 1, a + cells + 2
+                    faces += [(a, c, b), (b, c, d)]       # normals face +y
+            lines += [f"f {a + 1} {b + 1} {c + 1}" for a, b, c in faces]
+            return "\n".join(lines) + "\n"
+
+        def dome_normal(x, z):
+            r2 = (x * x + z * z) / 0.36
+            inside = r2 < 1
+            slope = _np.where(inside, 0.25 * 2 * (1 - r2) * (-2 / 0.36), 0.0)
+            n = _np.stack([-slope * x, _np.ones_like(x), -slope * z], axis=1)
+            return n / _np.linalg.norm(n, axis=1, keepdims=True)
+
+        dome = WORK / "dome"
+        dome.mkdir()
+        (dome / "SM_Dome_HP.obj").write_text(dome_sculpt(), encoding="utf-8")
+        done = run_gate(dome / "SM_Dome_HP.obj", "--bake-polypaint", "--bake-triangles", "120",
+                        "--bake-texture", "512")
+        expect("the bake writes a normal map beside the BaseColor, and both pass the gate",
+               done.returncode == 0 and "PASSED  T_Dome_LP_Normal.png" in done.stdout
+               and "PASSED  T_Dome_LP_BaseColor.png" in done.stdout
+               and "PASSED  SM_Dome_LP.glb" in done.stdout, done.stdout[-700:] + done.stderr[-300:])
+        document, arrays, images = read_glb_parts(dome / "SM_Dome_LP.glb")
+        material = document["materials"][0]
+        attributes = document["meshes"][0]["primitives"][0]["attributes"]
+        expect("... and the .glb carries it: normalTexture, TANGENT, metallic 0",
+               "normalTexture" in material and "TANGENT" in attributes and len(images) == 2
+               and material["pbrMetallicRoughness"]["metallicFactor"] == 0.0, str(material))
+        # Decode the normal map the way a glTF viewer does (B = cross(N, T) * w,
+        # green up) at points across the reduced mesh, and compare with the
+        # dome's true normal there. Flipping green must do clearly worse.
+        primitive = document["meshes"][0]["primitives"][0]
+        positions = arrays[attributes["POSITION"]].astype(float)
+        normals = arrays[attributes["NORMAL"]].astype(float)
+        tangents = arrays[attributes["TANGENT"]].astype(float)
+        uvs = arrays[attributes["TEXCOORD_0"]].astype(float)
+        triangles = arrays[primitive["indices"]].reshape(-1, 3).astype(int)
+        normal_map = _np.asarray(_Image.open(io.BytesIO(images[1])).convert("RGB"), float) / 255
+        base_map = _np.asarray(_Image.open(io.BytesIO(images[0])).convert("RGB"), float) / 255
+        rng = _np.random.default_rng(7)
+        picks = rng.integers(0, len(triangles), 4000)
+        weights = rng.dirichlet((2, 2, 2), 4000)
+        corners = triangles[picks]
+
+        def blend(values):
+            return _np.einsum("nk,nkc->nc", weights, values[corners])
+        point, uv = blend(positions), blend(uvs)
+        n, t4 = blend(normals), blend(tangents)
+        n /= _np.linalg.norm(n, axis=1, keepdims=True)
+        t = t4[:, :3]
+        handed = _np.where(t4[:, 3] < 0, -1.0, 1.0)[:, None]
+        size = normal_map.shape[0]
+        rows = _np.clip((uv[:, 1] * size).astype(int), 0, size - 1)     # glTF: v down
+        cols = _np.clip((uv[:, 0] * size).astype(int), 0, size - 1)
+        texel = normal_map[rows, cols] * 2 - 1
+        truth = dome_normal(point[:, 0], point[:, 2])
+
+        def error(green):
+            world = (texel[:, :1] * t + green * texel[:, 1:2] * _np.cross(n, t) * handed
+                     + texel[:, 2:3] * n)
+            world /= _np.linalg.norm(world, axis=1, keepdims=True)
+            return float(_np.degrees(_np.arccos(_np.clip((world * truth).sum(1), -1, 1))).mean())
+        plain = float(_np.degrees(_np.arccos(_np.clip((n * truth).sum(1), -1, 1))).mean())
+        right, flipped = error(1.0), error(-1.0)
+        expect("the normal map gives back the sculpt's shape (glTF/OpenGL, green up)",
+               right < 2.0 and right < plain * 0.6 and flipped > right * 2,
+               f"mapped {right:.2f} deg, mesh alone {plain:.2f}, green flipped {flipped:.2f}")
+        expected = _np.stack([(60 + 150 * (point[:, 0] + 1) / 2) / 255,
+                              (60 + 150 * (point[:, 2] + 1) / 2) / 255,
+                              _np.full(len(point), 128 / 255)], axis=1)
+        colour_error = float(_np.abs(base_map[rows, cols] - expected).mean())
+        expect("the colours are the sculpt's at each point (blended across its triangle)",
+               colour_error < 0.03, f"mean error {colour_error:.4f}")
+
+        sys.path.insert(0, str(ROOT / "engine"))
+        settings = polypaint.resolve_settings("n64", max_triangles=400, max_texture=32)
+        expect("the n64 preset: ~1,200 tris, 64 px, 16 colours, no normal map - within the rules",
+               polypaint.resolve_settings("n64") == {"preset": "n64", "triangles": 1200,
+                                                     "texture": 64, "normal_map": False,
+                                                     "colours": 16}
+               and settings["triangles"] == 400 and settings["texture"] == 32,
+               str(settings))
+        expect("... and anything given explicitly wins",
+               polypaint.resolve_settings("n64", texture=128, colours=0)["texture"] == 128
+               and polypaint.resolve_settings("n64", colours=0)["colours"] == 0)
+        try:
+            polypaint.resolve_settings("ps9")
+            refused = False
+        except polypaint.PolypaintError:
+            refused = True
+        expect("an unknown preset is refused", refused)
+        retro = WORK / "retro"
+        retro.mkdir()
+        (retro / "SM_Ball_HP.obj").write_text(text, encoding="utf-8")
+        (retro / "rules.toml").write_text("[mesh]\nmax_triangles = 1200\nmax_material_slots = 2\n"
+                                          "[texture]\nmax_edge = 64\npower_of_two = true\n"
+                                          "pbr = false\n", encoding="utf-8")
+        done = run_gate(retro / "SM_Ball_HP.obj", "--bake-polypaint", "--bake-preset", "n64")
+        expect("--bake-preset n64 under N64 rules passes them, with no normal map",
+               done.returncode == 0 and "PASSED  SM_Ball_LP.glb" in done.stdout
+               and "PASSED  T_Ball_LP_BaseColor.png" in done.stdout
+               and not (retro / "T_Ball_LP_Normal.png").exists()
+               and "the texture budget here" not in done.stdout + done.stderr,
+               done.stdout[-600:] + done.stderr[-300:])
+        palette = _Image.open(retro / "T_Ball_LP_BaseColor.png")
+        made = _trimesh.load(retro / "SM_Ball_LP.glb", force="mesh")
+        document, _, images = read_glb_parts(retro / "SM_Ball_LP.glb")
+        expect("... 64x64 in at most 16 colours, at most 1,200 triangles, nearest filtering",
+               palette.size == (64, 64) and len(palette.convert("RGB").getcolors(4096)) <= 16
+               and len(made.faces) <= 1200 and len(images) == 1
+               and "normalTexture" not in document["materials"][0]
+               and document["samplers"][0]["magFilter"] == 9728,
+               f"{palette.size} {len(made.faces)} {document['samplers']}")
+        done = run_gate(paint / "SM_Ball_HP.obj", "--bake-polypaint", "--bake-triangles", "600",
+                        "--bake-texture", "256", "--bake-no-normal", "--bake-colours", "16")
+        expect("--bake-no-normal and --bake-colours 16 do what they say",
+               done.returncode == 0 and len(_Image.open(paint / "T_Ball_LP_BaseColor.png")
+                                            .convert("RGB").getcolors(4096)) <= 16
+               and "BaseColor in 16 colours" in done.stdout + done.stderr
+               and "+ Normal" not in done.stdout + done.stderr,
+               done.stdout[-500:] + done.stderr[-300:])
     else:
         print("  skip baking: pip install fast-simplification xatlas scipy")
 finally:

@@ -197,17 +197,36 @@
     <div class="field" id="bake-tools" hidden>
       <label for="bake-run">Polypaint</label>
       <div class="sub">This sculpt's colour is stored per vertex. Bake it into a game asset:
-        a reduced .glb with UVs and a BaseColor texture, added to the library.</div>
+        a reduced .glb with UVs, a BaseColor texture and a normal map, added to the library.</div>
       <div class="row">
+        <select id="bake-preset" title="What the game asset is for">
+          <option value="" selected>Game asset</option>
+          <option value="n64">N64 style</option>
+        </select>
         <select id="bake-triangles" title="Triangles in the game asset">
+          <option value="1200">1,200 tris</option>
+          <option value="5000">5,000 tris</option>
           <option value="15000">15,000 tris</option>
           <option value="30000" selected>30,000 tris</option>
           <option value="50000">50,000 tris</option>
         </select>
-        <select id="bake-texture" title="BaseColor texture size">
+        <select id="bake-texture" title="Texture size">
+          <option value="64">64 px</option>
+          <option value="128">128 px</option>
+          <option value="256">256 px</option>
+          <option value="512">512 px</option>
           <option value="1024">1024 px</option>
           <option value="2048" selected>2048 px</option>
           <option value="4096">4096 px</option>
+        </select>
+      </div>
+      <div class="row">
+        <label class="check" title="Bakes the sculpt's surface detail into a _Normal map (glTF/OpenGL, green up). The N64 had no normal maps.">
+          <input type="checkbox" id="bake-normal" checked> Normal map</label>
+        <select id="bake-colours" title="Colours in the BaseColor texture (the N64 used 16- and 256-colour palette textures)">
+          <option value="0" selected>All colours</option>
+          <option value="256">256 colours</option>
+          <option value="16">16 colours</option>
         </select>
       </div>
       <button id="bake-run" class="chip" type="button">Bake into a game asset</button>

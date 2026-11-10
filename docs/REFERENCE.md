@@ -916,8 +916,11 @@ python asset_gatekeeper.py [folder] [options]
 | `--no-color` | Disable ANSI colour |
 | `--doctor` | Check this machine can run the gate (python, trimesh, Pillow, watchdog, rules, ports), then exit |
 | `--suggest-naming` | Read the texture and mesh names in `<folder>` and print a `[naming]` block for `rules.toml` that fits them; writes nothing |
-| `--bake-polypaint` | With one `.obj` whose colour is ZBrush Polypaint or vertex colours: write a game asset beside it (a reduced `.glb` with UVs and a baked `_BaseColor` texture) sized to the rules, then check it. Needs `pip install "asset-gatekeeper[bake]"` |
+| `--bake-polypaint` | With one `.obj` whose colour is ZBrush Polypaint or vertex colours: write a game asset beside it (a reduced `.glb` with UVs, a baked `_BaseColor` texture and a tangent-space `_Normal` map, both also inside the `.glb`) sized to the rules, then check them. Each texel is sampled several times on the sculpt's surface; detail that floats above it (eyebrows, eyeliner) is caught, as a cage bake would. Needs `pip install "asset-gatekeeper[bake]"` |
 | `--bake-triangles N` · `--bake-texture PX` | With `--bake-polypaint`: the triangle count and texture size (default: the budget, at most 30,000 and 2048) |
+| `--bake-preset n64` | With `--bake-polypaint`: Nintendo 64 style - about 1,200 triangles, a 64 px texture in 16 colours (a 4-bit palette texture fits the N64's 4 KB texture memory), no normal map, nearest-texel filtering; never more than the folder's rules allow. `--bake-triangles`, `--bake-texture`, `--bake-colours` still override it |
+| `--bake-no-normal` | With `--bake-polypaint`: skip the normal map (it is made by default; glTF/OpenGL convention, green up, MikkTSpace-style tangents written into the `.glb`) |
+| `--bake-colours N` | With `--bake-polypaint`: reduce the BaseColor to N colours (`16` or `256` like the N64's palette textures, `0` keeps them all) |
 | `--list-presets` | Print the shipped platform targets and their budgets, then exit |
 | `--init` | Interactive setup: create the watch folder and its `rules.toml` |
 | `--yes` | With `--init`: accept every default instead of prompting |

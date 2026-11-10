@@ -958,7 +958,22 @@ function renderLodList() {
 }
 
 /* Polypaint (9 Nov 2026): a ZBrush .obj whose colour is per vertex can be baked
- * into a game asset - a reduced .glb with UVs and a BaseColor texture. */
+ * into a game asset - a reduced .glb with UVs, a BaseColor texture and (10 Nov)
+ * a normal map. "N64 style" fills in ~1,200 tris, 64 px, 16 colours, no normal
+ * map; any of them can still be changed before baking. */
+const BAKE_PRESETS = {
+  "": { triangles: "30000", texture: "2048", normal: true, colours: "0" },
+  n64: { triangles: "1200", texture: "64", normal: false, colours: "16" },
+};
+
+function applyBakePreset() {
+  const chosen = BAKE_PRESETS[$("bake-preset").value] || BAKE_PRESETS[""];
+  $("bake-triangles").value = chosen.triangles;
+  $("bake-texture").value = chosen.texture;
+  $("bake-normal").checked = chosen.normal;
+  $("bake-colours").value = chosen.colours;
+}
+
 async function bakePolypaint() {
   const asset = state.asset;
   if (!asset) return;
@@ -969,7 +984,10 @@ async function bakePolypaint() {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ triangles: Number($("bake-triangles").value),
-                             texture: Number($("bake-texture").value) }),
+                             texture: Number($("bake-texture").value),
+                             normal_map: $("bake-normal").checked,
+                             colours: Number($("bake-colours").value),
+                             preset: $("bake-preset").value }),
     });
     let job = (await response.json()).job;
     while (job.state === "queued" || job.state === "running") {
@@ -984,7 +1002,9 @@ async function bakePolypaint() {
     await refreshAssets().catch(() => {});
     if (made.id) await selectAsset(made.id);
     setStatus(`${made.filename || "game asset"}: ${fmt(result.triangles || 0)} tris from `
-      + `${fmt(result.source_triangles || 0)}, ${result.texture_size}px BaseColor, `
+      + `${fmt(result.source_triangles || 0)}, ${result.texture_size}px `
+      + `${result.normal_map ? "BaseColor + Normal" : "BaseColor"}`
+      + `${result.colours ? ` in ${result.colours} colours` : ""}, `
       + `${result.seconds} s - ${result.note || ""}`);
     $("bake-progress").textContent = "";
   } catch (error) {
@@ -1676,6 +1696,7 @@ async function uploadFiles(files) {
 
 $("lod-generate").addEventListener("click", () => { generateLods(); });
 $("bake-run").addEventListener("click", () => { bakePolypaint(); });
+$("bake-preset").addEventListener("change", applyBakePreset);
 $("asset-delete").addEventListener("click", () => { deleteSelected(); });
 $("lod-upload").addEventListener("change", async (event) => {
   const file = event.target.files && event.target.files[0];

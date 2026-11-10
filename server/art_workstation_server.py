@@ -739,9 +739,12 @@ def preview_of(data_dir: Path, asset: dict) -> dict:
 
 
 def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
-                         triangles: int = 0, texture: int = 0, progress=None) -> dict:
+                         triangles: int = 0, texture: int = 0, progress=None,
+                         normal_map: bool | None = None, colours: int | None = None,
+                         preset: str = "") -> dict:
     """Make a game asset from an .obj with Polypaint: a new library asset holding
-    a reduced .glb with UVs and the colours baked into its BaseColor texture."""
+    a reduced .glb with UVs, the colours baked into its BaseColor texture and
+    (unless switched off, or with the n64 preset) a normal map."""
     asset = get_asset(db_path, asset_id)
     stored = resolve_inside(Path(data_dir), asset["file_path"])
     if stored is None or not stored.is_file() or stored.suffix.lower() != ".obj":
@@ -750,24 +753,31 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
     if not agk.obj_colour_source(stored):
         raise WorkstationError(f"{asset['filename']} has no Polypaint or vertex colours to bake",
                                400)
+    try:
+        settings = polypaint.resolve_settings(preset, triangles, texture, normal_map, colours)
+    except polypaint.PolypaintError as exc:
+        raise WorkstationError(str(exc), 400) from exc
     with tempfile.TemporaryDirectory(prefix="agk_bake_") as scratch:
         try:
-            result = polypaint.bake(stored, Path(scratch),
-                                    triangles=triangles or polypaint.DEFAULT_TRIANGLES,
-                                    texture=texture or polypaint.DEFAULT_TEXTURE,
+            result = polypaint.bake(stored, Path(scratch), triangles=settings["triangles"],
+                                    texture=settings["texture"],
+                                    normal_map=settings["normal_map"],
+                                    colours=settings["colours"], preset=settings["preset"],
                                     progress=progress)
         except polypaint.PolypaintError as exc:
             raise WorkstationError(str(exc), 400) from exc
         made = Path(result["mesh"])
         payload = made.read_bytes()
     # The library name follows the source: SM_Hero_HP_03.obj -> SM_Hero_LP_03.glb.
+    # The textures travel inside it.
     created = create_asset(db_path, data_dir, made.name, payload,
                            uploader="polypaint bake", new_asset=True,
                            provenance={"source": "polypaint bake"})
     return {"asset": created, "triangles": result["triangles"],
             "source_triangles": result["source_triangles"],
             "texture_size": result["texture_size"], "seconds": result["seconds"],
-            "note": result["note"]}
+            "normal_map": bool(result["normal"]), "colours": result["colours"],
+            "preset": result["preset"], "note": result["note"]}
 
 
 def asset_files(data_dir: Path, asset: dict) -> list[str]:
@@ -3220,10 +3230,31 @@ class Handler(BaseHTTPRequestHandler):
                 payload = self._json_body()
                 if payload is None:
                     return
+                unknown = sorted(set(payload) - {"triangles", "texture", "normal_map",
+                                                 "colours", "preset"})
+                if unknown:
+                    raise WorkstationError(
+                        f"unknown field(s) {', '.join(unknown)}; expected triangles, texture, "
+                        "normal_map, colours and/or preset", 400)
                 triangles, texture = payload.get("triangles", 0), payload.get("texture", 0)
                 for value, what in ((triangles, "triangles"), (texture, "texture")):
                     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
                         raise WorkstationError(f"{what} must be a positive whole number", 400)
+                normal_map = payload.get("normal_map")
+                if normal_map is not None and not isinstance(normal_map, bool):
+                    raise WorkstationError("normal_map must be true or false", 400)
+                colours = payload.get("colours")
+                if colours is not None and (not isinstance(colours, int)
+                                            or isinstance(colours, bool)
+                                            or colours not in polypaint.COLOUR_CHOICES):
+                    raise WorkstationError(
+                        "colours must be one of "
+                        + ", ".join(str(n) for n in polypaint.COLOUR_CHOICES)
+                        + " (0 keeps every colour)", 400)
+                preset = payload.get("preset") or ""
+                if not isinstance(preset, str) or (preset and preset not in polypaint.PRESETS):
+                    raise WorkstationError(
+                        f"preset must be one of: {', '.join(polypaint.PRESETS)} (or empty)", 400)
                 asset_id = int(match.group(1))
                 bakeable = get_asset(server.db_path, asset_id)      # 404 before queueing
                 stored = resolve_inside(Path(server.data_dir), bakeable["file_path"])
@@ -3235,10 +3266,12 @@ class Handler(BaseHTTPRequestHandler):
                 db_path, data_dir = server.db_path, Path(server.data_dir)
                 publish = self._publish
 
-                def bake_work(progress, _asset=asset_id, _tris=triangles, _tex=texture):
+                def bake_work(progress, _asset=asset_id, _tris=triangles, _tex=texture,
+                              _normal=normal_map, _colours=colours, _preset=preset):
                     result = bake_polypaint_asset(
                         db_path, data_dir, _asset, _tris, _tex,
-                        progress=lambda name, i, n: progress(name, i, n))
+                        progress=lambda name, i, n: progress(name, i, n),
+                        normal_map=_normal, colours=_colours, preset=_preset)
                     publish("asset", result["asset"]["id"])
                     return result
                 job = server.jobs.submit(asset_id, bake_work, kind="bake")
