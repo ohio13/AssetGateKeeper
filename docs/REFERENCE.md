@@ -113,7 +113,9 @@ asset-gatekeeper --init
 ```
 
 `--init` writes a `rules.toml` with your answers, the three platform profiles, and
-healing explicitly off. `--yes` takes every default (safe for scripts), `--force`
+healing explicitly off. For a project that uses several engines, art programs or
+platforms, `asset-gatekeeper <folder> --wizard` asks about those instead and
+writes one commented file for all of them ([06](06-CLI-REFERENCE.md#the-rules-wizard)). `--yes` takes every default (safe for scripts), `--force`
 overwrites an existing file, and a prompt that hits EOF falls back to its default
 instead of hanging a CI job.
 
@@ -925,7 +927,9 @@ python asset_gatekeeper.py [folder] [options]
 | `--list-presets` | Print the shipped platform targets and their budgets, then exit |
 | `--init` | Interactive setup: create the watch folder and its `rules.toml` |
 | `--yes` | With `--init`: accept every default instead of prompting |
-| `--force` | With `--init`: overwrite an existing `rules.toml` |
+| `--force` | With `--init`: overwrite an existing `rules.toml`. With `--wizard`: replace it without asking (a copy is still kept) |
+| `--wizard` | The rules wizard: six questions (engines, art programs, platforms, kinds of asset, style, broken geometry; several answers each) and one commented `rules.toml` for all of them; asks before replacing one and keeps a copy. With `--yes`: every default. See [06 - CLI reference](06-CLI-REFERENCE.md#the-rules-wizard) |
+| `--wizard-answers FILE` | The `--wizard` answers from a JSON file, for scripts: `{"engines": ["unreal", "unity"], "platforms": ["pc", "switch"]}` |
 | `--version` | Print the version and exit (pipelines log this) |
 | `-v`, `--verbose` | Debug logging (including why a file was skipped) |
 
