@@ -687,10 +687,12 @@ try:
 
         sys.path.insert(0, str(ROOT / "engine"))
         settings = polypaint.resolve_settings("n64", max_triangles=400, max_texture=32)
-        expect("the n64 preset: ~1,200 tris, 64 px, 16 colours, no normal map - within the rules",
+        expect("the n64 preset: ~1,200 tris, 64 px, 16 colours, no normal map, a face "
+               "texture - within the rules",
                polypaint.resolve_settings("n64") == {"preset": "n64", "triangles": 1200,
                                                      "texture": 64, "normal_map": False,
-                                                     "colours": 16}
+                                                     "colours": 16, "face_texture": True,
+                                                     "face_texture_note": ""}
                and settings["triangles"] == 400 and settings["texture"] == 32,
                str(settings))
         expect("... and anything given explicitly wins",
@@ -732,6 +734,114 @@ try:
                and "BaseColor in 16 colours" in done.stdout + done.stderr
                and "+ Normal" not in done.stdout + done.stderr,
                done.stdout[-500:] + done.stderr[-300:])
+
+        # 10 Nov 2026: at 64 px the whole test figure shared one texture and her
+        # face got about 6 x 6 texels (eyes were dark blobs). The n64 preset now
+        # gives the face a 64 px texture of its own, as a second material.
+        def figure(rings=90, segments=180):
+            """A blue body and a skin head with two dark eyes and red lips, facing +z;
+            each part a UV sphere whose pole fans repeat one point (open edges to a
+            reducer, as a UV seam or separate pieces are)."""
+            import math
+            vertices, colours, faces = [], [], []
+
+            def sphere(cx, cy, cz, rx, ry, rz, paint):
+                base = len(vertices)
+                for i in range(rings + 1):
+                    theta = math.pi * i / rings
+                    for j in range(segments):
+                        phi = 2 * math.pi * j / segments
+                        x, y = math.sin(theta) * math.cos(phi), math.cos(theta)
+                        z = math.sin(theta) * math.sin(phi)
+                        vertices.append((cx + rx * x, cy + ry * y, cz + rz * z))
+                        colours.append(paint(x, y, z))
+                for i in range(rings):
+                    for j in range(segments):
+                        a = base + i * segments + j
+                        b = base + i * segments + (j + 1) % segments
+                        faces.extend([(a, a + segments, b), (b, a + segments, b + segments)])
+
+            def head(x, y, z):
+                if z > 0 and any((x - ex) ** 2 + (y - 0.15) ** 2 < 0.13 ** 2 for ex in (-0.35, 0.35)):
+                    return (20, 20, 25)
+                if z > 0 and abs(x) < 0.3 and abs(y + 0.4) < 0.07:
+                    return (200, 30, 40)
+                return (230, 200, 90) if y > 0.55 else (235, 190, 160)
+
+            sphere(0, 0.6, 0, 0.6, 0.45, 0.55, lambda x, y, z: (40, 70, 200))
+            sphere(0, -1.4, 0, 0.45, 1.2, 0.4, lambda x, y, z: (40, 70, 200))
+            sphere(0, 1.55, 0, 0.32, 0.4, 0.34, head)
+            lines = ["# File exported by ZBrush version 2022"]
+            lines += [f"v {x:.5f} {y:.5f} {z:.5f}" for x, y, z in vertices]
+            groups = [f"ff{r:02x}{g:02x}{b:02x}" for r, g, b in colours]
+            lines += ["#MRGB " + "".join(groups[k:k + 64]) for k in range(0, len(groups), 64)]
+            lines += [f"f {a + 1} {b + 1} {c + 1}" for a, b, c in faces]
+            return "\n".join(lines) + "\n"
+
+        hero = WORK / "hero"
+        hero.mkdir()
+        figure_text = figure()
+        (hero / "SM_Hero_HP.obj").write_text(figure_text, encoding="utf-8")
+        (hero / "rules.toml").write_text("[mesh]\nmax_triangles = 1200\nmax_material_slots = 2\n"
+                                         "[texture]\nmax_edge = 64\npower_of_two = true\n"
+                                         "pbr = false\n", encoding="utf-8")
+        done = run_gate(hero / "SM_Hero_HP.obj", "--bake-polypaint", "--bake-preset", "n64")
+        expect("n64: the face gets its own texture, and everything passes N64 rules",
+               done.returncode == 0 and "PASSED  SM_Hero_LP.glb" in done.stdout
+               and "PASSED  T_Hero_LP_BaseColor.png" in done.stdout
+               and "PASSED  T_Hero_LP_Face_BaseColor.png" in done.stdout
+               and "the face has its own 64x64 texture" in done.stdout + done.stderr,
+               done.stdout[-700:] + done.stderr[-300:])
+        document, _, images = read_glb_parts(hero / "SM_Hero_LP.glb")
+        primitives = document["meshes"][0]["primitives"]
+        made = _trimesh.load(hero / "SM_Hero_LP.glb", force="mesh")
+        expect("... one mesh, two materials, two embedded textures, at most 1,200 triangles",
+               len(primitives) == 2 and len(document["materials"]) == 2 and len(images) == 2
+               and {p["material"] for p in primitives} == {0, 1}
+               and document["materials"][1]["name"] == "T_Hero_LP_Face"
+               and len(made.faces) <= 1200,
+               f"{len(primitives)} {len(document['materials'])} {len(images)} {len(made.faces)}")
+        face_pixels = _np.asarray(_Image.open(hero / "T_Hero_LP_Face_BaseColor.png").convert("RGB"))
+        dark_face = int((face_pixels.max(axis=2) < 70).sum())
+        done = run_gate(hero / "SM_Hero_HP.obj", "--bake-polypaint", "--bake-preset", "n64",
+                        "--bake-no-face-texture")
+        one_pixels = _np.asarray(_Image.open(hero / "T_Hero_LP_BaseColor.png").convert("RGB"))
+        dark_one = int((one_pixels.max(axis=2) < 70).sum())
+        document, _, images = read_glb_parts(hero / "SM_Hero_LP.glb")
+        expect("--bake-no-face-texture: one material, one texture",
+               done.returncode == 0 and len(document["materials"]) == 1 and len(images) == 1,
+               done.stdout[-400:])
+        expect("... and the face texture left by the bake before is named as unused, not deleted",
+               (hero / "T_Hero_LP_Face_BaseColor.png").is_file()
+               and "T_Hero_LP_Face_BaseColor.png is from an earlier bake" in done.stdout + done.stderr,
+               done.stdout[-400:] + done.stderr[-300:])
+        expect("the eyes get at least 4x the texels with a face texture",
+               dark_face >= 4 * max(dark_one, 1), f"{dark_face} vs {dark_one}")
+        expect("the reducer meets the budget on a sculpt with repeated points (was 4,628 of 1,200)",
+               len(_trimesh.load(hero / "SM_Hero_LP.glb", force="mesh").faces) <= 1200)
+        (hero / "rules.toml").write_text("[mesh]\nmax_triangles = 1200\nmax_material_slots = 1\n"
+                                         "[texture]\nmax_edge = 64\npower_of_two = true\n"
+                                         "pbr = false\n", encoding="utf-8")
+        for stale in hero.glob("*_LP*"):
+            stale.unlink()
+        done = run_gate(hero / "SM_Hero_HP.obj", "--bake-polypaint", "--bake-preset", "n64")
+        expect("rules with one material slot: one texture, and the log says why",
+               done.returncode == 0 and not (hero / "T_Hero_LP_Face_BaseColor.png").exists()
+               and "allow 1 material slot" in done.stdout + done.stderr,
+               done.stdout[-500:] + done.stderr[-300:])
+        plain = WORK / "plain"
+        plain.mkdir()
+        (plain / "SM_Ball_HP.obj").write_text(text, encoding="utf-8")
+        done = run_gate(plain / "SM_Ball_HP.obj", "--bake-polypaint", "--bake-preset", "n64")
+        expect("a sculpt without colour detail keeps one texture, and says so",
+               done.returncode == 0 and not (plain / "T_Ball_LP_Face_BaseColor.png").exists()
+               and "too little colour detail" in done.stdout + done.stderr,
+               done.stdout[-400:] + done.stderr[-300:])
+        centre = polypaint._face_centre(*[getattr(polypaint.read_obj(hero / "SM_Hero_HP.obj"), k)
+                                          for k in ("vertices", "faces", "colours")])
+        expect("the face is found where the eyes and lips are (front of the head)",
+               centre is not None and 1.2 < centre[1] < 1.8 and centre[2] > 0.15
+               and abs(centre[0]) < 0.15, str(centre))
     else:
         print("  skip baking: pip install fast-simplification xatlas scipy")
 finally:

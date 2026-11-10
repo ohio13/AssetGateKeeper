@@ -5308,7 +5308,9 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
             settings = module.resolve_settings(
                 preset, args.bake_triangles or 0, args.bake_texture or 0,
                 getattr(args, "bake_normal", None), getattr(args, "bake_colours", None),
-                max_triangles=budget.max_triangles, max_texture=budget.max_texture_edge)
+                max_triangles=budget.max_triangles, max_texture=budget.max_texture_edge,
+                face_texture=getattr(args, "bake_face", None),
+                max_materials=budget.max_material_slots)
         except module.PolypaintError as exc:
             LOG.error("%s", exc)
             return 2
@@ -5323,29 +5325,44 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
             LOG.warning("the triangle budget here is %s, so the baked mesh will have %s triangles; "
                         "use --bake-triangles 30000 for more", f"{triangles:,}", f"{triangles:,}")
         normal = getattr(args, "bake_normal", None)
-        settings = {"preset": "", "triangles": args.bake_triangles or triangles,
-                    "texture": args.bake_texture or edge,
-                    "normal_map": True if normal is None else normal,
-                    "colours": getattr(args, "bake_colours", None) or 0}
+        settings = module.resolve_settings(
+            "", args.bake_triangles or triangles, args.bake_texture or edge,
+            True if normal is None else normal, getattr(args, "bake_colours", None) or 0,
+            face_texture=getattr(args, "bake_face", None),
+            max_materials=budget.max_material_slots)
+    if settings.get("face_texture_note"):
+        LOG.warning("%s; allow 2 with max_material_slots = 2 in rules.toml", settings["face_texture_note"])
     edge = settings["texture"]
-    LOG.info("bake    %s -> %s triangles, %dx%d BaseColor%s%s%s", source.name,
+    LOG.info("bake    %s -> %s triangles, %dx%d BaseColor%s%s%s%s", source.name,
              f"{settings['triangles']:,}", edge, edge,
              " + Normal" if settings["normal_map"] else "",
              f" in {settings['colours']} colours" if settings["colours"] else "",
+             " + a face texture" if settings.get("face_texture") else "",
              f" (preset {preset})" if preset else "")
     try:
         result = module.bake(source, source.parent, triangles=settings["triangles"],
                              texture=edge, normal_map=settings["normal_map"],
                              colours=settings["colours"], preset=preset,
+                             face_texture=settings.get("face_texture", False),
                              progress=lambda name, i, n: LOG.info("bake    %d/%d %s", i + 1, n, name))
     except module.PolypaintError as exc:
         LOG.error("%s", exc)
         return 2
     made = [Path(result["mesh"]), Path(result["texture"])]
-    if result.get("normal"):
-        made.append(Path(result["normal"]))
+    for key in ("normal", "face_texture", "face_normal"):
+        if result.get(key):
+            made.append(Path(result[key]))
     LOG.info("bake    wrote %s in %s s (%s)", ", ".join(path.name for path in made),
              result["seconds"], result["note"])
+    # A texture an earlier bake wrote that this one did not (a normal map before
+    # an N64 bake, say) is not part of the new .glb; say so rather than leave it
+    # looking current. Nothing is deleted.
+    face_base, face_normal = module.face_texture_names(source)
+    for name in (module.normal_map_name(source), face_base, face_normal):
+        old = source.parent / name
+        if old.is_file() and old not in made:
+            LOG.warning("bake    %s is from an earlier bake and is not used by %s; "
+                        "delete it if you no longer need it", name, Path(result["mesh"]).name)
     gatekeeper = Gatekeeper(budget)
     reporter = Reporter(color=not getattr(args, "no_color", False), root=source.parent,
                         json_mode=bool(getattr(args, "json", False)))
@@ -6123,6 +6140,12 @@ def build_parser() -> argparse.ArgumentParser:
                         default=None,
                         help="with --bake-polypaint: do not bake a normal map (one is made "
                              "by default, except with --bake-preset n64)")
+    parser.add_argument("--bake-face-texture", action="store_true", dest="bake_face", default=None,
+                        help="with --bake-polypaint: give the face (the sculpt's densest colour "
+                             "detail) a texture of its own, the same size, as a second material "
+                             "(on with --bake-preset n64)")
+    parser.add_argument("--bake-no-face-texture", action="store_false", dest="bake_face",
+                        help="with --bake-polypaint: one texture for the whole model")
     parser.add_argument("--bake-colours", type=int, default=None, metavar="N",
                         help="with --bake-polypaint: reduce the BaseColor to N colours "
                              "(16 or 256 like the N64's palette textures; 0 keeps them all)")

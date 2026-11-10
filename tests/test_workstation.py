@@ -1968,6 +1968,7 @@ if _bake_ready():
     for body, wording in (({"colours": 7}, "colours must be one of"),
                           ({"preset": "ps9"}, "preset must be one of"),
                           ({"normal_map": "yes"}, "normal_map must be true or false"),
+                          ({"face_texture": 1}, "face_texture must be true or false"),
                           ({"shiny": True}, "unknown field")):
         status, refused = pp.json(f"/api/assets/{made['id']}/bake-polypaint", method="POST",
                                   body=body)
@@ -1987,6 +1988,9 @@ if _bake_ready():
            and result.get("texture_size") == 64 and result.get("colours") == 16
            and result.get("normal_map") is False and result.get("preset") == "n64",
            str(job)[:400])
+    expect("... and asks for a face texture; a sculpt with no face keeps one material",
+           result.get("face_texture") is False and result.get("materials") == 1
+           and "too little colour detail" in result.get("note", ""), str(result)[:400])
     status, queued = pp.json(f"/api/assets/{made['id']}/bake-polypaint", method="POST",
                              body={"triangles": 300, "texture": 128, "normal_map": False})
     job = queued["job"]

@@ -5,6 +5,27 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **N64 face texture (10 Nov).** At 64 px the whole test figure shared one
+  texture and her face got about 6 x 6 texels: the eyes were dark blobs. The
+  bake can now give the face a texture of its own, the same size, as a second
+  material (`T_<name>_Face_BaseColor.png`; `_Face_Normal.png` with a normal
+  map), packed separately. The face is found where the sculpt's colour detail is
+  densest (edges whose ends differ in colour, counted on a grid over the model)
+  and is the reduced surface nearest it, a tenth of the area - on a full figure,
+  about the head. On with `--bake-preset n64` and the review page's **N64 style**
+  (the **Face texture** box), off otherwise (`--bake-face-texture`,
+  `--bake-no-face-texture`). Rules that allow one material slot keep one
+  texture and the log says why; a sculpt with no colour detail keeps one too.
+  On a test figure the eyes get 27 dark texels instead of none.
+  A bake now also names any texture an earlier bake left beside it that the
+  new `.glb` does not use (a `_Normal.png` before an N64 bake, say); nothing is
+  deleted.
+* **The bake meets its triangle budget on sculpts with repeated points (10 Nov).**
+  Vertices on top of each other (UV seams, pole fans, separately exported
+  pieces) are open edges to the reducer, which keeps them: a 1,200-triangle N64
+  bake of such a figure came out at 4,628 triangles and passed only because the
+  folder had no rules. The reducer now works on a welded copy, and a bake that
+  still misses its budget says so.
 * **Install_Extras.bat (10 Nov).** One double-click installs the libraries
   into the same Python `Rules.bat` uses: what the gate needs (trimesh, Pillow,
   charset-normalizer, DracoPy) if anything is missing, plus the Polypaint bake

@@ -117,7 +117,9 @@ library as a new `.glb` (`SM_Hero_HP_03.obj` becomes `SM_Hero_LP_03.glb`). On a
 and 2048 px. A tangent-space normal map (`T_<name>_Normal.png`, glTF/OpenGL green
 up; tick Unreal's "Flip Green Channel" for the loose PNG) is baked too unless the
 **Normal map** box is cleared, and **N64 style** sets about 1,200 triangles, a
-64 px texture, 16 colours and no normal map. It needs
+64 px texture, 16 colours, no normal map and **Face texture**: the face (where the
+sculpt's colour detail is densest) gets a 64 px texture of its own as a second
+material, instead of about 6 x 6 texels of the body's. It needs
 `fast-simplification`, `xatlas` and `scipy` (Python 3.10 or newer): double-click
 `Install_Extras.bat` in the install folder. Without them the button says so,
 with the exact install command. The same bake from a terminal:

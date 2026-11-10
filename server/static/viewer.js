@@ -962,8 +962,8 @@ function renderLodList() {
  * a normal map. "N64 style" fills in ~1,200 tris, 64 px, 16 colours, no normal
  * map; any of them can still be changed before baking. */
 const BAKE_PRESETS = {
-  "": { triangles: "30000", texture: "2048", normal: true, colours: "0" },
-  n64: { triangles: "1200", texture: "64", normal: false, colours: "16" },
+  "": { triangles: "30000", texture: "2048", normal: true, colours: "0", face: false },
+  n64: { triangles: "1200", texture: "64", normal: false, colours: "16", face: true },
 };
 
 function applyBakePreset() {
@@ -972,6 +972,7 @@ function applyBakePreset() {
   $("bake-texture").value = chosen.texture;
   $("bake-normal").checked = chosen.normal;
   $("bake-colours").value = chosen.colours;
+  $("bake-face").checked = chosen.face;
 }
 
 async function bakePolypaint() {
@@ -987,6 +988,7 @@ async function bakePolypaint() {
                              texture: Number($("bake-texture").value),
                              normal_map: $("bake-normal").checked,
                              colours: Number($("bake-colours").value),
+                             face_texture: $("bake-face").checked,
                              preset: $("bake-preset").value }),
     });
     let job = (await response.json()).job;
@@ -1004,7 +1006,8 @@ async function bakePolypaint() {
     setStatus(`${made.filename || "game asset"}: ${fmt(result.triangles || 0)} tris from `
       + `${fmt(result.source_triangles || 0)}, ${result.texture_size}px `
       + `${result.normal_map ? "BaseColor + Normal" : "BaseColor"}`
-      + `${result.colours ? ` in ${result.colours} colours` : ""}, `
+      + `${result.colours ? ` in ${result.colours} colours` : ""}`
+      + `${result.face_texture ? " + a face texture" : ""}, `
       + `${result.seconds} s - ${result.note || ""}`);
     $("bake-progress").textContent = "";
   } catch (error) {

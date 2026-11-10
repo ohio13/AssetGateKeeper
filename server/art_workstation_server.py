@@ -741,7 +741,7 @@ def preview_of(data_dir: Path, asset: dict) -> dict:
 def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
                          triangles: int = 0, texture: int = 0, progress=None,
                          normal_map: bool | None = None, colours: int | None = None,
-                         preset: str = "") -> dict:
+                         preset: str = "", face_texture: bool | None = None) -> dict:
     """Make a game asset from an .obj with Polypaint: a new library asset holding
     a reduced .glb with UVs, the colours baked into its BaseColor texture and
     (unless switched off, or with the n64 preset) a normal map."""
@@ -754,7 +754,8 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
         raise WorkstationError(f"{asset['filename']} has no Polypaint or vertex colours to bake",
                                400)
     try:
-        settings = polypaint.resolve_settings(preset, triangles, texture, normal_map, colours)
+        settings = polypaint.resolve_settings(preset, triangles, texture, normal_map, colours,
+                                              face_texture=face_texture)
     except polypaint.PolypaintError as exc:
         raise WorkstationError(str(exc), 400) from exc
     with tempfile.TemporaryDirectory(prefix="agk_bake_") as scratch:
@@ -763,6 +764,7 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
                                     texture=settings["texture"],
                                     normal_map=settings["normal_map"],
                                     colours=settings["colours"], preset=settings["preset"],
+                                    face_texture=settings["face_texture"],
                                     progress=progress)
         except polypaint.PolypaintError as exc:
             raise WorkstationError(str(exc), 400) from exc
@@ -777,7 +779,8 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
             "source_triangles": result["source_triangles"],
             "texture_size": result["texture_size"], "seconds": result["seconds"],
             "normal_map": bool(result["normal"]), "colours": result["colours"],
-            "preset": result["preset"], "note": result["note"]}
+            "preset": result["preset"], "face_texture": bool(result.get("face_texture")),
+            "materials": result.get("materials", 1), "note": result["note"]}
 
 
 def asset_files(data_dir: Path, asset: dict) -> list[str]:
@@ -3231,11 +3234,11 @@ class Handler(BaseHTTPRequestHandler):
                 if payload is None:
                     return
                 unknown = sorted(set(payload) - {"triangles", "texture", "normal_map",
-                                                 "colours", "preset"})
+                                                 "colours", "preset", "face_texture"})
                 if unknown:
                     raise WorkstationError(
                         f"unknown field(s) {', '.join(unknown)}; expected triangles, texture, "
-                        "normal_map, colours and/or preset", 400)
+                        "normal_map, colours, face_texture and/or preset", 400)
                 triangles, texture = payload.get("triangles", 0), payload.get("texture", 0)
                 for value, what in ((triangles, "triangles"), (texture, "texture")):
                     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -3243,6 +3246,9 @@ class Handler(BaseHTTPRequestHandler):
                 normal_map = payload.get("normal_map")
                 if normal_map is not None and not isinstance(normal_map, bool):
                     raise WorkstationError("normal_map must be true or false", 400)
+                face_texture = payload.get("face_texture")
+                if face_texture is not None and not isinstance(face_texture, bool):
+                    raise WorkstationError("face_texture must be true or false", 400)
                 colours = payload.get("colours")
                 if colours is not None and (not isinstance(colours, int)
                                             or isinstance(colours, bool)
@@ -3267,11 +3273,13 @@ class Handler(BaseHTTPRequestHandler):
                 publish = self._publish
 
                 def bake_work(progress, _asset=asset_id, _tris=triangles, _tex=texture,
-                              _normal=normal_map, _colours=colours, _preset=preset):
+                              _normal=normal_map, _colours=colours, _preset=preset,
+                              _face=face_texture):
                     result = bake_polypaint_asset(
                         db_path, data_dir, _asset, _tris, _tex,
                         progress=lambda name, i, n: progress(name, i, n),
-                        normal_map=_normal, colours=_colours, preset=_preset)
+                        normal_map=_normal, colours=_colours, preset=_preset,
+                        face_texture=_face)
                     publish("asset", result["asset"]["id"])
                     return result
                 job = server.jobs.submit(asset_id, bake_work, kind="bake")

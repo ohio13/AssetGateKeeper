@@ -3368,7 +3368,7 @@ with _ctx.redirect_stdout(_out):
 expect("--check with a needed package missing exits 1 and prints the command",
        _code == 1 and "pip install" in _out.getvalue() and "MISSING" in _out.getvalue(),
        _out.getvalue()[-300:])
-extras.loads = lambda module, python=None: (module != "xatlas", "")
+extras.loads = lambda module, python=None: (module != "watchdog.observers", "")
 _out = _io.StringIO()
 with _ctx.redirect_stdout(_out):
     _code = extras.main(["--check"])
@@ -3380,19 +3380,19 @@ extras.subprocess.call = lambda command: _calls.append(command) or 0
 _out = _io.StringIO()
 with _ctx.redirect_stdout(_out):
     _code = extras.main(["--dry-run"])
-expect("--dry-run runs nothing", _code == 0 and not _calls and "xatlas" in _out.getvalue())
+expect("--dry-run runs nothing", _code == 0 and not _calls and "watchdog" in _out.getvalue())
 extras.loads = lambda module, python=None: (True, "")
 with _ctx.redirect_stdout(_io.StringIO()):
     _code = extras.main([])
 expect("with everything installed it installs nothing", _code == 0 and not _calls)
 _state = {"installed": False}
-extras.loads = lambda module, python=None: (module != "xatlas" or _state["installed"], "")
+extras.loads = lambda module, python=None: (module != "watchdog.observers" or _state["installed"], "")
 extras.pip_available = lambda python=None: True
 extras.subprocess.call = lambda command: (_calls.append(command), _state.update(installed=True))[0] and 0
 with _ctx.redirect_stdout(_io.StringIO()):
     _code = extras.main([])
 expect("it installs only what is missing, then checks it loads",
-       _code == 0 and len(_calls) == 1 and _calls[0][-1] == "xatlas>=0.0.9", str(_calls))
+       _code == 0 and len(_calls) == 1 and _calls[0][-1] == "watchdog>=3.0", str(_calls))
 _state["installed"] = False
 _calls.clear()
 extras.subprocess.call = lambda command: _calls.append(command) or 1
@@ -3400,7 +3400,7 @@ _out = _io.StringIO()
 with _ctx.redirect_stdout(_out):
     _code = extras.main([])
 expect("a failed install exits 1 and says what still does not load",
-       _code == 1 and "still do not load" in _out.getvalue() and "xatlas" in _out.getvalue())
+       _code == 1 and "still do not load" in _out.getvalue() and "watchdog" in _out.getvalue())
 extras.subprocess.call = _real_call
 extras.loads = _real_loads
 _bat = (ROOT_MODULE_DIR / "Install_Extras.bat").read_bytes()
