@@ -136,7 +136,7 @@ and a gate people switch off.
 Install once, then never open a terminal again:
 
 ```bat
-Rules.bat
+Start AssetGatekeeper.bat
 ```
 
 It finds Python, starts the admin page **and** the 3D review screen as detached
@@ -638,7 +638,7 @@ path, so the tool and the UI can never disagree.
 asset-health --port 8080 --rules "D:\Project\Assets\rules.toml"
 ```
 
-Or let `agk-serve.bat up` start this and the workstation together on free ports
+Or let `tools\agk-serve.bat up` start this and the workstation together on free ports
 ([§15](#15-operations)); `--port-auto` moves instead of failing.
 
 Open <http://127.0.0.1:8080/>. Loopback-only by default: exposing a review
@@ -786,7 +786,7 @@ private as the network.
 art-workstation --port 8100 --rules "D:\Project\Assets\rules.toml"
 ```
 
-Or `agk-serve.bat up`, which starts both services and opens the dashboard
+Or `tools\agk-serve.bat up`, which starts both services and opens the dashboard
 ([§15](#15-operations)). `--port-auto` moves to the next free port instead of
 failing.
 
@@ -1028,12 +1028,12 @@ screen. That is the whole training.
 ### One command for both services (recommended)
 
 ```bat
-agk-serve.bat up          :: start both, detached, print the URLs
-agk-serve.bat up --open   :: ...and open the dashboard
-agk-serve.bat status      :: running? which port? which pid?
-agk-serve.bat urls        :: URLs + the exact gate command
-agk-serve.bat logs        :: recent server output
-agk-serve.bat down        :: stop both (Stop.bat does the same)
+tools\agk-serve.bat up          :: start both, detached, print the URLs
+tools\agk-serve.bat up --open   :: ...and open the dashboard
+tools\agk-serve.bat status      :: running? which port? which pid?
+tools\agk-serve.bat urls        :: URLs + the exact gate command
+tools\agk-serve.bat logs        :: recent server output
+tools\agk-serve.bat down        :: stop both (Stop.bat does the same)
 ```
 
 (or `python tools/agk_serve.py up`). No windows to keep alive: the servers run
@@ -1190,7 +1190,7 @@ server/asset_health_server.py  dashboard, telemetry ingest, alerts, planner, /ap
 server/art_workstation_server.py  viewer, uploads, LODs, collision, notes, reports
 server/static/                 viewer.html, viewer.js, app.css (no frameworks)
 tools/agk_serve.py             up/down/status/urls/logs for both services
-agk-serve.bat                  one-click wrapper for the above
+tools\agk-serve.bat                  one-click wrapper for the above
 
 engine/lod_manager.py          vertex-clustering decimator (inspection-grade)
 plugins/{blender,houdini,maya,unreal}/   DCC hooks

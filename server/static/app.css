@@ -99,7 +99,16 @@ output { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12p
   background: rgba(224,175,104,.14); color: #f2d3a2; font-size: 12px; line-height: 1.45;
   pointer-events: none; }
 .preview-warning::before { content: "Converted preview \2014  "; font-weight: 700; }
+.preview-warning[data-kind="light"]::before { content: "Lighter preview \2014  "; }
+.preview-warning[data-kind="error"]::before { content: ""; }
 .preview-warning[hidden], .texture-view[hidden] { display: none; }
+.full-detail { position: absolute; right: 12px; bottom: 12px; z-index: 3; }
+.full-detail[hidden], .load-progress[hidden] { display: none; }
+.load-progress { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%);
+  z-index: 3; min-width: 260px; max-width: 80%; padding: 12px 16px; border-radius: 8px;
+  border: 1px solid var(--line); background: rgba(13,16,22,.88); color: var(--text);
+  font-size: 12px; text-align: center; }
+.load-progress progress { width: 100%; margin-top: 8px; accent-color: var(--accent, #7aa2f7); }
 .texture-view { position: absolute; inset: 0; display: flex; flex-direction: column;
   align-items: center; justify-content: center; gap: 10px; padding: 24px; }
 .texture-view img { max-width: 100%; max-height: calc(100% - 40px);
@@ -330,3 +339,7 @@ label.check { display: flex; align-items: center; gap: 6px; font-size: 12px; col
   box-shadow: 0 6px 24px rgba(0, 0, 0, .45); display: grid; gap: 10px; }
 .version-choice[hidden] { display: none; }
 .version-choice .row { display: flex; gap: 8px; flex-wrap: wrap; }
+/* LOD jobs (10 Nov 2026): a bar, the time left and Cancel. */
+.job-row { align-items: center; gap: 8px; margin-top: 4px; }
+.job-row[hidden], #lod-job-row[hidden] { display: none !important; }
+.job-row progress { flex: 1 1 auto; min-width: 120px; accent-color: var(--accent); }

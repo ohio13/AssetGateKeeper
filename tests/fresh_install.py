@@ -10,7 +10,8 @@ through the same files:
 
 1. Install_Extras.bat (Windows) / tools/install_extras.py: libraries in;
    running it a second time with --check finds nothing missing.
-2. Rules.bat (Windows) / tools/agk_serve.py up: both pages answer.
+2. Start AssetGatekeeper.bat (Windows) / tools/agk_serve.py up: both pages answer;
+   Rules.bat (the old name) still works.
 3. The gate checks a folder once (--once --recursive) and the verdict is right.
 4. --bake-polypaint turns a painted sculpt into a .glb + textures that pass.
 5. Stop.bat / agk_serve.py down: nothing is left running, the folder can go.
@@ -105,7 +106,7 @@ def main() -> int:
     print(f"    ({time.time() - started:.0f} s)")
     # The .bat files pick their own Python (.venv, then py -3, then PATH), which
     # need not be the one running this; every later step uses the one they chose,
-    # as a user's Rules.bat would.
+    # as the user's start file would.
     chosen = re.search(r"^Python \d+\.\d+ at (.+)$", done.stdout, re.M)
     python = chosen.group(1).strip() if chosen else sys.executable
     expect("the installer says which Python it used", bool(chosen))
@@ -116,8 +117,13 @@ def main() -> int:
            and "MISSING" not in again.stdout and "not yet" not in again.stdout)
 
     print("2. start the pages")
-    up = bat("Rules.bat") if WINDOWS else run([sys.executable, "tools/agk_serve.py", "up"])
-    expect("Rules.bat starts both pages", up.returncode == 0, f"exit {up.returncode}")
+    up = (bat("Start AssetGatekeeper.bat") if WINDOWS
+          else run([sys.executable, "tools/agk_serve.py", "up"]))
+    expect("Start AssetGatekeeper.bat starts both pages", up.returncode == 0, f"exit {up.returncode}")
+    if WINDOWS:
+        again = bat("Rules.bat")
+        expect("Rules.bat (the old name) still works: a second start re-opens the page",
+               again.returncode == 0, f"exit {again.returncode}")
     try:
         ports = json.loads((ROOT / ".agk" / "ports.json").read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:

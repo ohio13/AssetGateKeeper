@@ -61,7 +61,7 @@ selected, drop the missing files onto the page to complete it.
 | Source files | `.blend`, `.max`, `.ma`, `.mb`, `.usd*` | stored as **unverified**: reviewable, noteable, **excluded from triangle totals** |
 | Executables | `.exe`, `.dll`, `.ps1`, `.sh`, `.msi`, `.bat`, `.cmd` | **refused with HTTP 415** |
 
-Any upload is capped at 512 MB per file; `--max-upload-mb` (or `Rules.bat
+Any upload is capped at 512 MB per file; `--max-upload-mb` (or `Start AssetGatekeeper.bat
 --max-upload-mb`, or `$AGK_MAX_UPLOAD_MB`) moves it. A file over the limit is
 refused in words before it is sent, naming its size and the limit. Names in any script are kept (`岩石_rock.fbx`
 stays `岩石_rock.fbx`, and downloads under that name); characters a file system
@@ -124,6 +124,19 @@ material, instead of about 6 x 6 texels of the body's. It needs
 `Install_Extras.bat` in the install folder. Without them the button says so,
 with the exact install command. The same bake from a terminal:
 `asset-gatekeeper SM_Hero_HP_03.obj --bake-polypaint`.
+
+### Big models: a lighter preview first
+
+A model over 500,000 triangles opens as a lighter copy of about 200,000
+triangles, with its Polypaint colours, and a banner that says so; **Show full
+detail** loads every triangle. The numbers on the right are always the full
+model's. While a model downloads, a bar says how much has arrived, then that the
+3D view is being built. On the developer's test sculpt (1.08 million triangles) the
+light copy is 3 MB against the full preview's 20 MB and adds about 4 seconds to
+the upload. It needs `fast-simplification` (one of the bake extras: double-click
+`Install_Extras.bat`); without it the full model loads, with the bar, and the
+asset's note says how to get the quicker look. A light copy is shape and colour
+only: no UVs or materials.
 
 ### Inspection views
 
@@ -238,8 +251,17 @@ ways to fill it:
     placed in world space: download one with the arrow on its row and import it
     into Unreal, Unity or Blender. In the viewer they are drawn with their
     materials, not the grey preview.
-  * Slower: about 4 seconds for 65,000 triangles and 80 seconds for a million,
-    all levels, in the background.
+  * Slower, in the background: about 4 seconds for 65,000 triangles; for the developer's
+    1.08 million triangle test sculpt about 3-4 minutes on his PC (reading 9 s,
+    preparing 27 s, reducing 2.3 min to 3 %), all levels in one pass. It needs
+    about 1.7 GB of memory per million triangles; with less free, the page warns
+    before it starts (Windows then pages to disk and it runs many times slower).
+    The plain decimator (Shippable unticked) does the same sculpt in 13 seconds.
+  * While it runs, a bar shows how far it is, what it is doing ("LOD1: 412,000
+    triangles, going to 270,000") and **about how long is left**; **Cancel**
+    stops it within a second or two and changes nothing. A job that has to wait
+    for another (one job runs at a time, LODs and bakes alike) says so and where
+    it is in the queue. `POST /api/jobs/<id>/cancel`.
 * **Upload your own LOD** - choose the level and a `.glb`, self-contained `.gltf`,
   `.obj` or `.fbx`. It is measured like the source (an FBX by the gate's reader,
   viewed through a converted `.glb`). A file named `<asset>_LOD1` ... `_LOD4`
@@ -494,7 +516,7 @@ tab shows), `--allow-host NAME`, `--quiet`.
 | `GET /api/events` | the live event stream |
 | `GET /api/assets` · `POST /api/assets?filename=` | list · upload (raw body; optional verdict fields) |
 | `GET` · `DELETE /api/assets/<id>` | detail (LODs, collision, files, missing files) · delete |
-| `GET /api/assets/<id>/file` · `/preview` | the bytes · the converted preview (FBX or Polypaint `.glb`, texture `.png`) |
+| `GET /api/assets/<id>/file` · `/preview` · `/preview?light=1` | the bytes · the converted preview (FBX or Polypaint `.glb`, texture `.png`) · the lighter copy of a big model (404 when there is none) |
 | `POST /api/assets/<id>/files?filename=` · `GET .../files/<path>` | add · serve a file the asset references |
 | `GET` · `POST /api/assets/<id>/lods` | list · generate (`?async=1` for a job) |
 | `POST` · `DELETE /api/assets/<id>/lods/<LODn>` · `GET .../file` | upload · delete · download a level |

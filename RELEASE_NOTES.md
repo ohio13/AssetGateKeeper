@@ -5,6 +5,90 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **Going public (10 Nov).** The README and the setup manual open with a
+  plain note: an early alpha, built first as a test tool for private projects;
+  try it on a copy or under version control; which parts write to your files;
+  no warranty; and that it was built with AI (nearly all of the code, tests and
+  docs written by AI assistants, mostly Claude, directed and tested by one
+  developer). Test fixtures no longer use the developer's PC and folder names.
+  The README, CONTRIBUTING.md, SECURITY.md and the GitHub issue and pull
+  request forms say how the project is run: one person, spare time, guided by
+  their own projects; development continues, feature requests aren't taken,
+  bug-report replies can be slow, pull requests probably won't be merged, and
+  forks are welcome under the MIT licence.
+  THIRD_PARTY_NOTICES.md lists the two libraries copied in (three.js and
+  tomli, both MIT) and three.js's licence now sits beside it in
+  `server/static/vendor/`. Personal notes and AI-assistant files are
+  ignored by Git, and the public history was rebuilt without them.
+* **Long LOD jobs can be watched and stopped (10 Nov).** The developer left a Shippable
+  LOD of the test sculpt running for 25 minutes and gave up: the page said "generating
+  LOD1 (1 of 3)" the whole time, closing the page did not stop it, and a second
+  request waited behind it without a word. Measured on his PC, the job takes
+  3-4 minutes (the plain decimator 13 s), so something on the PC slowed it
+  further; the likeliest is memory (1.7 GB for the test sculpt). Now a job carries a
+  fraction, a line saying what it is doing and the time left, shown as a bar;
+  **Cancel** (`POST /api/jobs/<id>/cancel`) stops a queued job before it starts
+  and a running one at its next progress call; a queued job names the job it is
+  waiting for; a Shippable job on a PC with too little free memory warns before
+  it starts. The tooltip's "about a minute per million triangles" was wrong and
+  now gives the test sculpt's real figure.
+* **Ready for PyPI (10 Nov).** `twine check` passes on the wheel and sdist and
+  the build prints no warnings: the licence is an SPDX string (`license =
+  "MIT"`, setuptools 77+; the TOML table and the licence classifier stop
+  building in 2027), the data-only folders (`server/static`, the DCC plug-ins)
+  are listed so setuptools keeps shipping them, and every README link is
+  absolute, because PyPI shows the README as the project page and relative
+  links lead nowhere there. `asset-gatekeeper` is free on PyPI. Publishing
+  needs the repository public and a PyPI account.
+* **One front door (10 Nov).** Six `.bat` files sat at the top of the folder.
+  Now there is one to start with, **`Start AssetGatekeeper.bat`** (the old
+  `Rules.bat`), with `Stop.bat`, `Allow_Folder.bat` and `Install_Extras.bat`
+  beside it. `agk-serve.bat`, `start_workstation.bat` and
+  `start_asset_health.bat` moved to `tools\` and find the install folder from
+  there. **`Rules.bat` still works**: it is a two-line file that runs the new
+  one, so shortcuts and pinned icons keep working. Messages that named
+  `Rules.bat` or `agk-serve.bat` now name the new files.
+* **A first-run wizard (10 Nov).** A first start offered a page of budget
+  fields, and Scan with no project picked used to check the tool's own test
+  files. The Rules & Presets page now opens with **Get started**: your project
+  folder, your engine (Unreal, Unity, Godot or Other, written as `[naming]
+  preset`) and what it has to run on (the hardware budgets); **Save and check
+  my project** writes the project's `rules.toml` and runs the first scan. A
+  folder that already has rules is asked about before its numbers are
+  replaced. Covered by a browser test from an empty install: Just me on this
+  PC, the wizard, the scan with its skipped line.
+* **No account for one person (10 Nov).** A solo install opened on "Create
+  the first account", a password nobody else would ever need. The first-run
+  page now offers **Just me on this PC** first: no account, no password, rules
+  changed from this PC only (any other machine is shown a page saying so and
+  gets nothing). **Turn on accounts** gives you a name and password when a second
+  person joins; you stay the director and the change history moves to your name.
+  `--add-admin` refuses while solo mode is on, so the PC's owner cannot be
+  locked out. Rule changes still need the page's CSRF token, so another website
+  cannot make them.
+* **Big models open quickly on the review page (10 Nov).** The test sculpt (1.08 million
+  triangles) took about 70 seconds to appear, with nothing on screen. A model
+  over 500,000 triangles now gets a lighter copy at upload (about 200,000
+  triangles, quadric reduction, Polypaint colours averaged onto it): 3 MB
+  instead of 20 MB for the test sculpt, about 4 seconds more at upload. The viewer shows
+  it first with a "Lighter preview" banner and a **Show full detail** button,
+  and every download has a progress bar, then "Building the 3D view (N
+  triangles)". Needs fast-simplification (Install_Extras.bat); without it the
+  full model loads with the bar. `GET /api/assets/<id>/preview?light=1`.
+  `engine/light_preview.py`.
+* **Say what was skipped (10 Nov).** A run used to ignore files it does not
+  read without a word: the six `.jfif` reference images in the developer's test folder
+  were never mentioned, so the folder looked checked. Each run now ends with
+  `6 file(s) skipped: unsupported type .jfif x6 (a JPEG: rename it to .jpg to
+  check it)`, with a hint for common source files (.psd, .blend, .ztl, Maya, 3ds
+  Max ...); `--exclude` matches are counted too, and `--json`'s summary line
+  carries the same as `skipped`. "No tracked assets found" now says what was
+  there instead. The admin page's scan prints it as well.
+* **The admin page's scan reported failures as a failed scan (10 Nov).** A
+  scan that found a failing asset ended "scan failed: <the last log line>" (the
+  gate exits 1 when something fails), and the gate's closing summary line was
+  counted as one more failed asset, so two assets showed as three. Both fixed;
+  the test scans a folder with one pass, one fail and a `.jfif`.
 * **N64 face texture (10 Nov).** At 64 px the whole test figure shared one
   texture and her face got about 6 x 6 texels: the eyes were dark blobs. The
   bake can now give the face a texture of its own, the same size, as a second

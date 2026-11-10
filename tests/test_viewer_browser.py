@@ -11,6 +11,7 @@ Without them the suite says so and exits 0 (CI installs both and runs it).
 import http.server
 import io
 import json
+import math
 import shutil
 import socketserver
 import struct
@@ -789,6 +790,83 @@ with sync_playwright() as playwright:
            page.locator("#materials").inner_text()[:200])
     page.uncheck("#lod-shippable")
 
+    print("8j. long LOD jobs: a bar, the time left, Cancel (10 Nov 2026)")
+    # A long Shippable job showed one unchanging line and could not be stopped.
+    _gv = _trimesh.creation.uv_sphere(count=[200, 400])
+    ids["bigglobe"] = aws.create_asset(db, data, "bigglobe.glb",
+                                       _trimesh.Scene(_gv).export(file_type="glb"))["id"]
+    page.goto(f"{BASE}/viewer?live=0&asset={ids['bigglobe']}")
+    page.wait_for_function("() => document.getElementById('status').textContent === 'bigglobe.glb'",
+                           timeout=30000)
+    page.select_option("#lod-preset", "0.25,0.1,0.03")
+    page.check("#lod-shippable")
+    page.click("#lod-generate")
+    page.wait_for_function("() => /\\d+% - about .* left/.test(document.getElementById('lod-progress').textContent)",
+                           timeout=60000)
+    expect("a long Shippable job shows a moving bar, a percentage and the time left",
+           page.locator("#lod-job-row").is_visible()
+           and float(page.locator("#lod-bar").get_attribute("value") or 0) > 0,
+           page.locator("#lod-progress").inner_text())
+    page.click("#lod-cancel")
+    page.wait_for_function("() => /cancelled/.test(document.getElementById('lod-progress').textContent)",
+                           timeout=30000)
+    expect("Cancel stops it, says nothing was changed, and Generate is back",
+           not page.locator("#lod-job-row").is_visible()
+           and page.locator("#lod-generate").is_enabled()
+           and page.locator("#lod-list .lod-row").count() == 0,
+           [page.locator("#lod-job-row").is_visible(), page.locator("#lod-generate").is_enabled(),
+            page.locator("#lod-list").inner_text()[:200]])
+    page.uncheck("#lod-shippable")
+    page.select_option("#lod-preset", "0.5,0.25,0.125")
+
+    print("8b. a big model: a lighter preview first, a progress bar, then full detail (10 Nov 2026)")
+    if aws.light_preview.available():
+        _saved = (aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET)
+        aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET = 20000, 3000
+        _rows, _segs = 120, 240
+        _v, _g, _f = [], [], []
+        for _i in range(_rows + 1):
+            for _j in range(_segs):
+                _t, _q = math.pi * _i / _rows, 2 * math.pi * _j / _segs
+                _v.append(f"v {math.sin(_t) * math.cos(_q):.5f} {math.cos(_t):.5f} "
+                          f"{math.sin(_t) * math.sin(_q):.5f}")
+                _g.append("ffff0000" if math.cos(_t) > 0 else "ff0000ff")
+        for _i in range(_rows):
+            for _j in range(_segs):
+                _a, _b = _i * _segs + _j, _i * _segs + (_j + 1) % _segs
+                _f += [f"f {_a + 1} {_a + _segs + 1} {_b + 1}",
+                       f"f {_b + 1} {_a + _segs + 1} {_b + _segs + 1}"]
+        _mrgb = ["#MRGB " + "".join(_g[k:k + 64]) for k in range(0, len(_g), 64)]
+        _big = ("\n".join(_v + _mrgb + _f) + "\n").encode()
+        ids["big"] = aws.create_asset(db, data, "SM_Big_HP.obj", _big)["id"]
+        aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET = _saved
+        page.goto(f"{BASE}/viewer?live=0&asset={ids['big']}")
+        page.wait_for_function("() => document.getElementById('status').textContent === 'SM_Big_HP.obj'",
+                               timeout=30000)
+        _banner = page.locator("#preview-warning")
+        expect("a big model opens as a lighter preview, and says so",
+               _banner.is_visible() and _banner.get_attribute("data-kind") == "light"
+               and "of 57,600 triangles" in _banner.inner_text(), _banner.inner_text())
+        expect("... with a Show full detail button, and the progress box gone",
+               page.locator("#full-detail").is_visible()
+               and not page.locator("#load-progress").is_visible())
+        expect("... while the numbers on the right are the full model's",
+               "57,600" in page.locator("body").inner_text())
+        page.click("#full-detail")
+        page.wait_for_function("() => document.getElementById('status').textContent === 'SM_Big_HP.obj'"
+                               " && document.getElementById('full-detail').hidden", timeout=30000)
+        expect("Show full detail loads the whole model, with a download bar on the way",
+               _banner.get_attribute("data-kind") == "converted"
+               and "Polypaint" in _banner.inner_text()
+               and page.locator("#load-progress").get_attribute("data-shown") == "download"
+               and not page.locator("#load-progress").is_visible(), _banner.inner_text()[:120])
+        page.locator('#lod-buttons [data-level="source"]').click()
+        page.wait_for_timeout(500)
+        expect("... and Source stays at full detail once asked for",
+               page.locator("#full-detail").is_hidden(), "")
+    else:
+        print("  skip: pip install fast-simplification")
+
     print("9. deleted while open")
     page.goto(f"{BASE}/viewer?asset={ids['embedded']}")
     page.wait_for_function("() => document.getElementById('status').textContent === 'embedded.gltf'",
@@ -878,6 +956,54 @@ with sync_playwright() as playwright:
     expect("Sign out returns to the sign-in form", page.locator("#asset-list .asset").count() == 0)
     acc_server.shutdown()
     acc_server.server_close()
+
+    print("11. a first start: Just me on this PC, then the wizard (10 Nov 2026)")
+    import asset_health_server as ahs  # noqa: PLC0415 - only this section needs it
+    first_db = WORK / "first_run.db"
+    ahs.init_db(first_db)
+    game = (WORK / "MyGame").resolve()
+    (game / "Textures").mkdir(parents=True)
+    _Image.new("RGB", (64, 64), (90, 90, 90)).save(game / "Textures" / "T_Crate_Albedo.png")
+    _Image.new("RGB", (1000, 1000), (90, 90, 90)).save(game / "Textures" / "T_Bad_Albedo.png")
+    _Image.new("RGB", (64, 64), (90, 90, 90)).save(game / "Textures" / "reference.jfif", "JPEG")
+    install_rules = WORK / "install_rules.toml"
+    install_rules.write_text("", encoding="utf-8")
+    first = ahs.build_server("127.0.0.1", 0, first_db, quiet=True, rules_path=str(install_rules),
+                             rules_root=str(install_rules.parent), allow_roots=(str(game),))
+    threading.Thread(target=first.serve_forever, daemon=True).start()
+    first_base = f"http://127.0.0.1:{first.server_address[1]}"
+    admin = browser.new_page()
+    admin.goto(f"{first_base}/admin")
+    expect("a first start offers Just me on this PC",
+           admin.locator("#solo").is_visible() and "Just me on this PC" in admin.content())
+    admin.click("#solo")
+    admin.wait_for_selector("#wizard:not([hidden])", timeout=15000)
+    expect("... which opens the page in solo mode, with the setup wizard on top",
+           "Solo mode" in admin.locator("#who").inner_text()
+           and admin.locator("#accounts-on").is_visible()
+           and not admin.locator("#logout").is_visible(), admin.locator("#who").inner_text())
+    admin.select_option("#wiz-allowed", str(game))
+    admin.check('input[name="wiz-engine"][value="unity"]')
+    expect("picking an engine says how names will be checked",
+           "_MaskMap" in admin.locator("#wiz-engine-help").inner_text())
+    admin.select_option("#wiz-target", "n64")
+    admin.click("#wiz-go")
+    admin.wait_for_function("() => document.getElementById('scan-status').textContent === 'complete'",
+                            timeout=60000)
+    written = (game / "rules.toml").read_text(encoding="utf-8")
+    expect("the wizard writes the project's rules.toml: Unity naming, the N64 budget",
+           'preset = ["unity"]' in written and "max_edge = 64" in written, written[:400])
+    log = admin.locator("#scan-log").inner_text()
+    expect("... then checks the project itself, saying what was skipped",
+           "T_Bad_Albedo.png" in log and "rename it to .jpg" in log
+           and "1 passed, 1 failed, 1 skipped" in log, log[-400:])
+    expect("... and the wizard is gone", admin.locator("#wizard").is_hidden())
+    admin.reload()
+    admin.wait_for_function("() => document.getElementById('project-path').value !== ''", timeout=15000)
+    expect("it does not come back once a project is set", admin.locator("#wizard").is_hidden())
+    admin.close()
+    first.shutdown()
+    first.server_close()
 
     print("10. another website")
     other = browser.new_page()

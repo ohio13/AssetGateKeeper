@@ -137,7 +137,7 @@ Honesty matters more than a green table: **none of these four hosts were availab
 on the machine this was built on.** The plugin files are syntax-checked
 (`py_compile`) and written with capability probing plus fallbacks so a wrong API
 name degrades to a warning instead of taking the host down. Treat the first run in
-each app as a smoke test, and please open an issue with the version you tried.
+each app as a smoke test, and note the version you tried.
 
 What *is* verified end-to-end is the contract they all depend on:
 

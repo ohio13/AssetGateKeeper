@@ -10,8 +10,10 @@ Use GitHub's **Report a vulnerability** button on the repository's Security tab
 (private vulnerability reporting). Include what an attacker could do, the steps
 or file that show it, and the version (`asset-gatekeeper --version`).
 
-You will get a reply within a week. Fixes for confirmed problems are released as
-soon as they are ready, and credited to you unless you prefer otherwise.
+This is a one-person, spare-time project, so I can't promise a reply time, but
+security reports come before everything else. Fixes for confirmed problems are
+released as soon as they are ready, and credited to you unless you prefer
+otherwise.
 
 ## Supported versions
 

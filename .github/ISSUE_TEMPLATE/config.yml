@@ -1,5 +1,8 @@
-blank_issues_enabled: true
+blank_issues_enabled: false
 contact_links:
   - name: Security problem
     url: https://github.com/ohio13/AssetGateKeeper/security/advisories/new
     about: Please report security problems privately.
+  - name: Feature ideas and how the project is run
+    url: https://github.com/ohio13/AssetGateKeeper/blob/main/CONTRIBUTING.md#how-the-project-is-run
+    about: A one-person, spare-time project. Feature requests aren't being taken, but the MIT licence lets you fork it and add what you need.

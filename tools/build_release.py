@@ -52,16 +52,15 @@ DROP_IN_FILES = (
     "QUICKSTART.md",
     "RELEASE_NOTES.md",
     "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "pyproject.toml",
     "MANIFEST.in",
     "setup.py",
+    "Start AssetGatekeeper.bat",
     "Rules.bat",
     "Stop.bat",
     "Allow_Folder.bat",
     "Install_Extras.bat",
-    "agk-serve.bat",
-    "start_workstation.bat",
-    "start_asset_health.bat",
 )
 
 #: Directories copied whole into the drop-in tree (code + assets, no tests).
@@ -120,6 +119,13 @@ def _build(kind: str) -> Path:
     detached". A build script that dies because of its own logging is not a
     build script.
     """
+    import setuptools
+    major = int(str(getattr(setuptools, "__version__", "0")).split(".")[0] or 0)
+    if major < 77:
+        # pyproject.toml gives the licence as an SPDX string (license = "MIT"),
+        # which older setuptools rejects with a confusing schema error.
+        raise SystemExit(f"setuptools {setuptools.__version__} is too old to build this "
+                         f"(77 or newer): {sys.executable} -m pip install -U setuptools")
     real_out, real_err = sys.stdout, sys.stderr
     sys.stdout, sys.stderr = io.StringIO(), io.StringIO()
     try:

@@ -2,7 +2,7 @@
 rem ===========================================================================
 rem  AssetGatekeeper - stop everything.  Double-click it.
 rem
-rem  Stops the admin page / dashboard and the 3D review screen that Rules.bat
+rem  Stops the admin page / dashboard and the 3D review screen that Start AssetGatekeeper.bat
 rem  started, plus any other server still running from this folder. Afterwards
 rem  nothing holds this folder open, so it can be moved or deleted.
 rem ===========================================================================

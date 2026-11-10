@@ -185,9 +185,9 @@ def _send_failure(exc: BaseException, name: str, size: int) -> str:
     if isinstance(reason, (ConnectionAbortedError, ConnectionResetError, BrokenPipeError)):
         return (f"the Art Workstation hung up while {name} ({_megabytes(size)}) was being "
                 "sent - usually the file is bigger than it accepts, or it was stopped. "
-                "Check it is running (agk-serve.bat status) and try a lighter copy")
+                "Check it is running (tools\\agk-serve.bat status) and try a lighter copy")
     if isinstance(reason, ConnectionRefusedError):
-        return "the Art Workstation is not running - start it (Rules.bat) and try again"
+        return "the Art Workstation is not running - start it (double-click Start AssetGatekeeper.bat) and try again"
     if isinstance(reason, (TimeoutError, socket.timeout)):
         return f"the Art Workstation took too long to take {name} ({_megabytes(size)})"
     return str(reason)
@@ -2786,7 +2786,15 @@ class Handler(BaseHTTPRequestHandler):
         return ""
 
     def _admin_user(self) -> dict | None:
-        return session_user(self.server.db_path, self._cookie(SESSION_COOKIE))
+        user = session_user(self.server.db_path, self._cookie(SESSION_COOKIE))
+        if user is not None or not self._is_loopback():
+            return user
+        solo = solo_account(self.server.db_path)
+        if solo is None:
+            return None
+        # No cookie and no password: this machine is the solo account. The CSRF
+        # token is per server run, so another website still cannot post here.
+        return {**solo, "csrf": self.server.solo_csrf, "solo": True}
 
     def _same_origin(self) -> bool:
         """Block cross-site form posts. Non-browser clients send no Origin."""
@@ -2889,7 +2897,7 @@ class Handler(BaseHTTPRequestHandler):
         """The folder a scan checks, or None when there is nothing sensible.
 
         With no project picked the fallback used to be the server's own working
-        folder - for Rules.bat, the AssetGatekeeper install itself - so a first
+        folder - for the start file, the AssetGatekeeper install itself - so a first
         scan filled the dashboard with the tool's test files and screenshots
         marked as failures (9 Nov 2026). The install folder is never scanned.
         """
@@ -2934,9 +2942,21 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             self._serve_admin_static(path[len("/static/"):])
             return
+        if path == "/admin/accounts":
+            current = self._admin_user()
+            if current is None or not current.get("solo"):
+                self._redirect("/admin")
+                return
+            query = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
+            self._send_document(200, "text/html; charset=utf-8", render_accounts_page(
+                (query.get("error") or [""])[0], (query.get("u") or [""])[0], current["csrf"]))
+            return
         if path == "/admin/login":
             if self._admin_user() is not None:
                 self._redirect("/admin")
+                return
+            if solo_account(self.server.db_path) is not None:
+                self._send_document(200, "text/html; charset=utf-8", SOLO_REMOTE_PAGE)
                 return
             error = urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query)
             message = (error.get("error") or [""])[0]
@@ -2966,6 +2986,7 @@ class Handler(BaseHTTPRequestHandler):
             project = self._active_project()
             self._json(200, {
                 "user": {"username": user["username"], "role": user["role"]},
+                "solo": bool(user.get("solo")),
                 "csrf": user["csrf"],
                 "can_write": user["role"] in WRITER_ROLES,
                 "rules_path": str(rules_path),
@@ -3111,6 +3132,74 @@ class Handler(BaseHTTPRequestHandler):
             row = connection.execute(
                 "SELECT id, role FROM admin_users WHERE username = ?", (username,)).fetchone()
         token, _csrf = create_session(self.server.db_path, int(row["id"]), self._client_ip())
+        cookie = (f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; "
+                  f"Max-Age={int(SESSION_TTL)}")
+        self._redirect("/admin", [("Set-Cookie", cookie)])
+
+    def _admin_solo(self) -> None:
+        """'Just me on this PC': no account, no password, this machine only."""
+        if not self._same_origin():
+            self._json(403, {"error": "cross-origin request refused"})
+            return
+        if not self._is_loopback():
+            self._json(403, {"error": "solo mode can only be chosen on the PC this runs on",
+                             "detail": "open http://127.0.0.1:<port>/admin there"})
+            return
+        if admin_account_count(self.server.db_path) > 0:
+            self._json(403, {"error": "an account already exists; sign in instead"})
+            return
+        try:
+            account = start_solo_mode(self.server.db_path)
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            self._json(400, {"error": str(exc)})
+            return
+        record_audit(self.server.db_path, account, "account", "", "solo mode",
+                     self._client_ip(), summary="first-run setup chose solo mode (just me on this PC)")
+        self._redirect("/admin")
+
+    def _admin_accounts_on(self) -> None:
+        """Leave solo mode: give the solo account a name and password."""
+        user = self._require_admin()
+        if user is None:
+            return
+        if not user.get("solo"):
+            self._json(400, {"error": "accounts are already on"})
+            return
+        if not self._same_origin():
+            self._json(403, {"error": "cross-origin request refused"})
+            return
+        length = int(self.headers.get("Content-Length") or 0)
+        if length <= 0 or length > MAX_BODY_BYTES:
+            self._json(400, {"error": "missing form data"})
+            return
+        form = urllib.parse.parse_qs(self.rfile.read(length).decode("utf-8", "replace"))
+        self._body_read = True
+        if not hmac.compare_digest((form.get("csrf") or [""])[0], user["csrf"]):
+            self._json(403, {"error": "missing or stale CSRF token; reload the page"})
+            return
+        username = (form.get("username") or [""])[0].strip()
+        password = (form.get("password") or [""])[0]
+        confirm = (form.get("confirm") or [""])[0]
+        back = "/admin/accounts?u=" + urllib.parse.quote(username) + "&error="
+        if not username or len(username) > 64:
+            self._redirect(back + "Choose+a+username")
+            return
+        if len(password) < 10:
+            self._redirect(back + "Use+at+least+10+characters")
+            return
+        if password != confirm:
+            self._redirect(back + "Passwords+do+not+match")
+            return
+        try:
+            user_id = end_solo_mode(self.server.db_path, username, password)
+        except (ValueError, sqlite3.IntegrityError) as exc:
+            self._redirect(back + urllib.parse.quote_plus(str(exc)))
+            return
+        record_audit(self.server.db_path, {"id": user_id, "username": username,
+                                          "role": user["role"]},
+                     "account", "solo mode", f"{username} ({user['role']})", self._client_ip(),
+                     summary="accounts turned on; the solo account is now " + username)
+        token, _csrf = create_session(self.server.db_path, user_id, self._client_ip())
         cookie = (f"{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict; "
                   f"Max-Age={int(SESSION_TTL)}")
         self._redirect("/admin", [("Set-Cookie", cookie)])
@@ -3304,6 +3393,10 @@ class Handler(BaseHTTPRequestHandler):
             self._admin_project()
         elif path == "/admin/api/bootstrap":
             self._admin_bootstrap()
+        elif path == "/admin/api/solo":
+            self._admin_solo()
+        elif path == "/admin/api/accounts-on":
+            self._admin_accounts_on()
         elif path == "/admin/login":
             self._admin_login()
         elif path == "/admin/api/logout":
@@ -3504,7 +3597,7 @@ class Handler(BaseHTTPRequestHandler):
         base = self._workstation_url()
         if not base:
             self._json(400, {"error": "no Art Workstation to send to: start it "
-                                      "(agk-serve.bat up) or pass --workstation-url"})
+                                      "(tools\\agk-serve.bat up) or pass --workstation-url"})
             return
         results = []
         limit = self._workstation_upload_limit(base)
@@ -3539,7 +3632,7 @@ class Handler(BaseHTTPRequestHandler):
                                          "Send a lighter copy (decimate it first), or raise "
                                          "the limit with --max-upload-mb "
                                          f"{-(-size // (1024 * 1024)) + 1} (for example: "
-                                         "Rules.bat --max-upload-mb "
+                                         "\"Start AssetGatekeeper.bat\" --max-upload-mb "
                                          f"{-(-size // (1024 * 1024)) + 1})"})
                 continue
             tags = self._asset_tags(source)
@@ -3911,6 +4004,63 @@ def admin_account_count(db_path: str | Path) -> int:
         return 0
 
 
+#: "Just me on this PC" (10 Nov 2026): a solo install used to open on "Create
+#: the first account", a password nobody else would ever need. Solo mode keeps
+#: one director account named SOLO_USERNAME with a random password nobody knows;
+#: requests from this machine are that account without signing in, requests
+#: from anywhere else cannot get in. "Turn on accounts" gives it a real name and
+#: password, after which everything works as before.
+SOLO_USERNAME = "me"
+SOLO_META_KEY = "solo_user_id"
+
+
+def solo_account(db_path: str | Path) -> dict | None:
+    """The solo account while solo mode is on, else None. The CLI refuses
+    --add-admin while it is on; should a second account appear anyway, solo
+    mode is off and everyone signs in."""
+    try:
+        with open_db(db_path) as connection:
+            row = connection.execute(
+                "SELECT value FROM meta WHERE key = ?", (SOLO_META_KEY,)).fetchone()
+            if row is None:
+                return None
+            count = int(connection.execute("SELECT COUNT(*) FROM admin_users").fetchone()[0])
+            user = connection.execute(
+                "SELECT id, username, role FROM admin_users WHERE id = ? AND disabled = 0",
+                (int(row["value"]),)).fetchone()
+    except (STORAGE_ERRORS + (ValueError,)):
+        return None
+    if user is None or count != 1:
+        return None
+    return {"id": user["id"], "username": user["username"], "role": user["role"]}
+
+
+def start_solo_mode(db_path: str | Path) -> dict:
+    """Create the solo account (only when there are no accounts at all)."""
+    if admin_account_count(db_path) > 0:
+        raise ValueError("an account already exists")
+    create_admin_user(db_path, SOLO_USERNAME, "director", created_by="solo mode")
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        row = connection.execute("SELECT id FROM admin_users WHERE username = ?",
+                                 (SOLO_USERNAME,)).fetchone()
+        connection.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+                           (SOLO_META_KEY, str(row["id"])))
+    return solo_account(db_path) or {}
+
+
+def end_solo_mode(db_path: str | Path, username: str, password: str) -> int:
+    """Turn on accounts: the solo account takes a real name and password. Returns its id."""
+    account = solo_account(db_path)
+    if account is None:
+        raise ValueError("solo mode is not on")
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        connection.execute("UPDATE admin_users SET username = ?, password_hash = ? WHERE id = ?",
+                           (username, hash_password(password), account["id"]))
+        connection.execute("DELETE FROM meta WHERE key = ?", (SOLO_META_KEY,))
+        connection.execute("DELETE FROM admin_sessions WHERE user_id = ?", (account["id"],))
+    return int(account["id"])
+
+
 def create_session(db_path: str | Path, user_id: int, ip: str = "") -> tuple[str, str]:
     """Open a session. Returns (cookie token, CSRF token); only hashes are stored."""
     token = secrets.token_urlsafe(32)
@@ -4124,6 +4274,7 @@ class ScanRunner:
         self.started_at = ""
         self.finished_at = ""
         self.totals = {"total": 0, "passed": 0, "failed": 0}
+        self.skipped: dict = {}
         self._recent: list[dict] = []
 
     def busy(self) -> bool:
@@ -4134,7 +4285,7 @@ class ScanRunner:
         with self._lock:
             return {"status": self.status, "root": self.root, "error": self.error,
                     "started_at": self.started_at, "finished_at": self.finished_at,
-                    "totals": dict(self.totals)}
+                    "totals": dict(self.totals), "skipped": dict(self.skipped)}
 
     def recent(self) -> list[dict]:
         with self._lock:
@@ -4156,6 +4307,7 @@ class ScanRunner:
             self.started_at = _utc_now()
             self.finished_at = ""
             self.totals = {"total": 0, "passed": 0, "failed": 0}
+            self.skipped = {}
             self._recent = []
             self._thread = threading.Thread(
                 target=self._run, args=(str(root), Path(rules_path), telemetry_url),
@@ -4185,6 +4337,7 @@ class ScanRunner:
         with self._lock:
             self._process = process
         assert process.stdout is not None
+        summary_seen = False
         try:
             for line in process.stdout:
                 line = line.strip()
@@ -4196,6 +4349,17 @@ class ScanRunner:
                     self._emit({"type": "log", "text": line[:400]})
                     continue
                 if not isinstance(payload, dict):
+                    continue
+                if isinstance(payload.get("summary"), dict):
+                    # The gate's closing line, not an asset: it used to be counted
+                    # as one more failure on every scan.
+                    summary_seen = True
+                    skipped = payload["summary"].get("skipped") or {}
+                    if skipped.get("total"):
+                        with self._lock:
+                            self.skipped = dict(skipped)
+                        self._emit({"type": "skipped", "skipped": skipped,
+                                    "text": agk.describe_skipped(skipped)})
                     continue
                 with self._lock:
                     self.totals["total"] += 1
@@ -4215,7 +4379,11 @@ class ScanRunner:
             if process.stderr is not None:
                 tail = process.stderr.read() or ""
                 detail = tail.strip().splitlines()[-1] if tail.strip() else ""
-            self._finish("done" if code == 0 else "failed", detail,
+            # Exit 1 with a summary is a finished scan that found failing assets
+            # (the gate's normal "something failed" code); it used to be shown as
+            # "scan failed", with the last log line as the reason.
+            finished = code == 0 or (code == 1 and summary_seen)
+            self._finish("done" if finished else "failed", "" if finished else detail,
                          exit_code=code)
 
     def _finish(self, status: str, error: str = "", exit_code: int = 0) -> None:
@@ -4226,8 +4394,10 @@ class ScanRunner:
             self.finished_at = _utc_now()
             self._process = None
             totals = dict(self.totals)
+        with self._lock:
+            skipped = dict(self.skipped)
         self._emit({"type": "scan_end", "status": status, "error": error,
-                    "exit_code": exit_code, "totals": totals,
+                    "exit_code": exit_code, "totals": totals, "skipped": skipped,
                     "at": self.finished_at})
 
 
@@ -4254,10 +4424,20 @@ background:var(--accent);color:#0b1020;font:inherit;font-weight:600;cursor:point
 .err{color:var(--bad);font-size:12.5px;margin:0 0 12px}
 .hint{color:var(--muted);font-size:11.5px;margin-top:14px;line-height:1.5}
 code{background:#0b0f16;border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+.stack{display:grid;gap:14px}
+form.solo{border-color:var(--accent)}
 </style></head><body>
+<div class="stack">
+<form method="post" action="/admin/api/solo" class="solo">
+  <h1>Just me on this PC</h1>
+  <p class="sub">No account and no password. The rules can be changed from this PC
+  only; nobody on the network can get in. Turn on accounts later, when a second
+  person joins.</p>
+  <button type="submit" id="solo">Start without an account</button>
+</form>
 <form method="post" action="/admin/api/bootstrap" autocomplete="on">
-  <h1>Create the first account</h1>
-  <p class="sub">This dashboard has no accounts yet. The first one is a
+  <h1>Or create the first account</h1>
+  <p class="sub">For a team. The first account is a
   <strong>director</strong>, and it can be created from this machine only.</p>
   <p class="err">{{message}}</p>
   <label>Username<input name="username" value="{{username}}" autofocus required></label>
@@ -4268,6 +4448,8 @@ code{background:#0b0f16;border:1px solid var(--line);border-radius:4px;padding:1
   <button type="submit">Create account and sign in</button>
   <p class="hint">Only the PBKDF2 hash is stored. Everyone else is added later with
   <code>asset-health --add-admin &lt;name&gt; --admin-role producer</code>.</p>
+</form>
+</div>
 </body></html>"""
 
 
@@ -4306,6 +4488,72 @@ background:var(--accent);color:#0b1020;font:inherit;font-weight:600;cursor:point
 </body></html>"""
 
 
+ACCOUNTS_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Turn on accounts - AssetGatekeeper</title>
+<style>
+:root{--bg:#0d1016;--panel:#161b24;--line:#262f3d;--text:#e6e9ef;--muted:#8b94a7;
+--accent:#7aa2f7;--bad:#ff6b6b}
+*{box-sizing:border-box}
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:var(--bg);
+color:var(--text);font:14px/1.55 ui-sans-serif,"Segoe UI",Roboto,Arial,sans-serif}
+form{background:var(--panel);border:1px solid var(--line);border-radius:12px;
+padding:26px 26px 22px;width:min(390px,92vw)}
+h1{font-size:15px;margin:0 0 4px}
+p.sub{color:var(--muted);font-size:12px;margin:0 0 16px}
+label{display:block;font-size:12px;color:var(--muted);margin-bottom:12px}
+input{width:100%;margin-top:5px;background:#1d2431;border:1px solid var(--line);
+color:var(--text);border-radius:7px;padding:9px 10px;font:inherit}
+button{width:100%;margin-top:6px;padding:10px;border-radius:8px;border:1px solid var(--accent);
+background:var(--accent);color:#0b1020;font:inherit;font-weight:600;cursor:pointer}
+.err{color:var(--bad);font-size:12.5px;margin:0 0 12px}
+.hint{color:var(--muted);font-size:11.5px;margin-top:14px;line-height:1.5}
+a{color:var(--accent)}
+code{background:#0b0f16;border:1px solid var(--line);border-radius:4px;padding:1px 5px}
+</style></head><body>
+<form method="post" action="/admin/api/accounts-on" autocomplete="on">
+  <h1>Turn on accounts</h1>
+  <p class="sub">Choose your own name and password. You stay the director, the change
+  history keeps your earlier changes, and from then on everyone signs in.</p>
+  <p class="err">{{message}}</p>
+  <input type="hidden" name="csrf" value="{{csrf}}">
+  <label>Your username<input name="username" value="{{username}}" autofocus required></label>
+  <label>Password (at least 10 characters)
+    <input name="password" type="password" required minlength="10"></label>
+  <label>Confirm password<input name="confirm" type="password" required minlength="10"></label>
+  <button type="submit">Turn on accounts</button>
+  <p class="hint">Then add the second person with
+  <code>asset-health --add-admin &lt;name&gt; --admin-role producer</code>.
+  <a href="/admin">Back without changing anything</a></p>
+</form>
+</body></html>"""
+
+SOLO_REMOTE_PAGE = """<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solo mode - AssetGatekeeper</title>
+<style>
+body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0d1016;
+color:#e6e9ef;font:14px/1.55 ui-sans-serif,"Segoe UI",Roboto,Arial,sans-serif}
+div{background:#161b24;border:1px solid #262f3d;border-radius:12px;padding:26px;
+width:min(420px,92vw)}
+h1{font-size:15px;margin:0 0 8px}
+p{color:#8b94a7;font-size:12.5px;margin:0 0 10px}
+</style></head><body><div>
+<h1>This dashboard is in solo mode</h1>
+<p>Its rules can only be changed on the PC it runs on, without a password.</p>
+<p>To change them from here, open the Rules &amp; Presets page on that PC and choose
+<strong>Turn on accounts</strong>; then sign in here with that account.</p>
+</div></body></html>"""
+
+
+def render_accounts_page(message: str = "", username: str = "", csrf: str = "") -> str:
+    return (ACCOUNTS_PAGE.replace("{{message}}", html.escape(message))
+                         .replace("{{username}}", html.escape(username))
+                         .replace("{{csrf}}", html.escape(csrf)))
+
+
 def render_login_page(message: str = "", username: str = "",
                       first_run: bool = False) -> str:
     """Sign-in form, or the first-run setup form when no account exists yet.
@@ -4338,6 +4586,7 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
                  allow_hosts: tuple[str, ...] = (), people: "list[Person] | tuple" = (),
                  digest_at: "tuple[int, int] | None" = None):
         self.db_path = str(db_path)
+        self.solo_csrf = secrets.token_urlsafe(24)   # solo mode: per run, never stored
         self.people = tuple(people)
         self.digest_at = digest_at       # (hour, minute) local, or None for live alerts
         self.auth_token = token          # the studio-wide admin token, optional
@@ -4741,6 +4990,13 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     if args.add_admin:
+        if solo_account(db_path) is not None:
+            # A second account would end solo mode and lock the PC's owner out:
+            # the solo account has a password nobody knows.
+            print("error: this dashboard is in solo mode (just you on this PC). Open the "
+                  "Rules & Presets page on this PC and choose 'Turn on accounts' first, "
+                  "then add people.", file=sys.stderr)
+            return 2
         try:
             password = create_admin_user(db_path, args.add_admin, args.admin_role)
         except (ValueError, sqlite3.IntegrityError) as exc:

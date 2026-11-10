@@ -2006,6 +2006,163 @@ else:
 pp_server.shutdown()
 pp_server.server_close()
 
+print("30. a big model is first shown as a lighter preview (10 Nov 2026)")
+# The test sculpt (1.08 M triangles) took about 70 s to appear with nothing on screen.
+# The limits are lowered here so the test model stays small.
+_saved_limits = (aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET)
+aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET = 4000, 1000
+
+
+def _sphere_obj(rings, segments, painted):
+    verts, groups, faces = [], [], []
+    for i in range(rings + 1):
+        for j in range(segments):
+            t, q = _math.pi * i / rings, 2 * _math.pi * j / segments
+            verts.append(f"v {_math.sin(t) * _math.cos(q):.5f} {_math.cos(t):.5f} "
+                         f"{_math.sin(t) * _math.sin(q):.5f}")
+            groups.append("ffff0000" if _math.cos(t) > 0 else "ff0000ff")
+    for i in range(rings):
+        for j in range(segments):
+            a, b = i * segments + j, i * segments + (j + 1) % segments
+            faces += [f"f {a + 1} {a + segments + 1} {b + 1}",
+                      f"f {b + 1} {a + segments + 1} {b + segments + 1}"]
+    mrgb = (["#MRGB " + "".join(groups[k:k + 64]) for k in range(0, len(groups), 64)]
+            if painted else [])
+    return ("\n".join(verts + mrgb + faces) + "\n").encode()
+
+
+lp_db, lp_data = fresh("lightpreview")
+lp_server = aws.build_server("127.0.0.1", 0, lp_db, lp_data, quiet=True)
+threading.Thread(target=lp_server.serve_forever, daemon=True).start()
+lp = Client(lp_server.server_address[1])
+if aws.light_preview.available():
+    status, big = lp.json("/api/assets?filename=SM_Big_HP.obj", method="POST",
+                          body=_sphere_obj(50, 100, True))
+    status, detail = lp.json(f"/api/assets/{big['id']}")
+    light = detail["preview"].get("light") or {}
+    expect("a model over the limit gets a lighter copy, and the page is told its size",
+           light.get("source_triangles") == 10000 and 0 < light.get("triangles", 0) <= 1300
+           and "lighter preview" in detail.get("analyse_note", ""), str(detail["preview"])[:300])
+    status, light_bytes, _ = lp.call(f"/api/assets/{big['id']}/preview?light=1")
+    expect("... served at ?light=1, keeping the Polypaint colours",
+           status == 200 and light_bytes[:4] == b"glTF" and b"COLOR_0" in light_bytes[:4000],
+           str(status))
+    status, full_bytes, _ = lp.call(f"/api/assets/{big['id']}/preview")
+    expect("... while the full preview is still there for Show full detail",
+           status == 200 and len(full_bytes) > 3 * len(light_bytes), f"{len(full_bytes)} {len(light_bytes)}")
+    expect("... and the counts are the full model's", detail.get("triangle_count") == 10000,
+           str(detail.get("triangle_count")))
+    status, grey = lp.json("/api/assets?filename=SM_Grey.obj", method="POST",
+                           body=_sphere_obj(50, 100, False))
+    status, grey_detail = lp.json(f"/api/assets/{grey['id']}")
+    expect("a plain (uncoloured) big .obj gets one too",
+           (grey_detail["preview"].get("light") or {}).get("source_triangles") == 10000,
+           str(grey_detail["preview"])[:300])
+    status, _, _ = lp.call(f"/api/assets/{grey['id']}/preview?light=1")
+    expect("... and it is served", status == 200, str(status))
+else:
+    print("  skip lighter preview: pip install fast-simplification")
+status, small = lp.json("/api/assets?filename=SM_Small.obj", method="POST",
+                        body=_sphere_obj(10, 20, False))
+status, small_detail = lp.json(f"/api/assets/{small['id']}")
+expect("a small model has none", small_detail["preview"].get("light") is None,
+       str(small_detail["preview"]))
+status, _, _ = lp.call(f"/api/assets/{small['id']}/preview?light=1")
+expect("... and asking for one is a 404, not the full file", status == 404, str(status))
+_real_available = aws.light_preview.available
+aws.light_preview.available = lambda: False
+status, nolib = lp.json("/api/assets?filename=SM_NoLib.obj", method="POST",
+                        body=_sphere_obj(50, 100, False))
+aws.light_preview.available = _real_available
+status, nolib_detail = lp.json(f"/api/assets/{nolib['id']}")
+expect("without the reducer the full model loads, and the note says how to get a quicker look",
+       nolib_detail["preview"].get("light") is None
+       and "Install_Extras.bat" in nolib_detail.get("analyse_note", ""),
+       str(nolib_detail.get("analyse_note")))
+aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET = _saved_limits
+lp_server.shutdown()
+lp_server.server_close()
+
+print("31. long LOD jobs: a bar, the time left, the queue, Cancel (10 Nov 2026)")
+# The developer left a Shippable LOD of the test sculpt running 25 minutes: the page said
+# "generating LOD1 (1 of 3)" throughout, nothing could stop it, and a second
+# request waited behind the first without a word.
+jb_db, jb_data = fresh("jobs")
+jb_server = aws.build_server("127.0.0.1", 0, jb_db, jb_data, quiet=True)
+threading.Thread(target=jb_server.serve_forever, daemon=True).start()
+jb = Client(jb_server.server_address[1])
+_big_glb, _big_tris = textured_sphere(rings=160, segments=320)
+status, big = jb.json("/api/assets?filename=globe_big.glb", method="POST", body=_big_glb)
+status, small = jb.json("/api/assets?filename=globe_small.glb", method="POST",
+                        body=textured_sphere(rings=16, segments=32)[0])
+status, first = jb.json(f"/api/assets/{big['id']}/lods?async=1", method="POST",
+                        body={"ratios": [0.25, 0.1, 0.03], "shippable": True})
+first = first["job"]
+status, second = jb.json(f"/api/assets/{small['id']}/lods?async=1", method="POST",
+                         body={"ratios": [0.5], "shippable": True})
+second = second["job"]
+deadline = time.time() + 60
+while time.time() < deadline:
+    first = jb.json(f"/api/jobs/{first['id']}")[1]
+    if first["state"] == "running" and first.get("fraction", 0) > 0.2 and first.get("eta_s") is not None:
+        break
+    time.sleep(0.2)
+expect("a running Shippable job reports how far it is, what it is doing and the time left",
+       first["state"] == "running" and 0 < first["fraction"] < 1 and first["eta_s"] >= 0
+       and first["detail"], str({k: first.get(k) for k in ("state", "fraction", "detail", "eta_s")}))
+second = jb.json(f"/api/jobs/{second['id']}")[1]
+expect("a job behind it says what it is waiting for and where it is in the queue",
+       second["state"] == "queued" and second["queue_position"] == 2
+       and second["waiting_for"] == {"id": first["id"], "kind": "lods", "asset_id": big["id"]},
+       str(second)[:300])
+_fractions = []
+for _ in range(10):
+    _fractions.append(jb.json(f"/api/jobs/{first['id']}")[1]["fraction"])
+    time.sleep(0.15)
+expect("... and the bar only moves forward", _fractions == sorted(_fractions), str(_fractions))
+status, cancelled_q = jb.json(f"/api/jobs/{second['id']}/cancel", method="POST", body={})
+expect("Cancel on a queued job stops it before it starts",
+       status == 200 and cancelled_q["job"]["state"] == "cancelled", str(cancelled_q)[:200])
+status, cancelling = jb.json(f"/api/jobs/{first['id']}/cancel", method="POST", body={})
+expect("Cancel on a running job is acknowledged at once", status == 200
+       and cancelling["job"]["cancelling"] is True, str(cancelling)[:200])
+deadline = time.time() + 30
+while time.time() < deadline:
+    first = jb.json(f"/api/jobs/{first['id']}")[1]
+    if first["state"] != "running":
+        break
+    time.sleep(0.2)
+expect("... and the job stops within seconds, leaving no LODs", first["state"] == "cancelled"
+       and not jb.json(f"/api/assets/{big['id']}")[1]["lods"], str(first)[:200])
+expect("Cancel on an unknown job is a 404", jb.call("/api/jobs/9999/cancel", method="POST",
+                                                     body=b"{}")[0] == 404)
+status, again = jb.json(f"/api/assets/{small['id']}/lods?async=1", method="POST",
+                        body={"ratios": [0.5], "shippable": True})
+job = again["job"]
+deadline = time.time() + 60
+while job["state"] in ("queued", "running") and time.time() < deadline:
+    time.sleep(0.2)
+    job = jb.json(f"/api/jobs/{job['id']}")[1]
+expect("the worker carries on with the next job after a cancel",
+       job["state"] == "done" and job["fraction"] == 1.0, str(job)[:200])
+_real_free = aws.agk.available_memory
+aws.agk.available_memory = lambda: 512 * 2**20
+expect("a Shippable job on a PC short of memory says so before it starts",
+       "close other programs" in aws.shippable_memory_warning(
+           {"triangle_count": 1_082_096}), aws.shippable_memory_warning({"triangle_count": 1_082_096}))
+aws.agk.available_memory = lambda: 64 * 2**20       # the test globe needs ~170 MB
+status, warned = jb.json(f"/api/assets/{big['id']}/lods?async=1", method="POST",
+                         body={"ratios": [0.5], "shippable": True})
+expect("... and the job carries the warning for the page",
+       "GB of memory" in warned["job"].get("warning", ""), str(warned)[:300])
+jb.json(f"/api/jobs/{warned['job']['id']}/cancel", method="POST", body={})
+aws.agk.available_memory = lambda: 64 * 2**30
+expect("with memory to spare, no warning", aws.shippable_memory_warning(
+    {"triangle_count": 1_082_096}) == "")
+aws.agk.available_memory = _real_free
+jb_server.shutdown()
+jb_server.server_close()
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

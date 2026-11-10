@@ -52,8 +52,9 @@ REPO_ROOT = HERE.parent
 
 
 def is_checkout(root: Path = REPO_ROOT) -> bool:
-    """A downloaded or cloned copy (Rules.bat beside it), not a pip install."""
-    return (root / "pyproject.toml").is_file() or (root / "Rules.bat").is_file()
+    """A downloaded or cloned copy (Start AssetGatekeeper.bat or Rules.bat beside it), not a pip install."""
+    return ((root / "pyproject.toml").is_file() or (root / "Start AssetGatekeeper.bat").is_file()
+            or (root / "Rules.bat").is_file())
 
 
 def data_root() -> Path:
@@ -516,8 +517,8 @@ def command_hint(action: str) -> str:
     if not is_checkout():
         return f"agk-serve {action}"
     if os.name == "nt":
-        return {"down": "double-click Stop.bat", "up": "double-click Rules.bat"}.get(
-            action, f"agk-serve.bat {action}")
+        return {"down": "double-click Stop.bat", "up": "double-click Start AssetGatekeeper.bat"}.get(
+            action, f"tools\\agk-serve.bat {action}")
     return f"python tools/agk_serve.py {action}"
 
 
@@ -577,7 +578,7 @@ def command_down(args: argparse.Namespace) -> int:
 def stray_servers() -> list[tuple[int, str]]:
     """Servers running from *this* copy that ports.json does not record.
 
-    A second Rules.bat, a start_workstation.bat window, or a ports.json removed
+    A second start, a tools/start_workstation.bat window, or a ports.json removed
     by hand all leave servers nobody can stop by name - and a running server
     keeps its folder locked, so the copy cannot be deleted (9 Nov 2026). Only
     processes whose command line names this copy's own server scripts match.

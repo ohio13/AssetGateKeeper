@@ -68,3 +68,11 @@ certification/
 # verdict cache written by --once runs
 .agk-cache.json
 .agk-ci-cache/
+
+# --------------------------------------------------------------------------- #
+# Personal notes and AI-assistant files: they stay on the developer's machine
+# --------------------------------------------------------------------------- #
+CLAUDE.md
+CLAUDE.local.md
+.claude/
+HANDOFF*.md

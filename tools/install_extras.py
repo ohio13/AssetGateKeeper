@@ -5,7 +5,7 @@
     python tools/install_extras.py --check    only say what is there and what is not
     python tools/install_extras.py --dry-run  print the pip command, run nothing
 
-Install_Extras.bat runs this with the same Python that Rules.bat uses, so a
+Install_Extras.bat runs this with the same Python that Start AssetGatekeeper.bat uses, so a
 library lands where the servers will look for it. Before this, the review page
 said "pip install fast-simplification xatlas scipy" and a Windows user had to
 know which Python that meant, and to type it in cmd rather than inside Python.
@@ -13,7 +13,7 @@ know which Python that meant, and to type it in cmd rather than inside Python.
 Two groups:
 
 * **Needed** - what the gate itself cannot run without (trimesh, Pillow, ...).
-  Rules.bat refuses to start without them, and points here.
+  Start AssetGatekeeper.bat refuses to start without them, and points here.
 * **Extras** - optional: the Polypaint bake (fast-simplification, xatlas,
   scipy; Python 3.10 or newer) and watchdog (faster folder watching).
 
@@ -201,7 +201,7 @@ def main(argv: Optional[list] = None) -> int:
         say(f'    or add --user:  {quoted(command[:4] + ["--user"] + command[4:])}')
         say("  - \"externally-managed-environment\" (Linux/macOS system Python): make a")
         say("    virtual environment first:  python3 -m venv .venv  then run this with")
-        say("    .venv/bin/python (Rules.bat and this file use .venv by themselves)")
+        say("    .venv/bin/python (the .bat files use .venv by themselves)")
 
     still = []
     for package in missing:

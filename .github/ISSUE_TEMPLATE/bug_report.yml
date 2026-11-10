@@ -2,6 +2,14 @@ name: Bug report
 description: The tool gave a wrong answer, crashed, or did something confusing.
 labels: [bug]
 body:
+  - type: markdown
+    attributes:
+      value: |
+        Thank you for taking the time. AssetGatekeeper is a one-person, spare-time project,
+        so I read every report but replies can be slow, and not every report will get one.
+        A report that shows the problem (the line the tool printed, and the file if you can
+        share it) is the one most likely to be fixed. See
+        [how the project is run](https://github.com/ohio13/AssetGateKeeper/blob/main/CONTRIBUTING.md#how-the-project-is-run).
   - type: textarea
     id: output
     attributes:

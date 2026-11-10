@@ -121,6 +121,12 @@
         <div class="texture-caption" id="texture-caption"></div>
       </div>
       <div class="preview-warning" id="preview-warning" role="note" hidden></div>
+      <button class="chip full-detail" id="full-detail" type="button" hidden
+              title="Load every triangle of the model (can take a while for a sculpt)">Show full detail</button>
+      <div class="load-progress" id="load-progress" role="status" aria-live="polite" hidden>
+        <div id="load-progress-text">Loading</div>
+        <progress id="load-progress-bar" max="1"></progress>
+      </div>
       <div class="pins" id="pins"></div>
       <div class="version-choice" id="version-choice" role="dialog" aria-live="polite" hidden>
         <div id="version-choice-text"></div>
@@ -180,10 +186,14 @@
         <option value="0.25,0.1,0.03">Mobile - 25 / 10 / 3 %</option>
         <option value="0.5">One level - 50 %</option>
       </select>
-      <label class="check" title="Keeps UVs, normals and materials, locks UV seams; .glb levels you can import into Unreal, Unity or Blender. About a minute per million triangles.">
+      <label class="check" title="Keeps UVs, normals and materials, locks UV seams; .glb levels you can import into Unreal, Unity or Blender. Slow on sculpts: about 3-4 minutes for 1 million triangles (the bar shows the time left), and about 1.7 GB of memory per million.">
         <input type="checkbox" id="lod-shippable"> Shippable - keep UVs, normals, materials (slower)</label>
       <button id="lod-generate" class="chip" type="button" disabled>Generate</button>
       <div id="lod-progress" class="sub" aria-live="polite"></div>
+      <div class="row job-row" id="lod-job-row" hidden>
+        <progress id="lod-bar" max="1"></progress>
+        <button id="lod-cancel" class="chip" type="button">Cancel</button>
+      </div>
       <label for="lod-upload-level">Upload your own LOD</label>
       <div class="row">
         <select id="lod-upload-level">

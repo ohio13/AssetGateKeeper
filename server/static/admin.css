@@ -79,3 +79,19 @@ td.num, th.num { text-align: right; }
 .log .failed { color: var(--bad); }
 .log .passed { color: var(--good); }
 .log .muted { color: var(--muted); }
+/* Solo mode (10 Nov 2026): a link that looks like the header's buttons. */
+a.ghost { display: inline-block; padding: 6px 12px; border-radius: 8px; border: 1px solid var(--line);
+  color: var(--text); text-decoration: none; font-size: 12px; }
+a.ghost:hover { border-color: var(--accent); }
+a.ghost[hidden], button[hidden] { display: none; }
+/* First-run wizard (10 Nov 2026). */
+.wizard { border-color: var(--accent); }
+.wizard[hidden] { display: none; }
+.steps { margin: 0 0 14px; padding-left: 20px; display: grid; gap: 14px; }
+.steps > li > strong { display: block; margin-bottom: 6px; }
+.choices label { flex-direction: row; align-items: center; gap: 6px; font-size: 13px;
+  color: var(--text); }
+.choices input { width: 15px; height: 15px; min-width: 0; accent-color: var(--accent); }
+label.keep { flex-direction: row; align-items: center; gap: 7px; font-size: 13px; color: var(--text); }
+label.keep input { width: 15px; height: 15px; min-width: 0; }
+label.keep[hidden] { display: none; }

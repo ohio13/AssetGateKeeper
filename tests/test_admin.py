@@ -15,6 +15,8 @@ import http.cookiejar
 import json
 import os
 import shutil
+import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -332,6 +334,35 @@ expect("it counted the asset", snapshot["totals"]["total"] >= 1, json.dumps(snap
 expect("the asset passed under a 1,200 triangle budget",
        snapshot["totals"]["passed"] >= 1, json.dumps(snapshot["totals"]))
 expect("events are buffered for a late subscriber", len(server.scanner.recent()) >= 2)
+
+# 10 Nov 2026: a scan that found a failing asset ended "scan failed: <last log
+# line>" (the gate exits 1 when something fails), the gate's closing summary
+# line was counted as one more failed asset, and files it skipped (the developer's .jfif
+# reference images) were never mentioned.
+_saved_root = server.scan_root
+mixed = Path(tempfile.mkdtemp(prefix="agk-mixed-"))
+from PIL import Image as _Image
+_Image.new("RGB", (64, 64), (90, 90, 90)).save(mixed / "T_Good_BaseColor.png")
+_Image.new("RGB", (1000, 1000), (90, 90, 90)).save(mixed / "T_Bad_BaseColor.png")
+_Image.new("RGB", (64, 64), (90, 90, 90)).save(mixed / "reference.jfif", "JPEG")
+server.scan_root = str(mixed)
+status, body = anon.post("/admin/api/scan", csrf=csrf)
+expect("a scan of a folder with a failing asset starts", status == 200, body[:200])
+deadline = time.time() + 120
+while time.time() < deadline:
+    snapshot = anon.state()["scan"]
+    if snapshot["status"] != "running":
+        break
+    time.sleep(0.4)
+expect("... and finishes as done, not 'scan failed'", snapshot["status"] == "done"
+       and not snapshot["error"], json.dumps(snapshot)[:300])
+expect("... counting exactly the two assets (the summary line is not an asset)",
+       snapshot["totals"] == {"total": 2, "passed": 1, "failed": 1}, json.dumps(snapshot["totals"]))
+expect("... and saying the .jfif was skipped, with what to do",
+       snapshot["skipped"].get("unsupported") == {".jfif": 1}
+       and any(e.get("type") == "skipped" and "rename it to .jpg" in e.get("text", "")
+               for e in server.scanner.recent()), json.dumps(snapshot.get("skipped")))
+server.scan_root = _saved_root
 
 # 9 Nov 2026 audit, B1: with no project picked, the fallback folder was the
 # install itself, and a first scan filled the dashboard with the tool's own
@@ -708,6 +739,111 @@ expect("the tree names the category", "boss" in boss_only)
 
 audit_server.shutdown()
 audit_server.server_close()
+
+# --------------------------------------------------------------------------- #
+print("14. solo mode: just me on this PC, no account (10 Nov 2026)")
+# A solo install opened on "Create the first account", a password nobody else
+# would ever need. "Just me on this PC" starts without one, from this machine
+# only; "Turn on accounts" gives the owner a name and password later.
+solo_db = WORK / "solo.db"
+ahs.init_db(solo_db)
+solo_rules = WORK / "solo_rules.toml"
+solo_rules.write_text(rules.read_text(encoding="utf-8"), encoding="utf-8")
+solo_server, solo_base = start(solo_db, solo_rules, assets, allow=(str(WORK),))
+me = Session(solo_base)
+status, body = me.get("/admin/login")
+expect("first run offers 'Just me on this PC' above creating an account",
+       status == 200 and b"Just me on this PC" in body and b"create the first account" in body
+       and body.index(b"Just me on this PC") < body.index(b"create the first account"))
+status, body = me.form("/admin/api/solo", {})
+expect("choosing it opens the Rules & Presets page, with no password asked",
+       status == 200 and b"Rules" in body, body[:200])
+solo_state = me.state()
+expect("this PC is the solo director without a cookie",
+       solo_state.get("solo") is True and solo_state["user"]["role"] == "director"
+       and solo_state["can_write"] and bool(solo_state["csrf"]) and not list(me.jar),
+       json.dumps({k: solo_state.get(k) for k in ("solo", "user", "can_write")}))
+expect("a fresh client on this PC is the same (nothing to remember)",
+       Session(solo_base).state().get("solo") is True)
+solo_doc = solo_state["document"]
+solo_doc.setdefault("mesh", {})["max_triangles"] = 4321
+status, body = me.post("/admin/api/apply", {"document": solo_doc}, csrf=solo_state["csrf"])
+expect("rules can be saved in solo mode", status == 200
+       and agk.parse_rules(solo_rules)["mesh"]["max_triangles"] == 4321, body[:200])
+status, body = me.post("/admin/api/apply", {"document": solo_doc}, csrf="forged")
+expect("... but not without the page's CSRF token (another website cannot)", status == 403)
+expect("the change history says it was the solo account",
+       any(row.get("username") == ahs.SOLO_USERNAME for row in me.state()["audit"]),
+       str(me.state()["audit"][:2])[:300])
+status, body = me.form("/admin/api/solo", {})
+expect("solo mode cannot be chosen twice", status == 403, body[:120])
+status, body = me.form("/admin/api/bootstrap", {"username": "eve", "password": "x" * 12,
+                                                 "confirm": "x" * 12})
+expect("... and the first-account form is closed too", status == 403, body[:120])
+added = subprocess.run([sys.executable, str(ahs.HERE / "asset_health_server.py"), "--db",
+                        str(solo_db), "--add-admin", "bob"], capture_output=True, text=True)
+expect("--add-admin is refused in solo mode, saying what to do first",
+       added.returncode == 2 and "Turn on accounts" in added.stderr, added.stderr[-200:])
+expect("... and adds nobody", ahs.admin_account_count(solo_db) == 1)
+status, body = me.get("/admin/login")
+expect("this PC never sees a sign-in page in solo mode", status == 200 and b"Sign in" not in body
+       and b"Rules" in body)
+_lan = ""
+try:
+    _probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    _probe.connect(("10.255.255.255", 1))
+    _lan = _probe.getsockname()[0]
+    _probe.close()
+except OSError:
+    pass
+if _lan and not _lan.startswith("127."):
+    lan_server = ahs.build_server("0.0.0.0", 0, solo_db, quiet=True, rules_path=str(solo_rules),
+                                  rules_root=str(solo_rules.parent), scan_root=str(assets),
+                                  allow_hosts=(_lan,))
+    threading.Thread(target=lan_server.serve_forever, daemon=True).start()
+    remote = Session(f"http://{_lan}:{lan_server.server_address[1]}")
+    expect("from another machine solo mode is closed: no state",
+           remote.get("/admin/api/state")[0] == 401)
+    status, body = remote.get("/admin/login")
+    expect("... and the page says to turn on accounts on the PC",
+           b"solo mode" in body and b"Turn on accounts" in body, body[:200])
+    expect("... and cannot choose or end solo mode",
+           remote.form("/admin/api/solo", {})[0] == 403
+           and remote.form("/admin/api/accounts-on", {"username": "x"})[0] == 401)
+    lan_server.shutdown()
+    lan_server.server_close()
+else:
+    print("  skip the other-machine checks: no network address here")
+status, body = me.get("/admin/accounts")
+expect("'Turn on accounts' asks for a name and password", status == 200
+       and b'name="password"' in body and b'name="csrf"' in body)
+_csrf = me.state()["csrf"]
+status, body = me.form("/admin/api/accounts-on", {"csrf": _csrf, "username": "alex",
+                                                   "password": "short", "confirm": "short"})
+expect("a short password is refused in words", b"at least 10 characters" in body)
+status, body = me.form("/admin/api/accounts-on", {"csrf": "forged", "username": "alex",
+                                                   "password": "x" * 12, "confirm": "x" * 12})
+expect("... and a forged form", status == 403)
+status, body = me.form("/admin/api/accounts-on", {"csrf": _csrf, "username": "alex",
+                                                   "password": "correct horse 42",
+                                                   "confirm": "correct horse 42"})
+after = me.state()
+expect("accounts on: you are signed in as yourself, still the director",
+       status == 200 and after.get("solo") is False and after["user"]["username"] == "alex"
+       and after["user"]["role"] == "director", json.dumps(after.get("user")))
+expect("... the earlier change is now in your name (same account)",
+       any(row.get("username") == "alex" for row in after["audit"]))
+expect("... and a client without a session must sign in now",
+       Session(solo_base).get("/admin/api/state")[0] == 401)
+fresh_login = Session(solo_base)
+fresh_login.form("/admin/login", {"username": "alex", "password": "correct horse 42"})
+expect("... with the new password", fresh_login.state()["user"]["username"] == "alex")
+added = subprocess.run([sys.executable, str(ahs.HERE / "asset_health_server.py"), "--db",
+                        str(solo_db), "--add-admin", "bob", "--admin-role", "producer"],
+                       capture_output=True, text=True)
+expect("then the second person can be added", added.returncode == 0, added.stderr[-200:])
+solo_server.shutdown()
+solo_server.server_close()
 
 server.shutdown()
 server.server_close()

@@ -207,7 +207,7 @@ def main(argv: list[str] | None = None) -> int:
                                     data=path.read_bytes())
         except (urllib.error.URLError, OSError) as exc:
             print(f"error: cannot reach {base_url}: {exc}", file=sys.stderr)
-            print("       is the workstation running? start_workstation.bat", file=sys.stderr)
+            print("       is the workstation running? double-click Start AssetGatekeeper.bat", file=sys.stderr)
             return 2
         if status in (200, 201):
             uploaded += 1
