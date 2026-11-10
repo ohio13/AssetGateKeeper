@@ -5,6 +5,8 @@
 > **Please read first: an early alpha (0.1.0-alpha.1), shared as it is.**
 > AssetGatekeeper started as a test tool for my own private game projects. It is public in case it helps someone else, but it is not finished: expect rough edges, missing features and changes between versions. It has not been used on a real studio project yet.
 >
+> **Built with AI.** Nearly all of the code, tests and documentation were written by AI assistants (mostly Anthropic's Claude), directed and tested by one developer. Keep that in mind when you judge how far to trust it, and please report anything that looks wrong.
+>
 > **Please try it on a copy of your project, or on one in version control (Git, Perforce) that you can roll back.** Checking only reads your files. A few parts write to them: auto-heal (`--heal`, off unless you switch it on) resizes and repairs assets and keeps the originals in `.agk-backups`; the Polypaint bake writes new files next to the sculpt, replacing its own earlier output; and the Rules & Presets page saves `rules.toml`, noting every change in its history. Please don't rely on any of that for work you can't afford to lose. There is no warranty (see the [MIT licence](https://github.com/ohio13/AssetGateKeeper/blob/main/LICENSE)).
 >
 > Found something odd? [Tell me](https://github.com/ohio13/AssetGateKeeper/issues/new/choose), with the line the tool printed. That is the most useful thing anyone can do for it right now.

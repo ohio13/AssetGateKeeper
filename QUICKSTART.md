@@ -1,6 +1,7 @@
 # AssetGatekeeper — Setup manual
 
-> **Please read first:** an early alpha, built first as a test tool for private projects. Try it on a
+> **Please read first:** an early alpha, built first as a test tool for private projects and written
+> mostly by AI assistants. Try it on a
 > **copy** of your project, or one in version control you can roll back. See the
 > note at the top of the [README](https://github.com/ohio13/AssetGateKeeper/blob/main/README.md).
 

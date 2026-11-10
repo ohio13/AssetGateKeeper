@@ -8,7 +8,9 @@ AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 * **Going public (10 Nov).** The README and the setup manual open with a
   plain note: an early alpha, built first as a test tool for private projects;
   try it on a copy or under version control; which parts write to your files;
-  no warranty. Test fixtures no longer use the developer's PC and folder names.
+  no warranty; and that it was built with AI (nearly all of the code, tests and
+  docs written by AI assistants, mostly Claude, directed and tested by one
+  developer). Test fixtures no longer use the developer's PC and folder names.
   THIRD_PARTY_NOTICES.md lists the two libraries copied in (three.js and
   tomli, both MIT) and three.js's licence now sits beside it in
   `server/static/vendor/`. Personal notes and AI-assistant files are
