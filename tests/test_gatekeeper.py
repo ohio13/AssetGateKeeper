@@ -3488,6 +3488,22 @@ _many = agk.describe_skipped({"total": 7, "unsupported": {f".x{i}": 1 for i in r
 expect("a long list is cut short", "2 more type(s)" in _many, _many)
 shutil.rmtree(_skip_dir, ignore_errors=True)
 
+print("Ready for PyPI (10 Nov 2026)")
+# PyPI shows README.md as the project page, where a relative link like
+# docs/README.md leads nowhere; and the licence as a TOML table stops building
+# with setuptools after Feb 2027.
+_front = (ROOT_MODULE_DIR / "README.md").read_text(encoding="utf-8")
+import re as _re
+_relative = [link for link in _re.findall(r"\]\(([^)\s]+)\)", _front)
+             if not link.startswith(("http://", "https://", "#", "mailto:"))]
+expect("every README link is absolute, so it works on PyPI too", not _relative, str(_relative))
+_project = agk.tomllib.loads((ROOT_MODULE_DIR / "pyproject.toml").read_text(encoding="utf-8"))
+expect("the licence is an SPDX string, with no licence classifier",
+       _project["project"].get("license") == "MIT"
+       and not any(c.startswith("License ::") for c in _project["project"]["classifiers"]))
+expect("... and the build needs a setuptools that understands it",
+       any(r.replace(" ", "").startswith("setuptools>=77") for r in _project["build-system"]["requires"]))
+
 print("The reference and the CLI agree")
 # The long manual moved from README.md to docs/REFERENCE.md for the alpha (the
 # front page is now short); the flag table lives there.

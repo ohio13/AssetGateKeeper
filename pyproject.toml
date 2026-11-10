@@ -1,5 +1,5 @@
 [build-system]
-requires = ["setuptools>=65", "wheel"]
+requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
@@ -8,14 +8,16 @@ dynamic = ["version"]
 description = "Gate game assets against technical budgets: triangles, texture memory, materials, PBR realism, broken references."
 readme = "README.md"
 requires-python = ">=3.9"
-license = { text = "MIT" }
+# SPDX string (setuptools 77+): the TOML table and the license classifier are
+# deprecated and would stop building in 2027.
+license = "MIT"
+license-files = ["LICENSE"]
 authors = [{ name = "AssetGatekeeper contributors" }]
 keywords = ["gamedev", "pipeline", "technical-art", "assets", "ci", "linter"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
   "Intended Audience :: Developers",
-  "License :: OSI Approved :: MIT License",
   "Operating System :: OS Independent",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.9",
@@ -90,7 +92,15 @@ py-modules = ["asset_gatekeeper", "healer", "notifier"]
 # keep their folder names, which is what the HERE/REPO_ROOT path bootstrapping in
 # each module assumes.
 packages = ["agk_suite", "agk_suite.server", "agk_suite.engine", "agk_suite.tools",
-            "agk_suite.enterprise", "agk_suite.plugins", "agk_vendor", "agk_vendor.tomli"]
+            "agk_suite.enterprise", "agk_suite.plugins", "agk_vendor", "agk_vendor.tomli",
+            # Data-only folders, named so setuptools keeps shipping them: it warns
+            # that unlisted ones "would be ignored" in a future release.
+            "agk_suite.server.static", "agk_suite.server.static.vendor",
+            "agk_suite.server.static.vendor.controls", "agk_suite.server.static.vendor.geometries",
+            "agk_suite.server.static.vendor.loaders", "agk_suite.server.static.vendor.math",
+            "agk_suite.server.static.vendor.utils",
+            "agk_suite.plugins.blender", "agk_suite.plugins.houdini", "agk_suite.plugins.max",
+            "agk_suite.plugins.maya", "agk_suite.plugins.unreal"]
 
 [tool.setuptools.package-dir]
 "agk_suite.server" = "server"

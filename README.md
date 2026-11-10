@@ -47,7 +47,7 @@ asset-gatekeeper path/to/Exports --recursive           # keep watching; a pop-up
 | | power of two | on |
 | | name ends in a map name (`_BaseColor`, `_Normal`, `_ORM`, …) | on, 28 names |
 
-Every rule lives in a `rules.toml` next to the assets and can be changed per folder, per platform or per asset type. See the [rules reference](docs/05-RULES-REFERENCE.md).
+Every rule lives in a `rules.toml` next to the assets and can be changed per folder, per platform or per asset type. See the [rules reference](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/05-RULES-REFERENCE.md).
 
 Naming is yours to define: pick one or more ready-made conventions (`unreal`, `unity`, `gltf`, `substance`, `godot`), add your own prefixes, endings or a pattern, or run `asset-gatekeeper <folder> --suggest-naming` to have the tool learn a `[naming]` block from the files you already have.
 
@@ -62,10 +62,10 @@ Nintendo 64 style one instead (about 1,200 triangles, 64 px, 16 colours).
 | Where | How |
 | :--- | :--- |
 | A folder | `asset-gatekeeper <folder> --once` or a live watch |
-| Maya, 3ds Max, Blender, Houdini | a button that checks the selection before export ([DCC plug-ins](docs/09-DCC-PLUGINS.md)) |
-| Unreal Engine | checks on import and in Data Validation ([DCC plug-ins](docs/09-DCC-PLUGINS.md#unreal-engine-5)) |
-| GitHub | a ready-made workflow marks each failing asset on the pull request ([CI](docs/10-CI-AND-VERSION-CONTROL.md)) |
-| Git, Perforce | a pre-commit hook and a submit trigger ([CI and version control](docs/10-CI-AND-VERSION-CONTROL.md)) |
+| Maya, 3ds Max, Blender, Houdini | a button that checks the selection before export ([DCC plug-ins](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/09-DCC-PLUGINS.md)) |
+| Unreal Engine | checks on import and in Data Validation ([DCC plug-ins](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/09-DCC-PLUGINS.md#unreal-engine-5)) |
+| GitHub | a ready-made workflow marks each failing asset on the pull request ([CI](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/10-CI-AND-VERSION-CONTROL.md)) |
+| Git, Perforce | a pre-commit hook and a submit trigger ([CI and version control](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/10-CI-AND-VERSION-CONTROL.md)) |
 
 Tested with Maya 2027.2, 3ds Max 2027.2, Unreal Engine 5.3, Blender 4 and Perforce, on Windows 11 and Linux.
 
@@ -73,10 +73,10 @@ Tested with Maya 2027.2, 3ds Max 2027.2, Unreal Engine 5.3, Blender 4 and Perfor
 
 These ship in the repository but are newer and less tested than the gate itself. Use them, and expect changes:
 
-- **AssetHealth**, a team dashboard of pass rates and repeat offenders, with Slack, Discord and Teams alerts ([docs](docs/08-ASSETHEALTH.md)).
-- **Art Workstation**, a browser review screen with a 3D viewer, versions and notes ([docs](docs/07-ART-WORKSTATION.md)).
+- **AssetHealth**, a team dashboard of pass rates and repeat offenders, with Slack, Discord and Teams alerts ([docs](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/08-ASSETHEALTH.md)).
+- **Art Workstation**, a browser review screen with a 3D viewer, versions and notes ([docs](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/07-ART-WORKSTATION.md)).
 - **Auto-healing**, which can resize textures and remove broken triangles from OBJ files; it is off unless you switch it on.
-- **PostgreSQL** storage and the enterprise tools ([docs](docs/ENTERPRISE.md)).
+- **PostgreSQL** storage and the enterprise tools ([docs](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/ENTERPRISE.md)).
 
 ## Known limitations
 
@@ -86,15 +86,15 @@ These ship in the repository but are newer and less tested than the gate itself.
 
 ## Documentation
 
-- [Quickstart](QUICKSTART.md): setting up the web pages without a terminal.
-- [Full documentation](docs/README.md): solo developer, studio rollout, rules, every CLI flag, CI, troubleshooting.
-- [Reference](docs/REFERENCE.md): the long single-page manual.
-- [Release notes](RELEASE_NOTES.md).
+- [Quickstart](https://github.com/ohio13/AssetGateKeeper/blob/main/QUICKSTART.md): setting up the web pages without a terminal.
+- [Full documentation](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/README.md): solo developer, studio rollout, rules, every CLI flag, CI, troubleshooting.
+- [Reference](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/REFERENCE.md): the long single-page manual.
+- [Release notes](https://github.com/ohio13/AssetGateKeeper/blob/main/RELEASE_NOTES.md).
 
 ## Contributing
 
-Bug reports, sample files that break it, and pull requests are all welcome. See [CONTRIBUTING.md](CONTRIBUTING.md). Security problems: please follow [SECURITY.md](SECURITY.md) instead of opening a public issue.
+Bug reports, sample files that break it, and pull requests are all welcome. See [CONTRIBUTING.md](https://github.com/ohio13/AssetGateKeeper/blob/main/CONTRIBUTING.md). Security problems: please follow [SECURITY.md](https://github.com/ohio13/AssetGateKeeper/blob/main/SECURITY.md) instead of opening a public issue.
 
 ## Licence
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](https://github.com/ohio13/AssetGateKeeper/blob/main/LICENSE).

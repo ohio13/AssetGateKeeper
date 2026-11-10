@@ -5,6 +5,14 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **Ready for PyPI (10 Nov).** `twine check` passes on the wheel and sdist and
+  the build prints no warnings: the licence is an SPDX string (`license =
+  "MIT"`, setuptools 77+; the TOML table and the licence classifier stop
+  building in 2027), the data-only folders (`server/static`, the DCC plug-ins)
+  are listed so setuptools keeps shipping them, and every README link is
+  absolute, because PyPI shows the README as the project page and relative
+  links lead nowhere there. `asset-gatekeeper` is free on PyPI. Publishing
+  needs the repository public and a PyPI account.
 * **One front door (10 Nov).** Six `.bat` files sat at the top of the folder.
   Now there is one to start with, **`Start AssetGatekeeper.bat`** (the old
   `Rules.bat`), with `Stop.bat`, `Allow_Folder.bat` and `Install_Extras.bat`
