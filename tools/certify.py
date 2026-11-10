@@ -35,6 +35,7 @@ SUITES = (
     ("test_formats", "tests/test_formats.py", (), "gate"),
     ("test_rules_wizard", "tests/test_rules_wizard.py", (), "gate"),
     ("test_lod_collision", "tests/test_lod_collision.py", (), "gate"),
+    ("test_skeleton_lightmap", "tests/test_skeleton_lightmap.py", (), "gate"),
     ("test_server", "tests/test_server.py", (), "gate"),
     ("test_admin", "tests/test_admin.py", (), "gate"),
     ("test_enterprise", "tests/test_enterprise.py", (), "gate"),
