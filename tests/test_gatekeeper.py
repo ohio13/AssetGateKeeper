@@ -1475,6 +1475,15 @@ except _ET.ParseError as exc:
     _control_ok = exc
 expect("a control character in a node or file name keeps the JUnit report readable XML",
        _control_ok is True, _control_ok)
+_undecodable = agk.Verdict(rep_dir / "SM_\udcff\udcfe.obj", ("1 degenerate triangles",))
+try:
+    agk.write_reports([("github", str(rep_dir / "odd.txt")), ("junit", str(rep_dir / "odd.xml"))],
+                      [_undecodable], rep_dir)
+    _odd = (rep_dir / "odd.txt").read_text(encoding="utf-8")
+except Exception as exc:          # UnicodeEncodeError: the run stopped with a traceback
+    _odd = repr(exc)
+expect("a file name that is not UTF-8 (bytes Linux allows) is written to every report, no traceback",
+       "degenerate" in _odd and (rep_dir / "odd.xml").is_file(), _odd)
 _total_sarif = json.loads(agk.sarif_report([agk.Verdict(Path("[total] Props/*"), ("over",))], rep_dir))
 expect("SARIF: a folder total points at rules.toml, not at '[total] Props/*' (not a URI)",
        _total_sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]

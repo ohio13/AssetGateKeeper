@@ -7679,7 +7679,9 @@ def write_reports(targets: Sequence[tuple[str, str]], verdicts: Sequence[Verdict
         text = writers[kind](verdicts, root)
         path = Path(destination).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        # errors="replace": a file name that is not valid UTF-8 (Linux allows any
+        # bytes) reaches Python as surrogates, and used to stop the run here.
+        path.write_text(text, encoding="utf-8", errors="replace")
         LOG.info("report  %s written to %s (%d assets)", kind, path, len(verdicts))
 
 
