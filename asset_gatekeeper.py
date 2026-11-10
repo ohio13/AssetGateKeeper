@@ -4283,12 +4283,35 @@ def lightmap_coverage(triangles, resolution: int = 256) -> tuple[int, int, int]:
     return int(np.count_nonzero(counts)), int(np.count_nonzero(counts > 1)), res
 
 
+def _gltf_collision_meshes(document: dict) -> set:
+    """Indices of glTF meshes that are collision only (UCX_/UBX_/USP_/UCP_).
+
+    A mesh is collision when every node placing it is named so (or, for an
+    unnamed node, the mesh is), as gltf_structure reads them; a mesh no node
+    places is judged by its own name.
+    """
+    meshes = document.get("meshes") or []
+    users: dict = {}
+    for node in document.get("nodes") or []:
+        if isinstance(node, dict) and isinstance(node.get("mesh"), int) \
+                and 0 <= node["mesh"] < len(meshes):
+            users.setdefault(node["mesh"], []).append(node.get("name") or "")
+    found = set()
+    for index, mesh in enumerate(meshes):
+        own = (mesh.get("name") or "") if isinstance(mesh, dict) else ""
+        names = [_bare_name(name or own).lower() for name in users.get(index, [own])]
+        if names and all(name.startswith(FBX_COLLISION_PREFIXES) for name in names):
+            found.add(index)
+    return found
+
+
 def _lightmap_meshes(path: Path, channel: int) -> dict:
     """The static meshes of an asset and their lightmap UV set.
 
     {"meshes": [(name, uv points (n, 2), uv triangles (m, 3, 2))], "missing":
     [names of static meshes without the set], "unread": why some were not read}.
-    Skinned meshes are left out: a skeletal mesh is not lightmapped.
+    Skinned meshes are left out: a skeletal mesh is not lightmapped. So are
+    UCX_/UBX_/USP_/UCP_ collision meshes, which are never rendered.
     """
     found: dict = {"meshes": [], "missing": [], "unread": ""}
     suffix = path.suffix.lower()
@@ -4332,7 +4355,10 @@ def _lightmap_meshes(path: Path, channel: int) -> dict:
             return found
         buffers: dict = {}
         attribute = f"TEXCOORD_{channel}"
+        collision = _gltf_collision_meshes(document)
         for index, mesh in enumerate(document.get("meshes") or []):
+            if index in collision:
+                continue                                  # UCX_ & co: not lit, no lightmap
             name = mesh.get("name") or f"mesh {index}"
             points, triangles, missing = [], [], False
             for primitive in mesh.get("primitives") or []:
