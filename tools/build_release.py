@@ -27,6 +27,7 @@ import argparse
 import hashlib
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -83,10 +84,12 @@ def read_version() -> str:
     neither belongs in a packaging script.
     """
     text = (ROOT / "asset_gatekeeper.py").read_text(encoding="utf-8")
-    for line in text.splitlines():
-        if line.startswith("__version__"):
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
-    raise SystemExit("could not find __version__ in asset_gatekeeper.py")
+    # The string literal only: the line carries a comment since the 0.1.0a1
+    # rename, and the whole rest of the line once ended up in the ZIP's name.
+    found = re.search(r"""^__version__\s*=\s*["']([^"']+)["']""", text, re.M)
+    if not found:
+        raise SystemExit("could not find __version__ in asset_gatekeeper.py")
+    return found.group(1)
 
 
 def git(*args: str) -> str:

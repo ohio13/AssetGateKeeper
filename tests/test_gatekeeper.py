@@ -3413,6 +3413,8 @@ expect("Rules.bat points a user with missing libraries at it",
        b"Install_Extras.bat" in (ROOT_MODULE_DIR / "Rules.bat").read_bytes())
 _build = load_module("agk_build_release", "tools/build_release.py")
 expect("the release ZIP ships it", "Install_Extras.bat" in _build.DROP_IN_FILES)
+expect("the release is named by the version string alone, not the comment after it",
+       _build.read_version() == agk.__version__, _build.read_version())
 _pp = load_module("agk_polypaint_hint", "engine/polypaint.py")
 expect("the bake's install hint names the exact pip command",
        "-m pip install fast-simplification xatlas scipy" in _pp.install_hint())
