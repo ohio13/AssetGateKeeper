@@ -1434,6 +1434,13 @@ def parse_exceptions(document: Optional[dict], base: Optional[Path] = None,
             if isinstance(allow, bool) or not isinstance(allow, (int, float)) or allow < 0:
                 raise ConfigError(f"{label}.allow must be a number of MB for {rule}, got {allow!r}")
             allow = float(allow)
+        try:
+            # The value must make a budget: max_texture_edge = 0 used to pass here
+            # and then stop the run with a traceback on the first matching asset.
+            replace(Budget(), **{rule: allow})
+        except ConfigError as exc:
+            raise ConfigError(f"{label}.allow = {allow!r} cannot be used for {rule}: "
+                              f"{str(exc).replace('budget ', '', 1)}") from exc
         found.append(BudgetException(
             path=str(entry["path"]).strip(), rule=rule, allow=allow,
             reason=str(entry["reason"]).strip()[:300], owner=str(entry["owner"]).strip()[:80],

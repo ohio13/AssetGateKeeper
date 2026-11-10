@@ -1373,7 +1373,12 @@ for _bad, _why in (({"rule": "max_triangles", "allow": 1, "owner": "o", "expires
                    ({"rule": "max_triangles", "allow": 1, "reason": "r", "owner": "o",
                      "expires": "next week", "path": "x"}, "date"),
                    ({"rule": "max_triangles", "allow": 1, "reason": "r", "owner": "o",
-                     "expires": "2030-01-01", "path": "x", "approved": True}, "approved")):
+                     "expires": "2030-01-01", "path": "x", "approved": True}, "approved"),
+                   # a value no budget can hold: refused here, not a traceback mid-run
+                   ({"rule": "max_texture_edge", "allow": 0, "reason": "r", "owner": "o",
+                     "expires": "2030-01-01", "path": "x"}, "max_texture_edge must be at least 1"),
+                   ({"rule": "max_uv_channels", "allow": 0, "reason": "r", "owner": "o",
+                     "expires": "2030-01-01", "path": "x"}, "max_uv_channels must be at least 1")):
     try:
         agk.parse_exceptions({"exceptions": [_bad]})
         expect(f"a bad exception is refused ({_why})", False)
