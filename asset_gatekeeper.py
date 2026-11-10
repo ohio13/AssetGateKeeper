@@ -1294,7 +1294,15 @@ def parse_rules(path: Path) -> dict:
     """
     # utf-8-sig strips a leading BOM, which Notepad and PowerShell add by default
     # on Windows; tomllib would otherwise reject the file on its very first byte.
-    text = path.read_text(encoding="utf-8-sig")
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        # Notepad's "ANSI" (Windows-1252) turns an accent in a comment into a
+        # byte that is not UTF-8; the bare codec error did not say what to do.
+        line = path.read_bytes()[:exc.start].count(b"\n") + 1
+        raise ConfigError(f"{path.name} is not saved as UTF-8 (byte 0x{exc.object[exc.start]:02x} "
+                          f"on line {line}): save it as UTF-8 (Notepad: Save As, Encoding "
+                          "UTF-8)") from exc
     if path.suffix.lower() == ".json":
         try:
             return json.loads(text)

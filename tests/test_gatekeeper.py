@@ -233,6 +233,17 @@ bom_cfg.mkdir(exist_ok=True)
 bom_budget, _, _ = agk.resolve_budget(bom_cfg, agk.build_parser().parse_args([str(bom_cfg)]))
 expect("rules.toml written with a BOM still loads (Notepad / PowerShell)",
        bom_budget.max_triangles == 64, str(bom_budget.max_triangles))
+(bom_cfg / "rules.toml").write_bytes(b"# R\xe9gles\r\n[mesh]\r\nmax_triangles = 64 # caf\xe9\r\n")
+try:
+    agk.parse_rules(bom_cfg / "rules.toml")
+    _ansi = "loaded"
+except agk.ConfigError as exc:
+    _ansi = str(exc)
+except UnicodeDecodeError as exc:
+    _ansi = f"bare {exc!r}"
+expect("a rules.toml saved as Windows-1252 ('ANSI') is refused saying to save it as UTF-8, "
+       "with the line", "save it as UTF-8" in _ansi and "line 1" in _ansi, _ansi)
+(bom_cfg / "rules.toml").write_bytes(b"\xef\xbb\xbf[mesh]\nmax_triangles = 64\n")
 
 for label, blob in (
     ("unknown key is rejected", "[mesh]\nmax_triange = 10\n"),
