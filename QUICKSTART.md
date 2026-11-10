@@ -123,6 +123,22 @@ keep running.
 | read the server output | `agk-serve.bat logs --tail 60` |
 | start with the review screen too | `agk-serve.bat up --open both` |
 
+### The first start: three questions
+
+After that choice, the Rules & Presets page opens with **Get started** on top:
+
+1. **Your project folder** — pick one of the allowed folders (add one with
+   `Allow_Folder.bat`).
+2. **Your engine** — Unreal, Unity, Godot or Other. This sets how names are
+   checked (`[naming] preset` in the project's `rules.toml`).
+3. **What it has to run on** — one of the hardware budgets (N64 to PC). If the
+   folder already has a `rules.toml`, you are asked whether to keep its numbers.
+
+**Save and check my project** writes the project's `rules.toml` and runs the
+first check, streamed on the page, with the files it skipped named at the end.
+The wizard does not come back once a project is set; `/admin?setup=1` opens it
+again.
+
 ### Just me, or a first account
 
 On a brand-new install the browser offers two ways in:

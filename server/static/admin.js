@@ -80,6 +80,109 @@ async function useProject() {
   }
 }
 
+/* - first-run wizard (10 Nov 2026) */
+// A first start asked for nothing and offered a page of budget fields; a new
+// user pressed Scan with no project picked and got the tool's own test files.
+// The wizard asks three things - folder, engine, target - then saves and scans.
+
+const ENGINE_HELP = {
+  unreal: "Names are checked the Unreal way: <code>SM_</code>/<code>SK_</code> meshes, "
+    + "<code>T_</code> textures with a map suffix (<code>_D</code>, <code>_N</code>, <code>_BaseColor</code>...).",
+  unity: "Texture names need a Unity map suffix (<code>_Albedo</code>, <code>_Normal</code>, "
+    + "<code>_MaskMap</code>...); meshes are not name-checked.",
+  godot: "Texture names need a Godot map suffix (<code>_albedo</code>, <code>_normal</code>, "
+    + "<code>_orm</code>...); meshes are not name-checked.",
+  "": "Texture names need a common map suffix (<code>_BaseColor</code>, <code>_Normal</code>, "
+    + "<code>_Albedo</code>...).",
+};
+
+function wizardEngine() {
+  const picked = document.querySelector('input[name="wiz-engine"]:checked');
+  return picked ? picked.value : "";
+}
+
+function setupWizard(data) {
+  const params = new URLSearchParams(window.location.search);
+  const first = !data.project && !(data.recent_projects || []).length;
+  if (!(first || params.get("setup") === "1")) return;
+  $("wizard").hidden = false;
+  const allowed = $("wiz-allowed");
+  const seen = new Set();
+  for (const root of data.allowed_roots || []) {
+    const key = String(root).toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const option = document.createElement("option");
+    option.value = root;
+    option.textContent = root;
+    allowed.appendChild(option);
+  }
+  allowed.addEventListener("change", (event) => {
+    if (event.target.value) $("wiz-path").value = event.target.value;
+    $("wiz-keep-row").hidden = true;
+  });
+  $("wiz-path").addEventListener("input", () => { $("wiz-keep-row").hidden = true; });
+  const target = $("wiz-target");
+  for (const preset of state.presets) {
+    const option = document.createElement("option");
+    option.value = preset.name;
+    option.textContent = `${preset.label} - ${preset.character_triangles.toLocaleString()} `
+      + `triangles, ${preset.max_texture_edge} px`;
+    target.appendChild(option);
+  }
+  target.value = state.presets.some((row) => row.name === "pc") ? "pc" : (state.presets[0] || {}).name;
+  document.querySelectorAll('input[name="wiz-engine"]').forEach((input) =>
+    input.addEventListener("change", () => { $("wiz-engine-help").innerHTML = ENGINE_HELP[wizardEngine()]; }));
+  $("wiz-go").addEventListener("click", runWizard);
+  $("wiz-skip").addEventListener("click", () => { $("wizard").hidden = true; });
+}
+
+async function runWizard() {
+  const path = $("wiz-path").value.trim();
+  if (!path) { notice("Type your project folder, or pick an allowed one.", "warn"); return; }
+  $("wiz-go").disabled = true;
+  try {
+    const info = await api("/admin/api/project", { method: "POST", json: { path } });
+    // A project that already has rules: ask once whether to keep its numbers.
+    if (info.rules_exists && $("wiz-keep-row").hidden) {
+      $("wiz-keep-row").hidden = false;
+      notice(`${info.project} already has a rules.toml. Keep its numbers, or untick the box `
+        + "to use the budget you picked; then press the button again.", "warn");
+      return;
+    }
+    $("project-path").value = info.project;
+    $("where").textContent = info.rules_path;
+    setProjectStatus(info);
+    renderRecent(info.recent);
+    state.document = info.document || {};
+    fillForm(state.document);
+    const keep = info.rules_exists && $("wiz-keep").checked;
+    if (!keep) applyPreset($("wiz-target").value);
+    const engine = wizardEngine();
+    const document = budgetDocument();
+    if (engine) document.naming = { preset: [engine] };
+    const result = await api("/admin/api/apply", {
+      method: "POST",
+      json: { document, action: "rescan",
+              summary: `first-run setup: ${engine || "other engine"}, `
+                + (keep ? "kept the project's rules" : `preset ${$("wiz-target").value}`) },
+    });
+    $("wizard").hidden = true;
+    markClean();
+    notice(`Set up ${info.project}: ${engine ? engine[0].toUpperCase() + engine.slice(1) : "common"} `
+      + `naming, ${keep ? "its own rules.toml" : $("wiz-target").selectedOptions[0].textContent}. `
+      + "The first check is running below.", "ok");
+    await loadState(false);
+    if (result.scan && result.scan.started) watchScan();
+    else if (result.scan && result.scan.blocked) notice(result.scan.blocked, "warn");
+    $("scan-log").scrollIntoView({ behavior: "smooth", block: "center" });
+  } catch (error) {
+    notice(`That did not work: ${error.message}`, "err");
+  } finally {
+    $("wiz-go").disabled = false;
+  }
+}
+
 /* - helpers */
 
 function notice(message, kind = "ok") {
@@ -368,6 +471,7 @@ async function loadState(firstTime = true) {
       option.textContent = `${preset.label} - ${preset.character_triangles.toLocaleString()} char`;
       select.appendChild(option);
     }
+    setupWizard(data);
     $("project-use").addEventListener("click", useProject);
     $("project-path").addEventListener("keydown", (event) => {
       if (event.key === "Enter") { event.preventDefault(); useProject(); }

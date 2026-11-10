@@ -26,6 +26,52 @@
 
   <div class="notice" id="banner" hidden></div>
 
+  <section class="panel wizard" id="wizard" hidden>
+    <h2>Get started</h2>
+    <p class="help">Three questions, then the first check of your project. Everything
+    can be changed below afterwards.</p>
+    <ol class="steps">
+      <li>
+        <strong>Your project folder</strong>
+        <div class="row">
+          <label style="flex:1 1 320px">Folder
+            <input id="wiz-path" placeholder="D:\Projects\My-Game" autocomplete="off">
+          </label>
+          <label>Allowed folder
+            <select id="wiz-allowed"><option value="">— choose —</option></select>
+          </label>
+        </div>
+        <p class="help">Only folders on the allow-list can be opened. To add one,
+        double-click <code>Allow_Folder.bat</code>.</p>
+      </li>
+      <li>
+        <strong>Your engine</strong>
+        <div class="row choices" id="wiz-engine">
+          <label><input type="radio" name="wiz-engine" value="unreal" checked> Unreal</label>
+          <label><input type="radio" name="wiz-engine" value="unity"> Unity</label>
+          <label><input type="radio" name="wiz-engine" value="godot"> Godot</label>
+          <label><input type="radio" name="wiz-engine" value=""> Other</label>
+        </div>
+        <p class="help" id="wiz-engine-help">Names are checked the Unreal way:
+        <code>SM_</code> meshes, <code>T_</code> textures with a map suffix.</p>
+      </li>
+      <li>
+        <strong>What it has to run on</strong>
+        <div class="row">
+          <label>Budget
+            <select id="wiz-target"></select>
+          </label>
+          <label class="keep" id="wiz-keep-row" hidden>
+            <input type="checkbox" id="wiz-keep" checked> Keep the project's own rules.toml numbers</label>
+        </div>
+      </li>
+    </ol>
+    <div class="row">
+      <button type="button" id="wiz-go" class="primary">Save and check my project</button>
+      <button type="button" id="wiz-skip" class="ghost">Skip, I'll set it up below</button>
+    </div>
+  </section>
+
   <section class="panel">
     <h2>Project</h2>
     <p class="help">

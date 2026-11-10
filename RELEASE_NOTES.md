@@ -5,6 +5,15 @@ October-November 2026) are folded into it; their notes follow below for the
 record. The gate, the GitHub check and the editor plug-ins are the product;
 AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
 
+* **A first-run wizard (10 Nov).** A first start offered a page of budget
+  fields, and Scan with no project picked used to check the tool's own test
+  files. The Rules & Presets page now opens with **Get started**: your project
+  folder, your engine (Unreal, Unity, Godot or Other, written as `[naming]
+  preset`) and what it has to run on (the hardware budgets); **Save and check
+  my project** writes the project's `rules.toml` and runs the first scan. A
+  folder that already has rules is asked about before its numbers are
+  replaced. Covered by a browser test from an empty install: Just me on this
+  PC, the wizard, the scan with its skipped line.
 * **No account for one person (10 Nov).** A solo install opened on "Create
   the first account", a password nobody else would ever need. The first-run
   page now offers **Just me on this PC** first: no account, no password, rules

@@ -928,6 +928,54 @@ with sync_playwright() as playwright:
     acc_server.shutdown()
     acc_server.server_close()
 
+    print("11. a first start: Just me on this PC, then the wizard (10 Nov 2026)")
+    import asset_health_server as ahs  # noqa: PLC0415 - only this section needs it
+    first_db = WORK / "first_run.db"
+    ahs.init_db(first_db)
+    game = (WORK / "MyGame").resolve()
+    (game / "Textures").mkdir(parents=True)
+    _Image.new("RGB", (64, 64), (90, 90, 90)).save(game / "Textures" / "T_Crate_Albedo.png")
+    _Image.new("RGB", (1000, 1000), (90, 90, 90)).save(game / "Textures" / "T_Bad_Albedo.png")
+    _Image.new("RGB", (64, 64), (90, 90, 90)).save(game / "Textures" / "reference.jfif", "JPEG")
+    install_rules = WORK / "install_rules.toml"
+    install_rules.write_text("", encoding="utf-8")
+    first = ahs.build_server("127.0.0.1", 0, first_db, quiet=True, rules_path=str(install_rules),
+                             rules_root=str(install_rules.parent), allow_roots=(str(game),))
+    threading.Thread(target=first.serve_forever, daemon=True).start()
+    first_base = f"http://127.0.0.1:{first.server_address[1]}"
+    admin = browser.new_page()
+    admin.goto(f"{first_base}/admin")
+    expect("a first start offers Just me on this PC",
+           admin.locator("#solo").is_visible() and "Just me on this PC" in admin.content())
+    admin.click("#solo")
+    admin.wait_for_selector("#wizard:not([hidden])", timeout=15000)
+    expect("... which opens the page in solo mode, with the setup wizard on top",
+           "Solo mode" in admin.locator("#who").inner_text()
+           and admin.locator("#accounts-on").is_visible()
+           and not admin.locator("#logout").is_visible(), admin.locator("#who").inner_text())
+    admin.select_option("#wiz-allowed", str(game))
+    admin.check('input[name="wiz-engine"][value="unity"]')
+    expect("picking an engine says how names will be checked",
+           "_MaskMap" in admin.locator("#wiz-engine-help").inner_text())
+    admin.select_option("#wiz-target", "n64")
+    admin.click("#wiz-go")
+    admin.wait_for_function("() => document.getElementById('scan-status').textContent === 'complete'",
+                            timeout=60000)
+    written = (game / "rules.toml").read_text(encoding="utf-8")
+    expect("the wizard writes the project's rules.toml: Unity naming, the N64 budget",
+           'preset = ["unity"]' in written and "max_edge = 64" in written, written[:400])
+    log = admin.locator("#scan-log").inner_text()
+    expect("... then checks the project itself, saying what was skipped",
+           "T_Bad_Albedo.png" in log and "rename it to .jpg" in log
+           and "1 passed, 1 failed, 1 skipped" in log, log[-400:])
+    expect("... and the wizard is gone", admin.locator("#wizard").is_hidden())
+    admin.reload()
+    admin.wait_for_function("() => document.getElementById('project-path').value !== ''", timeout=15000)
+    expect("it does not come back once a project is set", admin.locator("#wizard").is_hidden())
+    admin.close()
+    first.shutdown()
+    first.server_close()
+
     print("10. another website")
     other = browser.new_page()
     other.goto(f"http://127.0.0.1:{evil.server_address[1]}/")
