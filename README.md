@@ -88,7 +88,7 @@ These ship in the repository but are newer and less tested than the gate itself.
 ## Known limitations
 
 - glTF compressed with meshopt is counted exactly, but its shape checks are skipped. Draco needs DracoPy, which installs with the tool.
-- Mesh memory and texel density are measured for glTF and OBJ, not FBX yet.
+- Mesh memory and texel density for FBX are new (10 Nov 2026) and checked against the tool's own glTF path, not yet against Unreal's Size Map.
 - Budgets are calibrated against Unreal Engine 5.3; other engines may count slightly differently.
 - It has been used by one person, on Windows 11 and Linux. macOS, Python 3.9 and 3.13 and the DCC plug-ins are covered by automated tests, not by daily use.
 

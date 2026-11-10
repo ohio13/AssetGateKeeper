@@ -1316,7 +1316,7 @@ def check_totals(totals: Sequence[MemoryTotal], verdicts: Sequence[Verdict]) -> 
         members = [verdict for verdict in verdicts if total.matches(verdict.path)]
         used = sum(int(dict(verdict.stats).get("memory_kb", 0)) for verdict in members) * 1024
         limit = int(total.max_mb * 1024 * 1024)
-        # An asset with no estimate (an FBX mesh, a mesh that could not be read)
+        # An asset with no estimate (a mesh that could not be read or measured)
         # must not count as 0 MB: a total that silently leaves it out can pass a
         # folder that is over. Such a total fails, naming them.
         unmeasured = [verdict for verdict in members
@@ -1330,8 +1330,8 @@ def check_totals(totals: Sequence[MemoryTotal], verdicts: Sequence[Verdict]) -> 
             failed.append(Verdict(Path(f"[total] {total.path}"),
                                   (f"cannot check the {total.max_mb:g} MB budget for {total.path}: "
                                    f"{len(unmeasured)} asset(s) have no memory estimate "
-                                   f"({names}{more}; FBX meshes are not estimated yet) - "
-                                   "narrow the path or convert them",),
+                                   f"({names}{more}; its warning says why) - "
+                                   "fix or re-export them, or narrow the path",),
                                   f"~{_mb(used)}+?", (("memory_kb", used // 1024),)))
             continue
         if used > limit:
@@ -4395,11 +4395,12 @@ class Gatekeeper:
         # [[totals]] line needs the number.
         want_memory = self.budget.max_mesh_mb > 0 or self.want_memory
         want_texel = self.budget.texel_density_max > 0
-        if (want_memory or want_texel) and path.suffix.lower() in FBX_SUFFIXES:
-            warnings.append("mesh memory and texel density are not measured for FBX yet")
-        elif want_memory or want_texel:
+        if want_memory or want_texel:
             try:
-                facts = mesh_facts(path, self.budget.texel_texture)
+                if path.suffix.lower() in FBX_SUFFIXES:
+                    facts = engine_module("fbx_preview").measure(path, self.budget.texel_texture)
+                else:
+                    facts = mesh_facts(path, self.budget.texel_texture)
             except Exception as exc:          # a measurement must never break the verdict
                 warnings.append(f"mesh memory / texel density not measured ({exc})")
             else:
@@ -5341,17 +5342,21 @@ def _pool_check(path: Path) -> Verdict:
                        unreadable=True)
 
 
-def polypaint_module():
-    """engine/polypaint.py from a downloaded copy, or agk_suite.engine when installed."""
+def engine_module(name: str):
+    """engine/<name>.py from a downloaded copy, or agk_suite.engine when installed."""
+    import importlib
     try:
-        from agk_suite.engine import polypaint            # type: ignore[import-not-found]
-        return polypaint
+        return importlib.import_module(f"agk_suite.engine.{name}")
     except ImportError:
         engine = Path(__file__).resolve().parent / "engine"
         if str(engine) not in sys.path:
             sys.path.insert(0, str(engine))
-        import polypaint                                  # type: ignore[import-not-found]
-        return polypaint
+        return importlib.import_module(name)
+
+
+def polypaint_module():
+    """engine/polypaint.py from a downloaded copy, or agk_suite.engine when installed."""
+    return engine_module("polypaint")
 
 
 def bake_defaults(budget: "Budget") -> tuple[int, int]:

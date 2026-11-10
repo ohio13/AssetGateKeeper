@@ -20,6 +20,14 @@ AssetHealth, the Art Workstation, auto-healing and PostgreSQL are experimental.
   tomli, both MIT) and three.js's licence now sits beside it in
   `server/static/vendor/`. Personal notes and AI-assistant files are
   ignored by Git, and the public history was rebuilt without them.
+* **FBX mesh memory and texel density (10 Nov).** `[mesh] max_mb`,
+  `texel_density` and `[[totals]]` now measure FBX files too; before, an FBX
+  only said "not measured for FBX yet" and failed every total it was in. The
+  vertex count is what an engine builds (a UV seam or a hard edge splits a
+  vertex: a flat-shaded cube is 24, not 8), the model is placed with its own
+  transforms and unit scale, and the base-colour texture beside the FBX sets
+  the density when there is one. Checked against the glTF path on every FBX
+  test file (same density) and on hand-counted cases.
 * **Release workflow (10 Nov).** Pushing a tag such as `v0.1.0-alpha.1`
   builds the wheel, source archive and drop-in ZIP, checks the wheel installs
   and serves, and publishes a GitHub release with that version's notes. It

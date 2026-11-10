@@ -248,20 +248,25 @@ format = "astc8x8"
   for depth-only passes (`depth_index_buffer`). Measured on UE 5.3.2 (Nov 2026,
   five meshes from 1,000 to 48,000 triangles): within 7% of Size Map with them,
   37-53% under without. An engine that adds neither (most Unity and Godot
-  projects) sets both to `false`. glTF and OBJ only for now; an FBX gets a note
-  instead.
+  projects) sets both to `false`. For an FBX the vertex count is what an engine
+  builds from it: polygon corners that share a position, normal and UV within
+  one material are one vertex, and a UV seam or a hard edge splits it (a
+  flat-shaded cube is 24 vertices, not 8).
 * **Texel density** = sqrt(UV area x texture pixels / surface area), weighted by
   area over the asset's meshes, in pixels per metre (glTF is in metres; OBJ is
-  read as metres). A 1 m plane with 0-1 UVs and a 1024 texture is 1024 px/m.
-  The texture is the one the material names when it can be read, else
+  read as metres; an FBX is placed with its own transforms and converted from
+  its unit scale, so a centimetre file and a metre file of the same model agree). A 1 m plane with 0-1 UVs and a 1024 texture is 1024 px/m.
+  The texture is the one the material names when it can be read (for an FBX,
+  the base-colour map when it sits beside the file), else
   `texel_texture` (and the failure says it assumed one). A mesh without UVs gets
   a note, not a failure.
 * **`[[totals]]`** add up the estimate of every asset under `path` (a glob
   relative to the folder holding `rules.toml`, `*` crossing folders). A total
   over budget fails the run - even when every file passes - and is a failing
   case named `[total] <path>` in `--report junit`. Each total's use is printed.
-  An asset under the path with no memory estimate (an FBX mesh, for now) fails
-  the total, naming it, instead of counting as 0 MB: narrow the path or convert it.
+  An asset under the path with no memory estimate (a mesh that could not be read
+  or measured; its warning says why) fails the total, naming it, instead of
+  counting as 0 MB.
 * **At submit time** the Perforce trigger matches `[[exceptions]]` paths against
   the depot path below the folder of the `rules.toml` it used, as a local run
   does (`--exception-path`).

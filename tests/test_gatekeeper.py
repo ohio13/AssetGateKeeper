@@ -1265,11 +1265,19 @@ _tot = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.p
                        "--once", "--recursive", "--no-color"], capture_output=True, text=True,
                       encoding="utf-8", errors="replace")
 _tot_out = _tot.stdout + _tot.stderr
-expect("a total that holds an FBX (no memory estimate) fails and names it, never counts it as 0 MB",
-       _tot.returncode == 1 and "1 not measured" in _tot_out and "hero.fbx" in _tot_out
-       and "cannot check the 12 MB budget" in _tot_out, _tot_out[-500:])
-expect("... and the FBX itself says it was not measured",
-       "not measured for FBX yet" in _tot_out)
+# Until 10 Nov 2026 an FBX had no memory estimate and failed every total it
+# was in ("1 not measured"); engine/fbx_preview.measure() now gives one.
+expect("a total that holds an FBX counts its memory too (3 assets, none unmeasured)",
+       _tot.returncode == 0 and "Props/*: ~10.7 MB of 12 MB (3 assets)" in _tot_out
+       and "not measured" not in _tot_out, _tot_out[-500:])
+with patch.object(agk, "engine_module", side_effect=RuntimeError("measuring broke")):
+    _broken = agk.Gatekeeper(agk.Budget(max_mesh_mb=8)).check(mem_dir / "Props" / "hero.fbx")
+expect("... and if measuring ever fails, the verdict still comes with a warning, not a crash",
+       any("not measured (measuring broke)" in w for w in _broken.warnings), _broken.warnings)
+_unmeasured = agk.check_totals([agk.MemoryTotal("Props/*", 12, mem_dir)], [_broken])
+expect("... and a total holding an unmeasured asset fails and names it, never counts it as 0 MB",
+       len(_unmeasured) == 1 and "1 asset(s) have no memory estimate (hero.fbx" in _unmeasured[0].problems[0],
+       [v.problems for v in _unmeasured])
 (mem_dir / "Props" / "hero.fbx").unlink()
 
 

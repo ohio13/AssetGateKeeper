@@ -258,6 +258,17 @@ def convert(path: Path, out_path: Path) -> dict:
     {"triangles", "vertices", "materials": [names], "meshes", "bounds": (min, max),
      "axes": "+Z up, 1 unit = 1 cm", "skipped": {"collision": n, "lower_lod": n}}
     """
+    scene = _collect(path)
+    _write_glb(Path(out_path), scene["positions"], scene["groups"], scene["material_names"],
+               Path(path).stem, uvs=scene["uvs"], normals=scene["normals"],
+               textures=scene["textures"])
+    return scene["info"]
+
+
+def _collect(path: Path) -> dict:
+    """The FBX's render geometry, placed in metres, one entry per polygon corner:
+    {"positions", "uvs" or None, "normals" or None, "groups": [(slot, triangles)],
+    "material_names", "textures" (per slot), "colours": bool, "info": {...}}."""
     if np is None:                                   # pragma: no cover
         raise FbxPreviewError("numpy is not installed; FBX cannot be converted")
     top = _scene(Path(path))
@@ -325,7 +336,7 @@ def convert(path: Path, out_path: Path) -> dict:
     all_positions, all_uvs, all_normals, primitives = [], [], [], {}
     material_names: list = []
     material_texture: dict = {}      # material name -> texture path
-    has_uv = has_normals = False
+    has_uv = has_normals = has_colours = False
     corner_total = 0
     vertex_total = triangle_total = 0
     skipped = {"collision": 0, "lower_lod": 0}
@@ -386,6 +397,7 @@ def convert(path: Path, out_path: Path) -> dict:
         # One preview vertex per polygon corner, so per-corner UVs and normals
         # (seams, hard edges) survive. The reported vertex count stays the
         # FBX's own control points.
+        has_colours = has_colours or geometry.child("LayerElementColor") is not None
         uv = _layer_values(geometry, "LayerElementUV", "UV", "UVIndex", 2, corners,
                            len(positions))
         normals = _layer_values(geometry, "LayerElementNormal", "Normals", "NormalsIndex", 3,
@@ -439,9 +451,7 @@ def convert(path: Path, out_path: Path) -> dict:
     normals_out = np.vstack(all_normals).astype(np.float32) if has_normals else None
     groups = [(slot, np.vstack(parts).astype(np.uint32)) for slot, parts in sorted(primitives.items())]
     textures = [material_texture.get(name, "") if has_uv else "" for name in material_names]
-    _write_glb(Path(out_path), positions, groups, material_names, Path(path).stem,
-               uvs=uvs, normals=normals_out, textures=textures)
-    return {
+    info = {
         "uvs": has_uv,
         "normals": has_normals,
         "textures": sorted({item for item in textures if item}),
@@ -455,6 +465,79 @@ def convert(path: Path, out_path: Path) -> dict:
         "unit_scale": unit_scale,
         "skipped": skipped,
     }
+    return {"positions": positions, "uvs": uvs, "normals": normals_out, "groups": groups,
+            "material_names": material_names, "textures": textures, "colours": has_colours,
+            "info": info}
+
+
+def _texture_edge(fbx: Path, name: str) -> int:
+    """sqrt(width x height) of a texture the FBX names, found beside it, or 0."""
+    if not name:
+        return 0
+    for candidate in (fbx.parent / name, fbx.parent / name.rsplit("/", 1)[-1]):
+        try:
+            if not candidate.is_file():
+                continue
+            with candidate.open("rb") as handle:
+                size = agk.image_size_from_bytes(handle.read(1 << 20))
+        except OSError:
+            continue
+        if size and min(size) >= 16:
+            return int(round(math.sqrt(size[0] * size[1])))
+    return 0
+
+
+def measure(path: Path, assumed_texture: int = 1024) -> dict:
+    """Vertex count, vertex colours and texel density of an FBX, as the gate's
+    ``mesh_facts`` gives them for glTF and OBJ.
+
+    * vertices: what an engine builds - corners that share a position, normal
+      and UV within one material section are one vertex; a UV seam or a hard
+      edge splits it (the control-point count would undercount, the corner
+      count overcount);
+    * texel density: sqrt(UV area x texture pixels / surface area in square
+      metres), area-weighted over every section with UVs, in the file's own
+      unit converted to metres. The texture is the base-colour map the material
+      names when it sits beside the FBX, else ``assumed_texture``.
+    """
+    try:
+        scene = _collect(Path(path))
+    except FbxPreviewError as exc:
+        if "no mesh geometry" not in str(exc):
+            raise
+        return {"vertices": 0, "colours": False, "texel_density": None,
+                "with_uv": 0, "without_uv": 0, "assumed_texture": False}
+    positions, uvs, normals = scene["positions"], scene["uvs"], scene["normals"]
+    columns = [np.round(positions.astype(np.float64), 6)]
+    if normals is not None:
+        columns.append(np.round(normals.astype(np.float64), 3))
+    if uvs is not None:
+        columns.append(np.round(uvs.astype(np.float64), 6))
+    keys = np.hstack(columns)
+    vertices = 0
+    weighted = world_total = 0.0
+    with_uv = without_uv = 0
+    assumed = False
+    for slot, triangles in scene["groups"]:
+        used = np.unique(triangles.reshape(-1))
+        vertices += len(np.unique(keys[used], axis=0))
+        if uvs is None:
+            without_uv += 1
+            continue
+        with_uv += 1
+        p = positions[triangles].astype(np.float64)
+        world = 0.5 * np.linalg.norm(np.cross(p[:, 1] - p[:, 0], p[:, 2] - p[:, 0]), axis=1).sum()
+        t = uvs[triangles].astype(np.float64)
+        uv_area = 0.5 * np.abs((t[:, 1, 0] - t[:, 0, 0]) * (t[:, 2, 1] - t[:, 0, 1])
+                               - (t[:, 2, 0] - t[:, 0, 0]) * (t[:, 1, 1] - t[:, 0, 1])).sum()
+        edge = _texture_edge(Path(path), scene["textures"][slot] if slot < len(scene["textures"]) else "")
+        if not edge:
+            edge, assumed = assumed_texture, True
+        weighted += float(uv_area) * edge * edge
+        world_total += float(world)
+    density = math.sqrt(weighted / world_total) if world_total > 0 and weighted > 0 else None
+    return {"vertices": int(vertices), "colours": bool(scene["colours"]), "texel_density": density,
+            "with_uv": with_uv, "without_uv": without_uv, "assumed_texture": assumed}
 
 
 def _pad(blob: bytes, filler: bytes) -> bytes:
