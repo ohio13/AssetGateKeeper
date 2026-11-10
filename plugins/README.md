@@ -1,6 +1,6 @@
 # DCC integrations
 
-Same rules, same `rules.toml`, four different front doors - so the verdict reaches
+Same rules, same `rules.toml`, a front door in each host - so the verdict reaches
 the artist where they actually work instead of in a terminal they never open.
 
 | Host | Path | Feedback | Can it block? |
@@ -10,6 +10,8 @@ the artist where they actually work instead of in a terminal they never open.
 | **Houdini** | `houdini/sop_gatekeeper.py` | Node warning badge on cook | Non-fatal warning (never breaks the cook) |
 | **Unreal** | `unreal/init_unreal.py` + `import_gatekeeper.py` + `agk_validator.py` | Message Log + dialog after import; Data Validation on save and Validate Changelist | **Yes** for scripted imports; drag-and-drop moved to `_AssetGatekeeper_Rejected` (or warn/delete) |
 | **3ds Max** | `max/max_preflight.py` | Message box with the full report | Pre-export check (artist decides) |
+| **Unity** | `unity/` (package) | Console errors, `AGK_Failed` label, Tools > AssetGatekeeper menu | No: reports after import |
+| **Godot** | `godot/addons/asset_gatekeeper/` | Output panel errors + AssetGatekeeper dock | No: reports after import |
 
 ## In-viewport pre-flight (v1.1)
 

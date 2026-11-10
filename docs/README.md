@@ -30,7 +30,7 @@ for the same flag.
 | [06 CLI reference](06-CLI-REFERENCE.md) | Every command and flag, exit codes, telemetry payload, hooks, watcher behaviour |
 | [07 Art Workstation](07-ART-WORKSTATION.md) | The 3D review screen: uploads, LODs, collision, notes, the gate verdict panel |
 | [08 AssetHealth](08-ASSETHEALTH.md) | Telemetry, projects and tokens, dashboard, alerts, budget planner, admin, `/analytics` |
-| [09 DCC plugins](09-DCC-PLUGINS.md) | Blender, Maya, 3ds Max, Houdini, Unreal: install, behaviour, headless, troubleshooting |
+| [09 DCC plugins](09-DCC-PLUGINS.md) | Blender, Maya, 3ds Max, Houdini, Unreal, Unity, Godot: install, behaviour, headless, troubleshooting |
 | [10 CI and version control](10-CI-AND-VERSION-CONTROL.md) | Git hooks, Perforce triggers, LFS, remote validation, runner farms |
 | [11 Troubleshooting](11-TROUBLESHOOTING.md) | Symptom -> cause -> fix, including the bugs this project has actually hit |
 | [Enterprise layer](ENTERPRISE.md) | PostgreSQL, OIDC/SAML, path RBAC, migrations, SIEM, read replicas |
