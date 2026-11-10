@@ -374,6 +374,11 @@ setup. Add `--json` for machine output.
 Five questions with defaults; every answer is also a flag (`--triangles`,
 `--max-texture`, `--max-materials`, `--platform`), plus `--yes` for scripts.
 
+If the project uses several engines, art programs or platforms, ask the rules
+wizard instead: `--wizard` in place of `--init`, or double-click
+`tools\rules_wizard.bat`. It asks six plain questions (several answers each)
+and writes one commented `rules.toml` for all of them.
+
 ### Watch mode while people work
 
 ```bat

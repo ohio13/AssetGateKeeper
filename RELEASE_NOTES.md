@@ -1,5 +1,18 @@
 # Unreleased (on `main`)
 
+* **A rules wizard for projects that use several tools.** `asset-gatekeeper
+  <folder> --wizard` (or double-click `tools\rules_wizard.bat`) asks six
+  questions - engines, art programs, platforms, kinds of asset, art style,
+  broken geometry; the first four take several answers - and writes one
+  commented `rules.toml` that works for all of them: the engines' and tools'
+  naming presets combined, the tightest platform as the base budget with a
+  `[platforms.<name>]` block for each platform (`--platform <name>`), and
+  per-folder budgets for characters, props and environment. The numbers come
+  from the shipped presets; the file says which answers made it. It asks
+  before replacing a `rules.toml` and keeps a copy. `--wizard-answers
+  answers.json` gives the same answers from a file for scripts; without a
+  terminal it refuses instead of waiting. Plain `--init` is unchanged.
+
 * **Install from PyPI.** `pip install "asset-gatekeeper[full]"` now works:
   v0.1.0-alpha.1 is on PyPI, published by the release workflow. The README
   and the installation guide use it instead of the git URL.

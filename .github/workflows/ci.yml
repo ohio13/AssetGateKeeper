@@ -70,6 +70,12 @@ jobs:
       - name: Gate suite
         run: python tests/test_gatekeeper.py
 
+      # --wizard: every answer combination writes a rules.toml the gate loads.
+      - name: Rules wizard suite
+        run: |
+          python -m pyflakes engine/rules_wizard.py tests/test_rules_wizard.py
+          python tests/test_rules_wizard.py
+
       - name: Workstation suite
         run: python tests/test_workstation.py
 

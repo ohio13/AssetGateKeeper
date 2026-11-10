@@ -44,6 +44,12 @@ asset-gatekeeper "C:\Projects\MyGame\assets" --preset ps2
 That works - a preset is a complete budget on its own. You do not need a
 `rules.toml` until you disagree with the preset.
 
+Or let the rules wizard pick for you: `asset-gatekeeper "C:\Projects\MyGame\assets"
+--wizard` (or double-click `tools\rules_wizard.bat`) asks which engines, art
+programs and platforms you use - several of each is fine - plus the kinds of
+asset, the art style and how strict to be about broken geometry, and writes a
+commented `rules.toml` from these same presets.
+
 ## Minute 6-12: make it yours
 
 Copy the template and edit three numbers:

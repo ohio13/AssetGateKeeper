@@ -6141,6 +6141,7 @@ def build_parser() -> argparse.ArgumentParser:
             "common first runs:\n"
             "  asset-gatekeeper <folder> --recursive --once     one scan, then exit\n"
             "  asset-gatekeeper <folder> --init                 write a rules.toml\n"
+            "  asset-gatekeeper <folder> --wizard               ...from questions about your project\n"
             "  asset-gatekeeper --doctor                        check this machine\n"
             "  asset-gatekeeper <folder> --recursive            watch and toast\n"
             "\n"
@@ -6234,9 +6235,20 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--init", action="store_true",
                         help="interactive setup: create the watch folder and its rules.toml")
     parser.add_argument("--yes", action="store_true",
-                        help="with --init: accept every default instead of prompting")
+                        help="with --init or --wizard: accept every default instead of prompting")
     parser.add_argument("--force", action="store_true",
-                        help="with --init: overwrite an existing rules.toml")
+                        help="with --init: overwrite an existing rules.toml (with --wizard: replace "
+                             "it without asking; a copy is still kept)")
+    parser.add_argument("--wizard", action="store_true",
+                        help="ask six plain-English questions (engines, art tools, platforms, "
+                             "kinds of asset, style, broken geometry; several answers each) and "
+                             "write one commented rules.toml for all of them. Asks before "
+                             "replacing a rules.toml and keeps a copy. With --yes: every "
+                             "default, no questions")
+    parser.add_argument("--wizard-answers", metavar="FILE", default=None, dest="wizard_answers",
+                        help="the --wizard answers from a JSON file instead of a terminal "
+                             "(for scripts), e.g. {\"engines\": [\"unreal\", \"unity\"], "
+                             "\"platforms\": [\"pc\", \"switch\"]}")
     parser.add_argument("--audit", action="store_true",
                         help="audit the whole folder for broken references and orphaned "
                              "textures, then exit")
@@ -6352,6 +6364,11 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         return run_doctor(target, args)
 
     # The wizard runs before anything touches the folder: it may be creating it.
+    if getattr(args, "wizard", False) or getattr(args, "wizard_answers", None):
+        target = Path(args.folder).expanduser() if args.folder else None
+        answers = Path(args.wizard_answers).expanduser() if args.wizard_answers else None
+        return engine_module("rules_wizard").run_wizard(
+            target, answers_file=answers, force=args.force, assume_yes=args.yes)
     if getattr(args, "init", False):
         target = Path(args.folder).expanduser() if args.folder else None
         return run_init(target, ask=input, assume_yes=args.yes, force=args.force,

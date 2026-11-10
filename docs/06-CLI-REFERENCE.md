@@ -94,6 +94,7 @@ Reported as: `tag 'charcter' is not a known tag; closest match is 'character'`.
 | `--no-color` | plain text (CI logs, redirected output) |
 | `-v` | verbose |
 | `--init [--yes]` | write a commented starter `rules.toml` |
+| `--wizard [--yes] [--force]` · `--wizard-answers FILE` | the rules wizard: six questions about the project (several answers each), one commented `rules.toml` for all of them - see [below](#the-rules-wizard) |
 | `--list-presets` | print the ten shipped budgets |
 | `--doctor` | environment report: interpreter, packages, ports, rules |
 | `--suggest-naming` | learn a `[naming]` block from the names already in `<folder>`; prints it, writes nothing |
@@ -196,6 +197,51 @@ problems[], project_id
 Telemetry is **fire and forget**: if the dashboard is down the gate still exits
 with the right code, and the verdict is simply not recorded. A gate that fails
 because a dashboard is down turns a metrics problem into a pipeline outage.
+
+## The rules wizard
+
+```
+asset-gatekeeper <folder> --wizard                       # asks, in a terminal
+asset-gatekeeper <folder> --wizard-answers answers.json   # the same answers from a file
+asset-gatekeeper <folder> --wizard --yes                  # every default, no questions
+```
+
+On Windows, double-click `tools\rules_wizard.bat` (or drag the export folder
+onto it). `--init --wizard` is the same as `--wizard`; plain `--init` is
+unchanged. Six questions, each with a default on Enter; the first four take
+several answers (`1,3` or `unreal, unity`):
+
+| Question (answers-file key) | Choices | Becomes |
+|---|---|---|
+| Engines (`engines`) | `unreal` `unity` `godot` `other` | `[naming] preset = [...]`, one per engine (`other` adds `default`); engine differences (skin weights, UV sets, memory estimates) as comments |
+| Art programs (`tools`) | `maya` `max` `blender` `houdini` `zbrush` `substance` `other` | `substance` and `blender` add the `substance` / `gltf` naming presets; comments point at the DCC panels ([09](09-DCC-PLUGINS.md)) and, for ZBrush, at `--bake-polypaint` |
+| Platforms (`platforms`) | `pc` (high-end PC / current console), `midrange` (mid PC / last-gen console), `switch`, `mobile`, `vr`, `n64` (retro) | the tightest limit of all of them is the `[mesh]`/`[texture]` budget; each platform gets a `[platforms.<name>]` block for `--platform <name>` |
+| Kinds of asset (`assets`) | `characters` `props` `environment` `ui` | two or more kinds of mesh: `[tags.characters]`, `[tags.props]`, `[tags.environment]` (a tag is a folder name). With several platforms they are written as comments, because a tag's budget wins over `--platform`. `ui` lets textures named `UI_...` skip the map suffix |
+| Style (`style`) | `realistic` `stylised` `lowpoly` | the albedo brightness check (`pbr`) is on for realistic art only |
+| Broken geometry (`broken_geometry`) | `block` `warn` | `[mesh] degenerate` |
+
+The numbers come from the shipped tables, not from the wizard: `pc`, `mobile`
+and `n64` are those `--preset` targets, `switch` uses the `ps3` target, `vr`
+the `mobile` one, and `midrange` the built-in default budget. The file's header
+lists the answers (and a `# wizard-answers:` line you can save as
+`answers.json`); every value has a comment saying where it came from.
+
+An answers file is JSON with any of the keys above; a missing key takes the
+default, a list or a comma-separated string both work, and an unknown key or
+choice is an error that names it:
+
+```json
+{"engines": ["unreal", "unity"], "tools": ["maya", "substance"],
+ "platforms": ["pc", "switch"], "assets": ["characters", "props"],
+ "style": "realistic", "broken_geometry": "block", "replace": false}
+```
+
+An existing `rules.toml` is replaced only after a yes (default no), with
+`"replace": true` in the answers file, or with `--force`; the old one is copied
+to `rules.backup-<date>-<time>.toml` first. Without a terminal and without an
+answers file (or `--yes`) the wizard refuses instead of waiting. Exit codes:
+`0` written, `1` nothing written (you said no, or kept the existing file), `2`
+a bad answer, a bad answers file or no terminal.
 
 ## Recipes
 
