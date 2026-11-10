@@ -1659,6 +1659,15 @@ _json_run = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekee
 _json_line = json.loads(_json_run.stdout.splitlines()[0])
 expect("--json carries the numbers behind the verdict (memory_kb, as docs/05 says)",
        _json_line.get("stats", {}).get("memory_kb", 0) > 0, _json_line)
+_cli_doc = (Path(ROOT_MODULE_DIR) / "docs" / "06-CLI-REFERENCE.md").read_text(encoding="utf-8")
+_shape = _cli_doc.split("### The JSON shape", 1)[1].split("```json", 1)[1].split("```", 1)[0]
+try:
+    _documented = json.loads(_shape)
+except ValueError:
+    _documented = json.loads(_shape.strip().splitlines()[0])
+_documented = _documented[0] if isinstance(_documented, list) else _documented
+expect("docs/06's JSON example has the keys a verdict line really carries (file, not path)",
+       set(_documented) == set(_json_line), (sorted(_documented), sorted(_json_line)))
 
 print("15. VCS hook integrations")
 
