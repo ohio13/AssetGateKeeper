@@ -2309,6 +2309,21 @@ else:
                f"err={push_blocked.stderr[-200:]}")
         expect("pre-push reports the offending asset",
                "crate_4mtl.obj" in push_blocked.stderr, push_blocked.stderr[-160:])
+        _push_dir = (scratch / "push_nested_rules").resolve()
+        if _push_dir.exists():
+            force_rmtree(_push_dir)
+        (_push_dir / "Props").mkdir(parents=True)
+        run(["git", "init", "-q", "-b", "main"], _push_dir)
+        (_push_dir / "rules.toml").write_text("[mesh]\nmax_triangles = 1\n", encoding="utf-8")
+        (_push_dir / "Props" / "SM_two.obj").write_text(
+            "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n", encoding="utf-8")
+        run(["git", "add", "."], _push_dir)
+        run(["git", "commit", "-q", "--no-verify", "-m", "nested"], _push_dir)
+        _nested_push = run([bash, push_script], _push_dir,
+                           {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
+        expect("pre-push judges Props/SM_two.obj by the rules.toml at the repository's top",
+               _nested_push.returncode == 1 and "SM_two.obj" in _nested_push.stderr,
+               (_nested_push.returncode, _nested_push.stderr[-200:]))
 
 print("16. references, platforms, PBR and transforms")
 

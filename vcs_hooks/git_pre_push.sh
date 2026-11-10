@@ -105,7 +105,20 @@ report=""
 while IFS= read -r entry; do
   [ -n "${entry}" ] || continue
   path=${entry%% \[LFS\]*}
-  verdict=$("$AGK_PYTHON" "$AGK_GATEKEEPER" "$path" --no-color --no-auto-heal 2>&1)
+  # The nearest rules.toml at or above the asset's folder, up to the repository
+  # root, as a --once run there would use: the gate on one file reads only its
+  # own folder, so an asset under Props/ was judged by the shipped defaults.
+  rules=()
+  folder=$(dirname -- "$path")
+  while :; do
+    if [ -f "${folder}/rules.toml" ]; then
+      rules=(--rules "${folder}/rules.toml")
+      break
+    fi
+    [ "$folder" = "." ] && break
+    folder=$(dirname -- "$folder")
+  done
+  verdict=$("$AGK_PYTHON" "$AGK_GATEKEEPER" "$path" --no-color --no-auto-heal "${rules[@]+"${rules[@]}"}" 2>&1)
   status=$?
   if [ $status -eq 0 ]; then
     continue
