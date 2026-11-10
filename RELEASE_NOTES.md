@@ -1,5 +1,12 @@
 # Unreleased (on `main`)
 
+* **`--json` explains a failing `[[totals]]`; names cannot drive the terminal
+  (11 Nov).** A folder total over budget exited 1 with `"failed": 0` and nothing
+  else in the JSON; the summary line now carries `totals_failed`, and the
+  admin page's Scan log shows them. Control characters in file and node names
+  (an ESC that would recolour or clear the terminal, a newline that could
+  fake a PASSED line) are printed as `\x1b`. docs/10's CI example installs
+  from PyPI instead of a 1.0.0 wheel.
 * **Faster FBX checks with memory, texel, skeleton or lightmap rules
   (11 Nov).** Run as a script, the gate loaded itself a second time whenever
   it measured an FBX, and the FBX was parsed up to three times per check. It

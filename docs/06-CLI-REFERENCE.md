@@ -112,7 +112,10 @@ keys: `file` (the full path), `name`, `passed`, `status`, `metric`, `problems`,
 `modifications` (what a heal changed), `warnings` (notes that never fail the
 asset) and `stats` (the numbers behind the metric). `status` is `PASSED`, `FAILED`, `HEALED` or
 `ERROR`; `problems` is empty for a pass. A `--once` run ends with one more
-line, `{"summary": {"total", "passed", "failed", "skipped"}}`, where `skipped`
+line, `{"summary": {"total", "passed", "failed", "skipped", "totals_failed"}}`, where
+`totals_failed` lists each `[[totals]]` budget over its limit (`{"total": "Props/*",
+"problems": [...], "metric", "stats"}`; it fails the run without being an asset, so
+`failed` does not count it) and `skipped`
 counts the files it walked past: `{"total": 7, "unsupported": {".jfif": 6,
 ".blend": 1}, "excluded": 0}` (scratch, hidden and the tool's own files are not
 counted). The text output says the same in one line, with a hint for the common

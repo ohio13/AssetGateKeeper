@@ -1271,6 +1271,20 @@ expect("... and is a failing case in the JUnit report",
        "[total] Props/*" in (mem_dir / "r.xml").read_text(encoding="utf-8"))
 (mem_dir / "rules.toml").write_text('[texture]\npbr = false\n[[totals]]\npath = "Props/*"\nmax_mb = 12\n',
                                     encoding="utf-8")
+(mem_dir / "rules.toml").write_text('[texture]\npbr = false\n[[totals]]\npath = "Props/*"\nmax_mb = 8\n',
+                                    encoding="utf-8")
+_tj = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(mem_dir),
+                      "--once", "--recursive", "--json", "--no-cache"], capture_output=True, text=True,
+                     encoding="utf-8", errors="replace")
+_tj_summary = [json.loads(line)["summary"] for line in _tj.stdout.splitlines()
+               if line.startswith('{"summary"')]
+expect("--json: a failing [[totals]] is in the summary, so exit 1 is explained (11 Nov 2026)",
+       _tj.returncode == 1 and _tj_summary and _tj_summary[0]["failed"] == 0
+       and [t["total"] for t in _tj_summary[0]["totals_failed"]] == ["Props/*"]
+       and "exceeds the 8 MB budget" in _tj_summary[0]["totals_failed"][0]["problems"][0],
+       _tj.stdout[-500:])
+(mem_dir / "rules.toml").write_text('[texture]\npbr = false\n[[totals]]\npath = "Props/*"\nmax_mb = 12\n',
+                                    encoding="utf-8")
 _tot = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(mem_dir),
                        "--once", "--recursive", "--no-color"], capture_output=True, text=True,
                       encoding="utf-8", errors="replace")
@@ -3686,6 +3700,19 @@ if readme.is_file():
     expect("every CLI flag appears in docs/REFERENCE.md", not undocumented, str(undocumented))
 else:                                    # pragma: no cover - shipped without docs
     print("  skip  README.md is not next to the tests")
+
+print("Names from assets cannot drive the terminal (11 Nov 2026)")
+expect("control characters are shown, not sent", agk.printable("a\x1b[2Jb\nc\x9b") ==
+       "a\\x1b[2Jb\\x0ac\\x9b", agk.printable("a\x1b[2Jb\nc\x9b"))
+if os.name != "nt":
+    _esc_dir = Path(_tempfile.mkdtemp(prefix="agk-esc-"))
+    (_esc_dir / "SM_bad\x1b[2J.obj").write_text("v 0 0 0\n", encoding="utf-8")
+    _esc = subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"), str(_esc_dir),
+                           "--once", "--no-cache"], capture_output=True, text=True,
+                          encoding="utf-8", errors="replace")
+    _esc_out = _esc.stdout + _esc.stderr
+    expect("a file name with ESC in it is printed escaped", _esc.returncode == 1
+           and "\x1b" not in _esc_out and "SM_bad\\x1b[2J.obj" in _esc_out, _esc_out[-300:])
 
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

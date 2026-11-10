@@ -6273,6 +6273,16 @@ class Telemetry:
                         self.failed + self.dropped, self.url, self.sent)
 
 
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def printable(text: str) -> str:
+    """Text safe for a terminal: control characters shown as \\xNN. A node or
+    file name in an asset is the author's to choose, and an ESC in one must not
+    recolour, move or clear the reader's terminal."""
+    return _CONTROL.sub(lambda match: f"\\x{ord(match.group()):02x}", str(text))
+
+
 class Reporter:
     """Formats verdicts as one terminal line each, with optional ANSI colour."""
 
@@ -6355,25 +6365,34 @@ class Reporter:
             if verdict.passed:
                 self.passed += 1
                 # A healed asset passed, but the artist must be told it was rewritten.
-                tag = self._paint(verdict.tag if verdict.healed else "PASSED", self.GREEN)
+                tag = self._paint(printable(verdict.tag) if verdict.healed else "PASSED", self.GREEN)
             else:
                 self.failed += 1
-                tag = self._paint(verdict.tag, self.RED)
+                tag = self._paint(printable(verdict.tag), self.RED)
 
-            detail = f" {self._paint(verdict.metric, self.DIM)}" if verdict.metric else ""
-            LOG.info("%s  %s%s", tag, self.display_path(verdict.path), detail)
+            detail = f" {self._paint(printable(verdict.metric), self.DIM)}" if verdict.metric else ""
+            LOG.info("%s  %s%s", tag, printable(self.display_path(verdict.path)), detail)
 
             # Advisories sit under the verdict, dimmed: they inform, they never
             # change the exit code, and they must not look like failures.
             for warning in verdict.warnings:
-                LOG.info("       %s", self._paint(f"note: {warning}", self.DIM))
+                LOG.info("       %s", self._paint(f"note: {printable(warning)}", self.DIM))
 
-    def summary(self, skipped: Optional[dict] = None) -> None:
+    def summary(self, skipped: Optional[dict] = None,
+                totals: Sequence["Verdict"] = ()) -> None:
         total = self.passed + self.failed
         if self.json_mode:
             document = {"total": total, "passed": self.passed, "failed": self.failed}
             if skipped is not None:
                 document["skipped"] = skipped
+            # [[totals]] over budget fail the run (exit 1) without being an asset:
+            # they ride on the summary, so --json readers see why it failed
+            # (11 Nov 2026: "failed": 0 with exit 1 and nothing else said).
+            document["totals_failed"] = [
+                {"total": str(verdict.path).replace("\\", "/").removeprefix("[total] "),
+                 "problems": list(verdict.problems), "metric": verdict.metric,
+                 "stats": {name: value for name, value in verdict.stats}}
+                for verdict in totals]
             print(json.dumps({"summary": document}), flush=True)
             return
         LOG.info("%d asset(s): %d passed, %d failed", total, self.passed, self.failed)
@@ -7188,10 +7207,10 @@ def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
     for verdict in over:
         # Printed and counted, and in the JUnit/SARIF report, but never sent as
         # telemetry: a folder total is not an asset on the dashboard.
-        LOG.error("FAILED: %s  %s", verdict.reason, str(verdict.path).replace("\\", "/"))
+        LOG.error("FAILED: %s  %s", printable(verdict.reason), str(verdict.path).replace("\\", "/"))
         if reporter.keep_verdicts:
             reporter.verdicts.append(verdict)
-    reporter.summary(skipped)
+    reporter.summary(skipped, totals=over)
     return 1 if (reporter.failed or over) else 0
 
 

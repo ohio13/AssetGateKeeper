@@ -4361,6 +4361,12 @@ class ScanRunner:
                     # The gate's closing line, not an asset: it used to be counted
                     # as one more failure on every scan.
                     summary_seen = True
+                    for total in payload["summary"].get("totals_failed") or []:
+                        # A [[totals]] budget over its limit fails the scan
+                        # without being an asset: say so in the log.
+                        self._emit({"type": "log", "text": (
+                            f"FAILED: [total] {total.get('total', '?')}: "
+                            + "; ".join(total.get("problems") or []))[:400]})
                     skipped = payload["summary"].get("skipped") or {}
                     if skipped.get("total"):
                         with self._lock:

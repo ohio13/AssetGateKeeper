@@ -42,7 +42,7 @@ it forever.
 ```yaml
 - name: Asset gate
   run: |
-    pip install asset_gatekeeper-1.0.0-py3-none-any.whl "trimesh>=4" "pillow>=10"
+    pip install "asset-gatekeeper[full]"     # or a wheel from the GitHub release
     asset-gatekeeper assets --once --json --no-color --no-notify > gate.json
 
 - name: Upload the verdicts
