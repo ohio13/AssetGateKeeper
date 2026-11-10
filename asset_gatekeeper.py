@@ -8095,10 +8095,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except ConfigError as exc:
         LOG.error("invalid totals: %s", exc)
         return 2
+    # One file checked with --rules from a folder above it (the Perforce trigger,
+    # a Git hook, --heal): that folder is the project, as in a --once run there.
+    # With the file's own folder as the root, [tags.props] never matched
+    # Props/crate.fbx and a ../Textures reference "left the project".
+    project_dir = watch_dir
+    if root.is_file() and args.rules:
+        rules_dir = Path(args.rules).expanduser().resolve().parent
+        try:
+            root.relative_to(rules_dir)
+            project_dir = rules_dir
+        except ValueError:
+            pass
     gatekeeper = Gatekeeper(budget, healer=healer, overrides=overrides,
                             tag_budgets=tag_budgets,
                             tag_mode=tag_mode, tag_similarity=tag_similarity,
-                            tag_root=watch_dir, exceptions=exceptions)
+                            tag_root=project_dir, exceptions=exceptions)
     gatekeeper.want_memory = bool(totals)
     reporter = Reporter(color=not args.no_color and not args.json, root=watch_dir,
                         json_mode=args.json, telemetry=telemetry, notifier=notifier)

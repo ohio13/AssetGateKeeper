@@ -1687,6 +1687,27 @@ _documented = _documented[0] if isinstance(_documented, list) else _documented
 expect("docs/06's JSON example has the keys a verdict line really carries (file, not path)",
        set(_documented) == set(_json_line), (sorted(_documented), sorted(_json_line)))
 
+_proj = scratch / "single_file_project"
+if _proj.exists():
+    shutil.rmtree(_proj)
+(_proj / "Props").mkdir(parents=True)
+(_proj / "Materials").mkdir()
+(_proj / "rules.toml").write_text("[tags.props]\nmax_triangles = 1\n", encoding="utf-8")
+(_proj / "Materials" / "a.mtl").write_text("newmtl m\nKd 1 1 1\n", encoding="utf-8")
+(_proj / "Props" / "SM_two.obj").write_text("v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n",
+                                             encoding="utf-8")
+(_proj / "Props" / "SM_shared.obj").write_text("mtllib ../Materials/a.mtl\nusemtl m\nv 0 0 0\nv 1 0 0\n"
+                                                "v 0 1 0\nf 1 2 3\n", encoding="utf-8")
+_one = {name: subprocess.run([sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py"),
+                              str(_proj / "Props" / name), "--rules", str(_proj / "rules.toml"),
+                              "--no-color"], capture_output=True, text=True).returncode
+        for name in ("SM_two.obj", "SM_shared.obj")}
+expect("one file with --rules from the project above it gets the project's folder tags "
+       "([tags.props] for Props/), as a --once run there does (the Perforce trigger's case)",
+       _one["SM_two.obj"] == 1, _one)
+expect("... and a ../Materials reference inside that project is not 'outside the project'",
+       _one["SM_shared.obj"] == 0, _one)
+
 print("15. VCS hook integrations")
 
 p4_hook = load_module("agk_p4_hook", Path("vcs_hooks") / "p4_pre_submit.py")
