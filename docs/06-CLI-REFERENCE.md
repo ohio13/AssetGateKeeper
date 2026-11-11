@@ -5,6 +5,8 @@ contracts (exit codes, JSON, telemetry) other tools depend on.
 
 ```
 asset-gatekeeper <folder> [flags]
+asset-gatekeeper <file> [flags]
+asset-gatekeeper <file> <file> ... --once [flags]
 ```
 
 One folder, one budget, one verdict per asset. There is no project file, no
@@ -39,6 +41,57 @@ violation is the tool working; a red build from a typo in `--preset` is the
   and their order are the same as one at a time.
 * **It never follows symlinks** unless `--follow-symlinks`; dangling links are
   skipped and counted (a Windows 1920 symlink is not an asset problem).
+
+## Several files in one run
+
+```
+asset-gatekeeper Props/SM_Crate.fbx Textures/T_Crate_Albedo.png SM_Gone.fbx --once --json --rules rules.toml
+```
+
+```json
+{"file": "/proj/Props/SM_Crate.fbx", "name": "SM_Crate.fbx", "passed": true, "status": "PASSED", ...}
+{"file": "/proj/Textures/T_Crate_Albedo.png", "name": "T_Crate_Albedo.png", "passed": false, "status": "FAILED", ...}
+{"file": "/proj/SM_Gone.fbx", "name": "SM_Gone.fbx", "passed": false, "status": "ERROR", "problems": ["not found"], ...}
+{"summary": {"total": 3, "passed": 1, "failed": 2, "totals_failed": []}}
+```
+
+What the Unity and Godot plug-ins run for an import: one Python start-up for
+the lot instead of one (about 0.7 s) per file. With `--once`, several file
+paths are checked one after another in one process:
+
+* **Each file is checked exactly as a run with that file alone** checks it:
+  the `--rules` file if given, else the `rules.toml` in the file's own folder;
+  `[tags.*]` and `[[exceptions]]` relative to the `--rules` file's folder when
+  the file is under it; `[[totals]]` are not judged (a few files are not the
+  folder, and one file does not judge them either). Each JSON line is the same
+  line that run would print.
+* **One verdict line per file, in the order given**, each with its own `file`
+  (the full path, symlinks resolved), then **one summary line** as a folder run
+  prints (`{"summary": ...}`, no `file` key; readers of verdicts skip it). The
+  text output is a line per file and `N asset(s): x passed, y failed`. The
+  rules and budget lines on stderr are printed once per different budget, not
+  once per file.
+* **A missing file, or one that is not an asset type, is an `ERROR` line of
+  its own** (`"problems": ["not found"]` / `["not a tracked asset type"]`); the
+  files after it are still checked.
+* **A file whose own `rules.toml` cannot be used** (no `--rules`, a broken file
+  in its folder) gets no verdict line; the reason is on stderr, as for one file.
+* **Exit code:** `2` if any file could not be checked that way, else `1` if any
+  file failed (an `ERROR` line included), else `0`.
+* `--report` writes one report holding every file.
+* **Refused with exit 2**, before anything is checked: a folder among the paths
+  (check a folder on its own), several paths without `--once`, and the flags
+  that do one job on one path (`--heal`, `--exception-path`, `--bake-polypaint`,
+  `--doctor`, `--init`, `--wizard`, `--audit`, `--suggest-naming`,
+  `--undo-heal`, `--list-heals`). `--jobs` and the cache are not used for a
+  list of files, as for one file.
+
+One path - a file or a folder - behaves exactly as before: one file prints one
+line and no summary, and exits 2 with no line when the file is not there.
+
+Measured on a 2-core Linux machine, 50 small files (25 64 px PNGs, 25
+768-triangle FBXs) with `--once --json --rules rules.toml`: one process per file
+37.4 s, all 50 in one run 0.94 s.
 
 ## Budget flags
 
@@ -111,8 +164,9 @@ One JSON object per asset, one per line (JSON Lines, not one array), stable
 keys: `file` (the full path), `name`, `passed`, `status`, `metric`, `problems`,
 `modifications` (what a heal changed), `warnings` (notes that never fail the
 asset) and `stats` (the numbers behind the metric). `status` is `PASSED`, `FAILED`, `HEALED` or
-`ERROR`; `problems` is empty for a pass. A `--once` run ends with one more
-line, `{"summary": {"total", "passed", "failed", "skipped", "totals_failed"}}`, where
+`ERROR`; `problems` is empty for a pass. A `--once` run over a folder or
+[several files](#several-files-in-one-run) ends with one more line (one file
+alone has none), `{"summary": {"total", "passed", "failed", "skipped", "totals_failed"}}`, where
 `totals_failed` lists each `[[totals]]` budget over its limit (`{"total": "Props/*",
 "problems": [...], "metric", "stats"}`; it fails the run without being an asset, so
 `failed` does not count it) and `skipped`

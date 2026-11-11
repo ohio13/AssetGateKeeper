@@ -166,6 +166,27 @@ if wanted("contract"):
     expect("a file that is not there: exit 2 and no verdict line (the plug-ins report NOT checked)",
            completed.returncode == 2 and verdict is None, (completed.returncode, completed.stdout[-200:]))
 
+    # A batch, as both plug-ins now run an import: several files, one process.
+    batch = [contract / name for name in ("good.fbx", "heavy.fbx", "gone.fbx", "brick_Albedo.png", "odd.png")]
+    completed = subprocess.run([sys.executable, str(ROOT / "asset_gatekeeper.py"), *map(str, batch),
+                                "--once", "--json", "--rules", str(rules)], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=180)
+    rows = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+    verdicts = [row for row in rows if "problems" in row]
+    expect("a batch: stdout holds nothing but JSON lines",
+           len(rows) == len(completed.stdout.strip().splitlines()), completed.stdout[-300:])
+    expect("a batch: one verdict line per file, in the order given, each naming its file",
+           [row["file"] for row in verdicts] == [str(path.resolve()) for path in batch]
+           and all(isinstance(row.get(key), kind) for row in verdicts for key, kind in fields.items()),
+           completed.stdout[-600:])
+    expect("a batch: the verdicts are the single-file ones (--rules applies to every file)",
+           [row["status"] for row in verdicts] == ["PASSED", "PASSED", "ERROR", "PASSED", "FAILED"], verdicts)
+    expect("a batch: a missing file is its own ERROR line, not the end of the batch",
+           verdicts[2]["passed"] is False and verdicts[2]["problems"] == ["not found"], verdicts[2:3])
+    expect("a batch: the last line is the summary, which has no \"file\" or \"problems\" (plug-ins skip it)",
+           rows and set(rows[-1]) == {"summary"} and rows[-1]["summary"]["total"] == len(batch), rows[-1:])
+    expect("a batch: exit 1 when any file failed", completed.returncode == 1, completed.returncode)
+
 # --------------------------------------------------------------------------- #
 if wanted("contract") or wanted("unity") or wanted("godot"):
     print("2. Package files, and the lists the plug-ins copy from the gate")
