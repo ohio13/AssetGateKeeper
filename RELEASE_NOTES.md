@@ -1,5 +1,34 @@
 # Unreleased (on `main`)
 
+* **The gate's code is split into parts in `agk_gate/` (11 Nov).**
+  `asset_gatekeeper.py` had grown to about 8,500 lines; it is now a short front
+  door, and the code lives in seven parts in `agk_gate/` (settings,
+  readers, the gate, the audit, reports, the command line, and what they
+  share). Nothing changes for a user: the same command, the same flags, the
+  same verdicts (checked file by file against the old version, with and
+  without a `rules.toml`), and every name is still on `asset_gatekeeper` for
+  scripts, plug-ins and tests. One thing to know: copying the gate by hand
+  now means copying `asset_gatekeeper.py` *and* the `agk_gate/` folder; the
+  download ZIP and `pip install` already include both.
+
+* **The DCC panels call the gate's skeleton and lightmap checks directly
+  (11 Nov).** `skeleton_problems()`, `lightmap_facts_of()` and
+  `lightmap_problems()` are now plain functions in the gate; the panels used
+  to run copies of the gate's methods with swapped-in data, which a small
+  change in the gate could have broken. Same words, same thresholds.
+
+* **Unity and Godot check an import in batches; the CLI takes several files
+  (11 Nov).** Both plug-ins started Python once per imported file (about
+  0.7 s each, over two minutes for 200 assets). They now send up to 50 files
+  that share a `rules.toml` to one run, at most 8,000 characters of command
+  line, and match each verdict back to its file by path; labels, Console and
+  Output messages, NOT checked, the unchanged-file guard and cancelling work
+  as before, and Unity's timeout scales with the batch. The gate accepts
+  `asset-gatekeeper a.fbx b.png c.glb --once --json`: each file checked as it
+  would be alone, one line each in order, then a summary line; a missing file
+  is an `ERROR` line instead of ending the run. 50 small files: 37-39 s one
+  process each, under 1 s in one run (docs/06, docs/09).
+
 * **glTF collision and LODs read as in an FBX; bakes stay inside the folder's
   limits (11 Nov).** A glTF's `UCX_`/`UBX_`/`USP_`/`UCP_` meshes counted as part
   of the model: a 12-triangle crate with its hull read as 24 triangles and two

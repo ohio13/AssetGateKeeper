@@ -1742,6 +1742,119 @@ expect("one file with --rules from the project above it gets the project's folde
 expect("... and a ../Materials reference inside that project is not 'outside the project'",
        _one["SM_shared.obj"] == 0, _one)
 
+print("14h. several files in one --once run (the Unity and Godot plug-ins batch imports)")
+_bp = scratch / "batch_project"
+if _bp.exists():
+    shutil.rmtree(_bp)
+(_bp / "Props").mkdir(parents=True)
+(_bp / "Materials").mkdir()
+(_bp / "rules.toml").write_text(
+    '[texture]\npbr = false\n[tags.props]\nmax_triangles = 1\n'
+    '[[exceptions]]\npath = "Props/SM_boss.obj"\nrule = "max_triangles"\nallow = 10\n'
+    'reason = "hero prop"\nowner = "art"\nexpires = "2099-01-01"\n'
+    '[[totals]]\npath = "Props/*"\nmax_mb = 0.000001\n', encoding="utf-8")
+(_bp / "Materials" / "a.mtl").write_text("newmtl m\nKd 1 1 1\n", encoding="utf-8")
+_two_tris = "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n"
+(_bp / "Props" / "SM_two.obj").write_text(_two_tris, encoding="utf-8")
+(_bp / "Props" / "SM_boss.obj").write_text(_two_tris, encoding="utf-8")
+(_bp / "Props" / "SM_shared.obj").write_text("mtllib ../Materials/a.mtl\nusemtl m\nv 0 0 0\nv 1 0 0\n"
+                                              "v 0 1 0\nf 1 2 3\n", encoding="utf-8")
+shutil.copy(DROP / "bark_Albedo.png", _bp / "bark_Albedo.png")
+_gate_py = [sys.executable, str(ROOT_MODULE_DIR / "asset_gatekeeper.py")]
+
+
+def _batch(*argv):
+    completed = subprocess.run(_gate_py + [str(item) for item in argv], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace")
+    rows = [json.loads(line) for line in completed.stdout.splitlines() if line.startswith("{")]
+    return completed, [row for row in rows if "file" in row], [row["summary"] for row in rows if "summary" in row]
+
+
+_names = ["Props/SM_two.obj", "Props/SM_boss.obj", "Props/SM_shared.obj", "bark_Albedo.png", "Props/gone.obj"]
+_rules_flag = ("--rules", _bp / "rules.toml")
+_b, _b_rows, _b_sum = _batch(*[_bp / name for name in _names], "--once", "--json", *_rules_flag)
+expect("several files: one verdict line each, in the order given, each with its own full path",
+       [row["file"] for row in _b_rows] == [str((_bp / name).resolve()) for name in _names],
+       (_b.stdout[-600:], _b.stderr[-400:]))
+expect("... then one summary line, last (the plug-ins skip it: it has no \"file\")",
+       len(_b_sum) == 1 and _b.stdout.strip().splitlines()[-1].startswith('{"summary"')
+       and _b_sum[0]["total"] == 5 and _b_sum[0]["passed"] == 3 and _b_sum[0]["failed"] == 2, _b_sum)
+expect("... and exit 1, because one failed and one is missing", _b.returncode == 1, _b.returncode)
+_status = {Path(row["file"]).name: row["status"] for row in _b_rows}
+expect("[tags.props] from the --rules folder fails Props/SM_two.obj; the exception passes SM_boss.obj",
+       _status["SM_two.obj"] == "FAILED" and _status["SM_boss.obj"] == "PASSED"
+       and any("exception" in note for row in _b_rows if row["name"] == "SM_boss.obj" for note in row["warnings"]),
+       _b_rows)
+expect("a missing file is its own ERROR line ('not found'), and the files after it are still checked",
+       _status["gone.obj"] == "ERROR" and _b_rows[-1]["problems"] == ["not found"]
+       and _status["bark_Albedo.png"] == "PASSED", _b_rows[-1])
+expect("[[totals]] are not judged on a list of files (a few files are not the folder), as for one file",
+       _b_sum and _b_sum[0]["totals_failed"] == [], _b_sum)
+_alone = {}
+for _name in _names[:4]:
+    _a, _a_rows, _a_sum = _batch(_bp / _name, "--once", "--json", *_rules_flag)
+    _alone[_name] = (_a.returncode, _a_rows, _a_sum)
+expect("each verdict line is exactly what a run with that file alone prints",
+       all(_alone[name][1] == [row] for name, row in zip(_names[:4], _b_rows)),
+       [(name, _alone[name][1]) for name in _names[:4]])
+expect("one file alone is unchanged: one line, no summary line, exit 0 or 1",
+       all(len(rows) == 1 and not summary and code == (1 if name.endswith("SM_two.obj") else 0)
+           for name, (code, rows, summary) in _alone.items()), _alone)
+expect("the rules and budget lines are printed once for the batch, not once per file",
+       _b.stderr.count(" budget  ") == 1 and _b.stderr.count(" rules   ") == 1, _b.stderr[-600:])
+_mixed, _mixed_rows, _ = _batch(_bp / "Props" / "SM_two.obj", "--once", "--json", _bp / "bark_Albedo.png",
+                                *_rules_flag)
+expect("paths may come before or after the flags", len(_mixed_rows) == 2 and _mixed.returncode == 1,
+       _mixed.stderr[-300:])
+
+# Without --rules each file takes its own folder's rules.toml, as one file does.
+_own = scratch / "batch_own_rules"
+if _own.exists():
+    shutil.rmtree(_own)
+for _sub, _rules_text in (("strict", "[mesh]\nmax_triangles = 1\n"), ("loose", None), ("broken", "[mesh\n")):
+    (_own / _sub).mkdir(parents=True)
+    (_own / _sub / "SM_two.obj").write_text(_two_tris, encoding="utf-8")
+    if _rules_text:
+        (_own / _sub / "rules.toml").write_text(_rules_text, encoding="utf-8")
+_o, _o_rows, _o_sum = _batch(_own / "strict" / "SM_two.obj", _own / "loose" / "SM_two.obj", "--once", "--json")
+expect("without --rules, each file is judged by its own folder's rules.toml",
+       [row["status"] for row in _o_rows] == ["FAILED", "PASSED"] and _o.returncode == 1,
+       (_o_rows, _o.stderr[-300:]))
+expect("... and each different budget is printed (once)", _o.stderr.count(" budget  ") == 2, _o.stderr[-600:])
+_x, _x_rows, _x_sum = _batch(_own / "broken" / "SM_two.obj", _own / "loose" / "SM_two.obj", "--once", "--json")
+expect("a file whose rules.toml is broken gets no verdict and makes it exit 2; the others are checked",
+       _x.returncode == 2 and [row["file"] for row in _x_rows] == [str((_own / "loose" / "SM_two.obj").resolve())]
+       and "invalid rules" in _x.stderr and _x_sum and _x_sum[0]["total"] == 1, (_x.stdout[-400:], _x.stderr[-300:]))
+
+_t, _, _ = _batch(_bp / "Props" / "SM_two.obj", _bp / "bark_Albedo.png", "--once", "--no-color", *_rules_flag)
+expect("text output: a line per file, then one 'N asset(s)' line",
+       "FAILED" in _t.stdout and "PASSED" in _t.stdout and "2 asset(s): 1 passed, 1 failed" in _t.stdout,
+       _t.stdout[-400:])
+_rep = _bp.parent / "batch_report.xml"
+_r, _, _ = _batch(_bp / "Props" / "SM_two.obj", _bp / "bark_Albedo.png", _bp / "nothing.png", "--once",
+                  "--report", f"junit:{_rep}", *_rules_flag)
+import xml.etree.ElementTree as _BatchET  # noqa: E402
+expect("--report with several files writes one report holding every file",
+       _r.returncode == 1 and _rep.is_file()
+       and len(_BatchET.parse(_rep).getroot().findall(".//testcase")) == 3, _r.stderr[-300:])
+for _label, _argv, _says in (
+        ("a folder among the files", (_bp, _bp / "bark_Albedo.png", "--once"), "is a folder"),
+        ("several files without --once", (_bp / "bark_Albedo.png", _bp / "Props" / "SM_two.obj"), "--once"),
+        ("--heal with several files", (_bp / "bark_Albedo.png", _bp / "Props" / "SM_two.obj", "--once", "--heal"),
+         "--heal takes one path"),
+        ("--exception-path with several files",
+         (_bp / "bark_Albedo.png", _bp / "Props" / "SM_two.obj", "--once", "--exception-path", "x.obj"),
+         "--exception-path takes one path")):
+    _refused, _rows, _ = _batch(*_argv)
+    expect(f"refused with exit 2 and a reason: {_label}",
+           _refused.returncode == 2 and not _rows and _says in _refused.stderr + _refused.stdout,
+           (_refused.returncode, (_refused.stderr + _refused.stdout)[-300:]))
+_parsed = agk.build_parser().parse_args(["a.fbx", "--once", "b.png"])
+expect("the parser: folder is still the first path, paths has them all",
+       _parsed.folder == "a.fbx" and _parsed.paths == ["a.fbx", "b.png"]
+       and agk.build_parser().parse_args([]).folder is None
+       and agk.build_parser().parse_args(["x"]).paths == ["x"], vars(_parsed))
+
 print("15. VCS hook integrations")
 
 p4_hook = load_module("agk_p4_hook", Path("vcs_hooks") / "p4_pre_submit.py")
@@ -2610,7 +2723,7 @@ expect("the console script is declared",
        'asset-gatekeeper = "asset_gatekeeper:main"' in pyproject_text)
 expect("the version is dynamic so it cannot drift",
        'dynamic = ["version"]' in pyproject_text
-       and 'version = { attr = "asset_gatekeeper.__version__" }' in pyproject_text)
+       and 'version = { attr = "agk_gate.__version__" }' in pyproject_text)
 # The gate refuses to run without trimesh+Pillow, so they are honest hard
 # requirements; watchdog is a speed-up and must stay optional.
 expect("trimesh and pillow are declared as required",

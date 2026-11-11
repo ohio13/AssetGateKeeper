@@ -376,7 +376,7 @@ try:
     expect("a damaged exr fails cleanly", not agk.Gatekeeper(agk.Budget()).check(junk).passed)
 
     print("10. A missing file is reported once")
-    source = (ROOT / "asset_gatekeeper.py").read_text(encoding="utf-8")
+    source = "".join(part.read_text(encoding="utf-8") for part in (ROOT / "agk_gate").glob("*.py"))
     expect("missing references are de-duplicated", "seen_written" in source)
 
     print("11. AssetHealth: earlier history can join a project, and a project can be removed")

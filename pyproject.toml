@@ -85,13 +85,14 @@ Changelog = "https://github.com/ohio13/AssetGateKeeper/blob/main/RELEASE_NOTES.m
 # they must stay side by side in site-packages too.
 include-package-data = true
 py-modules = ["asset_gatekeeper", "healer", "notifier"]
+# The gate's code, in parts (asset_gatekeeper.py re-exports every name).
 
 # server/, engine/, tools/, enterprise/ and plugins/ travel with the wheel, but
 # under agk_suite/ rather than at the top of site-packages, where names this
 # common collide with other packages (9 Nov 2026 audit, B3). Inside agk_suite they
 # keep their folder names, which is what the HERE/REPO_ROOT path bootstrapping in
 # each module assumes.
-packages = ["agk_suite", "agk_suite.server", "agk_suite.engine", "agk_suite.tools",
+packages = ["agk_gate", "agk_suite", "agk_suite.server", "agk_suite.engine", "agk_suite.tools",
             "agk_suite.enterprise", "agk_suite.plugins", "agk_vendor", "agk_vendor.tomli",
             # Data-only folders, named so setuptools keeps shipping them: it warns
             # that unlisted ones "would be ignored" in a future release.
@@ -122,4 +123,4 @@ packages = ["agk_suite", "agk_suite.server", "agk_suite.engine", "agk_suite.tool
 "agk_vendor.tomli" = ["LICENSE", "py.typed"]
 
 [tool.setuptools.dynamic]
-version = { attr = "asset_gatekeeper.__version__" }
+version = { attr = "agk_gate.__version__" }

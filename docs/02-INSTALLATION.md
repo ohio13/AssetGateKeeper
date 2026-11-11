@@ -105,7 +105,7 @@ python -m venv .venv
 python tests\test_gatekeeper.py     # 396 assertions, no network
 ```
 
-`pip install -e` keeps the source live: edit `asset_gatekeeper.py`, rerun, done.
+`pip install -e` keeps the source live: edit the gate's code in `agk_gate/`, rerun, done.
 This is the path to use if you are writing checks for your studio.
 
 ## Path D - one install for the whole studio

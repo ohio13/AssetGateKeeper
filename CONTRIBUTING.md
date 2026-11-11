@@ -50,11 +50,14 @@ Use the **Bug report** form and include:
    python tests/test_realworld.py
    python tests/test_gatekeeper.py
    python tests/test_formats.py
-   python -m pyflakes asset_gatekeeper.py healer.py
+   python -m pyflakes asset_gatekeeper.py agk_gate healer.py
    ```
 
-Adding a new rule touches three places: the `Budget` field, the check in
-`Gatekeeper`, and the rules reference in `docs/05-RULES-REFERENCE.md`. The DCC
+The gate's code is in `agk_gate/`, in seven parts (`agk_gate/__init__.py` says
+what each holds); `asset_gatekeeper.py` re-exports every name, so
+`import asset_gatekeeper` keeps working. Adding a new rule touches three places:
+the `Budget` field (`agk_gate/config.py`), the check in `Gatekeeper`
+(`agk_gate/gate.py`), and the rules reference in `docs/05-RULES-REFERENCE.md`. The DCC
 panels share `plugins/preflight_core.py`, so a rule added there reaches Maya,
 3ds Max and Blender together.
 

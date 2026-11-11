@@ -125,6 +125,21 @@ def gate_like_plugins(path, rules=None):
     return completed, verdict
 
 
+def write_logging_gate(folder):
+    """The real gate behind a wrapper that appends each run's arguments to
+    $AGK_HARNESS_GATE_LOG: how the harnesses count the gate runs a batch took."""
+    folder.mkdir(parents=True, exist_ok=True)
+    (folder / "asset_gatekeeper.py").write_text(
+        "import json, os, runpy, sys\n"
+        f"REAL = {str(ROOT / 'asset_gatekeeper.py')!r}\n"
+        "with open(os.environ['AGK_HARNESS_GATE_LOG'], 'a', encoding='utf-8') as log:\n"
+        "    log.write(json.dumps(sys.argv[1:]) + '\\n')\n"
+        "sys.argv[0] = REAL\n"
+        "sys.path.insert(0, os.path.dirname(REAL))\n"
+        "runpy.run_path(REAL, run_name='__main__')\n", encoding="utf-8")
+    return folder
+
+
 shutil.rmtree(WORK, ignore_errors=True)
 WORK.mkdir(parents=True)
 
@@ -165,6 +180,27 @@ if wanted("contract"):
     completed, verdict = gate_like_plugins(contract / "gone.fbx")
     expect("a file that is not there: exit 2 and no verdict line (the plug-ins report NOT checked)",
            completed.returncode == 2 and verdict is None, (completed.returncode, completed.stdout[-200:]))
+
+    # A batch, as both plug-ins now run an import: several files, one process.
+    batch = [contract / name for name in ("good.fbx", "heavy.fbx", "gone.fbx", "brick_Albedo.png", "odd.png")]
+    completed = subprocess.run([sys.executable, str(ROOT / "asset_gatekeeper.py"), *map(str, batch),
+                                "--once", "--json", "--rules", str(rules)], capture_output=True, text=True,
+                               encoding="utf-8", errors="replace", timeout=180)
+    rows = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+    verdicts = [row for row in rows if "problems" in row]
+    expect("a batch: stdout holds nothing but JSON lines",
+           len(rows) == len(completed.stdout.strip().splitlines()), completed.stdout[-300:])
+    expect("a batch: one verdict line per file, in the order given, each naming its file",
+           [row["file"] for row in verdicts] == [str(path.resolve()) for path in batch]
+           and all(isinstance(row.get(key), kind) for row in verdicts for key, kind in fields.items()),
+           completed.stdout[-600:])
+    expect("a batch: the verdicts are the single-file ones (--rules applies to every file)",
+           [row["status"] for row in verdicts] == ["PASSED", "PASSED", "ERROR", "PASSED", "FAILED"], verdicts)
+    expect("a batch: a missing file is its own ERROR line, not the end of the batch",
+           verdicts[2]["passed"] is False and verdicts[2]["problems"] == ["not found"], verdicts[2:3])
+    expect("a batch: the last line is the summary, which has no \"file\" or \"problems\" (plug-ins skip it)",
+           rows and set(rows[-1]) == {"summary"} and rows[-1]["summary"]["total"] == len(batch), rows[-1:])
+    expect("a batch: exit 1 when any file failed", completed.returncode == 1, completed.returncode)
 
 # --------------------------------------------------------------------------- #
 if wanted("contract") or wanted("unity") or wanted("godot"):
@@ -267,12 +303,16 @@ if wanted("unity"):
         (project / "Assets" / "readme.txt").write_text("not an asset\n", encoding="utf-8")
         # The project's rules.toml sits beside Assets/, where Unity does not import it.
         (project / "rules.toml").write_text("[mesh]\nmax_material_slots = 4\n", encoding="utf-8")
+        # A second rules.toml, nearer the textures: they are checked in a run of their own.
+        (project / "Assets" / "My Textures" / "rules.toml").write_text("[texture]\nmax_edge = 2048\n",
+                                                                     encoding="utf-8")
         slow = WORK / "slow_gate"
         slow.mkdir()
         (slow / "asset_gatekeeper.py").write_text("import time\ntime.sleep(60)\n", encoding="utf-8")
+        logging_gate = write_logging_gate(WORK / "logging_gate")
 
         run = subprocess.run([dotnet, "run", "--project", str(stubs / "harness" / "AgkUnityHarness.csproj"),
-                              "--", str(project), sys.executable, str(ROOT), str(slow)],
+                              "--", str(project), sys.executable, str(ROOT), str(slow), str(logging_gate)],
                              capture_output=True, text=True, encoding="utf-8", errors="replace",
                              timeout=900, env=env)
         result = None
@@ -309,9 +349,63 @@ if wanted("unity"):
                        for line in lines), lines)
             expect("the background-task progress ends as Failed", result["finish_status"] == "Failed",
                    result["finish_status"])
+            models, textures = project / "Assets" / "Models", project / "Assets" / "My Textures"
+            expect("the import is checked in one gate run per rules.toml, each run holding its files",
+                   sorted(result["import_runs"]) == sorted([
+                       [str(models / "good.fbx"), str(models / "heavy.fbx"), "--once", "--json",
+                        "--rules", str(project / "rules.toml")],
+                       [str(textures / "brick_Albedo.png"), str(textures / "héros_odd.png"), "--once", "--json",
+                        "--rules", str(textures / "rules.toml")]]), result["import_runs"])
             expect("re-importing unchanged files checks nothing (no label-change loop)",
                    result["reimport_busy"] is False and result["reimport_lines"] == []
                    and result["reimport_set_labels"] == 0, result)
+            batch_lines = result["batch_lines"]
+            expect("a batch with a missing file: two runs again (the missing file is not sent)",
+                   len(result["batch_runs"]) == 2
+                   and not any("gone.fbx" in item for run in result["batch_runs"] for item in run),
+                   result["batch_runs"])
+            expect("... the failing ones are Console errors, the missing one NOT checked, the rest silent",
+                   sorted(line.split(" FAILED")[0] for line in batch_lines if line.startswith("error: "))
+                   == ["error: AssetGatekeeper: Assets/Models/heavy.fbx",
+                       "error: AssetGatekeeper: Assets/My Textures/héros_odd.png"]
+                   and any(line.startswith("warning: AssetGatekeeper: Assets/Models/gone.fbx NOT checked: "
+                                           "source file not found") for line in batch_lines)
+                   and not any("good.fbx" in line or "brick_Albedo" in line for line in batch_lines),
+                   batch_lines)
+            expect("... with the summary for all five",
+                   any(line.startswith("log: AssetGatekeeper: 5 asset(s) checked: 2 passed, 2 failed, 1 NOT checked")
+                       for line in batch_lines), batch_lines)
+            expect("... and the labels are what one-at-a-time gave", result["batch_labels"] == labels,
+                   result["batch_labels"])
+            expect("batch plan: 120 files under one rules.toml are runs of 50, 50 and 20",
+                   result["plan_counts"] == [50, 50, 20], result["plan_counts"])
+            expect("batch plan: long paths are cut at 8,000 characters of command line, every file sent once",
+                   all(chars <= 8000 for chars in result["plan_long_chars"])
+                   and sum(result["plan_long_counts"]) == 60 and len(result["plan_long_counts"]) > 2,
+                   (result["plan_long_counts"], result["plan_long_chars"]))
+            expect("batch plan: files are grouped by their rules.toml, order kept within a group",
+                   result["plan_mixed"] == [{"rules": str(project / "rules.toml"), "files": [0, 2]},
+                                            {"rules": str(textures / "rules.toml"), "files": [1]}],
+                   result["plan_mixed"])
+            parsed = result["parse_windows"]
+            expect("verdicts find their file by path: Windows case and separators do not matter, order neither",
+                   [item["outcome"] for item in parsed] == ["Passed", "Failed", "Failed", "NotChecked"]
+                   and parsed[1]["problems"] == ["too big"], parsed)
+            expect("... the gate's ERROR line for a missing file is a failure with its reason",
+                   parsed[2]["status"] == "ERROR" and parsed[2]["problems"] == ["not found"], parsed[2])
+            expect("... and a file without a line is NOT checked, quoting the gate's last line",
+                   parsed[3]["reason"].startswith("the gate gave no verdict (exit 1): ")
+                   and "rules.toml" in parsed[3]["reason"], parsed[3])
+            direct = result["direct_batch"]
+            expect("the real gate on a batch: pass, fail, the missing file as ERROR, pass",
+                   [(item["outcome"], item["status"]) for item in direct]
+                   == [("Passed", "PASSED"), ("Failed", "FAILED"), ("Failed", "ERROR"), ("Passed", "PASSED")]
+                   and direct[2]["problems"] == ["not found"]
+                   and any("power of two" in problem for problem in direct[1]["problems"]), direct)
+            expect("a batch's timeout is the per-file timeout times its files (1 s x 3 files)",
+                   3 <= result["batch_timeout_seconds"] < 20
+                   and all("took longer than 3 s for 3 files" in reason for reason in result["batch_timeout_reasons"]),
+                   (result["batch_timeout_seconds"], result["batch_timeout_reasons"]))
             expect("Check Selected on a folder re-checks it; a fixed model loses its label",
                    "AGK_Failed" not in result["fixed_labels"].get("Assets/Models/heavy.fbx", [])
                    and result["fixed_labels"].get("Assets/My Textures/héros_odd.png") == ["AGK_Failed"]
@@ -361,10 +455,14 @@ if wanted("godot"):
         write_png(project / "addons" / "asset_gatekeeper" / "icon.png", 100, 60)
         (project / "notes.txt").write_text("not an asset\n", encoding="utf-8")
         (project / "rules.toml").write_text("[mesh]\nmax_triangles = 100\n", encoding="utf-8")
+        # A second rules.toml, nearer the textures: they are checked in a run of their own.
+        (project / "textures" / "rules.toml").write_text("[texture]\nmax_edge = 2048\n", encoding="utf-8")
         bogus = WORK / "someone_elses_python"
         bogus.mkdir()
+        gate_log = WORK / "godot_gate_runs.log"
         env = dict(os.environ, AGK_TEST_PYTHON=sys.executable, AGK_TEST_HOME=str(ROOT),
-                   PYTHONHOME=str(bogus))
+                   AGK_TEST_LOGGING_HOME=str(write_logging_gate(WORK / "godot_logging_gate")),
+                   AGK_HARNESS_GATE_LOG=str(gate_log), PYTHONHOME=str(bogus))
         run = subprocess.run([godot, "--headless", "--path", str(project), "--script", "res://test_runner.gd"],
                              capture_output=True, text=True, encoding="utf-8", errors="replace",
                              timeout=600, env=env)
@@ -427,6 +525,41 @@ if wanted("godot"):
                    result["queue_batches"])
             expect("unchanged files are not queued again", result["enqueued_unchanged"] == 0,
                    result["enqueued_unchanged"])
+            full = str(project).replace("\\", "/")
+            expect("... the queue checked them in one gate run per rules.toml",
+                   sorted(result["queue_runs"]) == sorted([
+                       [f"{full}/models/good.obj", f"{full}/models/heavy.obj", "--once", "--json",
+                        "--rules", f"{full}/rules.toml"],
+                       [f"{full}/textures/brick_Albedo.png", "--once", "--json",
+                        "--rules", f"{full}/textures/rules.toml"]]), result["queue_runs"])
+            expect("a batch: pass, fail, a missing file NOT checked, pass, fail - the one-at-a-time verdicts",
+                   [(item["outcome"], item["status"]) for item in result["batch"]]
+                   == [("passed", "PASSED"), ("failed", "FAILED"), ("not_checked", ""), ("passed", "PASSED"),
+                       ("failed", "FAILED")]
+                   and result["batch"][2]["reason"] == "source file not found"
+                   and result["batch"][1]["problems"] == result["heavy"]["problems"]
+                   and result["batch"][4]["problems"] == result["npot"]["problems"], result["batch"])
+            expect("the real gate on a batch holding a missing file: its own ERROR line, the rest checked",
+                   [(item["outcome"], item["status"]) for item in result["batch_direct"]]
+                   == [("passed", "PASSED"), ("failed", "FAILED"), ("failed", "ERROR")]
+                   and result["batch_direct"][2]["problems"] == ["not found"], result["batch_direct"])
+            expect("batch plan: 120 files under one rules.toml are runs of 50, 50 and 20",
+                   result["plan_counts"] == [50, 50, 20], result["plan_counts"])
+            expect("batch plan: long paths are cut at 8,000 characters of command line, every file sent once",
+                   all(chars <= 8000 for chars in result["plan_long_chars"])
+                   and sum(result["plan_long_counts"]) == 60 and len(result["plan_long_counts"]) > 2,
+                   (result["plan_long_counts"], result["plan_long_chars"]))
+            expect("batch plan: files are grouped by their rules.toml, order kept within a group",
+                   result["plan_mixed"] == [{"rules": f"{full}/rules.toml", "indexes": [0, 2]},
+                                            {"rules": f"{full}/textures/rules.toml", "indexes": [1]}],
+                   result["plan_mixed"])
+            parsed = result["parse_windows"]
+            expect("verdicts find their file by path: Windows case and separators do not matter, order neither",
+                   [item["outcome"] for item in parsed] == ["passed", "failed", "failed", "not_checked"]
+                   and parsed[1]["problems"] == ["too big"] and parsed[2]["status"] == "ERROR", parsed)
+            expect("... and a file without a line is NOT checked, quoting the gate's last log line",
+                   parsed[3]["reason"] == "the gate gave no verdict (exit 1): 12:00:00 rules   C:\\Proj\\rules.toml",
+                   parsed[3])
 
         # The editor itself: the add-on enables, the first import of the project
         # reaches it (resources_reimported), and it reports through push_error. The

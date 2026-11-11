@@ -67,7 +67,7 @@ DROP_IN_FILES = (
 #: enterprise/ and plugins/ are here because a studio that unzips this gets the
 #: console scripts and the DCC panels too; leaving them out meant the drop-in tree
 #: could not do half of what the README promised.
-DROP_IN_DIRS = ("server", "engine", "tools", "templates", "plugins", "enterprise",
+DROP_IN_DIRS = ("agk_gate", "server", "engine", "tools", "templates", "plugins", "enterprise",
                 "vcs_hooks", "docs", "agk_vendor")
 
 #: Never copied, whatever folder they appear in.
@@ -82,12 +82,12 @@ def read_version() -> str:
     Importing the gate would pull in optional dependencies and touch stdout -
     neither belongs in a packaging script.
     """
-    text = (ROOT / "asset_gatekeeper.py").read_text(encoding="utf-8")
+    text = (ROOT / "agk_gate" / "__init__.py").read_text(encoding="utf-8")
     # The string literal only: the line carries a comment since the 0.1.0a1
     # rename, and the whole rest of the line once ended up in the ZIP's name.
     found = re.search(r"""^__version__\s*=\s*["']([^"']+)["']""", text, re.M)
     if not found:
-        raise SystemExit("could not find __version__ in asset_gatekeeper.py")
+        raise SystemExit("could not find __version__ in agk_gate/__init__.py")
     return found.group(1)
 
 
@@ -152,7 +152,7 @@ def check_tag(tag: str, version: str | None = None, notes_text: str | None = Non
     problems = []
     try:
         if normalise_version(tag) != normalise_version(version):
-            problems.append(f"tag {tag} is not the version in asset_gatekeeper.py ({version}): "
+            problems.append(f"tag {tag} is not the version in agk_gate/__init__.py ({version}): "
                             "change one of them")
     except ValueError as exc:
         problems.append(str(exc))

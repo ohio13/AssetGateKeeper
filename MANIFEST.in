@@ -12,6 +12,7 @@ include templates/rules.toml
 include *.bat
 recursive-include server/static *
 recursive-include tests *.py
+recursive-include agk_gate *.py
 recursive-include engine *.py
 recursive-include tools *.py
 recursive-include enterprise *.py
