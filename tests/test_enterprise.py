@@ -1050,12 +1050,22 @@ health_store = store.open_store(primary_dsn, econfig.DatabaseConfig(
     dsn=primary_dsn, breaker_threshold=2, health_interval_seconds=0.05))
 health_store.start_health()
 _pgsim.REGISTRY.dead_dsns.add(primary_dsn)
-time.sleep(0.3)
+
+
+def _wait_for_state(breaker, state, limit=5.0):
+    # The loop runs every 0.05 s; a fixed short sleep failed on a slow macOS
+    # runner (11 Nov), so wait for the state, up to a few seconds.
+    deadline = time.time() + limit
+    while breaker.state is not state and time.time() < deadline:
+        time.sleep(0.02)
+
+
+_wait_for_state(health_store._breaker, rz.State.OPEN)
 expect("the health loop trips the breaker on a dead endpoint",
        health_store._breaker.state is rz.State.OPEN,
        health_store.health()["endpoints"][0]["breaker"]["state"])
 _pgsim.REGISTRY.dead_dsns.discard(primary_dsn)
-time.sleep(0.4)
+_wait_for_state(health_store._breaker, rz.State.CLOSED)
 expect("and closes it again once the endpoint answers",
        health_store._breaker.state is rz.State.CLOSED,
        health_store.health()["endpoints"][0]["breaker"]["state"])
