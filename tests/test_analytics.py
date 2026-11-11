@@ -324,7 +324,12 @@ expect("polygon growth is identical", sqlite_report["growth"] == pg_report["grow
 expect("error clusters are identical", sqlite_report["errors"] == pg_report["errors"])
 expect("the report has the three sections",
        {"compliance", "growth", "errors", "summary"} <= set(sqlite_report))
-expect("compliance has the monthly buckets", len(sqlite_report["compliance"]["points"]) == 3,
+# One bucket per calendar month a seeded verdict falls in: 3 or 4 depending on
+# today's date (80 days ago is August on 11 Nov, September on 30 Nov). The
+# fixed 3 failed CI on 11 Nov 2026.
+_months = sorted({(now - timedelta(days=row[3])).strftime("%Y-%m") for row in ROWS})
+expect("compliance has the monthly buckets",
+       [p["bucket"] for p in sqlite_report["compliance"]["points"]] == _months,
        str([p["bucket"] for p in sqlite_report["compliance"]["points"]]))
 expect("the failing month is reported as such",
        any(point["failed"] > 0 for point in sqlite_report["compliance"]["points"]))
