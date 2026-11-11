@@ -248,7 +248,14 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install trimesh pillow numpy playwright charset-normalizer
-          python -m playwright install --with-deps chromium
+          # The runner image already has the libraries Chromium needs;
+          # --with-deps only adds fonts, from Ubuntu's mirror. On 11 Nov that
+          # mirror was unreachable for hours and failed the job before any
+          # test ran, so a mirror outage now costs the fonts, not the run.
+          if ! timeout 300 python -m playwright install --with-deps chromium; then
+            echo "::warning::system packages unavailable (Ubuntu mirror); installing Chromium without them"
+            python -m playwright install chromium
+          fi
 
       - name: Viewer suite (Chromium)
         run: python tests/test_viewer_browser.py
