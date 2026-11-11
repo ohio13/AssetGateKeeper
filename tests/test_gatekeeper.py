@@ -2723,7 +2723,7 @@ expect("the console script is declared",
        'asset-gatekeeper = "asset_gatekeeper:main"' in pyproject_text)
 expect("the version is dynamic so it cannot drift",
        'dynamic = ["version"]' in pyproject_text
-       and 'version = { attr = "asset_gatekeeper.__version__" }' in pyproject_text)
+       and 'version = { attr = "agk_gate.__version__" }' in pyproject_text)
 # The gate refuses to run without trimesh+Pillow, so they are honest hard
 # requirements; watchdog is a speed-up and must stay optional.
 expect("trimesh and pillow are declared as required",

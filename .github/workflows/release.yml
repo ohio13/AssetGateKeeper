@@ -4,7 +4,7 @@ name: Release
 # archive and the drop-in ZIP, checks the wheel installs and runs, and puts all
 # of them on a GitHub release with that version's section of RELEASE_NOTES.md.
 #
-# Before tagging: the version in asset_gatekeeper.py must be the tag's version,
+# Before tagging: the version in agk_gate/__init__.py must be the tag's version,
 # and the RELEASE_NOTES.md heading for it must carry a date, not "unreleased".
 # The build refuses otherwise, before anything is published.
 #

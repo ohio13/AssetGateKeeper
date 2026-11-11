@@ -1180,7 +1180,8 @@ Documented on purpose, so nobody discovers them at the wrong moment:
 ## 19. Repository map
 
 ```
-asset_gatekeeper.py            the gate (single file), 4 entry points documented in §4
+asset_gatekeeper.py            the gate's front door, 4 entry points documented in §4
+agk_gate/                      the gate's code in seven parts (see agk_gate/__init__.py)
 healer.py                      opt-in repair engine, loaded only when healing is on
 notifier.py                    native toasts (WinRT/balloon, notify-send, osascript)
 asset_gatekeeper.example.toml  annotated rules.toml template

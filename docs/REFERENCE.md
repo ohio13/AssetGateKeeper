@@ -84,8 +84,9 @@ pip install "asset-gatekeeper[full]"       # or: pip install .[full] from a chec
 ```
 
 ```bash
-# 2. as a single file, no install at all
-curl -O https://raw.githubusercontent.com/ohio13/AssetGateKeeper/main/asset_gatekeeper.py
+# 2. no install at all: the downloaded ZIP, or copy asset_gatekeeper.py *and* the
+#    agk_gate/ folder beside it (the gate's code; since 11 Nov 2026 it is no
+#    longer one file) into e.g. your repo's tools/
 python asset_gatekeeper.py --help
 ```
 
@@ -988,7 +989,8 @@ python tests/test_dcc_integration.py      # local only: real Blender/Houdini/Unr
 Check counts change with every release; `certify.py` prints the current ones.
 
 ```
-asset_gatekeeper.py              the tool (single file)
+asset_gatekeeper.py              the tool's front door: every name, `python asset_gatekeeper.py ...`
+agk_gate/                        the gate's code in seven parts (agk_gate/__init__.py lists them)
 healer.py                        opt-in repair engine (only loaded with --auto-heal)
 asset_gatekeeper.example.toml    rules.toml template
 pyproject.toml  setup.py         pip-installable (asset-gatekeeper command)

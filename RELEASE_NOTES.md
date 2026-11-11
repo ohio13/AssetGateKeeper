@@ -1,5 +1,16 @@
 # Unreleased (on `main`)
 
+* **The gate's code is split into parts in `agk_gate/` (11 Nov).**
+  `asset_gatekeeper.py` had grown to about 8,500 lines; it is now a short front
+  door, and the code lives in seven parts in `agk_gate/` (settings,
+  readers, the gate, the audit, reports, the command line, and what they
+  share). Nothing changes for a user: the same command, the same flags, the
+  same verdicts (checked file by file against the old version, with and
+  without a `rules.toml`), and every name is still on `asset_gatekeeper` for
+  scripts, plug-ins and tests. One thing to know: copying the gate by hand
+  now means copying `asset_gatekeeper.py` *and* the `agk_gate/` folder; the
+  download ZIP and `pip install` already include both.
+
 * **The DCC panels call the gate's skeleton and lightmap checks directly
   (11 Nov).** `skeleton_problems()`, `lightmap_facts_of()` and
   `lightmap_problems()` are now plain functions in the gate; the panels used
