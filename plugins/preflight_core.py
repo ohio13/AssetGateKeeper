@@ -18,7 +18,6 @@ Fuzzy tags matter most here: an artist who sees "folder 'charcter' looks like
 from __future__ import annotations
 
 import dataclasses
-import types
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Optional, Sequence
@@ -417,28 +416,6 @@ def skeleton_from_hierarchy(bound: Iterable, parent_of, children_of, is_joint,
     return pairs
 
 
-def _gate_function(function, **replacements):
-    """The gate's own *function*, reading *replacements* in place of its globals.
-
-    The gate's [skeleton] and [lightmap] checks are written against a file path:
-    ``Gatekeeper._check_skeleton`` calls ``skeleton_facts(path)``. The panel has
-    the same facts from the live scene, so it runs that very function with
-    ``skeleton_facts`` answering from the scene. Nothing in the gate module is
-    changed (the copy has its own globals), and every threshold and every word
-    of the verdict stays the gate's. A replaced name the gate no longer has is
-    an error, so a renamed helper fails the tests instead of being bypassed.
-    """
-    missing = [name for name in replacements if name not in function.__globals__]
-    if missing:
-        raise RuntimeError("the gate has no " + ", ".join(missing))
-    namespace = dict(function.__globals__)
-    namespace.update(replacements)
-    clone = types.FunctionType(function.__code__, namespace, function.__name__,
-                               function.__defaults__, function.__closure__)
-    clone.__kwdefaults__ = function.__kwdefaults__
-    return clone
-
-
 def _relaxed(budget: Any, changes: dict) -> Any:
     """The budget with some rules off (the ones the panel cannot judge)."""
     return dataclasses.replace(budget, **changes) if changes else budget
@@ -549,7 +526,7 @@ def check_structure(report: PreflightReport, budget: Any, *,
                 if untested and budget.collision_convex:
                     note("collision", f"convexity of {agk._name_list(untested)}")
 
-    # [skeleton]: Gatekeeper._check_skeleton, fed from the scene.
+    # [skeleton]: the gate's skeleton_problems(), fed from the scene.
     if on["skeleton"]:
         bones = None if skeleton is None else skeleton.get("bones")
         if bones is None:
@@ -577,13 +554,11 @@ def check_structure(report: PreflightReport, budget: Any, *,
                 def skeleton_check():
                     problems: list = []
                     warnings: list = []
-                    check = _gate_function(agk.Gatekeeper._check_skeleton,
-                                           skeleton_facts=lambda _path: facts)
-                    check(agk.Gatekeeper(checked), path, problems, warnings, [], [])
+                    agk.skeleton_problems(facts, checked, problems, warnings, [], [])
                     return problems, warnings
                 run("skeleton", skeleton_check)
 
-    # [lightmap]: Gatekeeper._check_lightmap and lightmap_facts, fed from the scene.
+    # [lightmap]: the gate's lightmap_facts_of() and lightmap_problems(), fed from the scene.
     if on["lightmap"]:
         if lightmap is None:
             note("lightmap")
@@ -621,10 +596,9 @@ def check_structure(report: PreflightReport, budget: Any, *,
                 def lightmap_check():
                     problems: list = []
                     warnings: list = []
-                    facts = _gate_function(agk.lightmap_facts,
-                                           _lightmap_meshes=lambda _path, _channel: found)
-                    check = _gate_function(agk.Gatekeeper._check_lightmap, lightmap_facts=facts)
-                    check(agk.Gatekeeper(checked), path, problems, warnings, [], [])
+                    facts = agk.lightmap_facts_of(found, checked.lightmap_resolution,
+                                                  checked.lightmap_max_overlap >= 0)
+                    agk.lightmap_problems(facts, checked, problems, warnings, [], [])
                     return problems, warnings
                 run("lightmap", lightmap_check)
 

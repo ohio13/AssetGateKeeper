@@ -4576,7 +4576,13 @@ def lightmap_facts(path: Path, channel: int = 1, resolution: int = 256,
     """
     if np is None:                                         # pragma: no cover
         raise AssetError("numpy is not installed; lightmap UVs cannot be read")
-    found = _lightmap_meshes(path, channel)
+    return lightmap_facts_of(_lightmap_meshes(path, channel), resolution, overlap)
+
+
+def lightmap_facts_of(found: dict, resolution: int = 256, overlap: bool = True) -> dict:
+    """lightmap_facts() from meshes already read: {"meshes": [(name, uv points,
+    uv triangles)], "missing": [names], "unread": "", "obj_single_set": bool}.
+    The DCC panels pass what the open scene holds (plugins/preflight_core.py)."""
     facts: dict = {"static": len(found["meshes"]) + len(found["missing"]),
                    "missing": found["missing"], "obj_single_set": found.get("obj_single_set", False),
                    "uvs": 0, "outside": 0, "worst": None, "overlap": None, "collapsed": [],
@@ -5608,6 +5614,104 @@ def lod_collision_problems(path: Path, structure: Optional[dict], budget: "Budge
     return problems, warnings, metrics, stats
 
 
+def skeleton_problems(skeleton: dict, budget: "Budget", problems: list, warnings: list,
+                      metrics: list, stats: list) -> None:
+    """[skeleton] findings from skeleton facts ({"bones", "roots", "depth",
+    "deepest", "sections": [(material, bones)], "unread_sections"}): what
+    skeleton_facts() reads from a file and the DCC panels from the open scene,
+    so both say the same words for the same rig."""
+    bones, roots, depth = skeleton["bones"], skeleton["roots"], skeleton["depth"]
+    metrics.append(f"{bones} bones")
+    stats.extend((("bones", bones), ("root_bones", len(roots)), ("bone_depth", depth)))
+    if budget.max_bones and bones > budget.max_bones:
+        problems.append(f"{bones:,} bones in the skeleton exceeds the {budget.max_bones:,} "
+                        f"bone budget (+{bones - budget.max_bones:,}): remove helper or "
+                        "unused bones before export, or split the character")
+    sections = skeleton["sections"]
+    if skeleton["unread_sections"]:
+        sections = []      # not counted, rather than counted as 0 bones
+        warnings.append("bones per material section not counted: the skin weights are "
+                        "compressed, and this check reads plain vertex data only")
+    if sections:
+        stats.append(("max_bones_per_section", max(count for _label, count in sections)))
+    limit = budget.max_bones_per_section
+    over = sorted(((count, label) for label, count in sections if limit and count > limit),
+                  reverse=True)
+    if over:
+        count, label = over[0]
+        where = (f"material section '{label}' is skinned to {count} bones" if len(over) == 1
+                 else f"{len(over)} material sections are skinned to more than {limit} bones "
+                      f"(worst '{label}': {count})")
+        problems.append(f"{where}, over the {limit} bones-per-section limit: the engine "
+                        "splits such a section into extra draw calls (Unreal on mobile "
+                        "allows 75); weight it to fewer bones or give some of its faces "
+                        "another material")
+    if budget.single_root_bone and len(roots) != 1:
+        problems.append(f"skeleton has {len(roots)} root bones ({_name_list(roots)}): Unreal "
+                        "imports one root only (\"Multiple roots are found in the bone "
+                        "hierarchy\"); parent every bone under a single root bone")
+    if budget.max_bone_depth and depth > budget.max_bone_depth:
+        problems.append(f"bone chain is {depth} bones deep (root to "
+                        f"'{skeleton['deepest']}'), over the {budget.max_bone_depth} depth "
+                        "limit: shorten the chain or remove in-between bones")
+
+
+def lightmap_problems(facts: dict, budget: "Budget", problems: list, warnings: list,
+                      metrics: list, stats: list) -> None:
+    """[lightmap] findings from lightmap_facts() / lightmap_facts_of(), for the
+    gate and the DCC panels alike."""
+    channel = budget.lightmap_uv_channel
+    wanted_overlap = budget.lightmap_max_overlap >= 0
+    label = f"UV channel {channel}, the {_ordinal(channel + 1)} set"
+    if facts["unread"]:
+        warnings.append(f"lightmap UVs not fully checked: {facts['unread']}")
+    if budget.lightmap_require:
+        if facts["obj_single_set"]:
+            problems.append(f"no lightmap UV set: an OBJ file holds one UV set, so {label} "
+                            "cannot exist; export FBX or glTF with a lightmap UV set, or set "
+                            "[lightmap] uv_channel = 0 if the first set is the lightmap")
+            stats.append(("lightmap_missing", 1))
+        elif facts["missing"]:
+            missing = facts["missing"]
+            which = (f"static mesh '{missing[0]}'" if len(missing) == 1
+                     else f"{len(missing)} static meshes ({_name_list(missing)})")
+            problems.append(f"no lightmap UV set ({label}) on {which}: add a UV set unwrapped "
+                            "for lightmaps (no overlaps, inside 0-1), or switch off "
+                            "[lightmap] require to let the engine generate one")
+            stats.append(("lightmap_missing", len(missing)))
+    if budget.lightmap_inside_unit_square and facts["uvs"]:
+        stats.append(("lightmap_uvs_outside", facts["outside"]))
+        if facts["outside"]:
+            u, v = facts["worst"]
+            problems.append(f"{facts['outside']:,} of {facts['uvs']:,} lightmap UVs ({label}) "
+                            f"are outside 0-1 (worst at u {u:.3f}, v {v:.3f}): a lightmap does "
+                            "not tile, so those texels get another surface's light; move "
+                            "every lightmap island inside the 0-1 square")
+    if wanted_overlap:
+        collapsed = facts["collapsed"]
+        if collapsed:
+            which = (f"'{collapsed[0]}'" if len(collapsed) == 1
+                     else f"{len(collapsed)} meshes ({_name_list(collapsed)})")
+            problems.append(f"lightmap UVs ({label}) of {which} cover no texel of a "
+                            f"{budget.lightmap_resolution}x{budget.lightmap_resolution} grid "
+                            "(collapsed or far too small): unwrap the lightmap UVs again")
+        if facts["overlap"] is not None:
+            percent, overlapped, covered, name, grid = facts["overlap"]
+            stats.extend((("lightmap_overlap_texels", overlapped), ("lightmap_texels", covered)))
+            metrics.append(f"lightmap {_percent(percent)}% overlap")
+            if grid < budget.lightmap_resolution:
+                warnings.append(f"lightmap overlap measured on a {grid}x{grid} grid, not "
+                                f"{budget.lightmap_resolution}x{budget.lightmap_resolution}: "
+                                "its triangles cover the square many times over")
+            if overlapped and percent > budget.lightmap_max_overlap:
+                problems.append(f"lightmap UVs ({label}) overlap on {_percent(percent)}% of "
+                                f"their texels in '{name}' ({overlapped:,} of {covered:,} on a "
+                                f"{grid}x{grid} grid), over the "
+                                f"{budget.lightmap_max_overlap:g}% limit: overlapping islands "
+                                "share baked light and bleed into each other; repack the "
+                                "lightmap UVs so no islands overlap")
+
+
 class Gatekeeper:
     """Applies the budget rules and returns a Verdict. No I/O side effects.
 
@@ -6037,40 +6141,7 @@ class Gatekeeper:
             return
         if not skeleton or not skeleton["bones"]:
             return                            # nothing skinned: the rules do not apply
-        bones, roots, depth = skeleton["bones"], skeleton["roots"], skeleton["depth"]
-        metrics.append(f"{bones} bones")
-        stats.extend((("bones", bones), ("root_bones", len(roots)), ("bone_depth", depth)))
-        if budget.max_bones and bones > budget.max_bones:
-            problems.append(f"{bones:,} bones in the skeleton exceeds the {budget.max_bones:,} "
-                            f"bone budget (+{bones - budget.max_bones:,}): remove helper or "
-                            "unused bones before export, or split the character")
-        sections = skeleton["sections"]
-        if skeleton["unread_sections"]:
-            sections = []      # not counted, rather than counted as 0 bones
-            warnings.append("bones per material section not counted: the skin weights are "
-                            "compressed, and this check reads plain vertex data only")
-        if sections:
-            stats.append(("max_bones_per_section", max(count for _label, count in sections)))
-        limit = budget.max_bones_per_section
-        over = sorted(((count, label) for label, count in sections if limit and count > limit),
-                      reverse=True)
-        if over:
-            count, label = over[0]
-            where = (f"material section '{label}' is skinned to {count} bones" if len(over) == 1
-                     else f"{len(over)} material sections are skinned to more than {limit} bones "
-                          f"(worst '{label}': {count})")
-            problems.append(f"{where}, over the {limit} bones-per-section limit: the engine "
-                            "splits such a section into extra draw calls (Unreal on mobile "
-                            "allows 75); weight it to fewer bones or give some of its faces "
-                            "another material")
-        if budget.single_root_bone and len(roots) != 1:
-            problems.append(f"skeleton has {len(roots)} root bones ({_name_list(roots)}): Unreal "
-                            "imports one root only (\"Multiple roots are found in the bone "
-                            "hierarchy\"); parent every bone under a single root bone")
-        if budget.max_bone_depth and depth > budget.max_bone_depth:
-            problems.append(f"bone chain is {depth} bones deep (root to "
-                            f"'{skeleton['deepest']}'), over the {budget.max_bone_depth} depth "
-                            "limit: shorten the chain or remove in-between bones")
+        skeleton_problems(skeleton, budget, problems, warnings, metrics, stats)
 
     def _check_lightmap(self, path: Path, problems: list, warnings: list, metrics: list,
                         stats: list) -> None:
@@ -6086,54 +6157,7 @@ class Gatekeeper:
         except Exception as exc:              # a lightmap read must never break the verdict
             warnings.append(f"lightmap UVs not checked ({_describe_unexpected(exc)})")
             return
-        label = f"UV channel {channel}, the {_ordinal(channel + 1)} set"
-        if facts["unread"]:
-            warnings.append(f"lightmap UVs not fully checked: {facts['unread']}")
-        if budget.lightmap_require:
-            if facts["obj_single_set"]:
-                problems.append(f"no lightmap UV set: an OBJ file holds one UV set, so {label} "
-                                "cannot exist; export FBX or glTF with a lightmap UV set, or set "
-                                "[lightmap] uv_channel = 0 if the first set is the lightmap")
-                stats.append(("lightmap_missing", 1))
-            elif facts["missing"]:
-                missing = facts["missing"]
-                which = (f"static mesh '{missing[0]}'" if len(missing) == 1
-                         else f"{len(missing)} static meshes ({_name_list(missing)})")
-                problems.append(f"no lightmap UV set ({label}) on {which}: add a UV set unwrapped "
-                                "for lightmaps (no overlaps, inside 0-1), or switch off "
-                                "[lightmap] require to let the engine generate one")
-                stats.append(("lightmap_missing", len(missing)))
-        if budget.lightmap_inside_unit_square and facts["uvs"]:
-            stats.append(("lightmap_uvs_outside", facts["outside"]))
-            if facts["outside"]:
-                u, v = facts["worst"]
-                problems.append(f"{facts['outside']:,} of {facts['uvs']:,} lightmap UVs ({label}) "
-                                f"are outside 0-1 (worst at u {u:.3f}, v {v:.3f}): a lightmap does "
-                                "not tile, so those texels get another surface's light; move "
-                                "every lightmap island inside the 0-1 square")
-        if wanted_overlap:
-            collapsed = facts["collapsed"]
-            if collapsed:
-                which = (f"'{collapsed[0]}'" if len(collapsed) == 1
-                         else f"{len(collapsed)} meshes ({_name_list(collapsed)})")
-                problems.append(f"lightmap UVs ({label}) of {which} cover no texel of a "
-                                f"{budget.lightmap_resolution}x{budget.lightmap_resolution} grid "
-                                "(collapsed or far too small): unwrap the lightmap UVs again")
-            if facts["overlap"] is not None:
-                percent, overlapped, covered, name, grid = facts["overlap"]
-                stats.extend((("lightmap_overlap_texels", overlapped), ("lightmap_texels", covered)))
-                metrics.append(f"lightmap {_percent(percent)}% overlap")
-                if grid < budget.lightmap_resolution:
-                    warnings.append(f"lightmap overlap measured on a {grid}x{grid} grid, not "
-                                    f"{budget.lightmap_resolution}x{budget.lightmap_resolution}: "
-                                    "its triangles cover the square many times over")
-                if overlapped and percent > budget.lightmap_max_overlap:
-                    problems.append(f"lightmap UVs ({label}) overlap on {_percent(percent)}% of "
-                                    f"their texels in '{name}' ({overlapped:,} of {covered:,} on a "
-                                    f"{grid}x{grid} grid), over the "
-                                    f"{budget.lightmap_max_overlap:g}% limit: overlapping islands "
-                                    "share baked light and bleed into each other; repack the "
-                                    "lightmap UVs so no islands overlap")
+        lightmap_problems(facts, budget, problems, warnings, metrics, stats)
 
     # - textures - #
 

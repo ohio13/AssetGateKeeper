@@ -1,5 +1,11 @@
 # Unreleased (on `main`)
 
+* **The DCC panels call the gate's skeleton and lightmap checks directly
+  (11 Nov).** `skeleton_problems()`, `lightmap_facts_of()` and
+  `lightmap_problems()` are now plain functions in the gate; the panels used
+  to run copies of the gate's methods with swapped-in data, which a small
+  change in the gate could have broken. Same words, same thresholds.
+
 * **glTF collision and LODs read as in an FBX; bakes stay inside the folder's
   limits (11 Nov).** A glTF's `UCX_`/`UBX_`/`USP_`/`UCP_` meshes counted as part
   of the model: a 12-triangle crate with its hull read as 24 triangles and two
