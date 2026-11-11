@@ -344,6 +344,11 @@ Unreal's collision convention: meshes named `UCX_` (convex hull), `UBX_` (box),
 `USP_` (sphere) or `UCP_` (capsule) followed by the name of the render mesh
 they belong to. Off until the table is there.
 
+Whether the table is there or not, collision meshes are not render geometry: in
+an FBX and (since 11 Nov 2026) in a glTF they add nothing to the triangle,
+material, UV-set, broken-triangle, memory or texel-density numbers, so the same
+asset gets the same verdict in either format.
+
 ```toml
 [collision]
 require = true            # a static mesh must carry collision (default false)
@@ -474,6 +479,9 @@ decoded gets a warning that the per-section count was skipped.
 An authored lightmap UV set on static (non-skinned) meshes. Off by default:
 without a `[lightmap]` table no lightmap UV is read. Not the same as `[mesh]
 lightmap_uv`, which only adds the set Unreal *generates* to the memory estimate.
+Only LOD0 is asked, in both formats: an FBX LOD group's coarser levels, a glTF's
+`MSFT_lod` levels and meshes no node places are left out (the skeleton checks
+read LOD0 the same way).
 
 ```toml
 [lightmap]

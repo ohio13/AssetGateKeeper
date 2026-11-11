@@ -2651,6 +2651,39 @@ def _geometries(scene: object) -> list:
     return [scene]
 
 
+def _collision_geometry_names(scene: object) -> set:
+    """Geometry of a loaded glTF scene that only UCX_/UBX_/USP_/UCP_ nodes place."""
+    if trimesh is None or not isinstance(scene, trimesh.Scene):
+        return set()
+    graph = getattr(scene, "graph", None)
+    users: dict = {}
+    try:
+        for node_name in graph.nodes_geometry:
+            geometry_name = graph[node_name][1]
+            users.setdefault(geometry_name, []).append(str(node_name))
+    except Exception:                    # an unusual graph: count everything, as before
+        return set()
+
+    def collision(name):
+        return _bare_name(str(name)).lower().startswith(FBX_COLLISION_PREFIXES)
+
+    return {geometry for geometry, nodes in users.items()
+            if all(collision(node) or collision(geometry) for node in nodes)}
+
+
+def render_scene(path: Path, scene: object) -> object:
+    """The scene as rendered: a glTF's collision shapes removed (as an FBX's
+    are), so they add nothing to degenerate, memory or texel-density counts."""
+    if path.suffix.lower() not in GLTF_SUFFIXES:
+        return scene
+    hulls = _collision_geometry_names(scene)
+    if not hulls:
+        return scene
+    trimmed = scene.copy()
+    trimmed.delete_geometry(hulls)
+    return trimmed
+
+
 
 # --- #
 # FBX (binary, 7.1+): a small read-only parser, standard library + numpy only
@@ -3427,15 +3460,11 @@ def gltf_triangle_counts(document: dict) -> tuple[int, int]:
                     for primitive in (mesh.get("primitives") or []))
                 for mesh in meshes]
     nodes = document.get("nodes", [])
-    scenes = document.get("scenes", [])
-    scene_index = document.get("scene", 0)
-    if scenes:
-        scene = scenes[scene_index] if isinstance(scene_index, int) and 0 <= scene_index < len(scenes) else scenes[0]
-        roots = list(scene.get("nodes", []))
-    else:
-        roots = []
+    roots = _gltf_scene_roots(document) or []
     if not roots:
-        total = sum(per_mesh)
+        # UCX_ & co are collision, not render geometry, as in an FBX (11 Nov 2026).
+        collision = _gltf_collision_meshes(document)
+        total = sum(count for index, count in enumerate(per_mesh) if index not in collision)
         return total, total
 
     used: set[int] = set()
@@ -3447,7 +3476,8 @@ def gltf_triangle_counts(document: dict) -> tuple[int, int]:
             continue                     # malformed or cyclic graph: skip, never loop
         node = nodes[node_index]
         mesh_index = node.get("mesh")
-        if isinstance(mesh_index, int) and 0 <= mesh_index < len(per_mesh):
+        if isinstance(mesh_index, int) and 0 <= mesh_index < len(per_mesh) \
+                and not _gltf_is_collision_node(document, node):
             used.add(mesh_index)
             copies = 1
             instancing = (node.get("extensions") or {}).get("EXT_mesh_gpu_instancing")
@@ -3529,7 +3559,10 @@ def count_material_slots(path: Path) -> int:
 
         used_indices: set[int] = set()
         has_default_material = False
-        for mesh in document.get("meshes", []):
+        render = _gltf_render_meshes(document)
+        for index, mesh in enumerate(document.get("meshes", [])):
+            if index not in render:
+                continue          # collision, a coarser LOD, or never placed
             for primitive in mesh.get("primitives", []):
                 material_index = primitive.get("material")
                 if material_index is None:
@@ -3668,7 +3701,7 @@ def mesh_facts(path: Path, assumed_texture: int = 1024) -> dict:
     Units are taken as metres (glTF's unit; OBJ has none).
     """
     import numpy as np
-    scene = load_scene(path)
+    scene = render_scene(path, load_scene(path))
     meshes = scene.dump(concatenate=False) if hasattr(scene, "dump") else [scene]
     vertices = 0
     colours = False
@@ -3717,7 +3750,10 @@ def count_uv_channels(path: Path) -> int:
             document = None
         if document is not None:
             channels = set()
-            for mesh in document.get("meshes", []):
+            render = _gltf_render_meshes(document)
+            for index, mesh in enumerate(document.get("meshes", [])):
+                if index not in render:
+                    continue      # collision, a coarser LOD, or never placed
                 for primitive in mesh.get("primitives", []):
                     for attribute in primitive.get("attributes", {}):
                         if attribute.startswith("TEXCOORD_"):
@@ -4196,11 +4232,12 @@ def _gltf_skeleton(path: Path) -> Optional[dict]:
     skins = document.get("skins") or []
     meshes = document.get("meshes") or []
     uses = []
+    render = _gltf_render_meshes(document)
     for node in nodes:
         mesh, skin = node.get("mesh"), node.get("skin")
         if isinstance(mesh, int) and isinstance(skin, int) and 0 <= mesh < len(meshes) \
-                and 0 <= skin < len(skins):
-            uses.append((mesh, skin))
+                and 0 <= skin < len(skins) and mesh in render:
+            uses.append((mesh, skin))       # LOD0 only, as for an FBX
     if not uses:
         return None
     joints_of = {}
@@ -4348,6 +4385,60 @@ def lightmap_coverage(triangles, resolution: int = 256) -> tuple[int, int, int]:
     return int(np.count_nonzero(counts)), int(np.count_nonzero(counts > 1)), res
 
 
+def _gltf_is_collision_node(document: dict, node: dict) -> bool:
+    """Is this glTF node an Unreal collision shape (UCX_/UBX_/USP_/UCP_)? Its own
+    name decides; an unnamed node goes by its mesh's name, as gltf_structure."""
+    meshes = document.get("meshes") or []
+    mesh = node.get("mesh")
+    mesh_name = (meshes[mesh].get("name") or "") if isinstance(mesh, int) \
+        and 0 <= mesh < len(meshes) and isinstance(meshes[mesh], dict) else ""
+    return _bare_name(node.get("name") or mesh_name or "").lower().startswith(FBX_COLLISION_PREFIXES)
+
+
+def _gltf_scene_roots(document: dict) -> Optional[list]:
+    """Root nodes of the glTF's scene, or None when it has no scene at all."""
+    scenes = document.get("scenes") or []
+    if not scenes:
+        return None
+    scene_index = document.get("scene", 0)
+    scene = scenes[scene_index] if isinstance(scene_index, int) and 0 <= scene_index < len(scenes) \
+        else scenes[0]
+    return list(scene.get("nodes", []) or []) if isinstance(scene, dict) else []
+
+
+def _gltf_render_meshes(document: dict) -> set:
+    """Meshes the scene draws (LOD0, as an engine imports it): placed by a node
+    the scene reaches, not a collision shape. MSFT_lod's coarser levels sit
+    outside the scene, and a mesh no node places is never imported, so neither
+    counts - the FBX reader's rule (11 Nov 2026). A document without scenes is
+    read whole."""
+    meshes = document.get("meshes") or []
+    nodes = document.get("nodes") or []
+    roots = _gltf_scene_roots(document)
+    if roots is None:
+        placed = {node.get("mesh") for node in nodes if isinstance(node, dict)
+                  and not _gltf_is_collision_node(document, node)}
+        unplaced = set(range(len(meshes))) - {node.get("mesh") for node in nodes
+                                              if isinstance(node, dict)}
+        found = {index for index in placed | unplaced
+                 if isinstance(index, int) and 0 <= index < len(meshes)}
+        return found - _gltf_collision_meshes(document)
+    found, seen, stack = set(), set(), list(roots)
+    while stack:
+        index = stack.pop()
+        if not isinstance(index, int) or not 0 <= index < len(nodes) or index in seen \
+                or not isinstance(nodes[index], dict):
+            continue                                   # malformed or cyclic: never loop
+        seen.add(index)
+        node = nodes[index]
+        mesh = node.get("mesh")
+        if isinstance(mesh, int) and 0 <= mesh < len(meshes) \
+                and not _gltf_is_collision_node(document, node):
+            found.add(mesh)
+        stack.extend(node.get("children", []) or [])
+    return found
+
+
 def _gltf_collision_meshes(document: dict) -> set:
     """Indices of glTF meshes that are collision only (UCX_/UBX_/USP_/UCP_).
 
@@ -4420,10 +4511,10 @@ def _lightmap_meshes(path: Path, channel: int) -> dict:
             return found
         buffers: dict = {}
         attribute = f"TEXCOORD_{channel}"
-        collision = _gltf_collision_meshes(document)
+        render = _gltf_render_meshes(document)
         for index, mesh in enumerate(document.get("meshes") or []):
-            if index in collision:
-                continue                                  # UCX_ & co: not lit, no lightmap
+            if index not in render:
+                continue          # UCX_ & co, coarser LODs, unplaced: not lightmapped
             name = mesh.get("name") or f"mesh {index}"
             points, triangles, missing = [], [], False
             for primitive in mesh.get("primitives") or []:
@@ -4545,7 +4636,7 @@ def count_degenerate_triangles(path: Path, epsilon: float = 0.0, ratio: float = 
         return 0
 
     total = 0
-    for geometry in _geometries(load_scene(path)):
+    for geometry in _geometries(render_scene(path, load_scene(path))):
         faces = getattr(geometry, "faces", None)
         vertices = getattr(geometry, "vertices", None)
         if faces is None or vertices is None or len(faces) == 0:
@@ -6977,6 +7068,21 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
     module = polypaint_module()
     preset = getattr(args, "bake_preset", None) or ""
     triangles, edge = bake_defaults(budget)
+    # Asked for more than the folder allows, the bake would run (an 8192 bake:
+    # 85 s and 4 GB) and then fail the gate it just ran for. Say so first.
+    over = []
+    if args.bake_texture and budget.max_texture_edge and args.bake_texture > budget.max_texture_edge:
+        over.append(f"--bake-texture {args.bake_texture} is larger than the "
+                    f"{budget.max_texture_edge} px texture limit here ([texture] max_edge); use "
+                    f"--bake-texture {budget.max_texture_edge} or less, or raise max_edge")
+    if args.bake_triangles and budget.max_triangles and args.bake_triangles > budget.max_triangles:
+        over.append(f"--bake-triangles {args.bake_triangles:,} is more than the "
+                    f"{budget.max_triangles:,} triangle budget here ([mesh] max_triangles); use "
+                    f"--bake-triangles {budget.max_triangles} or less, or raise max_triangles")
+    if over:
+        for message in over:
+            LOG.error("%s: the baked asset would fail the gate", message)
+        return 2
     if preset:
         # A preset sets everything, within the folder's rules: n64 under a
         # 1,200-triangle, 64 px rules.toml is exactly that.

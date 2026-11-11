@@ -548,6 +548,59 @@ expect("the plain report is one line naming the problem", "FAILED" in line and "
 expect("the startup banner shows the rules", "lod>=3" in plain_run.stdout + plain_run.stderr,
        (plain_run.stdout + plain_run.stderr)[:600])
 
+print("9. A glTF's collision is not render geometry, as in an FBX (11 Nov 2026)")
+# Before: UCX_Crate_00 added its 12 triangles, its material, its flat faces and
+# its memory to the crate's own numbers, so a crate on budget as FBX failed as
+# glTF.
+crate_only = gltf_scene(WORK / "SM_Crate_alone.gltf", [{"name": "SM_Crate", "geometry": box()}],
+                        roots=[0])
+flat = (box()[0] + [(0.0, 0.0, 0.0), (0.0, 0.0, 0.0), (0.0, 0.0, 0.0)], box()[1] + [[8, 9, 10]])
+crate_hull = gltf_scene(WORK / "SM_Crate_hull.gltf", [
+    {"name": "SM_Crate", "geometry": box()},
+    {"name": "UCX_SM_Crate_00", "geometry": flat},
+], roots=[0, 1])
+_doc = json.loads(crate_hull.read_text(encoding="utf-8"))
+_doc["materials"] = [{"name": "Wood"}, {"name": "Hull"}]
+_doc["meshes"][0]["primitives"][0]["material"] = 0
+_doc["meshes"][1]["primitives"][0]["material"] = 1
+crate_hull.write_text(json.dumps(_doc), encoding="utf-8")
+budget = agk.Budget(max_triangles=12, max_material_slots=1, max_mesh_mb=8)
+alone, hulled = check(crate_only, budget), check(crate_hull, budget)
+expect("a 12-triangle crate with a UCX_ hull is 12 triangles, on a 12-triangle budget",
+       agk.count_triangles(crate_hull) == 12 and hulled.passed, (agk.count_triangles(crate_hull),
+                                                                 hulled.problems))
+expect("... the hull's material is not a draw call, nor its flat triangle a broken one",
+       agk.count_material_slots(crate_hull) == 1 and agk.count_degenerate_triangles(crate_hull) == 0,
+       (agk.count_material_slots(crate_hull), agk.count_degenerate_triangles(crate_hull)))
+expect("... and the memory estimate counts the crate's 8 vertices alone",
+       dict(alone.stats).get("vertices") == dict(hulled.stats).get("vertices") == 8
+       and dict(alone.stats).get("memory_kb") == dict(hulled.stats).get("memory_kb"),
+       (dict(alone.stats), dict(hulled.stats)))
+expect("... the collision checks still see the hull",
+       check(crate_hull, rules(collision={"require": True})).passed
+       and agk.gltf_structure(crate_hull, agk.read_gltf_document(crate_hull))["collision_shapes"],
+       check(crate_hull, rules(collision={"require": True})).problems)
+hull_only = gltf_scene(WORK / "SM_Hull_only.gltf", [{"name": "UCX_SM_Ghost_00", "geometry": box()}],
+                       roots=[0])
+expect("a glTF holding only a hull has no triangles to draw, as the same FBX",
+       agk.count_triangles(hull_only) == 0 and not check(hull_only, agk.Budget()).passed,
+       (agk.count_triangles(hull_only), check(hull_only, agk.Budget()).problems))
+
+print("10. A glTF's coarser LODs and unplaced meshes are not LOD0 (11 Nov 2026)")
+_vase = json.loads(msft.read_text(encoding="utf-8"))
+_vase["materials"] = [{"name": "Glaze"}, {"name": "Coarse"}, {"name": "Coarser"}, {"name": "Spare"}]
+for _index, _mesh in enumerate(_vase["meshes"]):
+    _mesh["primitives"][0]["material"] = _index
+_vase["meshes"].append({"name": "Spare", "primitives": [dict(_vase["meshes"][0]["primitives"][0],
+                                                              material=3)]})
+lod_vase = WORK / "SM_Vase_materials.gltf"
+lod_vase.write_text(json.dumps(_vase), encoding="utf-8")
+expect("materials count LOD0's only, not MSFT_lod levels or a mesh no node places",
+       agk.count_material_slots(lod_vase) == 1, agk.count_material_slots(lod_vase))
+_lm = agk._lightmap_meshes(lod_vase, 1)
+expect("[lightmap] asks LOD0 for a lightmap, not the coarser levels (an FBX's rule)",
+       _lm["missing"] == ["Vase"], _lm["missing"])
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

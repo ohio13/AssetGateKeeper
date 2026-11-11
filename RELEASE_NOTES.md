@@ -1,5 +1,15 @@
 # Unreleased (on `main`)
 
+* **glTF collision and LODs read as in an FBX; bakes stay inside the folder's
+  limits (11 Nov).** A glTF's `UCX_`/`UBX_`/`USP_`/`UCP_` meshes counted as part
+  of the model: a 12-triangle crate with its hull read as 24 triangles and two
+  materials, failed a budget it passed as FBX, and a glTF holding only a hull
+  passed. They now add nothing to triangles, materials, UV sets, broken
+  triangles, memory or texel density; only the `[collision]` checks see them.
+  Materials, UV sets, `[lightmap]` and `[skeleton]` read a glTF's LOD0 only
+  (not `MSFT_lod` levels or meshes no node places). `--bake-texture` or
+  `--bake-triangles` above the folder's limits is refused before the bake,
+  instead of baking for minutes and then failing the gate.
 * **`--json` explains a failing `[[totals]]`; names cannot drive the terminal
   (11 Nov).** A folder total over budget exited 1 with `"failed": 0` and nothing
   else in the JSON; the summary line now carries `totals_failed`, and the
