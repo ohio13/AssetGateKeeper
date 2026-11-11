@@ -615,7 +615,9 @@ def _read_memory(mesh: dict, texture: dict) -> dict:
                                      (mesh, "max_mb", "max_mesh_mb", "[mesh]")):
         value = _read_float(table, key, where)
         if value is not None:
-            if value < 0:
+            # not finite: nan compares False with every size, so the budget
+            # silently checked nothing
+            if not math.isfinite(value) or value < 0:
                 raise ConfigError(f"{where}.{key} must be 0 (off) or more, got {value}")
             found[field] = value
     for key, field in (("format", "texture_format"), ("normal_format", "normal_format")):
@@ -629,7 +631,8 @@ def _read_memory(mesh: dict, texture: dict) -> dict:
         value = mesh["texel_density"]
         if (not isinstance(value, (list, tuple)) or len(value) != 2
                 or any(isinstance(v, bool) or not isinstance(v, (int, float)) or v < 0
-                       for v in value) or float(value[0]) > float(value[1]) or not value[1]):
+                       or not math.isfinite(v) for v in value)
+                or float(value[0]) > float(value[1]) or not value[1]):
             raise ConfigError("[mesh].texel_density must be [min, max] in pixels per metre, "
                               f"with min <= max, got {value!r}")
         found["texel_density_min"], found["texel_density_max"] = float(value[0]), float(value[1])
@@ -979,6 +982,12 @@ PLATFORM_SECTION_KEYS: dict[str, tuple[str, ...]] = {
     # [platforms.mobile.skeleton] max_bones_per_section = 75: the bone limits
     # are what differ between targets.
     "skeleton": ("max_bones", "max_bones_per_section", "max_depth"),
+    # [platforms.mobile.lod] min_levels = 4, [tags.ui.lod] min_levels = 1: how
+    # many levels a target needs, and how much each must save, differ by target.
+    "lod": ("min_levels", "max_ratio"),
+    # The hull limits are numbers a target can tighten; require, name matching
+    # and convexity are switches and stay project-wide.
+    "collision": ("max_hulls", "max_hull_vertices"),
 }
 
 
@@ -1088,6 +1097,24 @@ PLATFORM_PRESETS: dict[str, dict[str, object]] = {
     "ps3": _preset("Sony PlayStation 3", "256 MB RSX, specular/gloss workflow, no PBR maps",
                     character=20_000, prop=8_000, texture=1_024, slots=4,
                     power_of_two=False, pbr=False, uv=2, influences=8),
+    # Added 11 Nov 2026 (the rules wizard borrowed ps3 / mobile / the defaults
+    # for these). Starting points, as everything here: Switch from typical
+    # third-party character budgets on a Tegra X1 with 4 GB shared memory; VR
+    # from Meta's guidance for Quest 2/Pro of 750k-1M triangles and 80-200 draw
+    # calls a frame, drawn for two eyes at 72-90 Hz; mid-range from the
+    # PS4 / Xbox One generation.
+    "switch": _preset("Nintendo Switch-class handheld",
+                       "4 GB shared memory, Tegra X1, ASTC textures, docked 1080p / handheld 720p",
+                       character=20_000, prop=5_000, texture=1_024, slots=4,
+                       power_of_two=False, pbr=True, uv=2, influences=4),
+    "vr": _preset("Standalone VR (Quest-class)",
+                   "750k-1M triangles and 80-200 draw calls a frame for two eyes at 72-90 Hz",
+                   character=15_000, prop=3_000, texture=2_048, slots=2,
+                   power_of_two=True, pbr=True, uv=2, influences=4),
+    "midrange": _preset("Mid-range PC / last-gen console",
+                         "PS4 / Xbox One generation: 5-8 GB shared memory, PBR with mip chains",
+                         character=50_000, prop=10_000, texture=2_048, slots=6,
+                         power_of_two=False, pbr=True, uv=3, influences=8, naming=True),
     "pc": _preset("Modern PC", "8 GB+ VRAM, PBR metal/roughness with mip chains",
                    character=120_000, prop=30_000, texture=4_096, slots=8,
                    power_of_two=False, pbr=True, uv=4, influences=8, naming=True),
@@ -1294,7 +1321,15 @@ def parse_rules(path: Path) -> dict:
     """
     # utf-8-sig strips a leading BOM, which Notepad and PowerShell add by default
     # on Windows; tomllib would otherwise reject the file on its very first byte.
-    text = path.read_text(encoding="utf-8-sig")
+    try:
+        text = path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as exc:
+        # Notepad's "ANSI" (Windows-1252) turns an accent in a comment into a
+        # byte that is not UTF-8; the bare codec error did not say what to do.
+        line = path.read_bytes()[:exc.start].count(b"\n") + 1
+        raise ConfigError(f"{path.name} is not saved as UTF-8 (byte 0x{exc.object[exc.start]:02x} "
+                          f"on line {line}): save it as UTF-8 (Notepad: Save As, Encoding "
+                          "UTF-8)") from exc
     if path.suffix.lower() == ".json":
         try:
             return json.loads(text)
@@ -1431,9 +1466,17 @@ def parse_exceptions(document: Optional[dict], base: Optional[Path] = None,
         if kind is bool and not isinstance(allow, bool):
             raise ConfigError(f"{label}.allow must be true or false for {rule}, got {allow!r}")
         if kind is float:
-            if isinstance(allow, bool) or not isinstance(allow, (int, float)) or allow < 0:
+            if isinstance(allow, bool) or not isinstance(allow, (int, float)) or allow < 0 \
+                    or not math.isfinite(allow):
                 raise ConfigError(f"{label}.allow must be a number of MB for {rule}, got {allow!r}")
             allow = float(allow)
+        try:
+            # The value must make a budget: max_texture_edge = 0 used to pass here
+            # and then stop the run with a traceback on the first matching asset.
+            replace(Budget(), **{rule: allow})
+        except ConfigError as exc:
+            raise ConfigError(f"{label}.allow = {allow!r} cannot be used for {rule}: "
+                              f"{str(exc).replace('budget ', '', 1)}") from exc
         found.append(BudgetException(
             path=str(entry["path"]).strip(), rule=rule, allow=allow,
             reason=str(entry["reason"]).strip()[:300], owner=str(entry["owner"]).strip()[:80],
@@ -1487,8 +1530,9 @@ def parse_totals(document: Optional[dict], base: Optional[Path] = None) -> tuple
         if not str(entry.get("path", "")).strip():
             raise ConfigError(f"{where} needs path")
         limit = _read_float(entry, "max_mb", where)
-        if limit is None or limit <= 0:
-            raise ConfigError(f"{where} needs max_mb above 0")
+        if limit is None or not math.isfinite(limit) or limit <= 0:
+            raise ConfigError(f"{where} needs max_mb above 0 (a number of MB)"
+                              + (f", got {limit}" if limit is not None else ""))
         found.append(MemoryTotal(str(entry["path"]).strip(), limit, base))
     return tuple(found)
 
@@ -2485,6 +2529,10 @@ def describe_rules(root: Path, rules_path: Optional[str | Path] = None,
     }
 
 
+class RulesFileError(ConfigError):
+    """The rules file could not be read or parsed at all."""
+
+
 def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:
     """Merge server settings: CLI flag > environment > ``[server]`` > nothing.
 
@@ -2496,7 +2544,13 @@ def resolve_server(root: Path, args: argparse.Namespace) -> ServerSettings:
     rules_path = Path(args.rules).expanduser() if getattr(args, "rules", None) else root / RULES_FILENAME
     if rules_path.is_file():
         try:
-            from_file = ServerSettings.from_mapping(parse_rules(rules_path).get("server", {}))
+            document = parse_rules(rules_path)
+        except (ConfigError, ValueError, OSError) as exc:
+            # The file itself is broken: say "rules", not "server settings"
+            # (the [server] reader is merely the first to open it).
+            raise RulesFileError(f"{rules_path}: {exc}") from exc
+        try:
+            from_file = ServerSettings.from_mapping(document.get("server", {}))
         except (ConfigError, ValueError, OSError) as exc:
             raise ConfigError(f"{rules_path}: {exc}") from exc
     return replace(
@@ -2595,6 +2649,39 @@ def _geometries(scene: object) -> list:
     if trimesh is not None and isinstance(scene, trimesh.Scene):
         return list(scene.geometry.values())
     return [scene]
+
+
+def _collision_geometry_names(scene: object) -> set:
+    """Geometry of a loaded glTF scene that only UCX_/UBX_/USP_/UCP_ nodes place."""
+    if trimesh is None or not isinstance(scene, trimesh.Scene):
+        return set()
+    graph = getattr(scene, "graph", None)
+    users: dict = {}
+    try:
+        for node_name in graph.nodes_geometry:
+            geometry_name = graph[node_name][1]
+            users.setdefault(geometry_name, []).append(str(node_name))
+    except Exception:                    # an unusual graph: count everything, as before
+        return set()
+
+    def collision(name):
+        return _bare_name(str(name)).lower().startswith(FBX_COLLISION_PREFIXES)
+
+    return {geometry for geometry, nodes in users.items()
+            if all(collision(node) or collision(geometry) for node in nodes)}
+
+
+def render_scene(path: Path, scene: object) -> object:
+    """The scene as rendered: a glTF's collision shapes removed (as an FBX's
+    are), so they add nothing to degenerate, memory or texel-density counts."""
+    if path.suffix.lower() not in GLTF_SUFFIXES:
+        return scene
+    hulls = _collision_geometry_names(scene)
+    if not hulls:
+        return scene
+    trimmed = scene.copy()
+    trimmed.delete_geometry(hulls)
+    return trimmed
 
 
 
@@ -3004,10 +3091,11 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float,
     if np is None:                                       # pragma: no cover
         raise AssetError("numpy is not installed; FBX cannot be analysed")
     try:
-        data = Path(path_string).read_bytes()
+        # One parse per file and modification time, shared with the skeleton,
+        # lightmap and preview/measure readers (_fbx_tree).
+        top = _fbx_tree_cached(path_string, modified_ns)
     except OSError as exc:
         raise AssetError(f"could not read FBX ({exc})") from exc
-    top = {node.name: node for node in parse_fbx_binary(data)}
     objects = top.get("Objects")
     if objects is None:
         return FbxSummary(0, 0, 0, 0, 0, ())
@@ -3287,7 +3375,7 @@ def read_gltf_document(path: Path) -> dict:
         if path.suffix.lower() == ".gltf":
             document = json.loads(path.read_text(encoding="utf-8-sig"))
         else:
-            document = _glb_json(path.read_bytes())
+            document = _glb_json(_glb_json_prefix(path))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         # Corrupt text used to escape as an uncaught UnicodeDecodeError (6 Nov
         # fuzzing) and stop a folder scan; it is a damaged file like any other.
@@ -3302,6 +3390,23 @@ def read_gltf_document(path: Path) -> dict:
         raise AssetError("glTF 1.0 file: this format was replaced by glTF 2.0 in 2017; "
                          "re-export it as glTF 2.0")
     return document
+
+
+def _glb_json_prefix(path: Path) -> bytes:
+    """The bytes of a .glb up to the end of its JSON chunk, not the whole file.
+
+    One check reads the document a dozen times (triangles, materials, UV sets,
+    compression, ...): reading all of a 500 MB .glb for each, binary chunk
+    included, was a dozen full reads of the file for a few kilobytes of JSON.
+    """
+    with path.open("rb") as handle:
+        blob = handle.read(20)                 # header (12) + first chunk header (8)
+        if blob[:4] != GLB_MAGIC or len(blob) < 20:
+            return blob
+        chunk_length, chunk_type = struct.unpack_from("<II", blob, 12)
+        if chunk_type == GLB_JSON_CHUNK:       # the glTF spec puts it first
+            return blob + handle.read(chunk_length)
+        return blob + handle.read()            # out of order: read it all, as before
 
 
 def _glb_json(blob: bytes) -> dict:
@@ -3355,15 +3460,11 @@ def gltf_triangle_counts(document: dict) -> tuple[int, int]:
                     for primitive in (mesh.get("primitives") or []))
                 for mesh in meshes]
     nodes = document.get("nodes", [])
-    scenes = document.get("scenes", [])
-    scene_index = document.get("scene", 0)
-    if scenes:
-        scene = scenes[scene_index] if isinstance(scene_index, int) and 0 <= scene_index < len(scenes) else scenes[0]
-        roots = list(scene.get("nodes", []))
-    else:
-        roots = []
+    roots = _gltf_scene_roots(document) or []
     if not roots:
-        total = sum(per_mesh)
+        # UCX_ & co are collision, not render geometry, as in an FBX (11 Nov 2026).
+        collision = _gltf_collision_meshes(document)
+        total = sum(count for index, count in enumerate(per_mesh) if index not in collision)
         return total, total
 
     used: set[int] = set()
@@ -3375,7 +3476,8 @@ def gltf_triangle_counts(document: dict) -> tuple[int, int]:
             continue                     # malformed or cyclic graph: skip, never loop
         node = nodes[node_index]
         mesh_index = node.get("mesh")
-        if isinstance(mesh_index, int) and 0 <= mesh_index < len(per_mesh):
+        if isinstance(mesh_index, int) and 0 <= mesh_index < len(per_mesh) \
+                and not _gltf_is_collision_node(document, node):
             used.add(mesh_index)
             copies = 1
             instancing = (node.get("extensions") or {}).get("EXT_mesh_gpu_instancing")
@@ -3457,7 +3559,10 @@ def count_material_slots(path: Path) -> int:
 
         used_indices: set[int] = set()
         has_default_material = False
-        for mesh in document.get("meshes", []):
+        render = _gltf_render_meshes(document)
+        for index, mesh in enumerate(document.get("meshes", [])):
+            if index not in render:
+                continue          # collision, a coarser LOD, or never placed
             for primitive in mesh.get("primitives", []):
                 material_index = primitive.get("material")
                 if material_index is None:
@@ -3596,7 +3701,7 @@ def mesh_facts(path: Path, assumed_texture: int = 1024) -> dict:
     Units are taken as metres (glTF's unit; OBJ has none).
     """
     import numpy as np
-    scene = load_scene(path)
+    scene = render_scene(path, load_scene(path))
     meshes = scene.dump(concatenate=False) if hasattr(scene, "dump") else [scene]
     vertices = 0
     colours = False
@@ -3645,7 +3750,10 @@ def count_uv_channels(path: Path) -> int:
             document = None
         if document is not None:
             channels = set()
-            for mesh in document.get("meshes", []):
+            render = _gltf_render_meshes(document)
+            for index, mesh in enumerate(document.get("meshes", [])):
+                if index not in render:
+                    continue      # collision, a coarser LOD, or never placed
                 for primitive in mesh.get("primitives", []):
                     for attribute in primitive.get("attributes", {}):
                         if attribute.startswith("TEXCOORD_"):
@@ -4124,11 +4232,12 @@ def _gltf_skeleton(path: Path) -> Optional[dict]:
     skins = document.get("skins") or []
     meshes = document.get("meshes") or []
     uses = []
+    render = _gltf_render_meshes(document)
     for node in nodes:
         mesh, skin = node.get("mesh"), node.get("skin")
         if isinstance(mesh, int) and isinstance(skin, int) and 0 <= mesh < len(meshes) \
-                and 0 <= skin < len(skins):
-            uses.append((mesh, skin))
+                and 0 <= skin < len(skins) and mesh in render:
+            uses.append((mesh, skin))       # LOD0 only, as for an FBX
     if not uses:
         return None
     joints_of = {}
@@ -4276,12 +4385,89 @@ def lightmap_coverage(triangles, resolution: int = 256) -> tuple[int, int, int]:
     return int(np.count_nonzero(counts)), int(np.count_nonzero(counts > 1)), res
 
 
+def _gltf_is_collision_node(document: dict, node: dict) -> bool:
+    """Is this glTF node an Unreal collision shape (UCX_/UBX_/USP_/UCP_)? Its own
+    name decides; an unnamed node goes by its mesh's name, as gltf_structure."""
+    meshes = document.get("meshes") or []
+    mesh = node.get("mesh")
+    mesh_name = (meshes[mesh].get("name") or "") if isinstance(mesh, int) \
+        and 0 <= mesh < len(meshes) and isinstance(meshes[mesh], dict) else ""
+    return _bare_name(node.get("name") or mesh_name or "").lower().startswith(FBX_COLLISION_PREFIXES)
+
+
+def _gltf_scene_roots(document: dict) -> Optional[list]:
+    """Root nodes of the glTF's scene, or None when it has no scene at all."""
+    scenes = document.get("scenes") or []
+    if not scenes:
+        return None
+    scene_index = document.get("scene", 0)
+    scene = scenes[scene_index] if isinstance(scene_index, int) and 0 <= scene_index < len(scenes) \
+        else scenes[0]
+    return list(scene.get("nodes", []) or []) if isinstance(scene, dict) else []
+
+
+def _gltf_render_meshes(document: dict) -> set:
+    """Meshes the scene draws (LOD0, as an engine imports it): placed by a node
+    the scene reaches, not a collision shape. MSFT_lod's coarser levels sit
+    outside the scene, and a mesh no node places is never imported, so neither
+    counts - the FBX reader's rule (11 Nov 2026). A document without scenes is
+    read whole."""
+    meshes = document.get("meshes") or []
+    nodes = document.get("nodes") or []
+    roots = _gltf_scene_roots(document)
+    if roots is None:
+        placed = {node.get("mesh") for node in nodes if isinstance(node, dict)
+                  and not _gltf_is_collision_node(document, node)}
+        unplaced = set(range(len(meshes))) - {node.get("mesh") for node in nodes
+                                              if isinstance(node, dict)}
+        found = {index for index in placed | unplaced
+                 if isinstance(index, int) and 0 <= index < len(meshes)}
+        return found - _gltf_collision_meshes(document)
+    found, seen, stack = set(), set(), list(roots)
+    while stack:
+        index = stack.pop()
+        if not isinstance(index, int) or not 0 <= index < len(nodes) or index in seen \
+                or not isinstance(nodes[index], dict):
+            continue                                   # malformed or cyclic: never loop
+        seen.add(index)
+        node = nodes[index]
+        mesh = node.get("mesh")
+        if isinstance(mesh, int) and 0 <= mesh < len(meshes) \
+                and not _gltf_is_collision_node(document, node):
+            found.add(mesh)
+        stack.extend(node.get("children", []) or [])
+    return found
+
+
+def _gltf_collision_meshes(document: dict) -> set:
+    """Indices of glTF meshes that are collision only (UCX_/UBX_/USP_/UCP_).
+
+    A mesh is collision when every node placing it is named so (or, for an
+    unnamed node, the mesh is), as gltf_structure reads them; a mesh no node
+    places is judged by its own name.
+    """
+    meshes = document.get("meshes") or []
+    users: dict = {}
+    for node in document.get("nodes") or []:
+        if isinstance(node, dict) and isinstance(node.get("mesh"), int) \
+                and 0 <= node["mesh"] < len(meshes):
+            users.setdefault(node["mesh"], []).append(node.get("name") or "")
+    found = set()
+    for index, mesh in enumerate(meshes):
+        own = (mesh.get("name") or "") if isinstance(mesh, dict) else ""
+        names = [_bare_name(name or own).lower() for name in users.get(index, [own])]
+        if names and all(name.startswith(FBX_COLLISION_PREFIXES) for name in names):
+            found.add(index)
+    return found
+
+
 def _lightmap_meshes(path: Path, channel: int) -> dict:
     """The static meshes of an asset and their lightmap UV set.
 
     {"meshes": [(name, uv points (n, 2), uv triangles (m, 3, 2))], "missing":
     [names of static meshes without the set], "unread": why some were not read}.
-    Skinned meshes are left out: a skeletal mesh is not lightmapped.
+    Skinned meshes are left out: a skeletal mesh is not lightmapped. So are
+    UCX_/UBX_/USP_/UCP_ collision meshes, which are never rendered.
     """
     found: dict = {"meshes": [], "missing": [], "unread": ""}
     suffix = path.suffix.lower()
@@ -4325,7 +4511,10 @@ def _lightmap_meshes(path: Path, channel: int) -> dict:
             return found
         buffers: dict = {}
         attribute = f"TEXCOORD_{channel}"
+        render = _gltf_render_meshes(document)
         for index, mesh in enumerate(document.get("meshes") or []):
+            if index not in render:
+                continue          # UCX_ & co, coarser LODs, unplaced: not lightmapped
             name = mesh.get("name") or f"mesh {index}"
             points, triangles, missing = [], [], False
             for primitive in mesh.get("primitives") or []:
@@ -4447,7 +4636,7 @@ def count_degenerate_triangles(path: Path, epsilon: float = 0.0, ratio: float = 
         return 0
 
     total = 0
-    for geometry in _geometries(load_scene(path)):
+    for geometry in _geometries(render_scene(path, load_scene(path))):
         faces = getattr(geometry, "faces", None)
         vertices = getattr(geometry, "vertices", None)
         if faces is None or vertices is None or len(faces) == 0:
@@ -5345,10 +5534,15 @@ def lod_collision_problems(path: Path, structure: Optional[dict], budget: "Budge
                         problems.append(f"LOD{level} of '{name}' has no triangles: re-export it "
                                         "or remove the level")
                     elif above and here / above > limit:
+                        # The largest count that passes: int(0.29 * 100) is 28 in
+                        # floating point, yet 29 / 100 passes a 0.29 limit.
+                        allowed = int(limit * above)
+                        while (allowed + 1) / above <= limit:
+                            allowed += 1
                         problems.append(
                             f"LOD{level} of '{name}' keeps {here / above:.2f} of LOD{level - 1}'s "
                             f"triangles ({here:,} of {above:,}); at most {limit:g} is allowed: "
-                            f"reduce it to {int(limit * above):,} triangles or fewer")
+                            f"reduce it to {allowed:,} triangles or fewer")
 
     if collision_on:
         if structure is None:
@@ -6180,6 +6374,16 @@ class Telemetry:
                         self.failed + self.dropped, self.url, self.sent)
 
 
+_CONTROL = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+
+
+def printable(text: str) -> str:
+    """Text safe for a terminal: control characters shown as \\xNN. A node or
+    file name in an asset is the author's to choose, and an ESC in one must not
+    recolour, move or clear the reader's terminal."""
+    return _CONTROL.sub(lambda match: f"\\x{ord(match.group()):02x}", str(text))
+
+
 class Reporter:
     """Formats verdicts as one terminal line each, with optional ANSI colour."""
 
@@ -6262,25 +6466,34 @@ class Reporter:
             if verdict.passed:
                 self.passed += 1
                 # A healed asset passed, but the artist must be told it was rewritten.
-                tag = self._paint(verdict.tag if verdict.healed else "PASSED", self.GREEN)
+                tag = self._paint(printable(verdict.tag) if verdict.healed else "PASSED", self.GREEN)
             else:
                 self.failed += 1
-                tag = self._paint(verdict.tag, self.RED)
+                tag = self._paint(printable(verdict.tag), self.RED)
 
-            detail = f" {self._paint(verdict.metric, self.DIM)}" if verdict.metric else ""
-            LOG.info("%s  %s%s", tag, self.display_path(verdict.path), detail)
+            detail = f" {self._paint(printable(verdict.metric), self.DIM)}" if verdict.metric else ""
+            LOG.info("%s  %s%s", tag, printable(self.display_path(verdict.path)), detail)
 
             # Advisories sit under the verdict, dimmed: they inform, they never
             # change the exit code, and they must not look like failures.
             for warning in verdict.warnings:
-                LOG.info("       %s", self._paint(f"note: {warning}", self.DIM))
+                LOG.info("       %s", self._paint(f"note: {printable(warning)}", self.DIM))
 
-    def summary(self, skipped: Optional[dict] = None) -> None:
+    def summary(self, skipped: Optional[dict] = None,
+                totals: Sequence["Verdict"] = ()) -> None:
         total = self.passed + self.failed
         if self.json_mode:
             document = {"total": total, "passed": self.passed, "failed": self.failed}
             if skipped is not None:
                 document["skipped"] = skipped
+            # [[totals]] over budget fail the run (exit 1) without being an asset:
+            # they ride on the summary, so --json readers see why it failed
+            # (11 Nov 2026: "failed": 0 with exit 1 and nothing else said).
+            document["totals_failed"] = [
+                {"total": str(verdict.path).replace("\\", "/").removeprefix("[total] "),
+                 "problems": list(verdict.problems), "metric": verdict.metric,
+                 "stats": {name: value for name, value in verdict.stats}}
+                for verdict in totals]
             print(json.dumps({"summary": document}), flush=True)
             return
         LOG.info("%d asset(s): %d passed, %d failed", total, self.passed, self.failed)
@@ -6855,6 +7068,21 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
     module = polypaint_module()
     preset = getattr(args, "bake_preset", None) or ""
     triangles, edge = bake_defaults(budget)
+    # Asked for more than the folder allows, the bake would run (an 8192 bake:
+    # 85 s and 4 GB) and then fail the gate it just ran for. Say so first.
+    over = []
+    if args.bake_texture and budget.max_texture_edge and args.bake_texture > budget.max_texture_edge:
+        over.append(f"--bake-texture {args.bake_texture} is larger than the "
+                    f"{budget.max_texture_edge} px texture limit here ([texture] max_edge); use "
+                    f"--bake-texture {budget.max_texture_edge} or less, or raise max_edge")
+    if args.bake_triangles and budget.max_triangles and args.bake_triangles > budget.max_triangles:
+        over.append(f"--bake-triangles {args.bake_triangles:,} is more than the "
+                    f"{budget.max_triangles:,} triangle budget here ([mesh] max_triangles); use "
+                    f"--bake-triangles {budget.max_triangles} or less, or raise max_triangles")
+    if over:
+        for message in over:
+            LOG.error("%s: the baked asset would fail the gate", message)
+        return 2
     if preset:
         # A preset sets everything, within the folder's rules: n64 under a
         # 1,200-triangle, 64 px rules.toml is exactly that.
@@ -6901,6 +7129,12 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
                              progress=lambda name, i, n: LOG.info("bake    %d/%d %s", i + 1, n, name))
     except module.PolypaintError as exc:
         LOG.error("%s", exc)
+        return 2
+    except MemoryError:
+        # --bake-texture 65536 asked numpy for 16 GB and ended in a traceback.
+        LOG.error("not enough memory to bake %s at %dx%d with %s triangles; use a smaller "
+                  "--bake-texture (2048 is the default; 8192 needs about 4 GB) or "
+                  "--bake-triangles", source.name, edge, edge, f"{settings['triangles']:,}")
         return 2
     made = [Path(result["mesh"]), Path(result["texture"])]
     for key in ("normal", "face_texture", "face_normal"):
@@ -7089,10 +7323,10 @@ def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
     for verdict in over:
         # Printed and counted, and in the JUnit/SARIF report, but never sent as
         # telemetry: a folder total is not an asset on the dashboard.
-        LOG.error("FAILED: %s  %s", verdict.reason, str(verdict.path).replace("\\", "/"))
+        LOG.error("FAILED: %s  %s", printable(verdict.reason), str(verdict.path).replace("\\", "/"))
         if reporter.keep_verdicts:
             reporter.verdicts.append(verdict)
-    reporter.summary(skipped)
+    reporter.summary(skipped, totals=over)
     return 1 if (reporter.failed or over) else 0
 
 
@@ -7504,11 +7738,27 @@ def _relative_name(path: Path, root: Optional[Path]) -> str:
     return path.name
 
 
+#: Characters XML 1.0 cannot carry at all (control characters, lone surrogates).
+_XML_INVALID = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
+
+
 def junit_report(verdicts: Sequence[Verdict], root: Optional[Path] = None) -> str:
     """JUnit XML: one test case per asset. Jenkins, TeamCity, Horde, GitLab and
     Azure DevOps all show these per test, so a failing asset is a red line with
     its path, not a word in a build log."""
-    from xml.sax.saxutils import escape, quoteattr
+    from xml.sax.saxutils import escape as _escape, quoteattr as _quoteattr
+
+    # XML 1.0 has no way to write most control characters, even escaped: one in
+    # a file or node name made the whole report unreadable to a CI server.
+    def clean(text: str) -> str:
+        return _XML_INVALID.sub("�", text)
+
+    def escape(text: str) -> str:
+        return _escape(clean(text))
+
+    def quoteattr(text: str) -> str:
+        return _quoteattr(clean(text))
+
     failures = sum(1 for verdict in verdicts if not verdict.passed and not verdict.unreadable)
     errors = sum(1 for verdict in verdicts if verdict.unreadable)
     lines = ['<?xml version="1.0" encoding="UTF-8"?>',
@@ -7608,7 +7858,9 @@ def write_reports(targets: Sequence[tuple[str, str]], verdicts: Sequence[Verdict
         text = writers[kind](verdicts, root)
         path = Path(destination).expanduser()
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(text, encoding="utf-8")
+        # errors="replace": a file name that is not valid UTF-8 (Linux allows any
+        # bytes) reaches Python as surrogates, and used to stop the run here.
+        path.write_text(text, encoding="utf-8", errors="replace")
         LOG.info("report  %s written to %s (%d assets)", kind, path, len(verdicts))
 
 
@@ -7719,8 +7971,9 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --init: overwrite an existing rules.toml (with --wizard: replace "
                              "it without asking; a copy is still kept)")
     parser.add_argument("--wizard", action="store_true",
-                        help="ask six plain-English questions (engines, art tools, platforms, "
-                             "kinds of asset, style, broken geometry; several answers each) and "
+                        help="ask seven plain-English questions (engines, art tools, platforms, "
+                             "kinds of asset, style, extra checks, broken geometry; several "
+                             "answers each) and "
                              "write one commented rules.toml for all of them. Asks before "
                              "replacing a rules.toml and keeps a copy. With --yes: every "
                              "default, no questions")
@@ -7905,6 +8158,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
     try:
         server = resolve_server(watch_dir, args)
+    except RulesFileError as exc:
+        LOG.error("invalid rules: %s", exc)
+        return 2
     except ConfigError as exc:
         LOG.error("invalid server settings: %s", exc)
         return 2
@@ -8016,10 +8272,22 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     except ConfigError as exc:
         LOG.error("invalid totals: %s", exc)
         return 2
+    # One file checked with --rules from a folder above it (the Perforce trigger,
+    # a Git hook, --heal): that folder is the project, as in a --once run there.
+    # With the file's own folder as the root, [tags.props] never matched
+    # Props/crate.fbx and a ../Textures reference "left the project".
+    project_dir = watch_dir
+    if root.is_file() and args.rules:
+        rules_dir = Path(args.rules).expanduser().resolve().parent
+        try:
+            root.relative_to(rules_dir)
+            project_dir = rules_dir
+        except ValueError:
+            pass
     gatekeeper = Gatekeeper(budget, healer=healer, overrides=overrides,
                             tag_budgets=tag_budgets,
                             tag_mode=tag_mode, tag_similarity=tag_similarity,
-                            tag_root=watch_dir, exceptions=exceptions)
+                            tag_root=project_dir, exceptions=exceptions)
     gatekeeper.want_memory = bool(totals)
     reporter = Reporter(color=not args.no_color and not args.json, root=watch_dir,
                         json_mode=args.json, telemetry=telemetry, notifier=notifier)
@@ -8084,4 +8352,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
 
 
 if __name__ == "__main__":
+    # The engine modules (fbx_preview, polypaint, rules_wizard, ...) say
+    # "import asset_gatekeeper". Run as a script, this file is __main__, and
+    # that import would execute all of it a second time: a second copy of every
+    # table and cache (an FBX parsed twice per check) and ~0.3 s more start-up.
+    sys.modules.setdefault("asset_gatekeeper", sys.modules[__name__])
     sys.exit(main())

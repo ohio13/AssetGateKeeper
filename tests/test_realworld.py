@@ -704,6 +704,57 @@ try:
         except polypaint.PolypaintError:
             refused = True
         expect("an unknown preset is refused", refused)
+        for _edge, _why in ((8, "at least 16 px (got 8)"), (100, "a power of two (got 100)")):
+            try:
+                polypaint.bake(paint / "SM_Ball_HP.obj", WORK / "unused", 600, _edge)
+                _said = "baked"
+            except polypaint.PolypaintError as exc:
+                _said = str(exc)
+            expect(f"a {_edge} px bake texture is refused saying why ({_why})", _why in _said, _said)
+
+        def _out_of_memory(*_args, **_kwargs):
+            raise MemoryError("Unable to allocate 16.0 GiB")
+        _args = agk.build_parser().parse_args([str(paint / "SM_Ball_HP.obj"), "--bake-polypaint",
+                                               "--bake-texture", "65536"])
+        with patch.object(agk.polypaint_module(), "bake", _out_of_memory):
+            try:
+                _code = agk.run_bake_polypaint(paint / "SM_Ball_HP.obj",
+                                               agk.Budget(max_texture_edge=65536), _args)
+            except MemoryError as exc:
+                _code = repr(exc)
+        expect("a bake that runs out of memory (--bake-texture 65536) exits 2 with advice, "
+               "not a traceback", _code == 2, _code)
+        import contextlib
+        import logging
+
+        @contextlib.contextmanager
+        def _captured_log():
+            class _Capture(logging.Handler):
+                text = ""
+
+                def emit(self, record):
+                    _Capture.text += record.getMessage() + "\n"
+            handler = _Capture()
+            agk.LOG.addHandler(handler)
+            try:
+                yield handler
+            finally:
+                agk.LOG.removeHandler(handler)
+
+        # 11 Nov 2026: asking for more than the folder allows used to bake (an
+        # 8192 bake: 85 s, 4 GB) and then fail the gate; it is refused first.
+        _baked = []
+        _args = agk.build_parser().parse_args([str(paint / "SM_Ball_HP.obj"), "--bake-polypaint",
+                                               "--bake-texture", "4096", "--bake-triangles", "9000"])
+        with patch.object(agk.polypaint_module(), "bake", lambda *a, **k: _baked.append(1)), \
+                _captured_log() as _log:
+            _code = agk.run_bake_polypaint(paint / "SM_Ball_HP.obj",
+                                           agk.Budget(max_texture_edge=2048, max_triangles=5000), _args)
+        expect("a bake asked for more than the folder's limits is refused before it starts",
+               _code == 2 and not _baked
+               and "--bake-texture 4096 is larger than the 2048 px texture limit here" in _log.text
+               and "--bake-triangles 9,000 is more than the 5,000 triangle budget here" in _log.text,
+               (_code, _log.text[-400:]))
         retro = WORK / "retro"
         retro.mkdir()
         (retro / "SM_Ball_HP.obj").write_text(text, encoding="utf-8")

@@ -1,5 +1,84 @@
 # Unreleased (on `main`)
 
+* **glTF collision and LODs read as in an FBX; bakes stay inside the folder's
+  limits (11 Nov).** A glTF's `UCX_`/`UBX_`/`USP_`/`UCP_` meshes counted as part
+  of the model: a 12-triangle crate with its hull read as 24 triangles and two
+  materials, failed a budget it passed as FBX, and a glTF holding only a hull
+  passed. They now add nothing to triangles, materials, UV sets, broken
+  triangles, memory or texel density; only the `[collision]` checks see them.
+  Materials, UV sets, `[lightmap]` and `[skeleton]` read a glTF's LOD0 only
+  (not `MSFT_lod` levels or meshes no node places). `--bake-texture` or
+  `--bake-triangles` above the folder's limits is refused before the bake,
+  instead of baking for minutes and then failing the gate.
+* **`--json` explains a failing `[[totals]]`; names cannot drive the terminal
+  (11 Nov).** A folder total over budget exited 1 with `"failed": 0` and nothing
+  else in the JSON; the summary line now carries `totals_failed`, and the
+  admin page's Scan log shows them. Control characters in file and node names
+  (an ESC that would recolour or clear the terminal, a newline that could
+  fake a PASSED line) are printed as `\x1b`. docs/10's CI example installs
+  from PyPI instead of a 1.0.0 wheel.
+* **Faster FBX checks with memory, texel, skeleton or lightmap rules
+  (11 Nov).** Run as a script, the gate loaded itself a second time whenever
+  it measured an FBX, and the FBX was parsed up to three times per check. It
+  now loads once and parses each file once: a small FBX with `[mesh] max_mb`
+  went from 1.1 s to 0.7 s.
+* **Wizard asks about the new checks; Switch, VR and mid-range presets
+  (11 Nov).** A seventh question picks extra checks (LODs, Unreal collision,
+  skeleton limits, lightmap UVs; none by default) and writes their tables:
+  collision only as a comment unless Unreal is chosen, 75 bones per material
+  for mobile and VR with a per-platform `[platforms.<name>.skeleton]` block.
+  `--preset`/the admin page gain `switch`, `vr` (from Meta's Quest guidance:
+  750k-1M triangles and 80-200 draw calls a frame) and `midrange` (PS4 / Xbox
+  One generation), which the wizard now uses instead of borrowing `ps3`,
+  `mobile` and the defaults. `[platforms.<name>]` and `[tags.<name>]` can set
+  `[lod] min_levels`/`max_ratio` and `[collision] max_hulls`/
+  `max_hull_vertices` (a folder of small props: `[tags.props.lod] min_levels
+  = 1`). The docs' `[platforms.ps2.mesh] allow_degenerate` example, which
+  the parser refuses, is replaced.
+* **The DCC panels check LODs, collision, skeletons and lightmap UVs.** With a
+  `[lod]`, `[collision]`, `[skeleton]` or `[lightmap]` table in `rules.toml`,
+  the Maya, 3ds Max and Blender pre-flight panels and the Houdini SOP read the
+  LOD groups or `_LOD<n>` names, the UCX_/UBX_/USP_/UCP_ meshes beside the
+  selection, the skin's bones and the lightmap UV set from the scene and judge
+  them with the gate's own code, so the panel says what the gate will say on
+  export, in the same words. What a host cannot read (bones per material
+  section in Maya and Max, Houdini skeletons) is shown as "not checked in the
+  panel; the gate checks it on export", never as a pass. Collision meshes, and
+  LOD1+ in a Maya LOD group, no longer count towards the panels' triangle
+  totals (and material totals in Maya, Max and Blender), as they never did in
+  the gate. Without the tables nothing
+  changes. Tested against stand-ins for each host's API, not yet inside the
+  hosts. See docs/09-DCC-PLUGINS.md.
+* **Fixes from a full sweep (10 Nov).**
+  * *Hooks let failing assets through.* The Git pre-commit and pre-push hooks
+    and the Perforce trigger skipped .tif, .tiff, .webp, .dds, .exr and .ktx2,
+    which the gate checks; the Git hooks judged an asset in a subfolder by the
+    shipped defaults instead of the repository's `rules.toml` above it; the
+    pre-commit hook checked the file on disk when a different version was
+    staged; and one file checked with `--rules` from a folder above it (the
+    Perforce trigger, `--heal`) never got that project's folder tags. All now
+    judge as a `--once` run of the project does. A hook copied into
+    `.git/hooks`, as docs/10 used to say, exits 2 with a fix instead of a
+    traceback; docs/10 gives `git_pre_commit.py --install`.
+  * *AssetHealth solo mode behind a reverse proxy on the same PC* treated
+    every intranet user as "this PC" (a director, no password). A request
+    with `X-Forwarded-For`/`Forwarded` now counts as from elsewhere.
+  * *Rules that checked nothing or crashed:* `nan`/`inf` in `max_mb`,
+    `texel_density`, `[[totals]]` and exceptions are refused; an
+    `[[exceptions]]` value no budget can hold (`max_texture_edge = 0`) is
+    refused at start instead of a traceback mid-run; a rules.toml saved as
+    Windows-1252 says to save it as UTF-8.
+  * *New checks:* `[lightmap] require` no longer asks a glTF `UCX_` hull for a
+    lightmap; `[lod] max_ratio` names a count that passes (29, not 28, for
+    0.29 of 100).
+  * *Reports:* JUnit stays valid XML when a node or file name holds a control
+    character; a file name that is not UTF-8 no longer stops `--report`;
+    docs/06 shows the real `--json` shape (JSON Lines, `file`, not `path`).
+  * *Bake:* below 16 px says so (not "not a power of two"); running out of
+    memory (`--bake-texture 65536`) is a message, not a traceback.
+  * *Speed:* a .glb's JSON is read without loading its binary chunk; a check
+    read a large .glb in full about nine times.
+
 * **A rules wizard for projects that use several tools.** `asset-gatekeeper
   <folder> --wizard` (or double-click `tools\rules_wizard.bat`) asks six
   questions - engines, art programs, platforms, kinds of asset, art style,

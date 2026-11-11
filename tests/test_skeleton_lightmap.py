@@ -608,6 +608,16 @@ expect("require skips the skinned mesh and names only the static one",
        has(verdict, "on static mesh 'Prop'") and not has(verdict, "'Body'"), verdict.problems)
 expect("... and a fully skinned asset is never asked for a lightmap",
        check(body, lightmap_require=True, lightmap_max_overlap=0.0).passed)
+hulled = json.loads(clean.read_text())
+hulled["meshes"].append({"name": "UCX_Wall_00", "primitives": [
+    {"attributes": {"POSITION": hulled["meshes"][0]["primitives"][0]["attributes"]["POSITION"]},
+     "indices": hulled["meshes"][0]["primitives"][0]["indices"]}]})
+hulled["nodes"].append({"name": "UCX_Wall_00", "mesh": 1})
+hulled["scenes"][0]["nodes"].append(1)
+(WORK / "hulled.gltf").write_text(json.dumps(hulled), encoding="utf-8")
+verdict = check(WORK / "hulled.gltf", lightmap_require=True, lightmap_max_overlap=0.0)
+expect("a glTF UCX_ collision mesh is not asked for a lightmap (as in FBX)",
+       verdict.passed and not has(verdict, "UCX_"), verdict.problems)
 draco = json.loads(clean.read_text())
 draco["meshes"][0]["primitives"][0]["extensions"] = {"KHR_draco_mesh_compression": {"bufferView": 0}}
 draco["extensionsUsed"] = ["KHR_draco_mesh_compression"]

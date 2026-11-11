@@ -928,7 +928,7 @@ python asset_gatekeeper.py [folder] [options]
 | `--init` | Interactive setup: create the watch folder and its `rules.toml` |
 | `--yes` | With `--init`: accept every default instead of prompting |
 | `--force` | With `--init`: overwrite an existing `rules.toml`. With `--wizard`: replace it without asking (a copy is still kept) |
-| `--wizard` | The rules wizard: six questions (engines, art programs, platforms, kinds of asset, style, broken geometry; several answers each) and one commented `rules.toml` for all of them; asks before replacing one and keeps a copy. With `--yes`: every default. See [06 - CLI reference](06-CLI-REFERENCE.md#the-rules-wizard) |
+| `--wizard` | The rules wizard: seven questions (engines, art programs, platforms, kinds of asset, style, extra checks, broken geometry; several answers each) and one commented `rules.toml` for all of them; asks before replacing one and keeps a copy. With `--yes`: every default. See [06 - CLI reference](06-CLI-REFERENCE.md#the-rules-wizard) |
 | `--wizard-answers FILE` | The `--wizard` answers from a JSON file, for scripts: `{"engines": ["unreal", "unity"], "platforms": ["pc", "switch"]}` |
 | `--version` | Print the version and exit (pipelines log this) |
 | `-v`, `--verbose` | Debug logging (including why a file was skipped) |

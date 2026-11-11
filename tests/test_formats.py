@@ -192,6 +192,21 @@ expect("... and one inside the range passes on that count, with the number in it
        not any("texel density" in p for p in verdict.problems)
        and dict(verdict.stats).get("texel_density") == 8, (verdict.problems, verdict.stats))
 
+# 11 Nov 2026: run as a script the gate is __main__, and fbx_preview's
+# "import asset_gatekeeper" executed the whole file a second time (and parsed
+# the FBX again). The gate now registers itself under its module name.
+speed_dir = WORK / "one_import"
+speed_dir.mkdir()
+shutil.copy(FIXTURES / "cube_subd3.fbx", speed_dir / "SM_Cube.fbx")
+(speed_dir / "rules.toml").write_text("[mesh]\nmax_mb = 64\n", encoding="utf-8")
+timed = subprocess.run([sys.executable, "-X", "importtime", str(ROOT / "asset_gatekeeper.py"),
+                        str(speed_dir), "--once", "--no-cache", "--no-color"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace")
+second = [line for line in timed.stderr.splitlines()
+          if line.startswith("import time:") and line.rstrip().endswith("| asset_gatekeeper")]
+expect("measuring an FBX does not load the gate a second time", timed.returncode == 0
+       and not second and "~51 KB" in timed.stdout + timed.stderr, second or timed.stderr[-300:])
+
 print("2. FBX texture references")
 expect("relative texture beside the FBX resolves",
        not agk.missing_references(FIXTURES / "tex_relative.fbx"),
@@ -276,6 +291,46 @@ expect("an ASCII FBX with no version fails with a re-export hint",
        "re-export" in " ".join(rows.get("ascii.fbx", {}).get("problems", [])))
 expect("the decompression bomb is refused by size, not by running out of memory",
        "too large" in " ".join(rows.get("bomb.fbx", {}).get("problems", [])))
+
+# A .glb's JSON is read a dozen times per check; each read used to load the
+# whole file, binary chunk and all.
+_json = json.dumps({"asset": {"version": "2.0"}}).encode() + b"  "
+_bin = b"\0" * (4 << 20)
+_glb = WORK / "big_bin.glb"
+_glb.write_bytes(b"glTF" + struct.pack("<II", 2, 28 + len(_json) + len(_bin))
+                 + struct.pack("<II", len(_json), 0x4E4F534A) + _json
+                 + struct.pack("<II", len(_bin), 0x004E4942) + _bin)
+_read = {"bytes": 0}
+_real_open = Path.open
+
+
+def _counting_open(self, *args, **kwargs):
+    handle = _real_open(self, *args, **kwargs)
+    if self == _glb:
+        _real_read = handle.read
+
+        def read(*a):
+            data = _real_read(*a)
+            _read["bytes"] += len(data)
+            return data
+        handle.read = read
+    return handle
+
+
+_real_read_bytes = Path.read_bytes
+with patch.object(Path, "open", _counting_open), \
+        patch.object(Path, "read_bytes", lambda self: (_read.__setitem__("bytes", _read["bytes"] + self.stat().st_size)
+                                                       if self == _glb else None) or _real_read_bytes(self)):
+    _document = agk.read_gltf_document(_glb)
+expect("a .glb's JSON is read without reading its binary chunk",
+       _document == {"asset": {"version": "2.0"}} and _read["bytes"] < 1024, _read)
+for _data, _why in ((b"", "not a GLB container"), (b"glTF\x02\0\0\0\xff\xff\xff\xff", "no JSON chunk")):
+    _glb.write_bytes(_data)
+    try:
+        agk.read_gltf_document(_glb)
+        expect(f"a broken .glb still says what is wrong ({_why})", False)
+    except agk.AssetError as exc:
+        expect(f"a broken .glb still says what is wrong ({_why})", _why in str(exc), str(exc))
 
 print("4. TGA and JPG textures")
 try:
@@ -935,6 +990,815 @@ expect("userSetup.py finds gatekeeper_maya.py's folder on sys.path",
        user_setup_globals["_scripts_dir"]().replace("\\", "/").endswith("plugins/maya"),
        user_setup_globals["_scripts_dir"]())
 
+print("9c. DCC panels: [lod], [collision], [skeleton], [lightmap] judged as the gate judges the export")
+# One scene, described once, written two ways: as the FBX the artist would
+# export (judged by the gate) and as each host's live scene (judged by the
+# panel through preflight_core). The panel's messages must be the gate's.
+import dataclasses  # noqa: E402
+import importlib.util  # noqa: E402
+
+from plugins import preflight_core  # noqa: E402
+import preflight_panel  # noqa: E402
+
+PANEL_WORK = WORK / "panel_rules"
+PANEL_WORK.mkdir()
+
+
+def _box(size=1.0, x=0.0):
+    corners = [(x + a * size, b * size, c * size) for a in (0, 1) for b in (0, 1) for c in (0, 1)]
+    return corners, [[0, 1, 3, 2], [4, 6, 7, 5], [0, 4, 5, 1], [2, 3, 7, 6], [0, 2, 6, 4], [1, 5, 7, 3]]
+
+
+def _l_prism():
+    """An L-shaped block: concave (a 1 m dent in a 3 m hull), 12 vertices."""
+    outline = [(0, 0), (2, 0), (2, 1), (1, 1), (1, 2), (0, 2)]
+    vertices = [(float(x), float(y), z) for z in (0.0, 1.0) for x, y in outline]
+    polygons = [[5, 4, 3, 2, 1, 0], [6, 7, 8, 9, 10, 11]]
+    polygons += [[i, (i + 1) % 6, (i + 1) % 6 + 6, i + 6] for i in range(6)]
+    return vertices, polygons
+
+
+def _corner_uvs(polygons, shift=0.0):
+    """One UV per face corner: every face mapped to the whole 0-1 square (so the
+    faces overlap), the first corner moved by *shift* (outside 0-1 when > 0)."""
+    square = [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0), (0.0, 1.0)]
+    uvs = [square[k % 4] for polygon in polygons for k in range(len(polygon))]
+    if shift:
+        uvs[0] = (uvs[0][0] + shift, uvs[0][1])
+    return uvs
+
+
+def _mesh(name, geometry, parent=None, kind="Mesh", uv_sets=(), material="crate_mat"):
+    vertices, polygons = geometry
+    return {"name": name, "kind": kind, "parent": parent, "vertices": vertices,
+            "polygons": polygons, "uv_sets": [list(uvs) for uvs in uv_sets], "material": material}
+
+
+def write_fbx(path, objects, bones=(), skin=None):
+    """ASCII FBX 7.4. objects: _mesh() dicts (kind LodGroup/Null: no geometry);
+    bones: [(name, parent bone index or None)]; skin: (mesh name, [(bone index,
+    vertex ids, weights)])."""
+    ids, lines, links = {}, [], []
+    counter = [1000]
+
+    def new_id():
+        counter[0] += 1
+        return counter[0]
+
+    materials = {}
+    for item in objects:
+        model = ids[item["name"]] = new_id()
+        lines.append(f'\tModel: {model}, "Model::{item["name"]}", "{item["kind"]}" {{\n\t}}')
+        links.append((model, ids[item["parent"]] if item["parent"] else 0))
+        if item["kind"] != "Mesh":
+            continue
+        geometry = item["geometry_id"] = new_id()
+        flat = []
+        for polygon in item["polygons"]:
+            flat += list(polygon[:-1]) + [-polygon[-1] - 1]
+        body = [f'\tGeometry: {geometry}, "Geometry::{item["name"]}", "Mesh" {{',
+                f"\t\tVertices: *{len(item['vertices']) * 3} {{ a: "
+                + ",".join(repr(float(c)) for v in item["vertices"] for c in v) + " }",
+                f"\t\tPolygonVertexIndex: *{len(flat)} {{ a: {','.join(map(str, flat))} }}"]
+        for index, uvs in enumerate(item["uv_sets"]):
+            body += [f"\t\tLayerElementUV: {index} {{", '\t\t\tMappingInformationType: "ByPolygonVertex"',
+                     '\t\t\tReferenceInformationType: "Direct"',
+                     f"\t\t\tUV: *{len(uvs) * 2} {{ a: " + ",".join(repr(float(c)) for uv in uvs for c in uv)
+                     + " }", "\t\t}"]
+        lines += body + ["\t}"]
+        links.append((geometry, model))
+        if item["material"]:
+            if item["material"] not in materials:
+                materials[item["material"]] = new_id()
+                lines.append(f'\tMaterial: {materials[item["material"]]}, '
+                             f'"Material::{item["material"]}", "" {{\n\t}}')
+            links.append((materials[item["material"]], model))
+    bone_ids = []
+    for name, parent in bones:
+        bone_ids.append(new_id())
+        lines.append(f'\tModel: {bone_ids[-1]}, "Model::{name}", "LimbNode" {{\n\t}}')
+    for (name, parent), bone_id in zip(bones, bone_ids):
+        links.append((bone_id, 0 if parent is None else bone_ids[parent]))
+    if skin:
+        owner, clusters = skin
+        skin_id = new_id()
+        lines.append(f'\tDeformer: {skin_id}, "Deformer::Skin", "Skin" {{\n\t}}')
+        links.append((skin_id, next(item["geometry_id"] for item in objects if item["name"] == owner)))
+        for bone, vertex_ids, weights in clusters:
+            cluster = new_id()
+            lines += [f'\tDeformer: {cluster}, "SubDeformer::Cluster", "Cluster" {{',
+                      f"\t\tIndexes: *{len(vertex_ids)} {{ a: {','.join(map(str, vertex_ids))} }}",
+                      f"\t\tWeights: *{len(weights)} {{ a: {','.join(repr(float(w)) for w in weights)} }}",
+                      "\t}"]
+            links += [(cluster, skin_id), (bone_ids[bone], cluster)]
+    text = ("; FBX 7.4.0 project file\nFBXHeaderExtension:  {\n\tFBXVersion: 7400\n}\n"
+            "Objects:  {\n" + "\n".join(lines) + "\n}\nConnections:  {\n"
+            + "\n".join(f'\tC: "OO",{a},{b}' for a, b in links) + "\n}\n")
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+#: Everything but the four structure tables generous, so the gate's verdict on
+#: the export holds only what those tables say.
+LENIENT = {"max_triangles": 1_000_000, "max_material_slots": 64, "max_uv_channels": 8,
+           "enforce_texture_naming": False, "allow_degenerate": True}
+
+
+def structure_budget(lod=None, collision=None, skeleton=None, lightmap=None):
+    document = {key: value for key, value in (("lod", lod), ("collision", collision),
+                                              ("skeleton", skeleton), ("lightmap", lightmap))
+                if value is not None}
+    return dataclasses.replace(agk.Budget.from_mapping(document), **LENIENT)
+
+
+def gate_says(path, budget):
+    verdict = agk.Gatekeeper(budget).check(path)
+    return sorted(verdict.problems), sorted(verdict.warnings)
+
+
+def panel_says(report):
+    return (sorted(f.message for f in report.findings if f.severity == "error"),
+            sorted(f.message for f in report.findings if f.severity == "warning"))
+
+
+def same_verdict(label, report, path, budget):
+    gate = gate_says(path, budget)
+    panel = panel_says(report)
+    expect(f"{label}: the panel says what the gate says ({len(gate[0])} error(s), "
+           f"{len(gate[1])} warning(s))", panel == gate and gate[0], f"panel {panel} / gate {gate}")
+
+
+# The crate: LOD0 and LOD1 that saves nothing, a concave hull named after LOD0,
+# a stray hull, a lightmap set with a UV outside 0-1 and overlapping faces on
+# LOD0, and no lightmap set on LOD1.
+CRATE_LOD0 = _box()
+CRATE_LOD1 = _box()
+CRATE_HULL = _l_prism()
+STRAY_HULL = _box(0.5, 3.0)
+CRATE_UV = [_corner_uvs(CRATE_LOD0[1]), _corner_uvs(CRATE_LOD0[1], shift=1.5)]
+crate_budget = structure_budget(lod={"min_levels": 3, "max_ratio": 0.6},
+                                collision={"max_hull_vertices": 8},
+                                lightmap={"require": True, "max_overlap": 0})
+
+
+def crate_objects(group):
+    """The crate as exported: under an LOD group (Maya) or by _LOD<n> names (Max, Blender)."""
+    parent = "Crate" if group else None
+    objects = [_mesh("Crate", ([], []), kind="LodGroup")] if group else []
+    objects += [_mesh("Crate_LOD0", CRATE_LOD0, parent, uv_sets=CRATE_UV),
+                _mesh("Crate_LOD1", CRATE_LOD1, parent, uv_sets=CRATE_UV[:1]),
+                _mesh("UCX_Crate_LOD0", CRATE_HULL, parent, material=None),
+                _mesh("UCX_Crat", STRAY_HULL, parent, material=None)]
+    return objects
+
+
+crate_group_fbx = write_fbx(PANEL_WORK / "crate_group.fbx", crate_objects(group=True))
+crate_names_fbx = write_fbx(PANEL_WORK / "crate_names.fbx", crate_objects(group=False))
+
+# The character: a skinned body, two roots, a three-bone chain, one section
+# weighted to three bones; no collision (exempt), no lightmap (skinned).
+BODY = _box()
+BONES = [("root", None), ("spine", 0), ("head", 1), ("prop_root", None)]
+BODY_CLUSTERS = [(0, [0, 1], [1.0, 1.0]), (1, [2, 3], [1.0, 1.0]), (2, [4], [1.0]), (3, [5], [1.0])]
+body_fbx = write_fbx(PANEL_WORK / "body.fbx", [_mesh("Body", BODY, material="skin_mat")],
+                     bones=BONES, skin=("Body", BODY_CLUSTERS))
+body_budget = structure_budget(skeleton={"max_bones": 3, "single_root": True, "max_depth": 2,
+                                         "max_bones_per_section": 2},
+                               collision={"require": True},
+                               lightmap={"require": True})
+
+
+def faces_of(geometry):
+    return preflight_core.fan_triangles([len(p) for p in geometry[1]], [i for p in geometry[1] for i in p])
+
+
+def uv_triangles(geometry, uvs):
+    corners = preflight_core.fan_triangles([len(p) for p in geometry[1]], list(range(len(uvs))))
+    return [[uvs[a], uvs[b], uvs[c]] for a, b, c in corners]
+
+
+def tris(geometry):
+    return sum(len(p) - 2 for p in geometry[1])
+
+
+# -- the core alone: facts as an adapter would pass them ---------------------- #
+core_crate = preflight_core.assess(
+    "crate_group.fbx", triangles=tris(CRATE_LOD0), budget=crate_budget,
+    lods=[("Crate", (tris(CRATE_LOD0), tris(CRATE_LOD1)), "group")],
+    collision=[("UCX_Crate_LOD0", CRATE_HULL[0], faces_of(CRATE_HULL)),
+               ("UCX_Crat", STRAY_HULL[0], faces_of(STRAY_HULL))],
+    render_names=["Crate_LOD0"],
+    lightmap=[("Crate_LOD0", CRATE_UV[1], uv_triangles(CRATE_LOD0, CRATE_UV[1]))])
+same_verdict("core, LOD group + collision + lightmap", core_crate, crate_group_fbx, crate_budget)
+core_names = preflight_core.assess(
+    "crate_names.fbx", triangles=tris(CRATE_LOD0) + tris(CRATE_LOD1), budget=crate_budget,
+    lods=preflight_core.lods_by_name([("Crate_LOD0", tris(CRATE_LOD0)), ("Crate_LOD1", tris(CRATE_LOD1))]),
+    collision=[("UCX_Crate_LOD0", CRATE_HULL[0], faces_of(CRATE_HULL)),
+               ("UCX_Crat", STRAY_HULL[0], faces_of(STRAY_HULL))],
+    render_names=["Crate_LOD0", "Crate_LOD1"],
+    lightmap=[("Crate_LOD0", CRATE_UV[1], uv_triangles(CRATE_LOD0, CRATE_UV[1])),
+              ("Crate_LOD1", None, None)])
+same_verdict("core, LODs by name (with the gate's FBX note)", core_names, crate_names_fbx, crate_budget)
+core_body = preflight_core.assess(
+    "body.fbx", triangles=tris(BODY), budget=body_budget, collision=[], render_names=["Body"],
+    skinned=True, lightmap=[],
+    skeleton={"bones": [(name, None if parent is None else BONES[parent][0]) for name, parent in BONES],
+              "sections": [("skin_mat", 4)]})
+same_verdict("core, skeleton (bones, roots, depth, per section)", core_body, body_fbx, body_budget)
+clean_fbx = write_fbx(PANEL_WORK / "clean.fbx", [_mesh("Barrel", _box(), uv_sets=[
+    _corner_uvs(_box()[1]), [((k % 4) // 2 * 0.1 + f * 0.15, (k % 2) * 0.1) for f in range(6) for k in range(4)]]),
+    _mesh("UCX_Barrel_00", _box(), material=None)])
+clean_budget = structure_budget(collision={"require": True}, lightmap={"require": True})
+clean_report = preflight_core.assess("clean.fbx", triangles=12, budget=clean_budget,
+                                     collision=[("UCX_Barrel_00", _box()[0], faces_of(_box()))],
+                                     render_names=["Barrel"], lightmap=[("Barrel", [(0.5, 0.5)] * 24, None)])
+expect("core: a clean asset passes in the panel as at the gate",
+       clean_report.ok and gate_says(clean_fbx, clean_budget) == ([], []),
+       (clean_report.as_text(), gate_says(clean_fbx, clean_budget)))
+
+# Rules off: the new inputs add nothing.
+plain = preflight_core.assess("x", triangles=12, budget=agk.Budget())
+everything = preflight_core.assess(
+    "x", triangles=12, budget=agk.Budget(), lods=[], collision=[("UCX_Nothing", 4)],
+    render_names=["X"], skinned=False, skeleton={"bones": [("a", None), ("b", None)], "sections": None},
+    lightmap=[("X", None, None)])
+expect("rules off: structure facts add no finding",
+       [f.as_dict() for f in everything.findings] == [f.as_dict() for f in plain.findings] == [],
+       everything.as_text())
+expect("rules off: nothing is noted either (no 'not checked' for rules nobody asked for)",
+       not preflight_core.assess("x", triangles=12, budget=agk.Budget()).findings)
+
+# Data not available: an info note, never an error and never a pass.
+unread = preflight_core.assess("x", triangles=12, budget=dataclasses.replace(crate_budget, max_bones=10))
+codes = sorted((f.severity, f.code) for f in unread.findings)
+expect("rules on, nothing supplied: one info note per rule, no error",
+       unread.ok and codes == [("info", "collision"), ("info", "lightmap"), ("info", "lod"),
+                               ("info", "skeleton")], codes)
+expect("... saying the gate checks it on export",
+       all(f.message.endswith("not checked in the panel; the gate checks it on export")
+           for f in unread.findings), [f.message for f in unread.findings])
+partial = preflight_core.assess(
+    "x", triangles=12, budget=dataclasses.replace(crate_budget, max_bones_per_section=1),
+    lods=[("Crate", (12, 6, 3), "group")], render_names=["Crate"],
+    collision=[("UCX_Crate", 8)],
+    skeleton={"bones": [("root", None)], "sections": None},
+    lightmap=[("Crate", [(0.5, 0.5)] * 3, None)])
+notes = sorted(f.message for f in partial.findings if f.severity == "info")
+expect("partial facts: hull convexity, bones per section and overlap are notes, not verdicts",
+       partial.ok and len(notes) == 3 and any("convexity of 'UCX_Crate'" in n for n in notes)
+       and any("max_bones_per_section" in n for n in notes)
+       and any("max_overlap" in n for n in notes), partial.as_text())
+present = preflight_core.assess("x", triangles=12, budget=crate_budget, lods=[("C", (12, 6, 3), "group")],
+                                collision=[], render_names=["C"], lightmap=[("C", True, None)])
+expect("a lightmap set that is there but unread is not 'missing' (no false fail)",
+       not any(f.code == "lightmap" and f.severity == "error" for f in present.findings)
+       and any("lightmap UVs of 'C'" in f.message for f in present.findings), present.as_text())
+stand_in = types.SimpleNamespace(max_triangles=100, max_material_slots=3, max_texture_edge=2048,
+                                  lod_min_levels=3)
+foreign = preflight_core.assess("x", triangles=12, budget=stand_in, lods=[])
+expect("a budget the gate did not build: the rule is a note, not a guess",
+       foreign.ok and [f.code for f in foreign.findings] == ["lod"]
+       and "not checked in the panel" in foreign.findings[0].message, foreign.as_text())
+
+
+# -- Maya: a stand-in maya.cmds + maya.api.OpenMaya over a small DAG ---------- #
+class _MayaScene:
+    """Just enough of maya.cmds for maya_preflight: a DAG of full paths."""
+
+    def __init__(self):
+        self.types, self.meshes, self.clusters, self.selected = {}, {}, {}, []
+
+    def add(self, path, kind, geometry=None, uv_sets=(), skin=None):
+        self.types[path] = kind
+        if geometry is not None:
+            shape = f"{path}|{path.rsplit('|', 1)[-1]}Shape"
+            self.types[shape] = "mesh"
+            self.meshes[shape] = {"geometry": geometry, "uv_sets": list(uv_sets), "skin": skin}
+        return path
+
+    def _full(self, name):
+        if name in self.types:
+            return name
+        return next((path for path in self.types if path.rsplit("|", 1)[-1] == name), name)
+
+    def _children(self, path):
+        return [item for item in self.types if item.rsplit("|", 1)[0] == path and item != path]
+
+    def nodeType(self, node):
+        return self.types.get(self._full(node), "skinCluster" if node in self.clusters else "")
+
+    def ls(self, items=None, selection=False, type=None, long=False, noIntermediate=False,
+           assemblies=False, **flags):
+        if selection:
+            return list(self.selected)
+        if assemblies:
+            return [path for path in self.types if path.count("|") == 1]
+        if items is None:
+            return [path.rsplit("|", 1)[-1] for path, kind in self.types.items() if kind == type]
+        items = [items] if isinstance(items, str) else list(items)
+        if type is not None:
+            return [item for item in items if self.nodeType(item) == type]
+        return [self._full(item) for item in items]
+
+    def listRelatives(self, node, shapes=False, type=None, allDescendents=False, children=False,
+                      parent=False, fullPath=False, **flags):
+        path = self._full(node)
+        if parent:
+            up = path.rsplit("|", 1)[0]
+            return [up] if up else []
+        found = ([item for item in self.types if item.startswith(path + "|")] if allDescendents
+                 else self._children(path))
+        if shapes:
+            found = [item for item in found if self.types[item] == "mesh"]
+        if type == "mesh":
+            found = [item for item in found if self.types[item] == "mesh"]
+        elif type == "transform":
+            found = [item for item in found if self.types[item] in ("transform", "joint", "lodGroup")]
+        return found
+
+    def polyEvaluate(self, shape, face=False, triangle=False, vertex=False):
+        vertices, polygons = self.meshes[self._full(shape)]["geometry"]
+        return len(polygons) if face else (sum(len(p) - 2 for p in polygons) if triangle
+                                           else len(vertices))
+
+    def listConnections(self, *args, **flags):
+        return []
+
+    def listHistory(self, shape):
+        skin = self.meshes[self._full(shape)]["skin"]
+        return [skin] if skin else []
+
+    def skinCluster(self, cluster, query=True, influence=True):
+        return [path.rsplit("|", 1)[-1] for path in self.clusters[cluster]]
+
+    def polyUVSet(self, shape, query=True, allUVSets=True):
+        return [f"map{index + 1}" for index in range(len(self.meshes[self._full(shape)]["uv_sets"]))]
+
+    def file(self, query=True, sceneName=True):
+        return "/proj/props/crate.ma"
+
+
+class _MayaPoint:
+    def __init__(self, xyz):
+        self.x, self.y, self.z = xyz
+
+
+def _open_maya(scene):
+    om = types.ModuleType("maya.api.OpenMaya")
+
+    class MSelectionList(list):
+        def add(self, name):
+            self.append(scene._full(name))
+
+        def getDagPath(self, index):
+            return self[index]
+
+    class MFnMesh:
+        def __init__(self, path):
+            self.data = scene.meshes[path]
+
+        def getVertices(self):
+            polygons = self.data["geometry"][1]
+            return [len(p) for p in polygons], [i for p in polygons for i in p]
+
+        def getPoints(self, *space):
+            return [_MayaPoint(xyz) for xyz in self.data["geometry"][0]]
+
+        def _set(self, name):
+            return self.data["uv_sets"][int(name[3:]) - 1]
+
+        def getUVs(self, name):
+            uvs = self._set(name)
+            return [u for u, _v in uvs], [v for _u, v in uvs]
+
+        def getAssignedUVs(self, name):
+            return [len(p) for p in self.data["geometry"][1]], list(range(len(self._set(name))))
+
+    om.MSelectionList, om.MFnMesh = MSelectionList, MFnMesh
+    return om
+
+
+def maya_crate():
+    scene = _MayaScene()
+    group = scene.add("|Crate", "lodGroup")
+    scene.add(group + "|Crate_LOD0", "transform", CRATE_LOD0, CRATE_UV)
+    scene.add(group + "|Crate_LOD1", "transform", CRATE_LOD1, CRATE_UV[:1])
+    scene.add(group + "|UCX_Crate_LOD0", "transform", CRATE_HULL)
+    scene.add(group + "|UCX_Crat", "transform", STRAY_HULL)
+    scene.selected = ["Crate_LOD0"]                  # the artist selects the mesh only
+    return scene
+
+
+def maya_body():
+    scene = _MayaScene()
+    scene.add("|Body", "transform", BODY, skin="skinCluster1")
+    scene.add("|root", "joint")
+    scene.add("|root|spine", "joint")
+    scene.add("|root|spine|head", "joint")
+    scene.add("|prop_root", "joint")
+    scene.clusters["skinCluster1"] = ["|root", "|root|spine", "|root|spine|head", "|prop_root"]
+    scene.selected = ["Body"]
+    return scene
+
+
+_saved_cmds = maya_preflight.cmds
+_maya_api = types.ModuleType("maya.api")
+sys.modules["maya.api"] = fake_maya.api = _maya_api
+
+
+def maya_report(scene, budget, open_maya=True):
+    maya_preflight.cmds = scene
+    if open_maya:
+        sys.modules["maya.api.OpenMaya"] = _maya_api.OpenMaya = _open_maya(scene)
+    else:
+        sys.modules["maya.api.OpenMaya"] = None             # import fails: no API 2
+    try:
+        triangles, vertices, materials, textures, degenerate = maya_preflight.scene_facts()
+        return triangles, preflight_core.assess(
+            "crate.ma", triangles=triangles, budget=budget,
+            **maya_preflight.structure_facts(budget))
+    finally:
+        maya_preflight.cmds = _saved_cmds
+        sys.modules.pop("maya.api.OpenMaya", None)
+
+
+maya_triangles, maya_crate_report = maya_report(maya_crate(), crate_budget)
+expect("Maya: LOD1 and the UCX_ hulls are not in the triangle count (as in the gate)",
+       maya_triangles == 12, maya_triangles)
+same_verdict("Maya, lodGroup + UCX_ hulls next to the mesh + UV set map2", maya_crate_report,
+             crate_group_fbx, crate_budget)
+no_section = dataclasses.replace(body_budget, max_bones_per_section=0)
+_, maya_body_report = maya_report(maya_body(), no_section)
+same_verdict("Maya, skinCluster joints (skinned: collision exempt, no lightmap)", maya_body_report,
+             body_fbx, no_section)
+_, maya_section = maya_report(maya_body(), body_budget)
+expect("Maya: bones per section is a note (left to the gate), not a pass or a fail",
+       any(f.severity == "info" and "max_bones_per_section" in f.message
+           for f in maya_section.findings)
+       and not any(f.severity == "error" and "material section" in f.message
+                   for f in maya_section.findings),
+       maya_section.as_text())
+_, maya_off = maya_report(maya_crate(), structure_budget())
+expect("Maya: rules off -> nothing new", not maya_off.findings, maya_off.as_text())
+_, maya_no_api = maya_report(maya_crate(), crate_budget, open_maya=False)
+expect("Maya without OpenMaya 2: hull convexity and lightmap values are notes, no false verdict",
+       not any(f.severity == "error" and ("not convex" in f.message or "outside 0-1" in f.message)
+               for f in maya_no_api.findings)
+       and any("convexity of" in f.message for f in maya_no_api.findings)
+       and any("lightmap UVs of 'Crate_LOD0'" in f.message for f in maya_no_api.findings),
+       maya_no_api.as_text())
+
+
+class _BrokenCmds(_MayaScene):
+    def polyUVSet(self, *args, **flags):
+        raise RuntimeError("polyUVSet changed")
+
+
+broken = maya_crate()
+broken.__class__ = _BrokenCmds
+_, maya_broken = maya_report(broken, crate_budget)
+expect("Maya: a host API that fails leaves that rule to the gate (info), the rest still judged",
+       any(f.severity == "info" and f.code == "lightmap" for f in maya_broken.findings)
+       and any(f.code == "lod" and f.severity == "error" for f in maya_broken.findings),
+       maya_broken.as_text())
+
+
+# -- 3ds Max: a stand-in pymxs runtime with nodes, TriMeshes and a Skin ------- #
+class _MaxPoint:
+    def __init__(self, *xyz):
+        self.x, self.y, self.z = (list(xyz) + [0.0, 0.0])[:3]
+
+
+class _MaxTriMesh:
+    """snapshotAsMesh(): fan triangles; map channel k + 1 holds UV set k, per corner."""
+
+    def __init__(self, geometry, uv_sets):
+        self.vertices, polygons = geometry
+        self.faces = faces_of(geometry)
+        self.maps = [None] + [(uvs, preflight_core.fan_triangles([len(p) for p in polygons],
+                                                                list(range(len(uvs)))))
+                              for uvs in uv_sets]
+
+
+def _max_runtime(nodes):
+    rt = types.SimpleNamespace()
+    for name in ("GeometryClass", "Multimaterial", "Bitmaptexture", "Skin", "BoneGeometry",
+                 "Editable_Poly"):
+        setattr(rt, name, _MaxClass(name))
+    by_handle = {node.inode.handle: node for node in nodes}
+    rt.classOf = lambda item: getattr(item, "cls", None)
+    rt.superClassOf = lambda item: getattr(item, "superclass", None)
+    rt.getPolygonCount = lambda node: [len(faces_of(node.geometry)), len(node.geometry[0])]
+    rt.selection = _MaxSelection([node for node in nodes if node.selected])
+    rt.objects = list(nodes)
+    rt.rootNode = types.SimpleNamespace(children=[node for node in nodes if node.parent is None])
+    rt.maxFilePath, rt.maxFileName = "C:/proj/props/", "crate.max"
+    rt.maxOps = types.SimpleNamespace(getNodeByHandle=lambda handle: by_handle[handle])
+    rt.snapshotAsMesh = lambda node: _MaxTriMesh(node.geometry, node.uv_sets)
+    rt.delete = lambda item: None
+    rt.getNumVerts = lambda mesh: len(mesh.vertices)
+    rt.getVert = lambda mesh, index: _MaxPoint(*mesh.vertices[index - 1])
+    rt.getNumFaces = lambda mesh: len(mesh.faces)
+    rt.getFace = lambda mesh, index: _MaxPoint(*(corner + 1 for corner in mesh.faces[index - 1]))
+    rt.meshop = types.SimpleNamespace(
+        getNumMaps=lambda mesh: len(mesh.maps),
+        getMapSupport=lambda mesh, channel: mesh.maps[channel] is not None,
+        getNumMapVerts=lambda mesh, channel: len(mesh.maps[channel][0]),
+        getMapVert=lambda mesh, channel, index: _MaxPoint(*mesh.maps[channel][0][index - 1]),
+        getMapFace=lambda mesh, channel, index: _MaxPoint(
+            *(corner + 1 for corner in mesh.maps[channel][1][index - 1])))
+    rt.skinOps = types.SimpleNamespace(GetBoneNodes=lambda modifier: modifier.bones)
+    return rt
+
+
+class _MaxSceneNode:
+    def __init__(self, name, geometry=None, parent=None, uv_sets=(), selected=False, bone=False):
+        self.name, self.geometry, self.parent, self.uv_sets = name, geometry, parent, list(uv_sets)
+        self.selected, self.children, self.modifiers, self.material = selected, [], [], None
+        self.inode = types.SimpleNamespace(handle=id(self))
+        self.cls = "bone" if bone else "poly"
+        self.superclass = None if bone else "geometry"
+        if parent is not None:
+            parent.children.append(self)
+
+
+def max_report(nodes, budget):
+    rt = _max_runtime(nodes)
+    for node in nodes:      # the stand-in classes, now that the runtime exists
+        node.cls = rt.BoneGeometry if node.cls == "bone" else rt.Editable_Poly
+        node.superclass = None if node.superclass is None else rt.GeometryClass
+        for modifier in node.modifiers:
+            modifier.cls = rt.Skin
+    saved, max_preflight.rt = max_preflight.rt, rt
+    try:
+        triangles, _v, _m, _t, _d, names = max_preflight.scene_facts()
+        return triangles, preflight_core.assess("crate.max", triangles=triangles, budget=budget,
+                                                mesh_names=names,
+                                                **max_preflight.structure_facts(budget))
+    finally:
+        max_preflight.rt = saved
+
+
+max_crate = [_MaxSceneNode("Crate_LOD0", CRATE_LOD0, uv_sets=CRATE_UV, selected=True),
+             _MaxSceneNode("Crate_LOD1", CRATE_LOD1, uv_sets=CRATE_UV[:1], selected=True),
+             _MaxSceneNode("UCX_Crate_LOD0", CRATE_HULL), _MaxSceneNode("UCX_Crat", STRAY_HULL)]
+max_triangles, max_crate_report = max_report(max_crate, crate_budget)
+expect("Max: UCX_ hulls are not in the triangle count; LODs by name are (as in the gate)",
+       max_triangles == 24, max_triangles)
+same_verdict("Max, _LOD<n> names + UCX_ hulls beside the meshes + map channel 2", max_crate_report,
+             crate_names_fbx, crate_budget)
+max_bones = {}
+for _name, _parent in BONES:
+    max_bones[_name] = _MaxSceneNode(_name, parent=None if _parent is None else max_bones[BONES[_parent][0]],
+                                     bone=True)
+max_body = _MaxSceneNode("Body", BODY, selected=True)
+max_body.modifiers.append(types.SimpleNamespace(bones=list(max_bones.values())))
+_, max_body_report = max_report([max_body, *max_bones.values()], no_section)
+same_verdict("Max, Skin modifier bones (skinned: collision exempt, no lightmap)", max_body_report,
+             body_fbx, no_section)
+_, max_off = max_report([_MaxSceneNode("Crate_LOD0", CRATE_LOD0, selected=True)], structure_budget())
+expect("Max: rules off -> nothing new", not max_off.findings, max_off.as_text())
+
+
+# -- Blender: a stand-in bpy.context over evaluated meshes -------------------- #
+class _BlenderCollection(list):
+    def foreach_get(self, attribute, target):
+        flat = []
+        for item in self:
+            value = getattr(item, attribute)
+            flat.extend(value if isinstance(value, (tuple, list)) else [value])
+        target[:] = flat
+
+
+class _BlenderMesh:
+    def __init__(self, geometry, uv_sets=(), weights=None):
+        vertices, polygons = geometry
+        weights = weights or {}
+        self.vertices = _BlenderCollection(
+            types.SimpleNamespace(index=index, co=tuple(map(float, point)),
+                                   groups=[types.SimpleNamespace(group=group, weight=1.0)
+                                           for group in weights.get(index, ())])
+            for index, point in enumerate(vertices))
+        self.polygons = _BlenderCollection(types.SimpleNamespace(loop_total=len(p), material_index=0,
+                                                                  area=1.0) for p in polygons)
+        self.loops = _BlenderCollection(types.SimpleNamespace(vertex_index=i) for p in polygons for i in p)
+        self.loop_triangles = faces_of(geometry)
+        self.uv_layers = [types.SimpleNamespace(uv=_BlenderCollection(
+            types.SimpleNamespace(vector=tuple(uv)) for uv in uvs)) for uvs in uv_sets]
+
+
+class _BlenderObject:
+    def __init__(self, name, geometry=None, uv_sets=(), kind="MESH", material="crate_mat"):
+        self.name, self.type, self.parent, self.parent_type = name, kind, None, "OBJECT"
+        self.geometry, self.uv_sets, self.weights = geometry, uv_sets, {}
+        self.modifiers, self.vertex_groups, self.children, self.users_collection = [], [], [], []
+        self.material_slots = [types.SimpleNamespace(material=types.SimpleNamespace(
+            name=material, use_nodes=False))] if material else []
+
+    def evaluated_get(self, depsgraph):
+        return self
+
+    def to_mesh(self):
+        return _BlenderMesh(self.geometry, self.uv_sets, self.weights)
+
+    def to_mesh_clear(self):
+        pass
+
+
+def blender_report(objects, selected, budget):
+    collection = list(objects)
+    for obj in objects:
+        obj.users_collection = [types.SimpleNamespace(objects=collection)]
+    context = types.SimpleNamespace(selected_objects=selected,
+                                     scene=types.SimpleNamespace(objects=objects, name="crate"),
+                                     evaluated_depsgraph_get=lambda: None)
+    fake_bpy.context = context
+    try:
+        triangles, _v, _m, _t, _d = preflight_panel.scene_facts()
+        return triangles, preflight_core.assess("crate.blend", triangles=triangles, budget=budget,
+                                                **preflight_panel.structure_facts(budget))
+    finally:
+        del fake_bpy.context
+
+
+blender_crate = [_BlenderObject("Crate_LOD0", CRATE_LOD0, CRATE_UV),
+                 _BlenderObject("Crate_LOD1", CRATE_LOD1, CRATE_UV[:1]),
+                 _BlenderObject("UCX_Crate_LOD0", CRATE_HULL, material=None),
+                 _BlenderObject("UCX_Crat", STRAY_HULL, material=None)]
+blender_triangles, blender_crate_report = blender_report(blender_crate, blender_crate[:2], crate_budget)
+expect("Blender: UCX_ hulls are not in the triangle count; LODs by name are (as in the gate)",
+       blender_triangles == 24, blender_triangles)
+same_verdict("Blender, _LOD<n> names + UCX_ hulls in the collection + UV layer 1",
+             blender_crate_report, crate_names_fbx, crate_budget)
+
+
+class _BlenderBone:
+    def __init__(self, name, parent):
+        self.name, self.parent, self.children = name, parent, []
+        if parent is not None:
+            parent.children.append(self)
+
+
+blender_bones = {}
+for _name, _parent in BONES:
+    blender_bones[_name] = _BlenderBone(_name, None if _parent is None else blender_bones[BONES[_parent][0]])
+armature = _BlenderObject("Armature", kind="ARMATURE", material=None)
+armature.data = types.SimpleNamespace(bones=list(blender_bones.values()))
+blender_body = _BlenderObject("Body", BODY, material="skin_mat")
+blender_body.modifiers = [types.SimpleNamespace(type="ARMATURE", object=armature)]
+blender_body.vertex_groups = [types.SimpleNamespace(index=i, name=name) for i, (name, _p) in enumerate(BONES)]
+blender_body.weights = {vertex: [bone] for bone, vertices, _w in BODY_CLUSTERS for vertex in vertices}
+_, blender_body_report = blender_report([blender_body, armature], [blender_body], body_budget)
+same_verdict("Blender, armature deform bones incl. bones per material section", blender_body_report,
+             body_fbx, body_budget)
+_, blender_off = blender_report(blender_crate, blender_crate[:2], structure_budget())
+expect("Blender: rules off -> nothing new", not blender_off.findings, blender_off.as_text())
+
+
+# -- Houdini: the Python SOP over stand-in geometry with a name attribute ------ #
+_sop_spec = importlib.util.spec_from_file_location("agk_sop_panel_rules",
+                                                   ROOT / "plugins" / "houdini" / "sop_gatekeeper.py")
+sop = importlib.util.module_from_spec(_sop_spec)
+_sop_spec.loader.exec_module(sop)
+
+
+class _HouAttrib:
+    def __init__(self, name, values=()):
+        self._name, self._values = name, list(values)
+
+    def name(self):
+        return self._name
+
+    def strings(self):
+        return list(dict.fromkeys(self._values))
+
+
+class _HouPoint:
+    def __init__(self, number, xyz):
+        self._number, self._xyz = number, xyz
+
+    def number(self):
+        return self._number
+
+    def position(self):
+        return self._xyz
+
+
+class _HouVertex:
+    def __init__(self, point, uvs):
+        self._point, self._uvs = point, uvs
+
+    def point(self):
+        return self._point
+
+    def attribValue(self, attribute):
+        return self._uvs[attribute.name()]
+
+
+class _HouPrim:
+    def __init__(self, name, points, uvs):
+        self._name, self._points = name, points
+        self._vertices = [_HouVertex(point, {key: values[k] for key, values in uvs.items()})
+                          for k, point in enumerate(points)]
+
+    def type(self):
+        return "primType.Polygon"
+
+    def numVertices(self):
+        return len(self._points)
+
+    def isClosed(self):
+        return True
+
+    def points(self):
+        return self._points
+
+    def vertices(self):
+        return self._vertices
+
+    def attribValue(self, attribute):
+        return self._name
+
+
+class _HouGeometry:
+    def __init__(self, pieces, uv_names=("uv", "uv2"), captured=False):
+        self._prims, self.uv = [], [_HouAttrib(name) for name in uv_names]
+        self.captured = captured
+        number = 0
+        for name, (vertices, polygons), uv_sets in pieces:
+            points = []
+            for xyz in vertices:
+                points.append(_HouPoint(number, xyz))
+                number += 1
+            corner = 0
+            for polygon in polygons:
+                uvs = {attribute.name(): uv_sets[i][corner:corner + len(polygon)]
+                       for i, attribute in enumerate(self.uv) if i < len(uv_sets)}
+                self._prims.append(_HouPrim(name, [points[i] for i in polygon], uvs))
+                corner += len(polygon)
+        self.names = _HouAttrib("name", [prim._name for prim in self._prims])
+
+    def prims(self):
+        return self._prims
+
+    def points(self):
+        return [point for prim in self._prims for point in prim.points()]
+
+    def findPrimAttrib(self, name):
+        return self.names if name == "name" else None
+
+    def findVertexAttrib(self, name):
+        return next((attribute for attribute in self.uv if attribute.name() == name), None)
+
+    def findPointAttrib(self, name):
+        return _HouAttrib(name) if name == "boneCapture" and self.captured else None
+
+    def vertexAttribs(self):
+        return self.uv
+
+    def pointAttribs(self):
+        return ()
+
+    primAttribs = pointAttribs
+
+
+houdini_crate = [("Crate_LOD0", CRATE_LOD0, CRATE_UV), ("Crate_LOD1", CRATE_LOD1, CRATE_UV),
+                 ("UCX_Crate_LOD0", CRATE_HULL, [_corner_uvs(CRATE_HULL[1])] * 2),
+                 ("UCX_Crat", STRAY_HULL, [_corner_uvs(STRAY_HULL[1])] * 2)]
+# A Houdini attribute is on every prim, so here LOD1 carries the lightmap set too.
+houdini_fbx = write_fbx(PANEL_WORK / "crate_houdini.fbx", [
+    _mesh("Crate_LOD0", CRATE_LOD0, uv_sets=CRATE_UV), _mesh("Crate_LOD1", CRATE_LOD1, uv_sets=CRATE_UV),
+    _mesh("UCX_Crate_LOD0", CRATE_HULL, material=None), _mesh("UCX_Crat", STRAY_HULL, material=None)])
+houdini_budget = dataclasses.replace(crate_budget, max_bones=10)
+sop_notes: list = []
+sop_problems = sop.analyse(_HouGeometry(houdini_crate), houdini_budget, sop_notes, node_name="crate")
+gate_problems, gate_warnings = gate_says(houdini_fbx, houdini_budget)
+expect("Houdini SOP: the badge carries what the gate says on the export (name attribute pieces)",
+       sorted(sop_problems) == sorted(gate_problems + gate_warnings) and gate_problems,
+       f"SOP {sorted(sop_problems)} / gate {sorted(gate_problems + gate_warnings)}")
+expect("Houdini SOP: an uncaptured stream has no skeleton to check (nothing noted)",
+       not any("skeleton" in note for note in sop_notes), sop_notes)
+captured_notes: list = []
+sop.analyse(_HouGeometry(houdini_crate, captured=True), houdini_budget, captured_notes, node_name="crate")
+expect("Houdini SOP: a captured stream leaves [skeleton] to the gate (a note, not a badge)",
+       any("skeleton ([skeleton]) not checked in the panel" in note for note in captured_notes),
+       captured_notes)
+expect("Houdini SOP: UCX_ pieces are not counted as triangles",
+       not any("triangles exceeds" in problem for problem in sop.analyse(
+           _HouGeometry(houdini_crate), dataclasses.replace(structure_budget(), max_triangles=24))),
+       sop.analyse(_HouGeometry(houdini_crate), dataclasses.replace(structure_budget(), max_triangles=24)))
+off_notes: list = []
+expect("Houdini SOP: rules off -> nothing new",
+       sop.analyse(_HouGeometry(houdini_crate), structure_budget(), off_notes) == [] and not off_notes,
+       off_notes)
+one_uv_fbx = write_fbx(PANEL_WORK / "crate_one_uv.fbx", [
+    _mesh(name, geometry, uv_sets=uvs[:1], material=None if name.startswith("UCX_") else "crate_mat")
+    for name, geometry, uvs in houdini_crate])
+lightmap_only = structure_budget(lightmap={"require": True})
+no_uv2 = sop.analyse(_HouGeometry(houdini_crate, uv_names=("uv",)), lightmap_only, node_name="crate")
+expect("Houdini SOP: no uv2 attribute -> every static piece lacks the lightmap set, as the gate says",
+       sorted(no_uv2) == gate_says(one_uv_fbx, lightmap_only)[0] and no_uv2, no_uv2)
+
 print("10. Hooks and tools know the new formats")
 sys.path.insert(0, str(ROOT / "vcs_hooks"))
 import git_pre_commit  # noqa: E402
@@ -944,6 +1808,12 @@ for suffix in (".fbx", ".tga", ".jpg", ".jpeg"):
     expect(f"Perforce trigger gates {suffix}", suffix in p4_pre_submit.ASSET_SUFFIXES)
     expect(f"the gate tracks {suffix}", suffix in agk.TRACKED_SUFFIXES)
 push_hook = (ROOT / "vcs_hooks" / "git_pre_push.sh").read_text(encoding="utf-8")
+_push_suffixes = {"." + item for item in push_hook.split('ASSET_EXTENSIONS="', 1)[1].split('"', 1)[0].split()}
+for _hook, _suffixes in (("git pre-commit", git_pre_commit.ASSET_SUFFIXES),
+                         ("Perforce trigger", p4_pre_submit.ASSET_SUFFIXES),
+                         ("git pre-push", _push_suffixes)):
+    expect(f"{_hook} gates every format the gate checks (.dds, .tif, .exr, .webp, .ktx2 too)",
+           set(agk.TRACKED_SUFFIXES) <= set(_suffixes), sorted(set(agk.TRACKED_SUFFIXES) - set(_suffixes)))
 expect("git pre-push gates fbx/tga/jpg", " fbx " in push_hook and " tga " in push_hook and " jpg " in push_hook)
 
 print()

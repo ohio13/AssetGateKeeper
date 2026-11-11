@@ -24,7 +24,7 @@
 # Exit codes: 0 allow the push, 1 block it, 2 the hook itself is misconfigured.
 set -u
 
-ASSET_EXTENSIONS=" obj gltf glb fbx png tga jpg jpeg "
+ASSET_EXTENSIONS=" obj gltf glb fbx png tga jpg jpeg tif tiff webp dds exr ktx2 "
 
 repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
   echo "AssetGatekeeper: not inside a git repository" >&2
@@ -105,7 +105,20 @@ report=""
 while IFS= read -r entry; do
   [ -n "${entry}" ] || continue
   path=${entry%% \[LFS\]*}
-  verdict=$("$AGK_PYTHON" "$AGK_GATEKEEPER" "$path" --no-color --no-auto-heal 2>&1)
+  # The nearest rules.toml at or above the asset's folder, up to the repository
+  # root, as a --once run there would use: the gate on one file reads only its
+  # own folder, so an asset under Props/ was judged by the shipped defaults.
+  rules=()
+  folder=$(dirname -- "$path")
+  while :; do
+    if [ -f "${folder}/rules.toml" ]; then
+      rules=(--rules "${folder}/rules.toml")
+      break
+    fi
+    [ "$folder" = "." ] && break
+    folder=$(dirname -- "$folder")
+  done
+  verdict=$("$AGK_PYTHON" "$AGK_GATEKEEPER" "$path" --no-color --no-auto-heal "${rules[@]+"${rules[@]}"}" 2>&1)
   status=$?
   if [ $status -eq 0 ]; then
     continue

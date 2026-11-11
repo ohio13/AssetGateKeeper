@@ -19,7 +19,10 @@ import subprocess
 import sys
 from pathlib import Path
 
-ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg"}
+# Every format the gate checks (asset_gatekeeper.TRACKED_SUFFIXES): a hook that
+# skipped .dds or .tif let an 8K texture through that CI then failed.
+ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg",
+                  ".tif", ".tiff", ".webp", ".dds", ".exr", ".ktx2"}
 HOOK_NAME = "pre-commit"
 
 
@@ -52,6 +55,25 @@ def is_lfs_tracked(path: Path, cwd: str | None = None) -> bool:
         return "filter: lfs" in git("check-attr", "filter", "--", str(path), cwd=cwd)
     except RuntimeError:
         return False  # no attributes file, or an old git: not our problem
+
+
+def nearest_rules(path: Path) -> list[str]:
+    """["--rules", <file>] for the nearest rules.toml at or above ``path``'s folder,
+    stopping at the repository root (the hook's working folder), or [].
+
+    The gate reads only the asset's own folder by default: a repository with one
+    rules.toml at the top had every asset in a subfolder checked against the
+    shipped defaults while CI, running --once at the top, used the project's.
+    """
+    top = Path.cwd().resolve()
+    folder = path.resolve().parent
+    while True:
+        candidate = folder / "rules.toml"
+        if candidate.is_file():
+            return ["--rules", str(candidate)]
+        if folder == top or folder.parent == folder or top not in folder.parents:
+            return []
+        folder = folder.parent
 
 
 def gatekeeper_command() -> list[str]:
@@ -87,7 +109,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="git_pre_commit.py",
         description="Block commits containing assets that exceed the budget.")
-    parser.add_argument("--rules", help="rules file (default: <asset folder>/rules.toml)")
+    parser.add_argument("--rules", help="rules file (default: the nearest rules.toml at or above the asset's folder, up to the repository root, as a --once run of that folder uses)")
     parser.add_argument("--install", action="store_true",
                         help="write this script into .git/hooks/pre-commit and exit")
     parser.add_argument("--verbose", action="store_true")
@@ -107,7 +129,15 @@ def main(argv: list[str] | None = None) -> int:
             print("AssetGatekeeper: no staged assets")
         return 0
 
-    interpreter_problem = check_interpreter()
+    try:
+        interpreter_problem = check_interpreter()
+    except RuntimeError as exc:
+        # The script copied into .git/hooks finds no asset_gatekeeper.py beside
+        # it: say how to fix that instead of printing a traceback.
+        print(f"AssetGatekeeper: {exc}, or install the hook with "
+              "`python <AssetGatekeeper>/vcs_hooks/git_pre_commit.py --install`",
+              file=sys.stderr)
+        return 2
     if interpreter_problem:
         print(f"AssetGatekeeper: {interpreter_problem}", file=sys.stderr)
         return 2
@@ -117,9 +147,26 @@ def main(argv: list[str] | None = None) -> int:
         extra += ["--rules", options.rules]
 
     failures: list[str] = []
+    # The gate reads the file on disk, but the commit holds the staged version:
+    # stage a failing mesh, fix it on disk without `git add`, and the fixed copy
+    # passed while the failing one was committed. Such a file is not checked.
+    try:
+        unstaged = {Path(line.strip()).as_posix() for line in
+                    git("diff", "--name-only", "--", *[str(path) for path in paths]).splitlines()
+                    if line.strip()}
+    except RuntimeError as exc:
+        print(f"AssetGatekeeper: {exc}", file=sys.stderr)
+        return 2
+    for path in list(paths):
+        if path.as_posix() in unstaged:
+            failures.append(f"{path}\n    has changes that are not staged, so the commit would "
+                            "hold a version this hook cannot check: `git add` it to commit what is on "
+                            "disk, or `git stash --keep-index` to check the staged version")
+            paths.remove(path)
     for path in paths:
         lfs = " [LFS]" if is_lfs_tracked(path) else ""
-        completed = subprocess.run([*gatekeeper_command(), str(path), *extra],
+        rules = [] if options.rules else nearest_rules(path)
+        completed = subprocess.run([*gatekeeper_command(), str(path), *extra, *rules],
                                    capture_output=True, text=True,
                                    encoding="utf-8", errors="replace")
         if completed.returncode == 0:

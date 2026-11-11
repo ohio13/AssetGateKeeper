@@ -68,7 +68,8 @@ def write_rules(name, answers):
 
 def preset_numbers(key):
     """What the test expects, read straight from the gate's tables (not the wizard's)."""
-    source = {"pc": "pc", "switch": "ps3", "mobile": "mobile", "vr": "mobile", "n64": "n64"}.get(key)
+    source = {"pc": "pc", "midrange": "midrange", "switch": "switch", "mobile": "mobile",
+              "vr": "vr", "n64": "n64"}.get(key)
     if source is None:                       # midrange: the built-in Budget defaults
         budget = agk.Budget()
         return {"character": budget.max_triangles, "prop": 8_000,
@@ -86,7 +87,12 @@ def preset_numbers(key):
 #: Budget fields the wizard is allowed to set; every other one must stay default.
 WIZARD_FIELDS = {"max_triangles", "max_texture_edge", "max_material_slots", "max_bone_influences",
                  "max_uv_channels", "require_power_of_two", "enforce_texture_naming",
-                 "naming_conventions", "degenerate_mode", "pbr_check", "check_references"}
+                 "naming_conventions", "degenerate_mode", "pbr_check", "check_references",
+                 # the "checks" question (11 Nov 2026)
+                 "lod_min_levels", "lod_max_ratio", "collision_require", "collision_name_match",
+                 "collision_convex", "single_root_bone", "max_bones_per_section",
+                 "lightmap_require", "lightmap_uv_channel", "lightmap_inside_unit_square",
+                 "lightmap_max_overlap"}
 
 
 def check_combination(label, answers):
@@ -182,8 +188,10 @@ for platform in wiz.PLATFORMS:
     expect(f"{platform.key} numbers = the shipped table",
            wiz.platform_numbers(platform.key) == preset_numbers(platform.key))
 template = (ROOT / "templates" / "rules.toml").read_text(encoding="utf-8")
-expect("the midrange prop number is templates/rules.toml's [tags.prop] example",
-       f"[tags.prop]\n# max_triangles = {wiz.MIDRANGE_PROP_TRIANGLES}" in template)
+expect("every wizard platform has a shipped table of its own (11 Nov 2026: switch, vr and "
+       "midrange used to borrow ps3, mobile and the defaults)",
+       all(platform.source == platform.key for platform in wiz.PLATFORMS),
+       str({platform.key: platform.source for platform in wiz.PLATFORMS}))
 expect("every naming preset the wizard writes exists",
        set(wiz.ENGINE_NAMING.values()) - {""} | set(wiz.TOOL_NAMING.values()) <= set(agk.NAMING_PRESETS))
 
@@ -222,11 +230,53 @@ for pair in itertools.combinations([p.key for p in wiz.PLATFORMS], 2):
     check_combination("+".join(pair), {**base, "platforms": list(pair),
                                        "assets": ["characters", "props"]})
 
+print("4b. The extra checks: [lod], [collision], [skeleton], [lightmap] (11 Nov 2026)")
+_all = {"engines": "unreal, godot", "platforms": "pc, mobile", "assets": "characters, props",
+        "checks": "lod, collision, skeleton, lightmap"}
+_rules = write_rules("checks-all", _all)
+_doc, _b = load(_rules)[:2]
+expect("every chosen check is written and switched on",
+       _b.lod_min_levels == 3 and _b.lod_max_ratio == 0.6 and _b.collision_require
+       and _b.collision_name_match and _b.collision_convex and _b.single_root_bone
+       and _b.lightmap_require and _b.lightmap_uv_channel == 1
+       and _b.lightmap_max_overlap == 0 and _b.lightmap_inside_unit_square,
+       str((_b.lod_min_levels, _b.collision_require, _b.single_root_bone, _b.lightmap_require)))
+expect("the base budget takes mobile's 75 bones per material",
+       _b.max_bones_per_section == 75, str(_b.max_bones_per_section))
+_pc = agk.Budget.from_mapping(agk.apply_platform(_doc, "pc"))
+_mobile = agk.Budget.from_mapping(agk.apply_platform(_doc, "mobile"))
+expect("--platform pc lifts the per-material bone limit, --platform mobile keeps it",
+       _pc.max_bones_per_section == 0 and _mobile.max_bones_per_section == 75,
+       f"{_pc.max_bones_per_section} / {_mobile.max_bones_per_section}")
+expect("... and both keep the other checks", _pc.lod_min_levels == 3 and _pc.lightmap_require
+       and _mobile.collision_require)
+_no_unreal = write_rules("checks-godot", {"engines": "godot", "platforms": "pc",
+                                          "checks": "collision, skeleton"})
+_nb = load(_no_unreal)[1]
+_text = _no_unreal.read_text(encoding="utf-8")
+expect("without Unreal, collision is written as a comment and single_root is not forced",
+       not _nb.collision_require and "# [collision]" in _text and not _nb.single_root_bone
+       and _nb.max_bones_per_section == 0, _text[_text.find("Extra checks"):][:400])
+_retro = load(write_rules("checks-n64", {"platforms": "n64", "checks": "lod"}))[1]
+expect("a retro-only project asks for 2 LOD levels, not 3", _retro.lod_min_levels == 2)
+_none = load(write_rules("checks-none", {"platforms": "pc", "checks": "none"}))[1]
+expect("'none' adds no table", _none.lod_min_levels == 0 and not _none.collision_require
+       and not _none.lightmap_require and _none.max_bones_per_section == 0)
+_mixed = wiz.normalise_answers({"checks": "lod, none"})
+expect("'none' next to a real check is ignored, not an error",
+       wiz.plan(_mixed)["checks"] == ["lod"], str(wiz.plan(_mixed)["checks"]))
+_tagged = dict(_doc)
+_tagged["tags"] = {"props": {"lod": {"min_levels": 1}}}
+expect("a folder can relax the LOD count, as the file's comment says ([tags.props.lod])",
+       agk.build_tag_budgets(_tagged)["props"].lod_min_levels == 1)
+
 print("5. What the comments promise is what the gate does")
 document, budget, path = results["unreal+unity / pc+switch / chars+props"]
 text = path.read_text(encoding="utf-8")
 expect("several platforms: folder budgets are written as comments, with each platform's numbers",
-       "# [tags.props]\n# max_triangles = 8000" in text and "120,000" in text and "30,000" in text)
+       "# [tags.props]\n# max_triangles = "
+       f"{agk.PLATFORM_PRESETS['switch']['document']['tags']['prop']['max_triangles']}" in text
+       and "120,000" in text and "30,000" in text)
 expect("... and the base mesh budget is the Switch-class one", budget.max_triangles == 20_000)
 expect("the file says how to pick a platform", "--platform pc" in text)
 expect("ZBrush points at the Polypaint bake", "--bake-polypaint" in text)
@@ -369,9 +419,9 @@ def scripted(replies):
 
 
 talk = SCRATCH / "talk"
-ask, asked, said = scripted(["1,2", "", "pc, ps9", "pc switch", "", "3", "", ""])
+ask, asked, said = scripted(["1,2", "", "pc, ps9", "pc switch", "", "3", "", "", ""])
 code = wiz.run_wizard(talk, ask=ask, out=said.append, err=said.append, interactive=True)
-expect("six questions, a re-ask after a bad answer, then confirm", code == 0 and len(asked) == 8,
+expect("seven questions, a re-ask after a bad answer, then confirm", code == 0 and len(asked) == 9,
        f"exit {code}, {len(asked)} prompts")
 expect("the bad answer is explained and asked again", any("'ps9' is not one of" in line for line in said))
 expect("Enter takes the default shown in brackets", "[unreal]" in asked[0] and "[other]" in asked[1])
@@ -384,19 +434,19 @@ expect("the typed answers are what was written",
        and not talk_budget.pbr_check)
 written = (talk / "rules.toml").read_text(encoding="utf-8")
 
-ask, asked, said = scripted(["", "", "", "", "", "", "", ""])
+ask, asked, said = scripted(["", "", "", "", "", "", "", "", ""])
 code = wiz.run_wizard(talk, ask=ask, out=said.append, err=said.append, interactive=True)
 expect("re-run: the old answers are the defaults", "[unreal, unity]" in asked[0]
        and "[pc, switch]" in asked[2], asked[0])
 expect("replacing asks, and Enter (No) keeps the file (exit 1)",
        code == 1 and "Replace it" in asked[-1] and "[y/N]" in asked[-1]
        and (talk / "rules.toml").read_text(encoding="utf-8") == written, asked[-1])
-ask, asked, said = scripted(["", "", "n64", "", "", "", "", "y"])
+ask, asked, said = scripted(["", "", "n64", "", "", "", "", "", "y"])
 code = wiz.run_wizard(talk, ask=ask, out=said.append, err=said.append, interactive=True)
 expect("'y' replaces it and keeps a copy of the old one",
        code == 0 and load(talk / "rules.toml")[1].max_triangles == 1_200
        and [p.read_text(encoding="utf-8") for p in talk.glob("rules.backup-*.toml")] == [written])
-ask, asked, said = scripted(["", "", "", "", "", "", "n"])
+ask, asked, said = scripted(["", "", "", "", "", "", "", "n"])
 expect("'n' at the summary writes nothing (exit 1)",
        wiz.run_wizard(SCRATCH / "talk-no", ask=ask, out=said.append, err=said.append,
                       interactive=True) == 1 and not (SCRATCH / "talk-no").exists())
@@ -405,7 +455,7 @@ expect("Ctrl+D / Ctrl+Z part-way: cancelled, nothing written (exit 1)",
        wiz.run_wizard(SCRATCH / "talk-eof", ask=ask, out=said.append, err=said.append,
                       interactive=True) == 1 and not (SCRATCH / "talk-eof").exists()
        and any("Cancelled" in line for line in said))
-ask, asked, said = scripted(["", '"' + str(SCRATCH / "asked-folder") + '"'] + [""] * 7)
+ask, asked, said = scripted(["", '"' + str(SCRATCH / "asked-folder") + '"'] + [""] * 8)
 expect("no folder given: it is asked for, quotes from drag-and-drop removed",
        wiz.run_wizard(None, ask=ask, out=said.append, err=said.append, interactive=True) == 0
        and (SCRATCH / "asked-folder" / "rules.toml").is_file())

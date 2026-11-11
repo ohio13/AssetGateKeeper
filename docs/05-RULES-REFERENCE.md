@@ -146,13 +146,20 @@ max_bone_influences = 4
 max_uv_channels = 1
 
 [platforms.ps2.mesh]
-allow_degenerate = false
+max_mb = 2              # a nested table tightens a threshold
+
+[platforms.ps2.lod]
+min_levels = 2
 ```
 
 Allowed keys: `max_triangles`, `max_material_slots`, `max_texture_edge`,
 `max_bone_influences`, `max_uv_channels`, plus nested `[mesh]`/`[texture]`
-and `[skeleton]` (`max_bones`, `max_bones_per_section`, `max_depth`; see
-[\[skeleton\]](#skeleton)). `[tags.<name>]` takes the same nested tables.
+`[skeleton]` (`max_bones`, `max_bones_per_section`, `max_depth`; see
+[\[skeleton\]](#skeleton)), `[lod]` (`min_levels`, `max_ratio`) and
+`[collision]` (`max_hulls`, `max_hull_vertices`). `[tags.<name>]` takes the same
+nested tables, so a folder of small props can say `[tags.props.lod] min_levels = 1`.
+Switches (`[collision] require`, `[lightmap]`, `[skeleton] single_root`) stay
+project-wide.
 
 Two rules:
 
@@ -337,6 +344,11 @@ Unreal's collision convention: meshes named `UCX_` (convex hull), `UBX_` (box),
 `USP_` (sphere) or `UCP_` (capsule) followed by the name of the render mesh
 they belong to. Off until the table is there.
 
+Whether the table is there or not, collision meshes are not render geometry: in
+an FBX and (since 11 Nov 2026) in a glTF they add nothing to the triangle,
+material, UV-set, broken-triangle, memory or texel-density numbers, so the same
+asset gets the same verdict in either format.
+
 ```toml
 [collision]
 require = true            # a static mesh must carry collision (default false)
@@ -467,6 +479,9 @@ decoded gets a warning that the per-section count was skipped.
 An authored lightmap UV set on static (non-skinned) meshes. Off by default:
 without a `[lightmap]` table no lightmap UV is read. Not the same as `[mesh]
 lightmap_uv`, which only adds the set Unreal *generates* to the memory estimate.
+Only LOD0 is asked, in both formats: an FBX LOD group's coarser levels, a glTF's
+`MSFT_lod` levels and meshes no node places are left out (the skeleton checks
+read LOD0 the same way).
 
 ```toml
 [lightmap]

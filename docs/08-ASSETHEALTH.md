@@ -110,7 +110,9 @@ are stored, and served with the budget on `/api/rules`, so every
 
 First visit offers **Just me on this PC** (solo mode: no account, no password,
 this machine only; requests from elsewhere get a page saying so) or bootstraps the
-first account (both only while zero accounts exist, only from loopback). Solo mode
+first account (both only while zero accounts exist, only from loopback; a request
+that came through a reverse proxy, with `X-Forwarded-For` or `Forwarded`, counts as
+from elsewhere even when the proxy runs on the same PC). Solo mode
 is one director account named `me` with a random password nobody knows, plus a
 per-run CSRF token; **Turn on accounts** (`/admin/accounts`) renames it and sets a
 real password. `--add-admin` refuses while solo mode is on. On a first start

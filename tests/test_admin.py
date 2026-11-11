@@ -788,6 +788,12 @@ expect("... and adds nobody", ahs.admin_account_count(solo_db) == 1)
 status, body = me.get("/admin/login")
 expect("this PC never sees a sign-in page in solo mode", status == 200 and b"Sign in" not in body
        and b"Rules" in body)
+_proxied = Session(solo_base)
+_status, _body = _proxied._call("/admin/api/state", headers={"X-Forwarded-For": "10.1.2.3"})
+expect("a request through a reverse proxy on this PC is not 'this PC' in solo mode",
+       _status == 401, (_status, _body[:120]))
+expect("... with Forwarded (RFC 7239) either",
+       _proxied._call("/admin/api/state", headers={"Forwarded": "for=10.1.2.3"})[0] == 401)
 _lan = ""
 try:
     _probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

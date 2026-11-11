@@ -94,34 +94,28 @@ Reported as: `tag 'charcter' is not a known tag; closest match is 'character'`.
 | `--no-color` | plain text (CI logs, redirected output) |
 | `-v` | verbose |
 | `--init [--yes]` | write a commented starter `rules.toml` |
-| `--wizard [--yes] [--force]` · `--wizard-answers FILE` | the rules wizard: six questions about the project (several answers each), one commented `rules.toml` for all of them - see [below](#the-rules-wizard) |
+| `--wizard [--yes] [--force]` · `--wizard-answers FILE` | the rules wizard: seven questions about the project (several answers each), one commented `rules.toml` for all of them - see [below](#the-rules-wizard) |
 | `--list-presets` | print the ten shipped budgets |
 | `--doctor` | environment report: interpreter, packages, ports, rules |
 | `--suggest-naming` | learn a `[naming]` block from the names already in `<folder>`; prints it, writes nothing |
-| `<file.obj> --bake-polypaint [--bake-triangles N] [--bake-texture PX]` | make a game asset from an `.obj` whose colour is ZBrush Polypaint or vertex colours: a reduced `.glb` with UVs and a baked `T_..._BaseColor.png`, written beside it (`_HP` in the name becomes `_LP`), sized to the folder's budget (at most 30,000 triangles and 2048 px unless set), then checked. The source is never changed. `--bake-preset n64` makes an N64-style asset (about 1,200 triangles, 64 px, 16 colours, the face in a second 64 px texture); `--bake-face-texture` / `--bake-no-face-texture` turn the face texture on or off. Needs `fast-simplification`, `xatlas` and `scipy` on Python 3.10+ (double-click `Install_Extras.bat`, or `pip install "asset-gatekeeper[bake]"`) |
+| `<file.obj> --bake-polypaint [--bake-triangles N] [--bake-texture PX]` | make a game asset from an `.obj` whose colour is ZBrush Polypaint or vertex colours: a reduced `.glb` with UVs and a baked `T_..._BaseColor.png`, written beside it (`_HP` in the name becomes `_LP`), sized to the folder's budget (at most 30,000 triangles and 2048 px unless set), then checked. The source is never changed. `--bake-preset n64` makes an N64-style asset (about 1,200 triangles, 64 px, 16 colours, the face in a second 64 px texture); `--bake-face-texture` / `--bake-no-face-texture` turn the face texture on or off. Needs `fast-simplification`, `xatlas` and `scipy` on Python 3.10+ (double-click `Install_Extras.bat`, or `pip install "asset-gatekeeper[bake]"`) A `--bake-texture` or `--bake-triangles` above the folder's `[texture] max_edge` or `[mesh] max_triangles` is refused before the bake starts, since the result would fail the gate |
 | `--version` | print the version |
 
 ### The JSON shape
 
 ```json
-[
-  {
-    "path": "C:\\Proj\\assets\\env\\cliff.obj",
-    "name": "cliff.obj",
-    "passed": false,
-    "status": "FAILED",
-    "metric": "72,500 tris / 4 mat",
-    "problems": [
-      "72,500 triangles exceeds the 50,000 budget (+22,500)",
-      "4 material slots exceeds the 3 slot budget (draw calls)"
-    ]
-  }
-]
+{"file": "C:\\Proj\\assets\\env\\cliff.obj", "name": "cliff.obj", "passed": false, "status": "FAILED", "metric": "72,500 tris / 4 mat", "problems": ["72,500 triangles exceeds the 50,000 budget (+22,500)", "4 material slots exceeds the 3 slot budget (draw calls)"], "modifications": [], "warnings": [], "stats": {"triangles": 72500, "material_slots": 4, "degenerate_triangles": 0}}
 ```
 
-One object per asset, stable keys. `status` is `PASSED`, `FAILED`, `HEALED` or
+One JSON object per asset, one per line (JSON Lines, not one array), stable
+keys: `file` (the full path), `name`, `passed`, `status`, `metric`, `problems`,
+`modifications` (what a heal changed), `warnings` (notes that never fail the
+asset) and `stats` (the numbers behind the metric). `status` is `PASSED`, `FAILED`, `HEALED` or
 `ERROR`; `problems` is empty for a pass. A `--once` run ends with one more
-line, `{"summary": {"total", "passed", "failed", "skipped"}}`, where `skipped`
+line, `{"summary": {"total", "passed", "failed", "skipped", "totals_failed"}}`, where
+`totals_failed` lists each `[[totals]]` budget over its limit (`{"total": "Props/*",
+"problems": [...], "metric", "stats"}`; it fails the run without being an asset, so
+`failed` does not count it) and `skipped`
 counts the files it walked past: `{"total": 7, "unsupported": {".jfif": 6,
 ".blend": 1}, "excluded": 0}` (scratch, hidden and the tool's own files are not
 counted). The text output says the same in one line, with a hint for the common
@@ -208,8 +202,8 @@ asset-gatekeeper <folder> --wizard --yes                  # every default, no qu
 
 On Windows, double-click `tools\rules_wizard.bat` (or drag the export folder
 onto it). `--init --wizard` is the same as `--wizard`; plain `--init` is
-unchanged. Six questions, each with a default on Enter; the first four take
-several answers (`1,3` or `unreal, unity`):
+unchanged. Seven questions, each with a default on Enter; the first four and
+the extra checks take several answers (`1,3` or `unreal, unity`):
 
 | Question (answers-file key) | Choices | Becomes |
 |---|---|---|
@@ -218,11 +212,12 @@ several answers (`1,3` or `unreal, unity`):
 | Platforms (`platforms`) | `pc` (high-end PC / current console), `midrange` (mid PC / last-gen console), `switch`, `mobile`, `vr`, `n64` (retro) | the tightest limit of all of them is the `[mesh]`/`[texture]` budget; each platform gets a `[platforms.<name>]` block for `--platform <name>` |
 | Kinds of asset (`assets`) | `characters` `props` `environment` `ui` | two or more kinds of mesh: `[tags.characters]`, `[tags.props]`, `[tags.environment]` (a tag is a folder name). With several platforms they are written as comments, because a tag's budget wins over `--platform`. `ui` lets textures named `UI_...` skip the map suffix |
 | Style (`style`) | `realistic` `stylised` `lowpoly` | the albedo brightness check (`pbr`) is on for realistic art only |
+| Extra checks (`checks`) | `lod` `collision` `skeleton` `lightmap` `none` (default) | `[lod] min_levels = 3` (2 for a retro-only project), `max_ratio = 0.6`; `[collision] require = true` (as a comment unless Unreal is one of the engines); `[skeleton] single_root = true` with Unreal and `max_bones_per_section = 75` for mobile and VR, with a `[platforms.<name>.skeleton]` block per platform; `[lightmap] require = true`, `uv_channel = 1`, `max_overlap = 0` |
 | Broken geometry (`broken_geometry`) | `block` `warn` | `[mesh] degenerate` |
 
-The numbers come from the shipped tables, not from the wizard: `pc`, `mobile`
-and `n64` are those `--preset` targets, `switch` uses the `ps3` target, `vr`
-the `mobile` one, and `midrange` the built-in default budget. The file's header
+The numbers come from the shipped tables, not from the wizard: every platform
+is the `--preset` target of the same name (`pc`, `midrange`, `switch`,
+`mobile`, `vr`, `n64`). The file's header
 lists the answers (and a `# wizard-answers:` line you can save as
 `answers.json`); every value has a comment saying where it came from.
 

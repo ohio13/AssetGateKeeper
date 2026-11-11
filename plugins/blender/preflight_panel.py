@@ -75,8 +75,8 @@ def scene_facts():
     targets = context.selected_objects or [o for o in context.scene.objects
                                            if o.type == "MESH"]
     for obj in targets:
-        if obj.type != "MESH":
-            continue
+        if obj.type != "MESH" or core.is_collision_name(obj.name):
+            continue                 # UCX_/UBX_/USP_/UCP_ are not in the gate's budget
         evaluated = obj.evaluated_get(depsgraph)
         mesh = evaluated.to_mesh()
         try:
@@ -118,6 +118,206 @@ def _zero_area_polygons(mesh, count) -> int:
         return sum(1 for polygon in mesh.polygons if polygon.area <= 1e-9)
 
 
+# --------------------------------------------------------------------------- #
+# [lod], [collision], [skeleton], [lightmap]: read only while a rule is on
+# --------------------------------------------------------------------------- #
+
+def _targets(context):
+    return context.selected_objects or [o for o in context.scene.objects if o.type == "MESH"]
+
+
+def _polygons(mesh):
+    """(corner counts, corner -> vertex index) of a mesh, read in two calls."""
+    import numpy as np
+
+    counts = np.empty(len(mesh.polygons), dtype=np.int64)
+    mesh.polygons.foreach_get("loop_total", counts)
+    corners = np.empty(len(mesh.loops), dtype=np.int64)
+    mesh.loops.foreach_get("vertex_index", corners)
+    return counts.tolist(), corners.tolist()
+
+
+def _evaluated_mesh_data(obj, depsgraph, read):
+    evaluated = obj.evaluated_get(depsgraph)
+    mesh = evaluated.to_mesh()
+    try:
+        return read(mesh)
+    finally:
+        evaluated.to_mesh_clear()
+
+
+def _hull(mesh):
+    import numpy as np
+
+    points = np.empty(len(mesh.vertices) * 3, dtype=np.float64)
+    mesh.vertices.foreach_get("co", points)
+    counts, corners = _polygons(mesh)
+    return points.reshape(-1, 3).tolist(), core.fan_triangles(counts, corners)
+
+
+def _armature(obj):
+    """The armature object deforming *obj* (Armature modifier, or an armature parent)."""
+    for modifier in getattr(obj, "modifiers", ()):
+        if modifier.type == "ARMATURE" and getattr(modifier, "object", None) is not None:
+            return modifier.object
+    parent = getattr(obj, "parent", None)
+    if parent is not None and parent.type == "ARMATURE" and \
+            getattr(obj, "parent_type", "") == "ARMATURE":
+        return parent
+    return None
+
+
+def _skeleton(render, depsgraph):
+    """Bones as the FBX export writes them: every bone is a joint (LimbNode); the
+    skeleton is the bones connected to one that weights a vertex (a vertex group
+    of its name). The exporter's "Only Deform Bones" option would drop some: the
+    gate reads the exported file."""
+    import numpy as np
+
+    bound, bones_of, sections = [], {}, {}
+    for obj in render:
+        armature = _armature(obj)
+        if armature is None:
+            continue
+        for bone in armature.data.bones:
+            bones_of[(armature.name, bone.name)] = bone
+        names = {group.index: group.name for group in obj.vertex_groups}
+
+        def read(mesh, armature=armature, names=names, obj=obj):
+            weighted = {}
+            for vertex in mesh.vertices:
+                for item in vertex.groups:
+                    name = names.get(item.group)
+                    if name is not None and item.weight > 1e-4 and \
+                            (armature.name, name) in bones_of:
+                        weighted.setdefault(name, set()).add(vertex.index)
+            counts, corners = _polygons(mesh)
+            slots = np.empty(len(mesh.polygons), dtype=np.int64)
+            mesh.polygons.foreach_get("material_index", slots)
+            per_corner = np.repeat(slots, counts) if len(slots) else slots
+            corners = np.asarray(corners, dtype=np.int64)
+            for slot in np.unique(slots).tolist():
+                used = set(corners[per_corner == slot].tolist())
+                material = (obj.material_slots[slot].material
+                            if slot < len(obj.material_slots) else None)
+                label = material.name if material is not None else "default material"
+                section = sections.setdefault(label, set())
+                section.update(name for name, vertices in weighted.items() if vertices & used)
+            return weighted
+
+        bound.extend((armature.name, name) for name in _evaluated_mesh_data(obj, depsgraph, read))
+
+    def parent_of(key):
+        parent = bones_of[key].parent
+        return (key[0], parent.name) if parent is not None else None
+
+    def children_of(key):
+        return [(key[0], child.name) for child in bones_of[key].children]
+
+    return {"bones": core.skeleton_from_hierarchy(bound, parent_of, children_of,
+                                                  lambda key: key in bones_of,
+                                                  label=lambda key: key[1]),
+            "sections": [(label, len(found)) for label, found in sections.items()]}
+
+
+def _uv_values(layer, count):
+    """Per-corner UVs of one UV layer. ``layer.uv`` (Blender 3.5+) or ``layer.data``
+    (older): capability probing, as the attribute moved between versions."""
+    import numpy as np
+
+    values = np.empty(count * 2, dtype=np.float64)
+    source = getattr(layer, "uv", None)
+    if source is not None and hasattr(source, "foreach_get"):
+        source.foreach_get("vector", values)
+    else:
+        layer.data.foreach_get("uv", values)
+    return values.reshape(-1, 2)
+
+
+def _lightmap(render, depsgraph, channel):
+    """(mesh, per-corner UVs of layer *channel* or None, fan UV triangles) per static
+    mesh. The FBX exporter writes the UV layers in order, so layer *channel* is
+    the FBX UV set of that index."""
+    found = []
+    for obj in render:
+        if _armature(obj) is not None:
+            continue                                   # skinned: not lightmapped
+
+        def read(mesh, name=obj.name):
+            layers = mesh.uv_layers
+            if channel >= len(layers):
+                return (name, None, None)
+            uvs = _uv_values(layers[channel], len(mesh.loops))
+            counts, _corners = _polygons(mesh)
+            import numpy as np
+
+            triangles = np.asarray(core.fan_triangles(counts, list(range(len(uvs)))),
+                                   dtype=np.int64).reshape(-1, 3)
+            return (name, uvs.tolist(), uvs[triangles].tolist())
+
+        found.append(_evaluated_mesh_data(obj, depsgraph, read))
+    return found
+
+
+def structure_facts(budget):
+    """assess() keywords for [lod], [collision], [skeleton] and [lightmap].
+
+    Nothing is read for a rule that is off. Blender has no LOD group the FBX
+    exporter writes, so LODs come from object names (<name>_LOD0, _LOD1, ...);
+    a collection is not exported as a node, so it does not make an LOD group.
+    An API difference between Blender versions leaves the rule to the gate (an
+    info note from assess()) instead of breaking the panel."""
+    on = core.rules_on(budget) if budget is not None else {}
+    facts = {}
+    if not any(on.values()):
+        return facts
+    context = bpy.context
+    depsgraph = context.evaluated_depsgraph_get()
+    meshes = [obj for obj in _targets(context) if obj.type == "MESH"]
+    render = [obj for obj in meshes if not core.is_collision_name(obj.name)]
+    facts["render_names"] = sorted(obj.name for obj in render)
+    if on.get("lod"):
+        try:
+            facts["lods"] = core.lods_by_name(
+                (obj.name, _evaluated_mesh_data(obj, depsgraph,
+                                                lambda mesh: _triangle_count(mesh)))
+                for obj in render)
+        except Exception:
+            pass
+    if on.get("collision"):
+        try:
+            # Selected, or next to a render mesh (same parent; at the top, the
+            # same collection): an artist selects the mesh, not its hull.
+            nearby = list(meshes)
+            for obj in render:
+                siblings = obj.parent.children if obj.parent is not None else [
+                    item for collection in obj.users_collection
+                    for item in collection.objects if item.parent is None]
+                nearby.extend(item for item in siblings if item.type == "MESH")
+            hulls = {obj.name: obj for obj in nearby if core.is_collision_name(obj.name)}
+            facts["collision"] = [(name, *_evaluated_mesh_data(obj, depsgraph, _hull))
+                                  for name, obj in sorted(hulls.items())]
+            facts["skinned"] = any(_armature(obj) is not None for obj in render)
+        except Exception:
+            facts.pop("collision", None)
+    if on.get("skeleton"):
+        try:
+            facts["skeleton"] = _skeleton(render, depsgraph)
+        except Exception:
+            pass
+    if on.get("lightmap"):
+        try:
+            facts["lightmap"] = _lightmap(render, depsgraph, int(budget.lightmap_uv_channel))
+        except Exception:
+            pass
+    return facts
+
+
+def _triangle_count(mesh) -> int:
+    count = len(mesh.polygons)
+    return len(mesh.loop_triangles) or (len(mesh.loops) - 2 * count)
+
+
 def _asset_folder():
     """The department folder the file lives in, for the fuzzy tag check."""
     path = bpy.data.filepath or ""
@@ -138,7 +338,8 @@ def run_preflight(rules_path=None, preset=None):
     report = core.assess(asset=bpy.context.scene.name, triangles=triangles,
                          vertices=vertices, materials=materials,
                          textures=textures, degenerate=degenerate,
-                         folder=_asset_folder(), budget=budget)
+                         folder=_asset_folder(), budget=budget,
+                         **structure_facts(budget))
     if problem:
         report.add("info", "no_rules", f"budget unavailable: {problem}")
     return report
