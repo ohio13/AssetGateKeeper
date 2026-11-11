@@ -7888,13 +7888,28 @@ def write_reports(targets: Sequence[tuple[str, str]], verdicts: Sequence[Verdict
         LOG.info("report  %s written to %s (%d assets)", kind, path, len(verdicts))
 
 
+class _GateParser(argparse.ArgumentParser):
+    """``args.folder`` stays the one path every caller reads; ``args.paths`` has them all.
+
+    Intermixed, so ``a.fbx --once b.png`` takes both files, as ``a.fbx b.png --once`` does.
+    """
+
+    def parse_args(self, args=None, namespace=None):  # type: ignore[override]
+        parsed = self.parse_intermixed_args(args, namespace)
+        paths = list(parsed.folder or [])
+        parsed.paths = paths
+        parsed.folder = paths[0] if paths else None
+        return parsed
+
+
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _GateParser(
         prog="asset_gatekeeper",
         description="Watch a folder of art exports and enforce asset budgets.",
         epilog=(
             "common first runs:\n"
             "  asset-gatekeeper <folder> --recursive --once     one scan, then exit\n"
+            "  asset-gatekeeper a.fbx b.png --once --json       several files in one run\n"
             "  asset-gatekeeper <folder> --init                 write a rules.toml\n"
             "  asset-gatekeeper <folder> --wizard               ...from questions about your project\n"
             "  asset-gatekeeper --doctor                        check this machine\n"
@@ -7904,8 +7919,10 @@ def build_parser() -> argparse.ArgumentParser:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    parser.add_argument("folder", nargs="?", default=None,
-                        help="folder to watch (default: current directory)")
+    parser.add_argument("folder", nargs="*", default=None, metavar="PATH",
+                        help="folder to watch or check (default: current directory), or one "
+                             "asset file; several asset files with --once check each as one "
+                             "file would be, one verdict each in the order given")
     parser.add_argument("--triangles", type=_non_negative_int, default=None,
                         help="max triangles per mesh (overrides rules.toml; default 50,000)")
     parser.add_argument("--max-texture", type=_positive_int, default=None, metavar="EDGE",
@@ -8073,6 +8090,100 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+#: Flags that do one job on one path: refused when several paths are given.
+_ONE_PATH_FLAGS = (("doctor", "--doctor"), ("init", "--init"), ("wizard", "--wizard"),
+                   ("wizard_answers", "--wizard-answers"), ("suggest_naming", "--suggest-naming"),
+                   ("audit", "--audit"), ("heal", "--heal"), ("dry_run", "--dry-run"),
+                   ("undo_heal", "--undo-heal"), ("list_heals", "--list-heals"),
+                   ("bake_polypaint", "--bake-polypaint"), ("exception_path", "--exception-path"))
+
+
+class _SetupLinesOnce(logging.Filter):
+    """In a run over several files, each file's setup lines (rules, budget, tags...)
+    are printed the first time only: they are the same for every file under one rules.toml."""
+
+    PREFIXES = ("rules   ", "cli     ", "budget  ", "heal    ", "report  ", "tags    ",
+                "except  ", "toasts  ", "healing ON")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.seen: set[str] = set()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not (isinstance(record.msg, str) and record.msg.startswith(self.PREFIXES)):
+            return True
+        text = record.getMessage()
+        if text in self.seen:
+            return False
+        self.seen.add(text)
+        return True
+
+
+def run_many(args: argparse.Namespace) -> int:
+    """``--once`` over several files in one run: ``a.fbx b.png c.glb --once --json``.
+
+    For the Unity and Godot plug-ins, which check what one import brought in
+    with one Python start-up (~0.7 s) instead of one per file. Each file is
+    checked exactly as a run with that file alone checks it: --rules if given,
+    else its own folder's rules.toml; [tags.*] and [[exceptions]] relative to
+    the --rules folder when the file is under it; no [[totals]] (a few files
+    are not the folder). Verdicts come in the order given, each with its own
+    "file", then one summary line. A missing file, or one that is not an asset
+    type, is an ERROR verdict of its own; a file whose rules cannot be used
+    gets no verdict and makes the run exit 2. Exit: 2 if any file could not be
+    checked that way, else 1 if any failed, else 0.
+    """
+    refused = [flag for attr, flag in _ONE_PATH_FLAGS if getattr(args, attr, None)]
+    if refused:
+        LOG.error("%s takes one path, and %d were given", refused[0], len(args.paths))
+        return 2
+    if not args.once:
+        LOG.error("several paths are checked with --once (watching takes one folder)")
+        return 2
+    paths = [Path(raw).expanduser().resolve() for raw in args.paths]
+    folder = next((path for path in paths if path.is_dir()), None)
+    if folder is not None:
+        LOG.error("%s is a folder: several paths must all be files. Check a folder on its "
+                  "own (asset-gatekeeper <folder> --once)", folder)
+        return 2
+    if trimesh is None or Image is None:
+        missing = [name for name, module in (("trimesh", trimesh), ("pillow", Image)) if module is None]
+        LOG.error("missing dependencies: %s - python -m pip install %s", ", ".join(missing), " ".join(missing))
+        return 2
+
+    verdicts: list[Verdict] = []
+    own = Reporter(color=not args.no_color and not args.json, json_mode=args.json)
+    status = 0
+    once = _SetupLinesOnce()
+    LOG.addFilter(once)
+    try:
+        for raw, path in zip(args.paths, paths):
+            problem = ("not found" if not path.exists()
+                       else "not a tracked asset type" if not is_candidate(path) else "")
+            if problem:
+                verdict = Verdict(path, (problem,), unreadable=True)
+                own.report(verdict)
+                verdicts.append(verdict)
+                status = max(status, 1)
+                continue
+            single = argparse.Namespace(**vars(args))
+            single.folder, single.paths, single.report = raw, [raw], []
+            status = max(status, run_args(single, sink=verdicts))
+    finally:
+        LOG.removeFilter(once)
+    own.passed = sum(1 for verdict in verdicts if verdict.passed)
+    own.failed = len(verdicts) - own.passed
+    own.summary()
+    if args.report:
+        try:
+            base: Optional[Path] = (Path(args.rules).expanduser().resolve().parent if args.rules
+                                    else Path(os.path.commonpath([str(path.parent) for path in paths])))
+        except ValueError:            # files on two Windows drives share no folder
+            base = None
+        write_reports(args.report, verdicts, base)
+    return status
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = build_parser().parse_args(argv)
     for stream in (sys.stdout, sys.stderr):
@@ -8088,7 +8199,17 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     stream = sys.stderr if args.json else sys.stdout
     logging.basicConfig(level=logging.DEBUG if args.verbose else logging.INFO,
                         format="%(asctime)s %(message)s", datefmt="%H:%M:%S", stream=stream)
+    if len(getattr(args, "paths", ())) > 1:
+        return run_many(args)
+    return run_args(args)
 
+
+def run_args(args: argparse.Namespace, sink: Optional[list] = None) -> int:
+    """Everything main() does once the command line is parsed, for one path.
+
+    ``sink``: run_many's list, which collects every verdict of a run over
+    several files (for --report and the summary line).
+    """
     if getattr(args, "list_presets", False):
         rows = preset_summary()
         print(f"{'preset':<10}{'platform':<26}{'char tris':>10}{'prop tris':>11}"
@@ -8316,6 +8437,8 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     reporter = Reporter(color=not args.no_color and not args.json, root=watch_dir,
                         json_mode=args.json, telemetry=telemetry, notifier=notifier)
     reporter.keep_verdicts = bool(args.report)
+    if sink is not None:
+        reporter.keep_verdicts, reporter.verdicts = True, sink
 
     if root.is_file():
         if not is_candidate(root):

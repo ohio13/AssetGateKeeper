@@ -470,8 +470,8 @@ writes each failure to the Console.
      folder or above it, up to the project folder. A `rules.toml` next to
      `Assets` (not inside it) covers the whole project and is not imported by
      Unity.
-   * **Timeout per file**, **Check on import** (on/off) and **Log passing
-     assets**.
+   * **Timeout per file** (a batch of n files may take n times it),
+     **Check on import** (on/off) and **Log passing assets**.
 4. Press **Test the gate**. It should say `asset-gatekeeper 0.1.0a1` (or a
    later version). Anything else is the reason the checks will not run.
 
@@ -482,9 +482,11 @@ differ from one PC to the next; nothing is written into the project.
 
 * After Unity imports (or moves) `.fbx`, `.obj`, `.gltf`, `.glb`, `.png`,
   `.tga`, `.jpg`, `.tif`, `.webp`, `.dds`, `.exr` or `.ktx2` files under
-  `Assets/`, the gate checks each source file, one at a time, on a background
-  thread. A background task ("AssetGatekeeper") shows the progress at the
-  bottom right of the editor and can be cancelled there.
+  `Assets/`, the gate checks the source files on a background thread, in
+  batches: the files that share a `rules.toml`, up to 50 per gate run (see
+  [Batches](#batches-unity-and-godot) below). A background task
+  ("AssetGatekeeper") shows the progress at the bottom right of the editor
+  and can be cancelled there.
 * A failure is a Console error naming the asset and the gate's own words,
   e.g. `AssetGatekeeper: Assets/Models/crate.fbx FAILED: 5 material slots
   exceeds the 4 slot budget`. Click it to highlight the asset.
@@ -504,8 +506,9 @@ in selected folders), *Check All* (every model and texture under `Assets/`),
 
 ### Limits
 
-* Each file starts the gate's Python once (about a second per file); a first
-  import of a big project, or *Check All*, takes a while in the background.
+* A batch reports when its gate run ends, so the progress bar moves in steps
+  of up to 50 files, and *Stop Checking* stops the run in progress (its files
+  are not checked, and are checked again on the next import or *Check*).
 * An unchanged file is not checked twice in one editor session, so a label
   change (which rewrites the `.meta`) does not start another check. Use *Check
   Selected* to force one.
@@ -525,9 +528,13 @@ plug-in as netstandard2.1 / C# 9 (the defaults of Unity 2021.3) against
 stand-in `UnityEngine`/`UnityEditor` declarations (`tests/unity_stubs/`,
 warnings are errors) with the .NET 8 SDK, then runs it against the real gate:
 an import of a good and an over-budget FBX and two textures (one in a folder
-with a space, one with an accent), labels, the re-import loop guard, Check
-Selected after a fix, a missing Python, a hanging gate stopped at the
-timeout, an inherited `PYTHONHOME`, and argument quoting. The CI job
+with a space, one with an accent, and its own `rules.toml`), checked in one
+gate run per `rules.toml`; labels, the re-import loop guard, a forced batch
+with a file that is gone, Check Selected after a fix, a missing Python, a
+hanging gate stopped at the timeout (and a batch's timeout, 3 files x 1 s),
+the batch plan (120 files are runs of 50/50/20; long paths cut at 8,000
+characters), verdicts matched back by path (Windows case and separators), an
+inherited `PYTHONHOME`, and argument quoting. The CI job
 *unity plug-in* runs it on every change. What it cannot prove: that Unity
 calls `OnPostprocessAllAssets`, the menu and the settings page the way its
 documentation says, and how the Console and labels look. Check that in your
@@ -572,7 +579,7 @@ failures in a dock.
 * When Godot imports or reimports a file (the `resources_reimported` signal of
   `EditorFileSystem`), the add-on checks the source files it measures (the
   same formats as Unity above; `res://addons/` is skipped) on a background
-  thread, one at a time.
+  thread, in batches of up to 50 files that share a `rules.toml` per gate run.
 * A failure is an error in the Output panel:
   `AssetGatekeeper: res://models/crate.obj FAILED: 200 triangles exceeds the
   100 budget (+100)`. The dock lists every failing asset with the reasons
@@ -589,9 +596,9 @@ failures in a dock.
   which in Godot 4.2 waits for the program to end (`OS.execute_with_pipe`,
   which does not, arrived in 4.3). A file the gate takes long over keeps the
   background thread busy (the editor stays usable), and closing the editor
-  waits for that one file.
-* About a second per file, as in Unity. An unchanged file is not checked
-  twice in a session.
+  waits for the batch being checked (up to 50 files, a few seconds for
+  ordinary assets).
+* An unchanged file is not checked twice in a session.
 * Godot 4.2 needs FBX2glTF to import `.fbx` (4.3+ reads FBX itself); the gate
   checks the `.fbx` source either way. Godot's own triangle counts have not
   been compared with the gate's.
@@ -605,9 +612,12 @@ failures in a dock.
 1. runs `godot --headless --script res://test_runner.gd`, which calls the
    add-on's own code: a good and an over-budget OBJ under the project's
    `rules.toml`, a non-power-of-two texture, a missing file, a missing Python,
-   unreadable gate output, the dock's list, and the background queue (three
-   files queued, text and `addons/` skipped, one batch, unchanged files not
-   queued again), with a stray `PYTHONHOME` in the environment;
+   unreadable gate output, the dock's list, the background queue (three
+   files queued, text and `addons/` skipped, one gate run per `rules.toml`,
+   unchanged files not queued again), a batch with a missing file (the
+   add-on's own "source file not found", and the gate's `ERROR` line when it
+   is sent anyway), the batch plan and matching verdicts back by path, with a
+   stray `PYTHONHOME` in the environment;
 2. opens the same project in the headless editor (`--headless --editor`),
    where the add-on is enabled and Godot's first import of the project reaches
    it: the test looks for the startup line, no script errors, and the
@@ -615,6 +625,37 @@ failures in a dock.
 
 Verified with Godot 4.2.2 on Linux, 10 Nov 2026. Not tried yet: Windows, the
 dock as an artist sees it, and Godot 4.3/4.4.
+
+### Batches (Unity and Godot)
+
+Both plug-ins used to start the gate's Python once per imported file (about
+0.7 s each), so a first import of 200 assets spent over two minutes just
+starting Python. They now pass several files to one run
+(`asset-gatekeeper a.fbx b.png ... --once --json --rules <rules.toml>`, see
+[06](06-CLI-REFERENCE.md#several-files-in-one-run)):
+
+* Files are grouped by the `rules.toml` each one would use (the setting,
+  `ASSETGATEKEEPER_RULES`, or the nearest one), so every file is judged by
+  the same rules as before.
+* At most **50 files** per run, so the progress bar moves and one crashed or
+  hung run takes no more than 50 files with it, and at most **8,000
+  characters** of command line: Windows' `CreateProcess` allows 32,767, and
+  8,000 also stays under the 8,191 of `cmd.exe`, which runs the gate when the
+  Python setting is a `.bat`/`.cmd` shim (pyenv-win's `python.bat`). A run
+  is cut at whichever limit comes first.
+* Each verdict line is matched to its file by the line's `file` (separators
+  and, on Windows, case do not matter); a file the gate resolved to another
+  spelling (a symlink) is matched by position when every file has a line and
+  the names agree. A file with no line is NOT checked, with the gate's last
+  log line as the reason. The summary line is skipped.
+* Unity's timeout is per file: a run of n files may take n times it.
+* A file that is gone before the check is still NOT checked: "source file not
+  found", without being sent.
+
+Measured on a 2-core Linux machine with the gate's own command line (50 small
+files: 25 64 px PNGs and 25 768-triangle FBXs, `--once --json --rules`): one
+process per file took 37.4-39.4 s (about 0.75 s a file), one run of all 50
+0.8-0.9 s.
 
 ---
 

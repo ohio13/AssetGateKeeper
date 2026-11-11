@@ -1,8 +1,9 @@
 // AssetGatekeeper for Unity (2021.3 LTS or newer) - the editor side.
 //
 // * Checks models and textures when Unity imports them (an AssetPostprocessor,
-//   batched through OnPostprocessAllAssets), on a background thread, one file at a
-//   time, so the editor is never blocked.
+//   batched through OnPostprocessAllAssets), on a background thread, so the editor
+//   is never blocked: up to GateRunner.MaxBatchFiles files that share a rules.toml
+//   per gate run, so an import of 200 files starts Python a few times, not 200.
 // * Every failure goes to the Console as an error naming the asset and the gate's
 //   own words (click it to ping the asset), and the asset gets the label
 //   AGK_Failed: type  l:AGK_Failed  in the Project window's search to list them.
@@ -208,7 +209,7 @@ namespace AssetGatekeeper.Editor
         {
             while (true)
             {
-                Item item;
+                var items = new List<Item>();
                 lock (Gate)
                 {
                     if (Pending.Count == 0 || stopping)
@@ -216,23 +217,37 @@ namespace AssetGatekeeper.Editor
                         worker = null;
                         return;
                     }
-                    item = Pending.Dequeue();
+                    // One batch: the next files queued with the same settings, up to the cap.
+                    // GateRunner splits it further by rules.toml and command-line length.
+                    GateSettings settings = Pending.Peek().Settings;
+                    while (Pending.Count > 0 && items.Count < GateRunner.MaxBatchFiles
+                           && ReferenceEquals(Pending.Peek().Settings, settings))
+                        items.Add(Pending.Dequeue());
                 }
-                GateResult result;
+                var fullPaths = new List<string>();
+                var assetPaths = new List<string>();
+                foreach (Item item in items)
+                {
+                    fullPaths.Add(item.FullPath);
+                    assetPaths.Add(item.AssetPath);
+                }
+                List<GateResult> results;
                 try
                 {
-                    result = GateRunner.Check(item.Settings, item.FullPath, item.AssetPath, () => stopping);
+                    results = GateRunner.CheckBatch(items[0].Settings, fullPaths, assetPaths, () => stopping);
                 }
                 catch (Exception error)
                 {
-                    result = new GateResult { AssetPath = item.AssetPath, FullPath = item.FullPath,
-                                              Reason = "the plug-in failed: " + error.Message };
+                    results = new List<GateResult>();
+                    foreach (Item item in items)
+                        results.Add(new GateResult { AssetPath = item.AssetPath, FullPath = item.FullPath,
+                                                     Reason = "the plug-in failed: " + error.Message });
                 }
-                Finished.Enqueue(result);
+                foreach (GateResult result in results) Finished.Enqueue(result);
             }
         }
 
-        /// <summary>Drop what is queued and stop the file being checked.</summary>
+        /// <summary>Drop what is queued and stop the batch being checked.</summary>
         public static void Cancel()
         {
             lock (Gate)
@@ -514,7 +529,7 @@ namespace AssetGatekeeper.Editor
             GateSettings snapshot = AgkSettings.Snapshot();
             string script = GateRunner.ResolveGateScript(snapshot);
             EditorGUILayout.LabelField("Runs", GateRunner.ResolvePython(snapshot) + " "
-                                       + (script.Length > 0 ? script : "-m asset_gatekeeper") + " <file> --once --json");
+                                       + (script.Length > 0 ? script : "-m asset_gatekeeper") + " <files> --once --json");
             EditorGUILayout.LabelField("Rules", "the setting, " + GateRunner.EnvRules
                                        + ", or the nearest rules.toml up to the project folder");
             if (GUILayout.Button("Test the gate", GUILayout.Width(140)))

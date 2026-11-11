@@ -6,11 +6,15 @@
 //
 // The gate is the same command line the CLI, CI and the Unreal plug-in use:
 //
-//     <python> <gate folder>/asset_gatekeeper.py <file> --once --json [--rules <rules.toml>]
+//     <python> <gate folder>/asset_gatekeeper.py <file> [<file> ...] --once --json [--rules <rules.toml>]
 //
 // or, when no gate folder is set, `<python> -m asset_gatekeeper ...` (the pip
-// install). It prints one JSON object for the file on stdout; its log lines go
-// to stderr. Exit codes: 0 passed, 1 failed, 2 bad setup.
+// install). It prints one JSON object per file on stdout, each with its "file",
+// in the order given (several files: then a summary line, which is skipped);
+// its log lines go to stderr. Exit codes: 0 passed, 1 failed, 2 bad setup.
+//
+// Files are checked in batches (CheckBatch): one Python start-up (~0.7 s) for
+// up to MaxBatchFiles files that share a rules.toml, instead of one per file.
 
 using System;
 using System.Collections.Generic;
@@ -57,7 +61,7 @@ namespace AssetGatekeeper.Editor
         public string GateHome = "";
         /// <summary>A rules.toml to use for every file. Empty: ASSETGATEKEEPER_RULES, else the nearest rules.toml.</summary>
         public string RulesFile = "";
-        /// <summary>Seconds one file may take before the gate is stopped.</summary>
+        /// <summary>Seconds one file may take before the gate is stopped (a batch of n files: n times this).</summary>
         public int TimeoutSeconds = 120;
         /// <summary>Highest folder the rules.toml search climbs to (the Unity project folder).</summary>
         public string ProjectRoot = "";
@@ -71,6 +75,21 @@ namespace AssetGatekeeper.Editor
         public const string EnvHome = "ASSETGATEKEEPER_HOME";
         public const string EnvRules = "ASSETGATEKEEPER_RULES";
         public const string RulesFileName = "rules.toml";
+
+        /// <summary>
+        /// At most this many files per gate run. A batch reports back only when the
+        /// whole run ends, so this keeps the progress bar moving and caps what one hung
+        /// or crashed run can take down with it.
+        /// </summary>
+        public const int MaxBatchFiles = 50;
+
+        /// <summary>
+        /// At most this many characters in one command line (interpreter included).
+        /// CreateProcess allows 32,767; 8,000 stays below that with room to spare, and
+        /// also below cmd.exe's 8,191, which applies when the Python setting is a .bat
+        /// or .cmd shim (pyenv-win's python.bat): CreateProcess runs those through cmd.exe.
+        /// </summary>
+        public const int MaxCommandLineChars = 8000;
 
         /// <summary>Source formats the gate measures (its TRACKED_SUFFIXES). Anything else is left alone.</summary>
         public static readonly string[] GatedExtensions =
@@ -184,6 +203,102 @@ namespace AssetGatekeeper.Editor
                 arguments.Add(rules);
             }
             return arguments;
+        }
+
+        /// <summary>The argument list for several files that share one rules.toml ("" = none).</summary>
+        public static List<string> BuildBatchArguments(GateSettings settings, IList<string> fullPaths, string rules)
+        {
+            var arguments = new List<string>();
+            string script = ResolveGateScript(settings);
+            if (script.Length > 0)
+            {
+                arguments.Add(script);
+            }
+            else
+            {
+                arguments.Add("-m");
+                arguments.Add("asset_gatekeeper");
+            }
+            arguments.AddRange(fullPaths);
+            arguments.Add("--once");
+            arguments.Add("--json");
+            if (!string.IsNullOrEmpty(rules))
+            {
+                arguments.Add("--rules");
+                arguments.Add(rules);
+            }
+            return arguments;
+        }
+
+        /// <summary>
+        /// Split files into gate runs: grouped by the rules.toml each one uses (the
+        /// order within a group kept), then cut at maxFiles files or maxChars characters
+        /// of command line, whichever comes first. A file too long for the limit on its
+        /// own still gets a run of its own. Returns, per run, the rules file and the
+        /// indexes into fullPaths.
+        /// </summary>
+        public static List<KeyValuePair<string, List<int>>> PlanBatches(GateSettings settings, IList<string> fullPaths,
+                                                                        int maxFiles = MaxBatchFiles,
+                                                                        int maxChars = MaxCommandLineChars)
+        {
+            var groups = new List<KeyValuePair<string, List<int>>>();
+            var byRules = new Dictionary<string, List<int>>();
+            for (int i = 0; i < fullPaths.Count; i++)
+            {
+                string rules = ResolveRules(settings, fullPaths[i]);
+                List<int> members;
+                if (!byRules.TryGetValue(rules, out members))
+                {
+                    members = new List<int>();
+                    byRules[rules] = members;
+                    groups.Add(new KeyValuePair<string, List<int>>(rules, members));
+                }
+                members.Add(i);
+            }
+            var runs = new List<KeyValuePair<string, List<int>>>();
+            int fixedLength = Quote(ResolvePython(settings)).Length + 1
+                              + JoinArguments(BuildBatchArguments(settings, new string[0], "")).Length;
+            foreach (var group in groups)
+            {
+                int baseLength = fixedLength + (group.Key.Length > 0 ? " --rules ".Length + Quote(group.Key).Length : 0);
+                List<int> run = null;
+                int length = 0;
+                foreach (int index in group.Value)
+                {
+                    int extra = 1 + Quote(fullPaths[index]).Length;
+                    if (run == null || run.Count >= Math.Max(1, maxFiles) || length + extra > maxChars)
+                    {
+                        run = new List<int>();
+                        runs.Add(new KeyValuePair<string, List<int>>(group.Key, run));
+                        length = baseLength;
+                    }
+                    run.Add(index);
+                    length += extra;
+                }
+            }
+            return runs;
+        }
+
+        /// <summary>
+        /// A path as a key for matching the gate's "file" back to the file sent: full,
+        /// forward slashes, no trailing slash; on Windows also backslashes and case.
+        /// </summary>
+        public static string PathKey(string path, bool windows)
+        {
+            string key = path ?? "";
+            if (windows == IsWindows)       // a path of this machine (tests pass the other kind)
+            {
+                try
+                {
+                    key = Path.GetFullPath(key);
+                }
+                catch (Exception)
+                {
+                    // keep it as it is
+                }
+            }
+            if (windows) key = key.Replace('\\', '/').ToLowerInvariant();
+            return key.TrimEnd('/');
         }
 
         /// <summary>
@@ -372,6 +487,179 @@ namespace AssetGatekeeper.Editor
             }
         }
 
+        /// <summary>
+        /// Check several files, in as few gate runs as PlanBatches allows. Never throws;
+        /// returns one result per file, in the order given. Results are the same as
+        /// Check gives one file at a time.
+        /// </summary>
+        public static List<GateResult> CheckBatch(GateSettings settings, IList<string> fullPaths, IList<string> assetPaths,
+                                                  Func<bool> cancelled = null)
+        {
+            var results = new List<GateResult>();
+            var present = new List<GateResult>();
+            for (int i = 0; i < fullPaths.Count; i++)
+            {
+                string assetPath = assetPaths != null && i < assetPaths.Count ? assetPaths[i] : null;
+                var result = new GateResult { AssetPath = assetPath ?? fullPaths[i], FullPath = fullPaths[i] };
+                results.Add(result);
+                if (!File.Exists(fullPaths[i]))
+                    result.Reason = "source file not found";
+                else
+                    present.Add(result);
+            }
+            if (present.Count == 0) return results;
+            string script = ResolveGateScript(settings);
+            if (script.Length > 0 && !File.Exists(script))
+            {
+                foreach (GateResult result in present)
+                    result.Reason = "the gate is not at " + script + " (check the gate folder setting or " + EnvHome + ")";
+                return results;
+            }
+            var presentPaths = new List<string>();
+            foreach (GateResult result in present) presentPaths.Add(result.FullPath);
+            List<KeyValuePair<string, List<int>>> runs;
+            try
+            {
+                runs = PlanBatches(settings, presentPaths);
+            }
+            catch (Exception error)
+            {
+                foreach (GateResult result in present) result.Reason = "could not prepare the gate: " + error.Message;
+                return results;
+            }
+            foreach (var run in runs)
+            {
+                var batch = new List<GateResult>();
+                foreach (int index in run.Value) batch.Add(present[index]);
+                if (cancelled != null && cancelled())
+                {
+                    foreach (GateResult result in batch) result.Reason = "cancelled";
+                    continue;
+                }
+                RunBatch(settings, batch, run.Key, cancelled);
+            }
+            return results;
+        }
+
+        /// <summary>
+        /// One gate run for files that share the rules file ("" = none), filling in their
+        /// results. The timeout is TimeoutSeconds per file. One file is read as Check reads
+        /// it; several are matched back by the "file" of each verdict line.
+        /// </summary>
+        public static void RunBatch(GateSettings settings, IList<GateResult> batch, string rules, Func<bool> cancelled)
+        {
+            if (batch.Count == 0) return;
+            var fullPaths = new List<string>();
+            foreach (GateResult result in batch) fullPaths.Add(result.FullPath);
+            ProcessStartInfo info;
+            try
+            {
+                info = StartInfo(settings, BuildBatchArguments(settings, fullPaths, rules));
+            }
+            catch (Exception error)
+            {
+                foreach (GateResult result in batch) result.Reason = "could not prepare the gate: " + error.Message;
+                return;
+            }
+            int timeout = Math.Max(1, settings.TimeoutSeconds) * batch.Count;
+            string stdout, stderr, failure;
+            int exitCode = RunProcess(info, timeout, cancelled, out stdout, out stderr, out failure);
+            if (failure.Length > 0)
+            {
+                if (batch.Count > 1 && failure.StartsWith("the gate took longer than", StringComparison.Ordinal))
+                    failure = "the gate took longer than " + timeout + " s for " + batch.Count
+                              + " files and was stopped (raise the timeout in the settings)";
+                foreach (GateResult result in batch) result.Reason = failure;
+                return;
+            }
+            if (batch.Count == 1)
+                Parse(batch[0], stdout, stderr, exitCode);
+            else
+                ParseBatch(batch, stdout, stderr, exitCode, IsWindows);
+        }
+
+        /// <summary>
+        /// Read a run over several files: every JSON line with "problems" and "file" is the
+        /// verdict for the file whose PathKey matches. A file the gate resolved to another
+        /// spelling (a symlink, an 8.3 name) is matched by position when there is exactly
+        /// one verdict line per file and the names agree. A file with no verdict line is
+        /// NotChecked, with the gate's last line as the reason.
+        /// </summary>
+        public static void ParseBatch(IList<GateResult> batch, string stdout, string stderr, int exitCode, bool windows)
+        {
+            var verdicts = new List<Dictionary<string, object>>();
+            foreach (string raw in (stdout ?? "").Split('\n'))
+            {
+                string line = raw.Trim();
+                if (!line.StartsWith("{")) continue;
+                Dictionary<string, object> verdict;
+                try
+                {
+                    verdict = MiniJson.Parse(line) as Dictionary<string, object>;
+                }
+                catch (FormatException)
+                {
+                    continue;
+                }
+                if (verdict != null && verdict.ContainsKey("problems") && verdict.ContainsKey("file"))
+                    verdicts.Add(verdict);
+            }
+            var byKey = new Dictionary<string, int>();
+            for (int i = 0; i < verdicts.Count; i++)
+            {
+                string key = PathKey(AsString(verdicts[i], "file"), windows);
+                if (!byKey.ContainsKey(key)) byKey[key] = i;
+            }
+            var used = new bool[verdicts.Count];
+            var unmatched = new List<int>();
+            for (int i = 0; i < batch.Count; i++)
+            {
+                int found;
+                if (byKey.TryGetValue(PathKey(batch[i].FullPath, windows), out found) && !used[found])
+                {
+                    used[found] = true;
+                    ReadVerdict(batch[i], verdicts[found], exitCode);
+                }
+                else
+                {
+                    unmatched.Add(i);
+                }
+            }
+            string detail = LastLine(stderr);
+            if (detail.Length == 0) detail = LastLine(stdout);
+            foreach (int i in unmatched)
+            {
+                GateResult result = batch[i];
+                result.ExitCode = exitCode;
+                if (verdicts.Count == batch.Count && !used[i]
+                    && string.Equals(AsString(verdicts[i], "name"), Path.GetFileName(result.FullPath),
+                                     windows ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal))
+                {
+                    used[i] = true;
+                    ReadVerdict(result, verdicts[i], exitCode);
+                    continue;
+                }
+                result.Outcome = GateOutcome.NotChecked;
+                result.Reason = "the gate gave no verdict (exit " + exitCode + ")"
+                                + (detail.Length > 0 ? ": " + Clip(detail, 300) : "");
+            }
+        }
+
+        static void ReadVerdict(GateResult result, Dictionary<string, object> verdict, int exitCode)
+        {
+            result.ExitCode = exitCode;
+            bool passed = verdict.ContainsKey("passed") && verdict["passed"] is bool && (bool)verdict["passed"];
+            result.Outcome = passed ? GateOutcome.Passed : GateOutcome.Failed;
+            result.Status = AsString(verdict, "status");
+            if (result.Status.Length == 0) result.Status = passed ? "PASSED" : "FAILED";
+            result.Metric = AsString(verdict, "metric");
+            result.Problems = AsStrings(verdict, "problems");
+            result.Warnings = AsStrings(verdict, "warnings");
+            result.Reason = "";
+            if (!passed && result.Problems.Count == 0)
+                result.Problems.Add("failed (exit " + exitCode + ") without a reason");
+        }
+
         /// <summary>Check one file. Never throws; a gate that cannot say is NotChecked with the reason.</summary>
         public static GateResult Check(GateSettings settings, string fullPath, string assetPath, Func<bool> cancelled = null)
         {
@@ -431,15 +719,7 @@ namespace AssetGatekeeper.Editor
                     continue;
                 }
                 if (verdict == null || !verdict.ContainsKey("problems")) continue;
-                bool passed = verdict.ContainsKey("passed") && verdict["passed"] is bool && (bool)verdict["passed"];
-                result.Outcome = passed ? GateOutcome.Passed : GateOutcome.Failed;
-                result.Status = AsString(verdict, "status");
-                if (result.Status.Length == 0) result.Status = passed ? "PASSED" : "FAILED";
-                result.Metric = AsString(verdict, "metric");
-                result.Problems = AsStrings(verdict, "problems");
-                result.Warnings = AsStrings(verdict, "warnings");
-                if (!passed && result.Problems.Count == 0)
-                    result.Problems.Add("failed (exit " + exitCode + ") without a reason");
+                ReadVerdict(result, verdict, exitCode);
                 return result;
             }
             string detail = LastLine(stderr);
