@@ -1,5 +1,16 @@
 # Unreleased (on `main`)
 
+* **Unity and Godot check an import in batches; the CLI takes several files
+  (11 Nov).** Both plug-ins started Python once per imported file (about
+  0.7 s each, over two minutes for 200 assets). They now send up to 50 files
+  that share a `rules.toml` to one run, at most 8,000 characters of command
+  line, and match each verdict back to its file by path; labels, Console and
+  Output messages, NOT checked, the unchanged-file guard and cancelling work
+  as before, and Unity's timeout scales with the batch. The gate accepts
+  `asset-gatekeeper a.fbx b.png c.glb --once --json`: each file checked as it
+  would be alone, one line each in order, then a summary line; a missing file
+  is an `ERROR` line instead of ending the run. 50 small files: 37-39 s one
+  process each, under 1 s in one run (docs/06, docs/09).
 * **glTF collision and LODs read as in an FBX; bakes stay inside the folder's
   limits (11 Nov).** A glTF's `UCX_`/`UBX_`/`USP_`/`UCP_` meshes counted as part
   of the model: a 12-triangle crate with its hull read as 24 triangles and two

@@ -91,7 +91,7 @@ line and no summary, and exits 2 with no line when the file is not there.
 
 Measured on a 2-core Linux machine, 50 small files (25 64 px PNGs, 25
 768-triangle FBXs) with `--once --json --rules rules.toml`: one process per file
-37.4 s, all 50 in one run 0.94 s.
+37.4-39.4 s, all 50 in one run 0.8-0.9 s.
 
 ## Budget flags
 

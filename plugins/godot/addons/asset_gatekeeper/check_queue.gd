@@ -1,8 +1,9 @@
 @tool
 extends RefCounted
-## A queue of files checked one at a time on a background thread, so the editor
-## never waits for the gate. Results come back on the main thread through the
-## signals. No editor API in here, so a headless test can drive it.
+## A queue of files checked on a background thread, so the editor never waits
+## for the gate: up to GateRunner.MAX_BATCH_FILES files per gate run, split by
+## rules.toml (gate_runner.gd check_batch). Results come back on the main thread
+## through the signals. No editor API in here, so a headless test can drive it.
 
 signal result_ready(result: Dictionary)
 signal batch_finished(summary: Dictionary)
@@ -68,7 +69,7 @@ func progress() -> Dictionary:
 	return copy
 
 
-## Drop what is queued. The file being checked finishes (OS.execute cannot be interrupted).
+## Drop what is queued. The batch being checked finishes (OS.execute cannot be interrupted).
 func cancel() -> void:
 	_mutex.lock()
 	for item in _pending:
@@ -96,10 +97,15 @@ func _work() -> void:
 			_running = false
 			_mutex.unlock()
 			return
-		var item: Dictionary = _pending.pop_front()
+		# One batch: the next files queued with the same runner (settings), up to the cap.
+		var runner = _pending[0].runner
+		var items := []
+		while not _pending.is_empty() and items.size() < GateRunner.MAX_BATCH_FILES \
+				and _pending[0].runner == runner:
+			items.append(_pending.pop_front())
 		_mutex.unlock()
-		var result: Dictionary = item.runner.check(item.file, item.path)
-		_deliver.call_deferred(result)
+		for result in runner.check_batch(items):
+			_deliver.call_deferred(result)
 
 
 func _deliver(result: Dictionary) -> void:
