@@ -1939,8 +1939,12 @@ status, plain = pp.json("/api/assets?filename=plain.obj", method="POST",
 status, plain_detail = pp.json(f"/api/assets/{plain['id']}")
 expect("a plain .obj is drawn as before", plain_detail["preview"]["polypaint"] is False)
 status, refused = pp.json(f"/api/assets/{plain['id']}/bake-polypaint", method="POST", body={})
-expect("baking is refused at once for a file with no Polypaint, in words",
-       status == 400 and "no ZBrush Polypaint" in refused.get("error", ""), str(refused)[:160])
+expect("baking is refused at once for a file with no Polypaint or textures, in words",
+       status == 400 and "no Polypaint or vertex colours, and no textures" in refused.get("error", ""),
+       str(refused)[:160])
+expect("... and the viewer is not offered a bake for it", plain_detail["preview"].get("bake") == "")
+expect("a Polypaint .obj is offered one", detail["preview"].get("bake") == "polypaint",
+       detail["preview"].get("bake"))
 import importlib  # noqa: E402
 def _bake_ready():
     try:
@@ -2007,6 +2011,46 @@ if _bake_ready():
     expect("... and the normal map can be switched off",
            job["state"] == "done" and (job.get("result") or {}).get("normal_map") is False,
            str(job)[:300])
+    # 12 Nov 2026: a textured model (here an .obj with its .mtl and two
+    # textures, sent as its files) bakes too, its textures into one.
+    _lines, _rings, _segments = ["mtllib SM_Globe.mtl"], 12, 24
+    for _i in range(_rings + 1):
+        for _j in range(_segments + 1):
+            _t, _q = _math.pi * _i / _rings, 2 * _math.pi * _j / _segments
+            _lines.append(f"v {_math.sin(_t) * _math.cos(_q):.5f} {_math.cos(_t):.5f} "
+                          f"{_math.sin(_t) * _math.sin(_q):.5f}")
+            _lines.append(f"vt {_j / _segments:.5f} {1 - _i / _rings:.5f}")
+    for _rows, _name in ((range(_rings // 2), "Top"), (range(_rings // 2, _rings), "Bottom")):
+        _lines.append(f"usemtl {_name}")
+        for _i in _rows:
+            for _j in range(_segments):
+                _a = _i * (_segments + 1) + _j + 1
+                _b, _c, _d = _a + 1, _a + _segments + 1, _a + _segments + 2
+                _lines += [f"f {_a}/{_a} {_c}/{_c} {_b}/{_b}", f"f {_b}/{_b} {_c}/{_c} {_d}/{_d}"]
+    status, globe = pp.json("/api/assets?filename=SM_Globe.obj", method="POST",
+                            body=("\n".join(_lines) + "\n").encode())
+    pp.json(f"/api/assets/{globe['id']}/files?filename=SM_Globe.mtl", method="POST",
+            body=b"newmtl Top\nmap_Kd T_Top.png\nnewmtl Bottom\nmap_Kd T_Bottom.png\n")
+    for _png, _rgb in (("T_Top.png", (220, 40, 30)), ("T_Bottom.png", (30, 60, 210))):
+        _buffer = io.BytesIO()
+        Image.new("RGB", (16, 16), _rgb).save(_buffer, "PNG")
+        pp.json(f"/api/assets/{globe['id']}/files?filename={_png}", method="POST",
+                body=_buffer.getvalue())
+    status, globe_detail = pp.json(f"/api/assets/{globe['id']}")
+    expect("a textured .obj with its files is offered a texture bake",
+           globe_detail["preview"].get("bake") == "texture", str(globe_detail["preview"])[:200])
+    status, queued = pp.json(f"/api/assets/{globe['id']}/bake-polypaint", method="POST",
+                             body={"preset": "n64"})
+    job = queued.get("job") or {}
+    deadline = time.time() + 120
+    while job.get("state") in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.3)
+        job = pp.json(f"/api/jobs/{job['id']}")[1]
+    textured = (job.get("result") or {}).get("asset") or {}
+    expect("... and bakes into one N64 game asset in the library",
+           job.get("state") == "done" and textured.get("filename") == "SM_Globe_LP.glb"
+           and 0 < textured.get("triangle_count", 0) <= 1200
+           and (job.get("result") or {}).get("materials") == 1, str(job)[:400])
 else:
     print("  skip baking: pip install fast-simplification xatlas scipy")
 pp_server.shutdown()

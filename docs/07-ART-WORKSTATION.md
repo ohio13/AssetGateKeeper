@@ -112,7 +112,12 @@ of the sculpt's vertices, and engines need a vertex-colour material to show
 them at all. **Bake into a game asset** (under LODs, shown for these files)
 reduces the mesh to 15,000, 30,000 or 50,000 triangles, unwraps UVs, bakes the
 colours into a 1024, 2048 or 4096 px BaseColor texture and adds the result to the
-library as a new `.glb` (`SM_Hero_HP_03.obj` becomes `SM_Hero_LP_03.glb`). On a
+library as a new `.glb` (`SM_Hero_HP_03.obj` becomes `SM_Hero_LP_03.glb`).
+A model that carries its colour in textures - an `.obj` uploaded with its
+`.mtl` and images, or a textured `.gltf`/`.glb` - gets the same **Bake**
+panel: every material's textures are baked into one, so a game rip with ten
+materials can be made into an N64-style asset with one or two. An `.obj`
+whose `.mtl` or textures are missing says which file to add. On a
 1.08 million triangle sculpt it takes about 30-45 seconds at 15,000 triangles
 and 2048 px. A tangent-space normal map (`T_<name>_Normal.png`, glTF/OpenGL green
 up; tick Unreal's "Flip Green Channel" for the loose PNG) is baked too unless the

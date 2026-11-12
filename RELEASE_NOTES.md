@@ -1,5 +1,14 @@
 # Unreleased (on `main`)
 
+* **Bake textured models too, not only Polypaint (12 Nov).** `--bake` (the
+  same as `--bake-polypaint`) and the review page's **Bake** panel now take a
+  textured `.obj` (with its `.mtl` and images beside it) or `.gltf`/`.glb`:
+  the mesh is reduced to the budget and every material's textures are baked
+  into one new texture, so a game rip with ten materials becomes an
+  N64-style asset with one or two. An `.obj` whose `.mtl` or textures are
+  missing is refused with the name of the file to add. An `.obj`'s `Kd`
+  colours only a material without a texture, as Blender and engines read it.
+
 * **N64 bake: a face you can read (12 Nov).** The face texture is now the
   face seen from the front, hairline to chin, one upright island, as N64
   faces were drawn: the eyes, brows and lips fill the 64 px texture instead

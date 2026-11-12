@@ -30,6 +30,12 @@ vertices. ``bake`` makes the usual game asset instead:
 5. write a .glb (both textures inside, ready for Unreal, Unity, Godot or
    Blender) and the textures as .png files beside it.
 
+A model that carries its colour in textures - an .obj with its .mtl and
+images, a .gltf or .glb - bakes the same way (``read_textured``,
+``TexturedSculpt``): the high surface's colour at each sample is its own
+material's texture there, through its UVs, so every material ends up in one
+texture (a game rip with ten materials becomes an asset with one).
+
 ``preset="n64"`` makes a Nintendo 64 style asset instead: about 1,200
 triangles, a 64 px texture in 16 colours (a 4-bit texture that fits the N64's
 4 KB texture memory), no normal map, nearest-texel filtering.
@@ -192,6 +198,200 @@ def read_obj(path: Path) -> ObjColours:
     else:
         raise PolypaintError(f"{path.name} has no Polypaint or vertex colours to use")
     return ObjColours(positions, triangles, colours.clip(0.0, 1.0), source)
+
+
+#: Model files whose textures can be baked (besides Polypaint .obj files).
+TEXTURED_SUFFIXES = (".obj", ".gltf", ".glb")
+
+
+@dataclass
+class TexturedModel:
+    """A model that carries colour in textures, ready to bake like a sculpt."""
+    vertices: "object"           # numpy (n, 3) float64, split where UVs are
+    faces: "object"              # numpy (m, 3) int64
+    colours: "object"            # numpy (n, 3) float32: the texture at each vertex
+    uvs: "object"                # numpy (n, 2) float64
+    material: "object"           # numpy (m,) int64: which of ``images`` each face uses
+    images: list                 # numpy (h, w, 3) float32 0..1 per material, or None
+    tints: "object"              # numpy (materials, 3) float32: colour factor per material
+    source: str = "texture"
+
+
+def _mtl_problem(path: Path) -> str:
+    """Why an .obj's textures cannot be read, or '' when they can: the .mtl it
+    names, or an image that .mtl names, is not where it says. Game rips often
+    come without them."""
+    libraries, has_uvs = [], False
+    try:
+        # Line by line, and only until the first UV: the review page asks this
+        # of every .obj it shows, and a scan can be tens of MB.
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("mtllib ") and len(line.split(None, 1)) > 1:
+                    libraries.append(line.split(None, 1)[1].strip())
+                elif line.startswith("vt "):
+                    has_uvs = True
+                    if libraries:
+                        break
+    except OSError as exc:
+        return f"cannot read {path.name}: {exc}"
+    if not libraries:
+        return f"{path.name} names no .mtl (material file), so it has no textures"
+    if not has_uvs:
+        return f"{path.name} has no UVs (vt lines), so a texture cannot be placed on it"
+    maps = 0
+    for library in libraries:
+        mtl = path.parent / library
+        if not mtl.is_file():
+            return (f"{path.name} names {library}, which is not beside it: put the .mtl "
+                    "and the textures it names next to the .obj")
+        for line in mtl.read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = line.strip().split()
+            if parts and parts[0].lower() == "map_kd" and len(parts) > 1:
+                image = path.parent / parts[-1].replace("\\", "/")
+                if not image.is_file():
+                    return (f"{library} names the texture {parts[-1]}, which is not there: "
+                            "put it next to the .obj")
+                maps += 1
+    return "" if maps else f"{', '.join(libraries)} names no texture (map_Kd)"
+
+
+def bake_source(path: Path) -> str:
+    """What a bake would take colour from: 'polypaint', 'vertex colours',
+    'texture', or '' when there is nothing to bake. Cheap: no mesh is read."""
+    suffix = path.suffix.lower()
+    if suffix == ".obj":
+        painted = colour_source(path)
+        if painted:
+            return painted
+        return "texture" if not _mtl_problem(path) else ""
+    if suffix in (".gltf", ".glb"):
+        try:
+            if suffix == ".glb":                  # only the JSON chunk, not the mesh data
+                with open(path, "rb") as handle:
+                    header = handle.read(20)
+                    length = int.from_bytes(header[12:16], "little")
+                    if length > 64 * 1024 * 1024:
+                        return ""
+                    document = json.loads(handle.read(length))
+            else:
+                document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if not isinstance(document, dict):
+            return ""
+        for material in document.get("materials") or []:
+            if (material.get("pbrMetallicRoughness") or {}).get("baseColorTexture"):
+                return "texture"
+    return ""
+
+
+def bake_problem(path: Path) -> str:
+    """Why ``path`` cannot be baked, in words, or '' when it can."""
+    if path.suffix.lower() not in TEXTURED_SUFFIXES:
+        return (f"{path.name}: only an .obj (ZBrush Polypaint, vertex colours or textures) "
+                "or a textured .gltf/.glb can be baked")
+    if bake_source(path):
+        return ""
+    if path.suffix.lower() == ".obj":
+        return (f"{path.name} has no Polypaint or vertex colours, and no textures to bake: "
+                + _mtl_problem(path))
+    return f"{path.name} has no base colour texture to bake"
+
+
+def _image_array(image):
+    import numpy as np
+    if image is None:
+        return None
+    return np.asarray(image.convert("RGB"), np.float32) / 255.0
+
+
+def read_textured(path: Path) -> TexturedModel:
+    """Every mesh of a textured .obj (with its .mtl and images) or .gltf/.glb,
+    placed by its node, with its UVs and its material's base colour texture."""
+    import numpy as np
+    import trimesh
+    problem = bake_problem(path)
+    if problem:
+        raise PolypaintError(problem)
+    try:
+        scene = trimesh.load(path, force="scene", process=False)
+    except Exception as exc:                     # noqa: BLE001 - any reader failure, said plainly
+        raise PolypaintError(f"cannot read {path.name}: {exc}") from exc
+    vertices, faces, uvs, material = [], [], [], []
+    images, tints, keys = [], [], {}
+    offset = 0
+    for node in scene.graph.nodes_geometry:
+        transform, name = scene.graph[node]
+        mesh = scene.geometry[name]
+        if not hasattr(mesh, "faces") or len(mesh.faces) == 0:
+            continue
+        visual = mesh.visual
+        uv = getattr(visual, "uv", None)
+        found = getattr(visual, "material", None)
+        if uv is None or found is None or len(uv) != len(mesh.vertices):
+            uv = np.zeros((len(mesh.vertices), 2))
+        image = getattr(found, "baseColorTexture", None)
+        if image is None:
+            image = getattr(found, "image", None)
+        # glTF multiplies its texture by baseColorFactor; an .obj's Kd only
+        # colours a material without a map_Kd (as Blender and engines read it:
+        # trimesh writes Kd 0.4 beside a texture, which darkened a bake to 40%).
+        factor = getattr(found, "baseColorFactor", None)
+        if factor is None and image is None:
+            factor = getattr(found, "diffuse", None)
+        tint = (np.asarray(factor, np.float32)[:3] / 255.0 if factor is not None
+                else np.ones(3, np.float32))
+        key = id(found)
+        if key not in keys:
+            keys[key] = len(images)
+            images.append(_image_array(image))
+            tints.append(tint)
+        points = trimesh.transformations.transform_points(np.asarray(mesh.vertices, np.float64),
+                                                           transform)
+        vertices.append(points)
+        faces.append(np.asarray(mesh.faces, np.int64) + offset)
+        uvs.append(np.asarray(uv, np.float64))
+        material.append(np.full(len(mesh.faces), keys[key], np.int64))
+        offset += len(points)
+    if not faces:
+        raise PolypaintError(f"{path.name} has no triangles")
+    if all(image is None for image in images):
+        raise PolypaintError(f"{path.name}: its textures could not be read")
+    model = TexturedModel(np.concatenate(vertices), np.concatenate(faces), None,
+                          np.concatenate(uvs), np.concatenate(material), images,
+                          np.asarray(tints, np.float32))
+    # One colour per vertex, sampled from its own material: what finds the face
+    # and the fine detail, as Polypaint does on a sculpt.
+    owner = np.zeros(len(model.vertices), np.int64)
+    owner[model.faces.ravel()] = np.repeat(model.material, 3)
+    model.colours = _sample_materials(model.images, model.tints, owner, model.uvs)
+    return model
+
+
+def _sample_materials(images, tints, material, uv):
+    """Base colour at each ``uv`` (n, 2) of each ``material`` (n,): bilinear,
+    repeating past 0-1 (a tiling texture), v going up; a material with no
+    image is its flat colour."""
+    import numpy as np
+    out = np.empty((len(uv), 3), np.float32)
+    for index in np.unique(material):
+        rows = np.nonzero(material == index)[0]
+        image = images[int(index)]
+        if image is None:
+            out[rows] = tints[int(index)]
+            continue
+        height, width = image.shape[:2]
+        x = (uv[rows, 0] % 1.0) * width - 0.5
+        y = (1.0 - uv[rows, 1] % 1.0) * height - 0.5
+        x0, y0 = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
+        fx, fy = (x - x0)[:, None].astype(np.float32), (y - y0)[:, None].astype(np.float32)
+        x1, y1 = (x0 + 1) % width, (y0 + 1) % height
+        x0, y0 = x0 % width, y0 % height
+        top = image[y0, x0] * (1 - fx) + image[y0, x1] * fx
+        bottom = image[y1, x0] * (1 - fx) + image[y1, x1] * fx
+        out[rows] = (top * (1 - fy) + bottom * fy) * tints[int(index)]
+    return out.clip(0.0, 1.0)
 
 
 def write_preview_glb(obj: ObjColours, target: Path) -> None:
@@ -619,6 +819,23 @@ class Sculpt:
         corners = self.faces[face]
         return _normalise(np.einsum("nk,nkc->nc", bary.astype(np.float32),
                                     self.normals[corners]))
+
+
+class TexturedSculpt(Sculpt):
+    """A textured model as the high surface: its colour at a point is its own
+    texture there (through its UVs), not a blend of vertex colours."""
+
+    def __init__(self, model: "TexturedModel", spatial):
+        super().__init__(model.vertices, model.faces, model.colours, spatial)
+        self.uvs = model.uvs
+        self.material = model.material
+        self.images = model.images
+        self.tints = model.tints
+
+    def colour(self, face, bary):
+        import numpy as np
+        uv = np.einsum("nk,nkc->nc", bary.astype(np.float64), self.uvs[self.faces[face]])
+        return _sample_materials(self.images, self.tints, self.material[face], uv)
 
 
 #: Bounding-box sizes (in pixels) triangles are grouped by when drawn; a larger
@@ -1423,7 +1640,8 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
 
     started = time.time()
     step("reading the sculpt", 0)
-    obj = read_obj(Path(source))
+    textured = bake_source(Path(source)) == "texture"
+    obj = read_textured(Path(source)) if textured else read_obj(Path(source))
     step("reducing the mesh", 1)
     # Reduce a welded copy: vertices that sit on top of each other (a UV seam,
     # a pole fan, pieces exported separately) are open edges to the reducer,
@@ -1450,7 +1668,8 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
         low_faces = low_faces[~flat]
     low_faces = _drop_stacked(low_positions, low_faces)
     step("unwrapping UVs", 2)
-    sculpt = Sculpt(obj.vertices, obj.faces, obj.colours, spatial)
+    sculpt = (TexturedSculpt(obj, spatial) if textured
+              else Sculpt(obj.vertices, obj.faces, obj.colours, spatial))
     nearest = _closest_low_triangles(obj.vertices, low_positions, low_faces, spatial)
     corners = low_positions[low_faces]
     area = 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0],
