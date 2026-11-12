@@ -119,7 +119,10 @@ up; tick Unreal's "Flip Green Channel" for the loose PNG) is baked too unless th
 **Normal map** box is cleared, and **N64 style** sets about 1,200 triangles, a
 64 px texture, 16 colours, no normal map and **Face texture**: the face (where the
 sculpt's colour detail is densest) gets a 64 px texture of its own as a second
-material, instead of about 6 x 6 texels of the body's. It needs
+material, mapped straight from the front like an N64 face, hairline to chin, so
+the eyes, brows and lips fill it instead of about 6 x 6 texels of the body's.
+Of the 16 colours, 6 go to small details the rest would lose, such as the
+colour of the irises. It needs
 `fast-simplification`, `xatlas` and `scipy` (Python 3.10 or newer): double-click
 `Install_Extras.bat` in the install folder. Without them the button says so,
 with the exact install command. The same bake from a terminal:

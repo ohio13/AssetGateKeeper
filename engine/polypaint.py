@@ -108,8 +108,10 @@ NEAREST_TEXTURE = 128
 #: Face texture (second material): the region around the sculpt's densest colour
 #: detail (eyes, brows, lips) that gets a texture of its own: colours counted in
 #: small cells, summed on a FACE_GRID-cell grid over the model (_face_centre);
-#: the region is the reduced surface nearest that centre, FACE_SHARE of its
-#: area (about a head on a full figure: the rule of nines gives the head 9%).
+#: the face texture is that face seen from the front (_front_projection), out
+#: to FACE_REACH times the detail's reach. FACE_SHARE of the reduced surface
+#: nearest the centre (about a head on a full figure: the rule of nines gives
+#: the head 9%) is the region unwrapped instead when the face has no front.
 #: A sculpt edge whose two ends differ by FACE_EDGE_CONTRAST (0-1, largest
 #: channel) is a detail edge; with fewer than FACE_MIN_EDGES there is no face.
 FACE_EDGE_CONTRAST = 0.25
@@ -1039,7 +1041,7 @@ def _detail(sculpt_colours, nearest, faces, positions):
     return touched[faces].any(axis=1)
 
 
-def _face_centre(vertices, faces, colours, spatial=None):
+def _face_centre(vertices, faces, colours, spatial=None, with_radius: bool = False):
     """Where the sculpt's colour detail is densest - on a character, the eyes,
     brows and lips - or None when it has too little detail to tell.
 
@@ -1107,7 +1109,15 @@ def _face_centre(vertices, faces, colours, spatial=None):
         pass
     busiest = np.array(np.unravel_index(int(np.argmax(grid)), cshape))
     near = np.all(np.abs(index - busiest) <= 1, axis=1)
-    return (middles[near] * detail[near, None]).sum(axis=0) / detail[near].sum()
+    weight = detail[near]
+    centre = (middles[near] * weight[:, None]).sum(axis=0) / weight.sum()
+    if not with_radius:
+        return centre
+    # How far the detail reaches from the centre (detail-weighted RMS): about
+    # half the span from brows to lips.
+    reach = float(np.sqrt((weight * ((middles[near] - centre) ** 2).sum(axis=1)).sum()
+                          / weight.sum()))
+    return centre, reach
 
 
 def _face_region(centre, positions, faces, share: float = FACE_SHARE):
@@ -1126,6 +1136,97 @@ def _face_region(centre, positions, faces, share: float = FACE_SHARE):
     if not region.any():                     # one huge triangle: take it alone
         region[order[0]] = True
     return region
+
+
+#: A face-texture triangle faces at most this far from the face's own direction;
+#: the rest of the region (the sides of the head) goes on the main texture.
+FACE_FRONT_DEGREES = 85.0
+#: The face texture covers what is within this many times the reach of the
+#: facial detail (eyes, brows, lips) from its centre: hairline to chin.
+FACE_REACH = 1.8
+#: Share of the face region, nearest its centre, whose facing says which way
+#: the face looks.
+FACE_DIRECTION_SHARE = 0.05
+#: Grid used to find face triangles hidden from the front by others.
+FACE_VISIBILITY_GRID = 384
+
+
+def _front_projection(positions, faces, region, centre, size: int, padding: int):
+    """The face mapped straight from the front, the way N64 faces were drawn:
+    one island, upright, filling its texture. Returns (region, mapping, uv
+    faces, uvs) for the triangles kept (``region`` narrowed to them), or None
+    when the region has no front to map from.
+
+    xatlas cut Samus's face into dozens of islands, the hair fringe took much
+    of the 64 px texture and her eyes came out two or three texels wide (12 Nov
+    2026). From the front, eyes, brows and lips span most of the texture.
+    Kept: triangles facing within FACE_FRONT_DEGREES of the face's direction
+    and not hidden from the front behind another one (they would share its
+    texels); the others go back to the main texture."""
+    import numpy as np
+    chosen = np.nonzero(region)[0]
+    if len(chosen) < 8:
+        return None
+    corners = positions[faces[chosen]]
+    normal = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    doubled = np.linalg.norm(normal, axis=1)
+    # Which way the face looks: the triangles nearest its centre (eyes, nose,
+    # lips), FACE_DIRECTION_SHARE of the region. The whole region is most of a
+    # low-poly head - back and hair too - whose facings cancel out; even the
+    # nearest ones point every way (nose sides, eye sockets), and agree only
+    # to about 0.4 on Samus, but their sum points out of the face.
+    distance = np.linalg.norm(corners.mean(axis=1) - np.asarray(centre, np.float64), axis=1)
+    order = np.argsort(distance, kind="stable")
+    nearest = order[np.cumsum(doubled[order]) <= FACE_DIRECTION_SHARE * float(doubled.sum())]
+    if len(nearest) < 12:
+        nearest = order[:12]
+    direction = normal[nearest].sum(axis=0)         # area-weighted
+    length = float(np.linalg.norm(direction))
+    if length < 0.25 * float(doubled[nearest].sum()):  # no one way it looks
+        return None
+    direction /= length
+    up = np.array([0.0, 1.0, 0.0])
+    if abs(float(up @ direction)) > 0.9:            # looking up or down: use depth
+        up = np.array([0.0, 0.0, 1.0])
+    up = up - direction * float(up @ direction)
+    up /= np.linalg.norm(up)
+    right = np.cross(up, direction)                 # seen from the front, left to right
+    unit = normal / np.where(doubled > 0, doubled, 1.0)[:, None]
+    keep = chosen[unit @ direction >= np.cos(np.radians(FACE_FRONT_DEGREES))]
+    if len(keep) < 8:
+        return None
+
+    def project(ids):
+        used, local = np.unique(faces[ids], return_inverse=True)
+        points = positions[used]
+        return used, local.reshape(-1, 3), np.stack([points @ right, points @ up], axis=1), points
+
+    used, local, xy, points = project(keep)
+    low, span = xy.min(axis=0), float((xy.max(axis=0) - xy.min(axis=0)).max()) or 1.0
+    grid = FACE_VISIBILITY_GRID
+    pixels = (xy - low) / span * (grid - 1) + 0.5
+    owner, _ = _rasterise(pixels, local, grid, depth=(points @ direction).astype(np.float32))
+    seen = np.bincount(owner[owner >= 0], minlength=len(keep))
+    tri = pixels[local]
+    covers = 0.5 * np.abs((tri[:, 1, 0] - tri[:, 0, 0]) * (tri[:, 2, 1] - tri[:, 0, 1])
+                          - (tri[:, 2, 0] - tri[:, 0, 0]) * (tri[:, 1, 1] - tri[:, 0, 1]))
+    # Mostly hidden (a cheek behind a lock of hair) goes; edge-on slivers that
+    # cover no pixel centre are kept, they share nothing.
+    visible = (seen >= 0.5 * covers) | (covers < 2.0)
+    keep = keep[visible]
+    if len(keep) < 8:
+        return None
+    used, local, xy, _ = project(keep)
+    low = xy.min(axis=0)
+    extent = xy.max(axis=0) - low
+    span = float(extent.max()) or 1.0
+    # Into the texture with ``padding`` texels round it, centred, square texels.
+    inner = (size - 2 * padding) / size
+    uvs = (xy - low) / span * inner + padding / size
+    uvs += (1.0 - 2 * padding / size - extent / span * inner) / 2.0
+    narrowed = np.zeros(len(region), bool)
+    narrowed[keep] = True
+    return narrowed, used, local, uvs
 
 
 def _png_bytes(image) -> bytes:
@@ -1229,13 +1330,25 @@ def write_glb(path: Path, positions, normals, uvs, faces, base_png: bytes, name:
         handle.write(struct.pack("<I4s", len(binary), b"BIN\0") + binary)
 
 
+#: Of a reduced palette, this share is chosen last, one colour at a time, for
+#: the colours the rest represent worst (see _reduce_colours).
+DETAIL_COLOUR_SHARE = 3 / 8
+#: Above this many distinct colours the detail colours are skipped (the search
+#: compares every colour with every other); a 64-128 px texture is far below.
+DETAIL_COLOUR_LIMIT = 8192
+
+
 def _reduce_colours(image, colours: int, inside=None):
     """The texture in ``colours`` colours, no dithering: a palette texture like the
     N64's 4-bit (16) and 8-bit (256) colour-index formats.
 
-    The palette is a median cut of the colours on the UV islands (``inside``),
-    each counted by the square root of how often it appears: a plain median
-    cut spent 13 of 16 colours on the blue suit and turned the eyebrows grey."""
+    Most of the palette is a median cut of the colours on the UV islands
+    (``inside``), each counted by the square root of how often it appears: a
+    plain median cut spent 13 of 16 colours on the blue suit and turned the
+    eyebrows grey. The last DETAIL_COLOUR_SHARE are then added one at a time,
+    each the colour that most lowers the error left (counted the same way):
+    small, distinct details - Samus's teal irises, her lip colour - that a
+    median cut merges into their dark or skin-toned neighbours (12 Nov 2026)."""
     import numpy as np
     from PIL import Image
     pixels = np.asarray(image.convert("RGB"))
@@ -1244,11 +1357,36 @@ def _reduce_colours(image, colours: int, inside=None):
     keys, counts = np.unique(coarse[:, 0] * 4096 + coarse[:, 1] * 64 + coarse[:, 2],
                              return_counts=True)
     distinct = np.stack([keys // 4096, keys // 64 % 64, keys % 64], axis=1) * 4 + 2
-    weighted = np.repeat(distinct, np.ceil(np.sqrt(counts)).astype(np.int64), axis=0)
+    weight = np.sqrt(counts)
+    extra = int(colours * DETAIL_COLOUR_SHARE)
+    if len(distinct) > DETAIL_COLOUR_LIMIT or colours - extra < 2:
+        extra = 0
+    weighted = np.repeat(distinct, np.ceil(weight).astype(np.int64), axis=0)
     sample = Image.fromarray(weighted.reshape(1, -1, 3).astype(np.uint8))
-    palette = sample.quantize(colors=colours, method=Image.Quantize.MEDIANCUT,
-                              dither=Image.Dither.NONE)
-    return image.convert("RGB").quantize(palette=palette, dither=Image.Dither.NONE)
+    base = sample.quantize(colors=colours - extra, method=Image.Quantize.MEDIANCUT,
+                           dither=Image.Dither.NONE)
+    if extra:
+        found = len(base.getcolors(1 << 16) or ()) or colours - extra
+        palette = np.asarray(base.getpalette()[:3 * found], np.float64).reshape(-1, 3)
+        points = distinct.astype(np.float64)
+        error = ((points[:, None, :] - palette[None]) ** 2).sum(axis=2).min(axis=1)
+        for _ in range(extra):
+            best_gain, best = 0.0, -1
+            for first in range(0, len(points), 256):
+                candidates = points[first:first + 256]
+                after = ((candidates[:, None, :] - points[None]) ** 2).sum(axis=2)
+                gain = (np.maximum(error[None] - after, 0.0) * weight[None]).sum(axis=1)
+                index = int(np.argmax(gain))
+                if gain[index] > best_gain:
+                    best_gain, best = float(gain[index]), first + index
+            if best < 0:                    # every colour is already in the palette
+                break
+            palette = np.vstack([palette, points[best]])
+            error = np.minimum(error, ((points - points[best]) ** 2).sum(axis=1))
+        base = Image.new("P", (1, 1))
+        # Exactly these colours: a 16-colour texture keeps a 16-entry palette.
+        base.putpalette(palette.round().clip(0, 255).astype(np.uint8).ravel().tolist())
+    return image.convert("RGB").quantize(palette=base, dither=Image.Dither.NONE)
 
 
 def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_TRIANGLES,
@@ -1320,10 +1458,11 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     face_region = None
     face_note = ""
     if face_texture:
-        centre = _face_centre(obj.vertices, obj.faces, obj.colours)
-        if centre is None:
+        found = _face_centre(obj.vertices, obj.faces, obj.colours, with_radius=True)
+        if found is None:
             face_note = "no separate face texture: the sculpt has too little colour detail to find one"
         else:
+            centre, reach = found
             face_region = _face_region(centre, low_positions, low_faces)
             if face_region.all() or not face_region.any():
                 face_region = None
@@ -1344,15 +1483,30 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     padding = 1 if texture <= 128 else 2 if texture <= 256 else 4
     # One unwrap per material: the body, then (if any) the face, each packed
     # into a texture of its own. ``groups`` holds the reduced triangles of each.
+    # The face texture is the face seen from the front, one island; xatlas
+    # unwraps it only when the region has no front to map from.
+    front = None
+    if face_region is not None:
+        # Hairline to chin: FACE_REACH times the reach of the eyes, brows and
+        # lips from the centre (on Samus, 3% of the surface rather than the 10%
+        # an unwrapped face takes, where hair and collar filled the texture).
+        middle = low_positions[low_faces].mean(axis=1)
+        close = np.linalg.norm(middle - centre, axis=1) <= FACE_REACH * reach
+        front = _front_projection(low_positions, low_faces, close, centre, texture, padding)
+        if front is not None:
+            face_region = front[0]
     groups = ([np.arange(len(low_faces))] if face_region is None
               else [np.nonzero(~face_region)[0], np.nonzero(face_region)[0]])
     mappings, part_faces, part_uvs, orders = [], [], [], []
     offset = 0
-    for group in groups:
-        mapping, uv_faces, uvs, order = _unwrap(xatlas, low_positions, low_faces[group],
-                                                texture, padding,
-                                                priority[group] if priority is not None else None,
-                                                boost)
+    for index, group in enumerate(groups):
+        if index == 1 and front is not None:
+            _, mapping, uv_faces, uvs = front
+            order = np.arange(len(group))
+        else:
+            mapping, uv_faces, uvs, order = _unwrap(
+                xatlas, low_positions, low_faces[group], texture, padding,
+                priority[group] if priority is not None else None, boost)
         mappings.append(mapping)
         part_faces.append(uv_faces + offset)
         part_uvs.append(uvs)
