@@ -1,5 +1,50 @@
 # Unreleased (on `main`)
 
+* **Bake textured models too, not only Polypaint (12 Nov).** `--bake` (the
+  same as `--bake-polypaint`) and the review page's **Bake** panel now take a
+  textured `.obj` (with its `.mtl` and images beside it) or `.gltf`/`.glb`:
+  the mesh is reduced to the budget and every material's textures are baked
+  into one new texture, so a game rip with ten materials becomes an
+  N64-style asset with one or two. An `.obj` whose `.mtl` or textures are
+  missing is refused with the name of the file to add. An `.obj`'s `Kd`
+  colours only a material without a texture, as Blender and engines read it.
+
+* **N64 bake: a face you can read (12 Nov).** The face texture is now the
+  face seen from the front, hairline to chin, one upright island, as N64
+  faces were drawn: the eyes, brows and lips fill the 64 px texture instead
+  of a few texels among hair and collar (a test character's eyes went from
+  two or three texels wide to about twelve). Triangles that face away or
+  sit behind hair stay on the main texture. And the 16-colour reduction
+  keeps 6 colours for small details a median cut would merge away - the
+  iris colour, the lips.
+
+* **Save & Run Audit no longer re-adds unchanged files (12 Nov).** Every
+  audit used to add each file to the dashboard again with the same verdict,
+  so three audits showed three identical rows per model. A verdict that
+  matches the newest one stored for the same file from the same machine
+  (same size, same result, same problems) is now not stored again; a file
+  that changed in any of those is. At the end of the audit, a note in the
+  bottom right of the Rules page says how many files were unchanged. A
+  healed file is always recorded.
+
+* **Generated LODs are named after their model (12 Nov).** A LOD made by the
+  review page or `engine/lod_manager.py` / `lod_shippable.py` is now
+  `SM_Rock_LOD2.obj`, not `LOD2_SM_Rock.obj`: the old name failed the same
+  naming rules as its source as soon as it was saved into a project, and
+  engines and the gate's own `[lod]` rules group `<name>_LOD<n>` together.
+  A LOD downloaded from the review page is saved under that name too.
+
+* **Polypaint bake: no more black triangles (12 Nov).** Reducing a thin part
+  (hair against the cheek, a ponytail) could fold it into two triangles on
+  the same three points, facing opposite ways, and one normal per vertex
+  pointed wrong wherever the low-poly mesh folded sharply: a Nintendo 64 bake
+  of a character showed a black triangle on each side of the head, and much
+  of the face was shaded as if lit from behind. Folds are now removed, and
+  shading normals are smoothed only between triangles within 60 degrees of
+  each other (hard edges elsewhere, as Blender's auto smooth does). The mesh
+  has a few more vertices where its edges are hard; the triangle count is
+  unchanged.
+
 * **The gate's code is split into parts in `agk_gate/` (11 Nov).**
   `asset_gatekeeper.py` had grown to about 8,500 lines; it is now a short front
   door, and the code lives in seven parts in `agk_gate/` (settings,

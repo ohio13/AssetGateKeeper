@@ -919,10 +919,10 @@ python asset_gatekeeper.py [folder] [options]
 | `--no-color` | Disable ANSI colour |
 | `--doctor` | Check this machine can run the gate (python, trimesh, Pillow, watchdog, rules, ports), then exit |
 | `--suggest-naming` | Read the texture and mesh names in `<folder>` and print a `[naming]` block for `rules.toml` that fits them; writes nothing |
-| `--bake-polypaint` | With one `.obj` whose colour is ZBrush Polypaint or vertex colours: write a game asset beside it (a reduced `.glb` with UVs, a baked `_BaseColor` texture and a tangent-space `_Normal` map, both also inside the `.glb`) sized to the rules, then check them. Each texel is sampled several times on the sculpt's surface; detail that floats above it (eyebrows, eyeliner) is caught, as a cage bake would. Needs `pip install "asset-gatekeeper[bake]"` |
+| `--bake-polypaint` · `--bake` | With one `.obj` whose colour is ZBrush Polypaint or vertex colours, or a textured `.obj` (its `.mtl` and images beside it) or `.gltf`/`.glb`: write a game asset beside it - a textured model's materials are baked into one texture; an `.obj`'s `Kd` counts only for a material without a `map_Kd`, a glTF's `baseColorFactor` always - (a reduced `.glb` with UVs, a baked `_BaseColor` texture and a tangent-space `_Normal` map, both also inside the `.glb`) sized to the rules, then check them. Each texel is sampled several times on the sculpt's surface; detail that floats above it (eyebrows, eyeliner) is caught, as a cage bake would. Needs `pip install "asset-gatekeeper[bake]"` |
 | `--bake-triangles N` · `--bake-texture PX` | With `--bake-polypaint`: the triangle count and texture size (default: the budget, at most 30,000 and 2048) |
-| `--bake-preset n64` | With `--bake-polypaint`: Nintendo 64 style - about 1,200 triangles, a 64 px texture in 16 colours (a 4-bit palette texture fits the N64's 4 KB texture memory), no normal map, nearest-texel filtering, and a separate face texture; never more than the folder's rules allow. `--bake-triangles`, `--bake-texture`, `--bake-colours`, `--bake-no-face-texture` still override it |
-| `--bake-face-texture` · `--bake-no-face-texture` | With `--bake-polypaint`: give the face its own texture, the same size, as a second material (`T_<name>_Face_BaseColor.png`, and `_Face_Normal.png` with a normal map). The face is found where the sculpt's colour detail is densest (eyes, brows, lips) and takes about a tenth of the surface - on a full figure, about the head. On with `--bake-preset n64`, off otherwise; skipped when the rules allow one material slot, or when the sculpt has no such detail |
+| `--bake-preset n64` | With `--bake-polypaint`: Nintendo 64 style - about 1,200 triangles, a 64 px texture in 16 colours (a 4-bit palette texture fits the N64's 4 KB texture memory; 6 of the 16 are kept for small details such as iris colour), no normal map, nearest-texel filtering, and a separate face texture; never more than the folder's rules allow. `--bake-triangles`, `--bake-texture`, `--bake-colours`, `--bake-no-face-texture` still override it |
+| `--bake-face-texture` · `--bake-no-face-texture` | With `--bake-polypaint`: give the face its own texture, the same size, as a second material (`T_<name>_Face_BaseColor.png`, and `_Face_Normal.png` with a normal map). The face is found where the sculpt's colour detail is densest (eyes, brows, lips) and is mapped straight from the front, hairline to chin, as one upright island (triangles facing away or hidden behind hair stay on the main texture); a face with no clear front is unwrapped instead, about a tenth of the surface. On with `--bake-preset n64`, off otherwise; skipped when the rules allow one material slot, or when the sculpt has no such detail |
 | `--bake-no-normal` | With `--bake-polypaint`: skip the normal map (it is made by default; glTF/OpenGL convention, green up, MikkTSpace-style tangents written into the `.glb`) |
 | `--bake-colours N` | With `--bake-polypaint`: reduce the BaseColor to N colours (`16` or `256` like the N64's palette textures, `0` keeps them all) |
 | `--list-presets` | Print the shipped platform targets and their budgets, then exit |
@@ -1240,9 +1240,9 @@ decimator — but deterministic, dependency-free, and honest about its trade-off
 ```bash
 python engine/lod_manager.py big_statue.glb --ratios 0.5,0.25,0.125 --max-tris 20000,5000,1200
 # big_statue.glb: 38,080 tris, 19,042 verts
-#   LOD1    21,154 tris ( 55.6% of source, target 0.50) -> LOD1_big_statue.glb
-#   LOD2    10,716 tris ( 28.1% of source, target 0.25) -> LOD2_big_statue.glb
-#   LOD3     4,316 tris ( 11.3% of source, target 0.13) -> LOD3_big_statue.glb
+#   LOD1    21,154 tris ( 55.6% of source, target 0.50) -> big_statue_LOD1.glb
+#   LOD2    10,716 tris ( 28.1% of source, target 0.25) -> big_statue_LOD2.glb
+#   LOD3     4,316 tris ( 11.3% of source, target 0.13) -> big_statue_LOD3.glb
 ```
 
 Two things that make it work on real exports:
@@ -1270,9 +1270,9 @@ surface error and is written as a `.glb` with its materials and textures.
 
 ```bash
 python engine/lod_shippable.py globe.glb --ratios 0.5,0.25,0.125
-# LOD1: 8,064 tris (target 8,064), error 1.23 mm  -> lods/LOD1_globe.glb
-# LOD2: 4,032 tris (target 4,032), error 1.98 mm  -> lods/LOD2_globe.glb
-# LOD3: 2,016 tris (target 2,016), error 4.42 mm  -> lods/LOD3_globe.glb
+# LOD1: 8,064 tris (target 8,064), error 1.23 mm  -> lods/globe_LOD1.glb
+# LOD2: 4,032 tris (target 4,032), error 1.98 mm  -> lods/globe_LOD2.glb
+# LOD3: 2,016 tris (target 2,016), error 4.42 mm  -> lods/globe_LOD3.glb
 ```
 
 Slower than clustering (about 80 s per million triangles, pure Python), which is

@@ -539,6 +539,64 @@ try:
     expect("bake output names follow the source: _HP becomes _LP",
            polypaint.output_names(Path("SM_Hero_HP_03.obj"))
            == ("SM_Hero_LP_03.glb", "T_Hero_LP_03_BaseColor.png"))
+    # 12 Nov 2026: the test sculpt's N64 bake had a black triangle on each side of the
+    # head - a fold the reducer left (two triangles on the same three points,
+    # facing opposite ways) - and much of her face shaded from behind, where one
+    # averaged normal per vertex spanned a sharp fold.
+    import numpy as _npp
+    _pos = _npp.array([(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)], float)
+    _faces = _npp.array([(0, 1, 2), (0, 2, 1), (1, 4, 2), (1, 4, 2), (0, 3, 1)])
+    _kept = polypaint._drop_stacked(_pos, _faces)
+    expect("a fold (same triangle twice, facing opposite ways) is dropped whole",
+           not any(sorted(face) == [0, 1, 2] for face in _kept.tolist()), _kept.tolist())
+    expect("... a plain copy keeps one, and other triangles stay",
+           sum(sorted(face) == [1, 2, 4] for face in _kept.tolist()) == 1
+           and [0, 3, 1] in _kept.tolist() and len(_kept) == 2, _kept.tolist())
+    # A sharp ridge: two faces at 90 degrees share an edge. One normal per
+    # vertex would point between them; per corner, each face keeps its own.
+    _ridge = _npp.array([(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)], float)
+    _ridge_faces = _npp.array([(0, 1, 2), (0, 3, 1)])
+    _normals = polypaint._corner_normals(_ridge, _ridge_faces)
+    expect("across a sharp edge each triangle keeps its own normal",
+           _npp.allclose(_normals[0], [0, 0, 1]) and _npp.allclose(_normals[1], [0, 1, 0]),
+           _normals.round(2).tolist())
+    _gentle = _npp.array([(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, -1, 0.3)], float)
+    _gentle_normals = polypaint._corner_normals(_gentle, _npp.array([(0, 1, 2), (0, 3, 1)]))
+    expect("... and a gentle bend is smoothed (the shared corners agree)",
+           _npp.allclose(_gentle_normals[0][0], _gentle_normals[1][0])
+           and _npp.allclose(_gentle_normals[0][1], _gentle_normals[1][2]),
+           _gentle_normals.round(2).tolist())
+    # A palette for a 64 px face: a smooth skin gradient, two eyes with teal
+    # irises (18 texels), a mouth. A median cut alone spends every colour on the
+    # gradient and turns the irises dark (the test sculpt, 12 Nov 2026).
+    from PIL import Image as _PImage
+    _y, _x = _npp.mgrid[0:64, 0:64]
+    _tex = _npp.stack([200 + _x * 0.8, 150 + _y * 0.9, 120 + (_x + _y) * 0.4],
+                      axis=2).clip(0, 255).astype(_npp.uint8)
+    for _left in (10, 40):
+        _tex[20:24, _left:_left + 6] = (40, 30, 30)
+        _tex[21:24, _left + 2:_left + 5] = (30, 130, 140)
+    _tex[44:47, 24:40] = (190, 90, 100)
+
+    def _teal_kept(image):
+        rgb = _npp.asarray(image.convert("RGB")).reshape(-1, 3).astype(int)
+        return int((_npp.abs(rgb - (30, 130, 140)).max(axis=1) < 30).sum())
+
+    _small = polypaint._reduce_colours(_PImage.fromarray(_tex), 16)
+    expect("a 16-colour palette keeps the teal irises teal (all 18 texels)",
+           _teal_kept(_small) == 18, _teal_kept(_small))
+    expect("... and has exactly 16 entries (a 4-bit texture)",
+           len(_small.getpalette()) // 3 == 16, len(_small.getpalette()) // 3)
+    _share = polypaint.DETAIL_COLOUR_SHARE
+    polypaint.DETAIL_COLOUR_SHARE = 0
+    try:
+        _plain = polypaint._reduce_colours(_PImage.fromarray(_tex), 16)
+    finally:
+        polypaint.DETAIL_COLOUR_SHARE = _share
+    expect("... where a median cut alone loses them", _teal_kept(_plain) == 0, _teal_kept(_plain))
+    _p2, _uv2, _n2, _f2 = polypaint._split_by_normal(_ridge, _npp.zeros((4, 2)), _ridge_faces, _normals)
+    expect("a vertex on a hard edge gets a copy per normal",
+           len(_p2) == 6 and _npp.allclose(_n2[_f2[0]], _normals[0]), len(_p2))
     import importlib
     def _bake_ready():
         try:
@@ -852,6 +910,150 @@ try:
                and document["materials"][1]["name"] == "T_Hero_LP_Face"
                and len(made.faces) <= 1200,
                f"{len(primitives)} {len(document['materials'])} {len(images)} {len(made.faces)}")
+        def shading_faults(path):
+            """(triangles with a corner shaded from behind, triangles lying on another)."""
+            document_, arrays_, _ = read_glb_parts(path)
+            behind, stacked = 0, 0
+            for primitive in (p for mesh in document_["meshes"] for p in mesh["primitives"]):
+                P = arrays_[primitive["attributes"]["POSITION"]].astype(float)
+                N = arrays_[primitive["attributes"]["NORMAL"]].astype(float)
+                F = arrays_[primitive["indices"]].astype(int).reshape(-1, 3)
+                fn = _np.cross(P[F[:, 1]] - P[F[:, 0]], P[F[:, 2]] - P[F[:, 0]])
+                behind += int((_np.einsum("ikj,ij->ik", N[F], fn).min(axis=1) < 0).sum())
+                keys = {tuple(sorted(map(tuple, corners)))
+                        for corners in _np.round(P[F] * 1e5).astype(_np.int64).tolist()}
+                stacked += len(F) - len(keys)
+            return behind, stacked
+
+        _faults = shading_faults(hero / "SM_Hero_LP.glb")
+        expect("n64 bake: no triangle shaded from behind, none lying on another",
+               _faults == (0, 0), f"{_faults[0]} shaded from behind, {_faults[1]} stacked")
+
+        def blade_sculpt(rings=60, segments=80):
+            """A head with a thin blade behind it (a ponytail, an ear): reduced
+            hard, the blade's rim is shared by its two sides, and one averaged
+            normal there shaded 16 of 148 triangles from behind (12 Nov 2026)."""
+            import math
+            vertices, colours, faces = [], [], []
+
+            def sphere(cx, cy, cz, rx, ry, rz, colour):
+                base = len(vertices)
+                for i in range(rings + 1):
+                    theta = math.pi * i / rings
+                    for j in range(segments):
+                        phi = 2 * math.pi * j / segments
+                        vertices.append((cx + rx * math.sin(theta) * math.cos(phi),
+                                         cy + ry * math.cos(theta),
+                                         cz + rz * math.sin(theta) * math.sin(phi)))
+                        colours.append(colour)
+                for i in range(rings):
+                    for j in range(segments):
+                        a = base + i * segments + j
+                        b = base + i * segments + (j + 1) % segments
+                        faces.extend([(a, a + segments, b), (b, a + segments, b + segments)])
+
+            sphere(0, 0, 0, 0.5, 0.5, 0.5, (200, 160, 140))
+            sphere(0, 0.2, -0.6, 0.35, 0.9, 0.03, (230, 210, 120))
+            lines = ["# File exported by ZBrush version 2022"]
+            lines += [f"v {x:.5f} {y:.5f} {z:.5f}" for x, y, z in vertices]
+            groups = [f"ff{r:02x}{g:02x}{b:02x}" for r, g, b in colours]
+            lines += ["#MRGB " + "".join(groups[k:k + 64]) for k in range(0, len(groups), 64)]
+            lines += [f"f {a + 1} {b + 1} {c + 1}" for a, b, c in faces]
+            return "\n".join(lines) + "\n"
+
+        blade = WORK / "blade"
+        blade.mkdir()
+        (blade / "SM_Blade_HP.obj").write_text(blade_sculpt(), encoding="utf-8")
+        polypaint.bake(blade / "SM_Blade_HP.obj", blade, triangles=150, texture=64,
+                       normal_map=False, colours=16)
+        _faults = shading_faults(blade / "SM_Blade_LP.glb")
+        expect("a thin blade reduced hard: no triangle shaded from behind (was 16 of 148)",
+               _faults == (0, 0), f"{_faults[0]} shaded from behind, {_faults[1]} stacked")
+
+        # 12 Nov 2026: models that carry colour in textures (game rips, a
+        # textured .obj or .glb) bake too - every material's textures into one.
+        def textured_globe(folder, rings=24, segments=48):
+            """SM_Globe.obj: a sphere, its top half one material (a red texture),
+            its bottom half another (blue), each .mtl entry with Kd 0.4 as many
+            exporters write it beside a texture."""
+            import math
+            folder.mkdir(parents=True, exist_ok=True)
+            lines = ["mtllib SM_Globe.mtl"]
+            for i in range(rings + 1):
+                for j in range(segments + 1):          # a UV seam: one more column
+                    theta, phi = math.pi * i / rings, 2 * math.pi * j / segments
+                    lines.append(f"v {math.sin(theta) * math.cos(phi):.5f} {math.cos(theta):.5f} "
+                                 f"{math.sin(theta) * math.sin(phi):.5f}")
+                    lines.append(f"vt {j / segments:.5f} {1 - i / rings:.5f}")
+            for half, name in ((range(rings // 2), "Top"), (range(rings // 2, rings), "Bottom")):
+                lines.append(f"usemtl {name}")
+                for i in half:
+                    for j in range(segments):
+                        a = i * (segments + 1) + j + 1
+                        b, c, d = a + 1, a + segments + 1, a + segments + 2
+                        lines += [f"f {a}/{a} {c}/{c} {b}/{b}", f"f {b}/{b} {c}/{c} {d}/{d}"]
+            (folder / "SM_Globe.obj").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            (folder / "SM_Globe.mtl").write_text(
+                "newmtl Top\nKd 0.4 0.4 0.4\nmap_Kd T_Top.png\n"
+                "newmtl Bottom\nKd 0.4 0.4 0.4\nmap_Kd T_Bottom.png\n", encoding="utf-8")
+            _Image.new("RGB", (32, 32), (220, 40, 30)).save(folder / "T_Top.png")
+            _Image.new("RGB", (32, 32), (30, 60, 210)).save(folder / "T_Bottom.png")
+            return folder / "SM_Globe.obj"
+
+        def baked_colour_by_height(path):
+            """(mean colour of the top, of the bottom) of a baked .glb: its own
+            texture read at its vertices' UVs."""
+            document_, arrays_, images_ = read_glb_parts(path)
+            primitive = document_["meshes"][0]["primitives"][0]
+            P = arrays_[primitive["attributes"]["POSITION"]].astype(float)
+            UV = arrays_[primitive["attributes"]["TEXCOORD_0"]].astype(float)
+            image = _np.asarray(_Image.open(io.BytesIO(images_[0])).convert("RGB")).astype(float)
+            h, w = image.shape[:2]
+            colour = image[_np.clip(((UV[:, 1]) * h).astype(int), 0, h - 1),
+                           _np.clip((UV[:, 0] * w).astype(int), 0, w - 1)]
+            return colour[P[:, 1] > 0.6].mean(axis=0), colour[P[:, 1] < -0.6].mean(axis=0)
+
+        globe = textured_globe(WORK / "globe")
+        expect("a textured .obj (its .mtl and images beside it) is something to bake",
+               polypaint.bake_source(globe) == "texture" and polypaint.bake_problem(globe) == "")
+        (globe.parent / "rules.toml").write_text("[mesh]\nmax_triangles = 1200\nmax_material_slots = 2\n"
+                                                 "[texture]\nmax_edge = 64\npower_of_two = true\n"
+                                                 "pbr = false\n", encoding="utf-8")
+        done = run_gate(globe, "--bake", "--bake-preset", "n64")
+        expect("--bake: the textured .obj's two materials become one N64 asset that passes",
+               done.returncode == 0 and "PASSED  SM_Globe_LP.glb" in done.stdout
+               and "1 mat" in done.stdout.split("PASSED  SM_Globe_LP.glb", 1)[1].splitlines()[0],
+               done.stdout[-600:] + done.stderr[-300:])
+        _top, _bottom = baked_colour_by_height(globe.parent / "SM_Globe_LP.glb")
+        expect("... the top keeps the red texture and the bottom the blue one",
+               _top[0] > 150 and _top[2] < 90 and _bottom[2] > 150 and _bottom[0] < 90,
+               (_top.round().tolist(), _bottom.round().tolist()))
+        expect("... at full strength: Kd 0.4 beside a texture does not darken it",
+               _top[0] > 180, _top.round().tolist())
+        _scene = _trimesh.load(globe, force="scene")
+        for _geometry in _scene.geometry.values():
+            # trimesh carries the .obj's Kd 0.4 over as baseColorFactor, which a
+            # glTF multiplies its texture by: a full-strength one here.
+            _geometry.visual.material.diffuse = [255, 255, 255, 255]
+        glb_globe = WORK / "globe_glb" / "SM_Globe.glb"
+        glb_globe.parent.mkdir()
+        glb_globe.write_bytes(_scene.export(file_type="glb"))
+        expect("a textured .glb is something to bake too", polypaint.bake_source(glb_globe) == "texture")
+        polypaint.bake(glb_globe, glb_globe.parent, triangles=600, texture=64, normal_map=False,
+                       colours=16)
+        _top, _bottom = baked_colour_by_height(glb_globe.parent / "SM_Globe_LP.glb")
+        expect("... and bakes the same colours",
+               _top[0] > 150 and _top[2] < 90 and _bottom[2] > 150 and _bottom[0] < 90,
+               (_top.round().tolist(), _bottom.round().tolist()))
+        rip = WORK / "rip"
+        rip.mkdir()
+        (rip / "rtm_hero.obj").write_text("mtllib rtm_hero.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\n"
+                                          "vt 0 0\nvt 1 0\nvt 0 1\nusemtl mat1\nf 1/1 2/2 3/3\n",
+                                          encoding="utf-8")
+        done = run_gate(rip / "rtm_hero.obj", "--bake")
+        expect("a rip without its .mtl is refused, saying which file to put beside it",
+               done.returncode == 2 and "rtm_hero.mtl, which is not beside it"
+               in done.stdout + done.stderr, done.stdout[-300:] + done.stderr[-300:])
         face_pixels = _np.asarray(_Image.open(hero / "T_Hero_LP_Face_BaseColor.png").convert("RGB"))
         dark_face = int((face_pixels.max(axis=2) < 70).sum())
         done = run_gate(hero / "SM_Hero_HP.obj", "--bake-polypaint", "--bake-preset", "n64",
@@ -868,6 +1070,18 @@ try:
                done.stdout[-400:] + done.stderr[-300:])
         expect("the eyes get at least 4x the texels with a face texture",
                dark_face >= 4 * max(dark_one, 1), f"{dark_face} vs {dark_one}")
+        # 12 Nov 2026: the face texture is the face seen from the front, upright,
+        # one island - xatlas cut the test sculpt's into dozens and its eyes got 2-3 texels.
+        _eye_rows = _np.nonzero(face_pixels.max(axis=2) < 70)[0]
+        _lip_rows = _np.nonzero((face_pixels[..., 0] > 150) & (face_pixels[..., 1] < 90))[0]
+        expect("the face texture is the face seen from the front: eyes above the mouth",
+               len(_eye_rows) and len(_lip_rows) and _eye_rows.mean() < _lip_rows.mean(),
+               (_eye_rows.mean() if len(_eye_rows) else None,
+                _lip_rows.mean() if len(_lip_rows) else None))
+        _eye_cols = _np.nonzero(face_pixels.max(axis=2) < 70)[1]
+        expect("... and the two eyes span a good part of its width (not a few texels)",
+               len(_eye_cols) and _eye_cols.max() - _eye_cols.min() >= 64 * 0.3,
+               (_eye_cols.min(), _eye_cols.max()) if len(_eye_cols) else None)
         expect("the reducer meets the budget on a sculpt with repeated points (was 4,628 of 1,200)",
                len(_trimesh.load(hero / "SM_Hero_LP.glb", force="mesh").faces) <= 1200)
         (hero / "rules.toml").write_text("[mesh]\nmax_triangles = 1200\nmax_material_slots = 1\n"

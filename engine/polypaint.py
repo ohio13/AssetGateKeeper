@@ -30,6 +30,12 @@ vertices. ``bake`` makes the usual game asset instead:
 5. write a .glb (both textures inside, ready for Unreal, Unity, Godot or
    Blender) and the textures as .png files beside it.
 
+A model that carries its colour in textures - an .obj with its .mtl and
+images, a .gltf or .glb - bakes the same way (``read_textured``,
+``TexturedSculpt``): the high surface's colour at each sample is its own
+material's texture there, through its UVs, so every material ends up in one
+texture (a game rip with ten materials becomes an asset with one).
+
 ``preset="n64"`` makes a Nintendo 64 style asset instead: about 1,200
 triangles, a 64 px texture in 16 colours (a 4-bit texture that fits the N64's
 4 KB texture memory), no normal map, nearest-texel filtering.
@@ -108,8 +114,10 @@ NEAREST_TEXTURE = 128
 #: Face texture (second material): the region around the sculpt's densest colour
 #: detail (eyes, brows, lips) that gets a texture of its own: colours counted in
 #: small cells, summed on a FACE_GRID-cell grid over the model (_face_centre);
-#: the region is the reduced surface nearest that centre, FACE_SHARE of its
-#: area (about a head on a full figure: the rule of nines gives the head 9%).
+#: the face texture is that face seen from the front (_front_projection), out
+#: to FACE_REACH times the detail's reach. FACE_SHARE of the reduced surface
+#: nearest the centre (about a head on a full figure: the rule of nines gives
+#: the head 9%) is the region unwrapped instead when the face has no front.
 #: A sculpt edge whose two ends differ by FACE_EDGE_CONTRAST (0-1, largest
 #: channel) is a detail edge; with fewer than FACE_MIN_EDGES there is no face.
 FACE_EDGE_CONTRAST = 0.25
@@ -190,6 +198,200 @@ def read_obj(path: Path) -> ObjColours:
     else:
         raise PolypaintError(f"{path.name} has no Polypaint or vertex colours to use")
     return ObjColours(positions, triangles, colours.clip(0.0, 1.0), source)
+
+
+#: Model files whose textures can be baked (besides Polypaint .obj files).
+TEXTURED_SUFFIXES = (".obj", ".gltf", ".glb")
+
+
+@dataclass
+class TexturedModel:
+    """A model that carries colour in textures, ready to bake like a sculpt."""
+    vertices: "object"           # numpy (n, 3) float64, split where UVs are
+    faces: "object"              # numpy (m, 3) int64
+    colours: "object"            # numpy (n, 3) float32: the texture at each vertex
+    uvs: "object"                # numpy (n, 2) float64
+    material: "object"           # numpy (m,) int64: which of ``images`` each face uses
+    images: list                 # numpy (h, w, 3) float32 0..1 per material, or None
+    tints: "object"              # numpy (materials, 3) float32: colour factor per material
+    source: str = "texture"
+
+
+def _mtl_problem(path: Path) -> str:
+    """Why an .obj's textures cannot be read, or '' when they can: the .mtl it
+    names, or an image that .mtl names, is not where it says. Game rips often
+    come without them."""
+    libraries, has_uvs = [], False
+    try:
+        # Line by line, and only until the first UV: the review page asks this
+        # of every .obj it shows, and a scan can be tens of MB.
+        with open(path, "r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                if line.startswith("mtllib ") and len(line.split(None, 1)) > 1:
+                    libraries.append(line.split(None, 1)[1].strip())
+                elif line.startswith("vt "):
+                    has_uvs = True
+                    if libraries:
+                        break
+    except OSError as exc:
+        return f"cannot read {path.name}: {exc}"
+    if not libraries:
+        return f"{path.name} names no .mtl (material file), so it has no textures"
+    if not has_uvs:
+        return f"{path.name} has no UVs (vt lines), so a texture cannot be placed on it"
+    maps = 0
+    for library in libraries:
+        mtl = path.parent / library
+        if not mtl.is_file():
+            return (f"{path.name} names {library}, which is not beside it: put the .mtl "
+                    "and the textures it names next to the .obj")
+        for line in mtl.read_text(encoding="utf-8", errors="replace").splitlines():
+            parts = line.strip().split()
+            if parts and parts[0].lower() == "map_kd" and len(parts) > 1:
+                image = path.parent / parts[-1].replace("\\", "/")
+                if not image.is_file():
+                    return (f"{library} names the texture {parts[-1]}, which is not there: "
+                            "put it next to the .obj")
+                maps += 1
+    return "" if maps else f"{', '.join(libraries)} names no texture (map_Kd)"
+
+
+def bake_source(path: Path) -> str:
+    """What a bake would take colour from: 'polypaint', 'vertex colours',
+    'texture', or '' when there is nothing to bake. Cheap: no mesh is read."""
+    suffix = path.suffix.lower()
+    if suffix == ".obj":
+        painted = colour_source(path)
+        if painted:
+            return painted
+        return "texture" if not _mtl_problem(path) else ""
+    if suffix in (".gltf", ".glb"):
+        try:
+            if suffix == ".glb":                  # only the JSON chunk, not the mesh data
+                with open(path, "rb") as handle:
+                    header = handle.read(20)
+                    length = int.from_bytes(header[12:16], "little")
+                    if length > 64 * 1024 * 1024:
+                        return ""
+                    document = json.loads(handle.read(length))
+            else:
+                document = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return ""
+        if not isinstance(document, dict):
+            return ""
+        for material in document.get("materials") or []:
+            if (material.get("pbrMetallicRoughness") or {}).get("baseColorTexture"):
+                return "texture"
+    return ""
+
+
+def bake_problem(path: Path) -> str:
+    """Why ``path`` cannot be baked, in words, or '' when it can."""
+    if path.suffix.lower() not in TEXTURED_SUFFIXES:
+        return (f"{path.name}: only an .obj (ZBrush Polypaint, vertex colours or textures) "
+                "or a textured .gltf/.glb can be baked")
+    if bake_source(path):
+        return ""
+    if path.suffix.lower() == ".obj":
+        return (f"{path.name} has no Polypaint or vertex colours, and no textures to bake: "
+                + _mtl_problem(path))
+    return f"{path.name} has no base colour texture to bake"
+
+
+def _image_array(image):
+    import numpy as np
+    if image is None:
+        return None
+    return np.asarray(image.convert("RGB"), np.float32) / 255.0
+
+
+def read_textured(path: Path) -> TexturedModel:
+    """Every mesh of a textured .obj (with its .mtl and images) or .gltf/.glb,
+    placed by its node, with its UVs and its material's base colour texture."""
+    import numpy as np
+    import trimesh
+    problem = bake_problem(path)
+    if problem:
+        raise PolypaintError(problem)
+    try:
+        scene = trimesh.load(path, force="scene", process=False)
+    except Exception as exc:                     # noqa: BLE001 - any reader failure, said plainly
+        raise PolypaintError(f"cannot read {path.name}: {exc}") from exc
+    vertices, faces, uvs, material = [], [], [], []
+    images, tints, keys = [], [], {}
+    offset = 0
+    for node in scene.graph.nodes_geometry:
+        transform, name = scene.graph[node]
+        mesh = scene.geometry[name]
+        if not hasattr(mesh, "faces") or len(mesh.faces) == 0:
+            continue
+        visual = mesh.visual
+        uv = getattr(visual, "uv", None)
+        found = getattr(visual, "material", None)
+        if uv is None or found is None or len(uv) != len(mesh.vertices):
+            uv = np.zeros((len(mesh.vertices), 2))
+        image = getattr(found, "baseColorTexture", None)
+        if image is None:
+            image = getattr(found, "image", None)
+        # glTF multiplies its texture by baseColorFactor; an .obj's Kd only
+        # colours a material without a map_Kd (as Blender and engines read it:
+        # trimesh writes Kd 0.4 beside a texture, which darkened a bake to 40%).
+        factor = getattr(found, "baseColorFactor", None)
+        if factor is None and image is None:
+            factor = getattr(found, "diffuse", None)
+        tint = (np.asarray(factor, np.float32)[:3] / 255.0 if factor is not None
+                else np.ones(3, np.float32))
+        key = id(found)
+        if key not in keys:
+            keys[key] = len(images)
+            images.append(_image_array(image))
+            tints.append(tint)
+        points = trimesh.transformations.transform_points(np.asarray(mesh.vertices, np.float64),
+                                                           transform)
+        vertices.append(points)
+        faces.append(np.asarray(mesh.faces, np.int64) + offset)
+        uvs.append(np.asarray(uv, np.float64))
+        material.append(np.full(len(mesh.faces), keys[key], np.int64))
+        offset += len(points)
+    if not faces:
+        raise PolypaintError(f"{path.name} has no triangles")
+    if all(image is None for image in images):
+        raise PolypaintError(f"{path.name}: its textures could not be read")
+    model = TexturedModel(np.concatenate(vertices), np.concatenate(faces), None,
+                          np.concatenate(uvs), np.concatenate(material), images,
+                          np.asarray(tints, np.float32))
+    # One colour per vertex, sampled from its own material: what finds the face
+    # and the fine detail, as Polypaint does on a sculpt.
+    owner = np.zeros(len(model.vertices), np.int64)
+    owner[model.faces.ravel()] = np.repeat(model.material, 3)
+    model.colours = _sample_materials(model.images, model.tints, owner, model.uvs)
+    return model
+
+
+def _sample_materials(images, tints, material, uv):
+    """Base colour at each ``uv`` (n, 2) of each ``material`` (n,): bilinear,
+    repeating past 0-1 (a tiling texture), v going up; a material with no
+    image is its flat colour."""
+    import numpy as np
+    out = np.empty((len(uv), 3), np.float32)
+    for index in np.unique(material):
+        rows = np.nonzero(material == index)[0]
+        image = images[int(index)]
+        if image is None:
+            out[rows] = tints[int(index)]
+            continue
+        height, width = image.shape[:2]
+        x = (uv[rows, 0] % 1.0) * width - 0.5
+        y = (1.0 - uv[rows, 1] % 1.0) * height - 0.5
+        x0, y0 = np.floor(x).astype(np.int64), np.floor(y).astype(np.int64)
+        fx, fy = (x - x0)[:, None].astype(np.float32), (y - y0)[:, None].astype(np.float32)
+        x1, y1 = (x0 + 1) % width, (y0 + 1) % height
+        x0, y0 = x0 % width, y0 % height
+        top = image[y0, x0] * (1 - fx) + image[y0, x1] * fx
+        bottom = image[y1, x0] * (1 - fx) + image[y1, x1] * fx
+        out[rows] = (top * (1 - fy) + bottom * fy) * tints[int(index)]
+    return out.clip(0.0, 1.0)
 
 
 def write_preview_glb(obj: ObjColours, target: Path) -> None:
@@ -303,6 +505,95 @@ def _weld(vertices, faces):
     keep = ((welded[:, 0] != welded[:, 1]) & (welded[:, 1] != welded[:, 2])
             & (welded[:, 0] != welded[:, 2]))
     return np.asarray(vertices, np.float64)[first], welded[keep]
+
+
+def _drop_stacked(positions, faces):
+    """``faces`` without triangles that lie exactly on another one.
+
+    Reducing a thin part (an ear, a strand of hair against the cheek) can fold
+    it flat into two triangles on the same three points, facing opposite ways.
+    Their normals cancel, so the one facing out is shaded as if lit from
+    behind: the test sculpt's N64 bake had a black triangle on each side of the head
+    (12 Nov 2026). Such a fold has no inside, so both go; a plain copy facing
+    the same way keeps one."""
+    import numpy as np
+    if len(faces) == 0:
+        return faces
+    corners = np.asarray(positions, np.float64)[faces]
+    span = float(np.max(corners.reshape(-1, 3).max(0) - corners.reshape(-1, 3).min(0))) or 1.0
+    keys = np.round(corners / (span * 1e-6)).astype(np.int64)      # (faces, 3 corners, xyz)
+    # The same three points in any order: sort each triangle's corners.
+    corner_order = np.lexsort((keys[:, :, 2], keys[:, :, 1], keys[:, :, 0]), axis=1)
+    sorted_keys = np.take_along_axis(keys, corner_order[:, :, None], axis=1).reshape(len(faces), -1)
+    _, group, counts = np.unique(sorted_keys, axis=0, return_inverse=True, return_counts=True)
+    group = group.ravel()
+    if counts.max() < 2:
+        return faces
+    normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    keep = np.ones(len(faces), bool)
+    for index in np.nonzero(counts > 1)[0]:
+        members = np.nonzero(group == index)[0]
+        reference = normals[members[0]]
+        facing = np.einsum("ij,j->i", normals[members], reference) > 0
+        if facing.all():
+            keep[members[1:]] = False        # copies: one is enough
+        else:
+            keep[members] = False            # a fold: nothing inside it
+    return faces[keep]
+
+
+#: Neighbouring triangles further apart than this keep a hard edge between
+#: them in the baked mesh's shading (Blender's "auto smooth" does the same).
+CREASE_DEGREES = 60.0
+
+
+def _corner_normals(positions, faces, crease_degrees: float = CREASE_DEGREES):
+    """A normal for each corner of each triangle, shape (faces, 3, 3): the
+    area-weighted average of the triangles at that corner's vertex that face
+    within ``crease_degrees`` of this one.
+
+    One averaged normal per vertex (what the bake used before) goes wrong where
+    a 1,200-triangle head folds sharply - hair over the cheek, the jaw against
+    the neck: the average points away from some of the triangles that share it,
+    and they shade as if lit from behind. On the test sculpt's N64 bake that was a corner
+    of 4 triangles in 10 on the body, and of most of the face (12 Nov 2026)."""
+    import numpy as np
+    corners = positions[faces]
+    weighted = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    length = np.linalg.norm(weighted, axis=1, keepdims=True)
+    unit = weighted / np.where(length > 0, length, 1.0)
+    limit = np.cos(np.radians(crease_degrees))
+    # Corner k of face f is row 3f+k; group the rows by the vertex they sit on.
+    vertex = faces.ravel()
+    row = np.argsort(vertex, kind="stable")
+    vertex = vertex[row]
+    starts = np.flatnonzero(np.r_[True, vertex[1:] != vertex[:-1]])
+    ends = np.r_[starts[1:], len(vertex)]
+    result = np.empty((len(faces) * 3, 3))
+    for start, end in zip(starts, ends):
+        rows = row[start:end]
+        here = rows // 3
+        close = unit[here] @ unit[here].T >= limit
+        result[rows] = close.astype(np.float64) @ weighted[here]
+    length = np.linalg.norm(result, axis=1, keepdims=True)
+    fallback = np.repeat(unit, 3, axis=0)
+    result = np.where(length > 0, result / np.where(length > 0, length, 1.0), fallback)
+    return result.reshape(len(faces), 3, 3)
+
+
+def _split_by_normal(positions, uvs, faces, corner_normals):
+    """(positions, uvs, normals, faces) with a vertex wherever its corners want
+    different normals: a hard edge needs its own copy of each vertex on it."""
+    import numpy as np
+    vertex = faces.ravel()
+    normals = corner_normals.reshape(-1, 3)
+    keys = np.concatenate([vertex[:, None].astype(np.float64),
+                           np.round(normals * 1e4)], axis=1)
+    _, first, inverse = np.unique(keys, axis=0, return_index=True, return_inverse=True)
+    inverse = inverse.ravel()
+    source = vertex[first]
+    return (positions[source], uvs[source], normals[first],
+            inverse.reshape(faces.shape).astype(faces.dtype))
 
 
 def _smooth_normals(positions, faces):
@@ -528,6 +819,23 @@ class Sculpt:
         corners = self.faces[face]
         return _normalise(np.einsum("nk,nkc->nc", bary.astype(np.float32),
                                     self.normals[corners]))
+
+
+class TexturedSculpt(Sculpt):
+    """A textured model as the high surface: its colour at a point is its own
+    texture there (through its UVs), not a blend of vertex colours."""
+
+    def __init__(self, model: "TexturedModel", spatial):
+        super().__init__(model.vertices, model.faces, model.colours, spatial)
+        self.uvs = model.uvs
+        self.material = model.material
+        self.images = model.images
+        self.tints = model.tints
+
+    def colour(self, face, bary):
+        import numpy as np
+        uv = np.einsum("nk,nkc->nc", bary.astype(np.float64), self.uvs[self.faces[face]])
+        return _sample_materials(self.images, self.tints, self.material[face], uv)
 
 
 #: Bounding-box sizes (in pixels) triangles are grouped by when drawn; a larger
@@ -950,7 +1258,7 @@ def _detail(sculpt_colours, nearest, faces, positions):
     return touched[faces].any(axis=1)
 
 
-def _face_centre(vertices, faces, colours, spatial=None):
+def _face_centre(vertices, faces, colours, spatial=None, with_radius: bool = False):
     """Where the sculpt's colour detail is densest - on a character, the eyes,
     brows and lips - or None when it has too little detail to tell.
 
@@ -1018,7 +1326,15 @@ def _face_centre(vertices, faces, colours, spatial=None):
         pass
     busiest = np.array(np.unravel_index(int(np.argmax(grid)), cshape))
     near = np.all(np.abs(index - busiest) <= 1, axis=1)
-    return (middles[near] * detail[near, None]).sum(axis=0) / detail[near].sum()
+    weight = detail[near]
+    centre = (middles[near] * weight[:, None]).sum(axis=0) / weight.sum()
+    if not with_radius:
+        return centre
+    # How far the detail reaches from the centre (detail-weighted RMS): about
+    # half the span from brows to lips.
+    reach = float(np.sqrt((weight * ((middles[near] - centre) ** 2).sum(axis=1)).sum()
+                          / weight.sum()))
+    return centre, reach
 
 
 def _face_region(centre, positions, faces, share: float = FACE_SHARE):
@@ -1037,6 +1353,97 @@ def _face_region(centre, positions, faces, share: float = FACE_SHARE):
     if not region.any():                     # one huge triangle: take it alone
         region[order[0]] = True
     return region
+
+
+#: A face-texture triangle faces at most this far from the face's own direction;
+#: the rest of the region (the sides of the head) goes on the main texture.
+FACE_FRONT_DEGREES = 85.0
+#: The face texture covers what is within this many times the reach of the
+#: facial detail (eyes, brows, lips) from its centre: hairline to chin.
+FACE_REACH = 1.8
+#: Share of the face region, nearest its centre, whose facing says which way
+#: the face looks.
+FACE_DIRECTION_SHARE = 0.05
+#: Grid used to find face triangles hidden from the front by others.
+FACE_VISIBILITY_GRID = 384
+
+
+def _front_projection(positions, faces, region, centre, size: int, padding: int):
+    """The face mapped straight from the front, the way N64 faces were drawn:
+    one island, upright, filling its texture. Returns (region, mapping, uv
+    faces, uvs) for the triangles kept (``region`` narrowed to them), or None
+    when the region has no front to map from.
+
+    xatlas cut the test sculpt's face into dozens of islands, the hair fringe took much
+    of the 64 px texture and her eyes came out two or three texels wide (12 Nov
+    2026). From the front, eyes, brows and lips span most of the texture.
+    Kept: triangles facing within FACE_FRONT_DEGREES of the face's direction
+    and not hidden from the front behind another one (they would share its
+    texels); the others go back to the main texture."""
+    import numpy as np
+    chosen = np.nonzero(region)[0]
+    if len(chosen) < 8:
+        return None
+    corners = positions[faces[chosen]]
+    normal = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    doubled = np.linalg.norm(normal, axis=1)
+    # Which way the face looks: the triangles nearest its centre (eyes, nose,
+    # lips), FACE_DIRECTION_SHARE of the region. The whole region is most of a
+    # low-poly head - back and hair too - whose facings cancel out; even the
+    # nearest ones point every way (nose sides, eye sockets), and agree only
+    # to about 0.4 on the test sculpt, but their sum points out of the face.
+    distance = np.linalg.norm(corners.mean(axis=1) - np.asarray(centre, np.float64), axis=1)
+    order = np.argsort(distance, kind="stable")
+    nearest = order[np.cumsum(doubled[order]) <= FACE_DIRECTION_SHARE * float(doubled.sum())]
+    if len(nearest) < 12:
+        nearest = order[:12]
+    direction = normal[nearest].sum(axis=0)         # area-weighted
+    length = float(np.linalg.norm(direction))
+    if length < 0.25 * float(doubled[nearest].sum()):  # no one way it looks
+        return None
+    direction /= length
+    up = np.array([0.0, 1.0, 0.0])
+    if abs(float(up @ direction)) > 0.9:            # looking up or down: use depth
+        up = np.array([0.0, 0.0, 1.0])
+    up = up - direction * float(up @ direction)
+    up /= np.linalg.norm(up)
+    right = np.cross(up, direction)                 # seen from the front, left to right
+    unit = normal / np.where(doubled > 0, doubled, 1.0)[:, None]
+    keep = chosen[unit @ direction >= np.cos(np.radians(FACE_FRONT_DEGREES))]
+    if len(keep) < 8:
+        return None
+
+    def project(ids):
+        used, local = np.unique(faces[ids], return_inverse=True)
+        points = positions[used]
+        return used, local.reshape(-1, 3), np.stack([points @ right, points @ up], axis=1), points
+
+    used, local, xy, points = project(keep)
+    low, span = xy.min(axis=0), float((xy.max(axis=0) - xy.min(axis=0)).max()) or 1.0
+    grid = FACE_VISIBILITY_GRID
+    pixels = (xy - low) / span * (grid - 1) + 0.5
+    owner, _ = _rasterise(pixels, local, grid, depth=(points @ direction).astype(np.float32))
+    seen = np.bincount(owner[owner >= 0], minlength=len(keep))
+    tri = pixels[local]
+    covers = 0.5 * np.abs((tri[:, 1, 0] - tri[:, 0, 0]) * (tri[:, 2, 1] - tri[:, 0, 1])
+                          - (tri[:, 2, 0] - tri[:, 0, 0]) * (tri[:, 1, 1] - tri[:, 0, 1]))
+    # Mostly hidden (a cheek behind a lock of hair) goes; edge-on slivers that
+    # cover no pixel centre are kept, they share nothing.
+    visible = (seen >= 0.5 * covers) | (covers < 2.0)
+    keep = keep[visible]
+    if len(keep) < 8:
+        return None
+    used, local, xy, _ = project(keep)
+    low = xy.min(axis=0)
+    extent = xy.max(axis=0) - low
+    span = float(extent.max()) or 1.0
+    # Into the texture with ``padding`` texels round it, centred, square texels.
+    inner = (size - 2 * padding) / size
+    uvs = (xy - low) / span * inner + padding / size
+    uvs += (1.0 - 2 * padding / size - extent / span * inner) / 2.0
+    narrowed = np.zeros(len(region), bool)
+    narrowed[keep] = True
+    return narrowed, used, local, uvs
 
 
 def _png_bytes(image) -> bytes:
@@ -1140,13 +1547,25 @@ def write_glb(path: Path, positions, normals, uvs, faces, base_png: bytes, name:
         handle.write(struct.pack("<I4s", len(binary), b"BIN\0") + binary)
 
 
+#: Of a reduced palette, this share is chosen last, one colour at a time, for
+#: the colours the rest represent worst (see _reduce_colours).
+DETAIL_COLOUR_SHARE = 3 / 8
+#: Above this many distinct colours the detail colours are skipped (the search
+#: compares every colour with every other); a 64-128 px texture is far below.
+DETAIL_COLOUR_LIMIT = 8192
+
+
 def _reduce_colours(image, colours: int, inside=None):
     """The texture in ``colours`` colours, no dithering: a palette texture like the
     N64's 4-bit (16) and 8-bit (256) colour-index formats.
 
-    The palette is a median cut of the colours on the UV islands (``inside``),
-    each counted by the square root of how often it appears: a plain median
-    cut spent 13 of 16 colours on the blue suit and turned the eyebrows grey."""
+    Most of the palette is a median cut of the colours on the UV islands
+    (``inside``), each counted by the square root of how often it appears: a
+    plain median cut spent 13 of 16 colours on the blue suit and turned the
+    eyebrows grey. The last DETAIL_COLOUR_SHARE are then added one at a time,
+    each the colour that most lowers the error left (counted the same way):
+    small, distinct details - the test sculpt's teal irises, its lip colour - that a
+    median cut merges into their dark or skin-toned neighbours (12 Nov 2026)."""
     import numpy as np
     from PIL import Image
     pixels = np.asarray(image.convert("RGB"))
@@ -1155,11 +1574,36 @@ def _reduce_colours(image, colours: int, inside=None):
     keys, counts = np.unique(coarse[:, 0] * 4096 + coarse[:, 1] * 64 + coarse[:, 2],
                              return_counts=True)
     distinct = np.stack([keys // 4096, keys // 64 % 64, keys % 64], axis=1) * 4 + 2
-    weighted = np.repeat(distinct, np.ceil(np.sqrt(counts)).astype(np.int64), axis=0)
+    weight = np.sqrt(counts)
+    extra = int(colours * DETAIL_COLOUR_SHARE)
+    if len(distinct) > DETAIL_COLOUR_LIMIT or colours - extra < 2:
+        extra = 0
+    weighted = np.repeat(distinct, np.ceil(weight).astype(np.int64), axis=0)
     sample = Image.fromarray(weighted.reshape(1, -1, 3).astype(np.uint8))
-    palette = sample.quantize(colors=colours, method=Image.Quantize.MEDIANCUT,
-                              dither=Image.Dither.NONE)
-    return image.convert("RGB").quantize(palette=palette, dither=Image.Dither.NONE)
+    base = sample.quantize(colors=colours - extra, method=Image.Quantize.MEDIANCUT,
+                           dither=Image.Dither.NONE)
+    if extra:
+        found = len(base.getcolors(1 << 16) or ()) or colours - extra
+        palette = np.asarray(base.getpalette()[:3 * found], np.float64).reshape(-1, 3)
+        points = distinct.astype(np.float64)
+        error = ((points[:, None, :] - palette[None]) ** 2).sum(axis=2).min(axis=1)
+        for _ in range(extra):
+            best_gain, best = 0.0, -1
+            for first in range(0, len(points), 256):
+                candidates = points[first:first + 256]
+                after = ((candidates[:, None, :] - points[None]) ** 2).sum(axis=2)
+                gain = (np.maximum(error[None] - after, 0.0) * weight[None]).sum(axis=1)
+                index = int(np.argmax(gain))
+                if gain[index] > best_gain:
+                    best_gain, best = float(gain[index]), first + index
+            if best < 0:                    # every colour is already in the palette
+                break
+            palette = np.vstack([palette, points[best]])
+            error = np.minimum(error, ((points - points[best]) ** 2).sum(axis=1))
+        base = Image.new("P", (1, 1))
+        # Exactly these colours: a 16-colour texture keeps a 16-entry palette.
+        base.putpalette(palette.round().clip(0, 255).astype(np.uint8).ravel().tolist())
+    return image.convert("RGB").quantize(palette=base, dither=Image.Dither.NONE)
 
 
 def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_TRIANGLES,
@@ -1196,7 +1640,8 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
 
     started = time.time()
     step("reading the sculpt", 0)
-    obj = read_obj(Path(source))
+    textured = bake_source(Path(source)) == "texture"
+    obj = read_textured(Path(source)) if textured else read_obj(Path(source))
     step("reducing the mesh", 1)
     # Reduce a welded copy: vertices that sit on top of each other (a UV seam,
     # a pole fan, pieces exported separately) are open edges to the reducer,
@@ -1221,9 +1666,10 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     flat = agk.degenerate_mask(corners[:, 0], corners[:, 1], corners[:, 2])
     if flat.any():
         low_faces = low_faces[~flat]
-    normals = _smooth_normals(low_positions, low_faces)
+    low_faces = _drop_stacked(low_positions, low_faces)
     step("unwrapping UVs", 2)
-    sculpt = Sculpt(obj.vertices, obj.faces, obj.colours, spatial)
+    sculpt = (TexturedSculpt(obj, spatial) if textured
+              else Sculpt(obj.vertices, obj.faces, obj.colours, spatial))
     nearest = _closest_low_triangles(obj.vertices, low_positions, low_faces, spatial)
     corners = low_positions[low_faces]
     area = 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0],
@@ -1231,10 +1677,11 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     face_region = None
     face_note = ""
     if face_texture:
-        centre = _face_centre(obj.vertices, obj.faces, obj.colours)
-        if centre is None:
+        found = _face_centre(obj.vertices, obj.faces, obj.colours, with_radius=True)
+        if found is None:
             face_note = "no separate face texture: the sculpt has too little colour detail to find one"
         else:
+            centre, reach = found
             face_region = _face_region(centre, low_positions, low_faces)
             if face_region.all() or not face_region.any():
                 face_region = None
@@ -1255,15 +1702,30 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     padding = 1 if texture <= 128 else 2 if texture <= 256 else 4
     # One unwrap per material: the body, then (if any) the face, each packed
     # into a texture of its own. ``groups`` holds the reduced triangles of each.
+    # The face texture is the face seen from the front, one island; xatlas
+    # unwraps it only when the region has no front to map from.
+    front = None
+    if face_region is not None:
+        # Hairline to chin: FACE_REACH times the reach of the eyes, brows and
+        # lips from the centre (on the test sculpt, 3% of the surface rather than the 10%
+        # an unwrapped face takes, where hair and collar filled the texture).
+        middle = low_positions[low_faces].mean(axis=1)
+        close = np.linalg.norm(middle - centre, axis=1) <= FACE_REACH * reach
+        front = _front_projection(low_positions, low_faces, close, centre, texture, padding)
+        if front is not None:
+            face_region = front[0]
     groups = ([np.arange(len(low_faces))] if face_region is None
               else [np.nonzero(~face_region)[0], np.nonzero(face_region)[0]])
     mappings, part_faces, part_uvs, orders = [], [], [], []
     offset = 0
-    for group in groups:
-        mapping, uv_faces, uvs, order = _unwrap(xatlas, low_positions, low_faces[group],
-                                                texture, padding,
-                                                priority[group] if priority is not None else None,
-                                                boost)
+    for index, group in enumerate(groups):
+        if index == 1 and front is not None:
+            _, mapping, uv_faces, uvs = front
+            order = np.arange(len(group))
+        else:
+            mapping, uv_faces, uvs, order = _unwrap(
+                xatlas, low_positions, low_faces[group], texture, padding,
+                priority[group] if priority is not None else None, boost)
         mappings.append(mapping)
         part_faces.append(uv_faces + offset)
         part_uvs.append(uvs)
@@ -1276,8 +1738,14 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     renumber = np.empty(len(order), np.int64)
     renumber[order] = np.arange(len(order))
     nearest = renumber[nearest]
-    positions = low_positions[mapping]
-    vertex_normals = normals[mapping]
+    # Shading normals per corner, hard across sharp folds; corners that disagree
+    # get a vertex each. Neighbours are found through the reduced mesh's own
+    # vertices, so a UV seam does not cut the shading.
+    corner_normals = _corner_normals(low_positions, mapping[all_faces])
+    positions, uvs, vertex_normals, all_faces = _split_by_normal(
+        low_positions[mapping], uvs, all_faces, corner_normals)
+    sizes = np.cumsum([len(part) for part in part_faces])[:-1]
+    part_faces = np.split(all_faces, sizes)
     tangents = _tangents(positions, uvs, all_faces, vertex_normals)
     per_side = samples_per_texel(texture)
     step("baking the textures", 3)

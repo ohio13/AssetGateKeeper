@@ -334,11 +334,37 @@ with socket.create_connection(("127.0.0.1", port), timeout=5) as conn:
         second = b""
 expect("a redirecting login POST leaves nothing behind", second == b"", second[:80])
 
-status, body, _ = request(port, "/api/telemetry", method="POST", body=VERDICT)
+# A new export of the seeded statue (one byte bigger): a verdict worth a row.
+NEW_EXPORT = dict(VERDICT, size_bytes=VERDICT["size_bytes"] + 1)
+status, body, _ = request(port, "/api/telemetry", method="POST", body=NEW_EXPORT)
 expect("POST /api/telemetry stores a verdict", status == 201, str(status))
 stored_id = json.loads(body)["id"]
 expect("the response names the row", isinstance(stored_id, int) and stored_id > 0)
 expect("the new verdict is counted", ahs.totals(seed_db)["total"] == SEED_ROWS + 1)
+
+# 12 Nov 2026: every Save & Run Audit added each unchanged file to the
+# dashboard again. The same file, same size, same verdict, from the same
+# machine is not a new row.
+status, body, _ = request(port, "/api/telemetry", method="POST", body=NEW_EXPORT)
+_answer = json.loads(body)
+expect("the same verdict again is not stored twice (200, unchanged, the first row's id)",
+       status == 200 and _answer.get("unchanged") is True and _answer.get("stored") is False
+       and _answer.get("id") == stored_id and ahs.totals(seed_db)["total"] == SEED_ROWS + 1,
+       (status, _answer))
+for _label, _changed in (
+        ("a new size", dict(NEW_EXPORT, size_bytes=NEW_EXPORT["size_bytes"] + 7)),
+        ("different problems", dict(NEW_EXPORT, problems=["1 material slot too many"])),
+        ("a pass after a fail", dict(NEW_EXPORT, passed=True, problems=[])),
+        ("another machine", dict(NEW_EXPORT, hostname="WS-ART-015")),
+        ("a heal", dict(NEW_EXPORT, modifications=["resized to 2048"]))):
+    _before = ahs.totals(seed_db)["total"]
+    status, _, _ = request(port, "/api/telemetry", method="POST", body=_changed)
+    expect(f"... but {_label} is a new row", status == 201
+           and ahs.totals(seed_db)["total"] == _before + 1, status)
+_before = ahs.totals(seed_db)["total"]
+request(port, "/api/telemetry", method="POST", body=dict(NEW_EXPORT, modifications=["resized to 2048"]))
+expect("... and a heal is stored every time, even the same one",
+       ahs.totals(seed_db)["total"] == _before + 1)
 
 status, _, _ = request(port, "/api/telemetry", method="POST", body=b"{not json")
 expect("invalid JSON is a 400", status == 400, str(status))
@@ -374,7 +400,7 @@ expect("a wrong token is a 401", status == 401, str(status))
 status, _, _ = request(port2, "/api/telemetry", method="POST", body=VERDICT,
                        headers={"Authorization": "Basic hunter2"})
 expect("the wrong scheme is a 401", status == 401, str(status))
-status, _, _ = request(port2, "/api/telemetry", method="POST", body=VERDICT,
+status, _, _ = request(port2, "/api/telemetry", method="POST", body=NEW_EXPORT,
                        headers={"Authorization": "Bearer hunter2"})
 expect("the right token is accepted", status == 201, str(status))
 with ahs.open_db(auth_db) as connection:

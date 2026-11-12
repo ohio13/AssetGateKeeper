@@ -499,11 +499,17 @@ def bake_defaults(budget: "Budget") -> tuple[int, int]:
 
 
 def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace) -> int:
-    """--bake-polypaint: make a game asset from a Polypaint .obj, then gate it."""
-    if not source.is_file() or source.suffix.lower() != ".obj":
-        LOG.error("--bake-polypaint takes one .obj file with ZBrush Polypaint or vertex colours")
+    """--bake-polypaint / --bake: make a game asset from a Polypaint .obj or a
+    textured model, then gate it."""
+    if not source.is_file():
+        LOG.error("--bake takes one file: an .obj with ZBrush Polypaint or vertex colours, "
+                  "or a textured .obj, .gltf or .glb")
         return 2
     module = polypaint_module()
+    problem = module.bake_problem(source)
+    if problem:
+        LOG.error("%s", problem)
+        return 2
     preset = getattr(args, "bake_preset", None) or ""
     triangles, edge = bake_defaults(budget)
     # Asked for more than the folder allows, the bake would run (an 8192 bake:
@@ -1381,11 +1387,12 @@ def build_parser() -> argparse.ArgumentParser:
                         default=None, help="also fail triangle-soup geometry (implies the audit)")
     parser.add_argument("--doctor", action="store_true",
                         help="check this machine can run the gate (deps, rules, ports), then exit")
-    parser.add_argument("--bake-polypaint", action="store_true", dest="bake_polypaint",
-                        help="turn an .obj with ZBrush Polypaint (or vertex colours) into a game "
-                             "asset beside it: a reduced .glb with UVs, a baked _BaseColor "
-                             "texture and a _Normal map, sized to the folder's rules, then "
-                             "check them. The source "
+    parser.add_argument("--bake-polypaint", "--bake", action="store_true", dest="bake_polypaint",
+                        help="turn an .obj with ZBrush Polypaint (or vertex colours), or a "
+                             "textured .obj/.gltf/.glb, into a game asset beside it: a reduced "
+                             ".glb with UVs, a baked _BaseColor texture (every material's "
+                             "textures in one) and a _Normal map, sized to the folder's rules, "
+                             "then check them. The source "
                              "is never changed. Needs: pip install \"asset-gatekeeper[bake]\"")
     parser.add_argument("--bake-triangles", type=int, default=None, metavar="N",
                         help="with --bake-polypaint: triangles to reduce to (default: the "
