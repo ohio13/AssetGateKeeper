@@ -1,5 +1,16 @@
 # Unreleased (on `main`)
 
+* **Polypaint bake: no more black triangles (12 Nov).** Reducing a thin part
+  (hair against the cheek, a ponytail) could fold it into two triangles on
+  the same three points, facing opposite ways, and one normal per vertex
+  pointed wrong wherever the low-poly mesh folded sharply: a Nintendo 64 bake
+  of a character showed a black triangle on each side of the head, and much
+  of the face was shaded as if lit from behind. Folds are now removed, and
+  shading normals are smoothed only between triangles within 60 degrees of
+  each other (hard edges elsewhere, as Blender's auto smooth does). The mesh
+  has a few more vertices where its edges are hard; the triangle count is
+  unchanged.
+
 * **The gate's code is split into parts in `agk_gate/` (11 Nov).**
   `asset_gatekeeper.py` had grown to about 8,500 lines; it is now a short front
   door, and the code lives in seven parts in `agk_gate/` (settings,

@@ -539,6 +539,36 @@ try:
     expect("bake output names follow the source: _HP becomes _LP",
            polypaint.output_names(Path("SM_Hero_HP_03.obj"))
            == ("SM_Hero_LP_03.glb", "T_Hero_LP_03_BaseColor.png"))
+    # 12 Nov 2026: Samus's N64 bake had a black triangle on each side of the
+    # head - a fold the reducer left (two triangles on the same three points,
+    # facing opposite ways) - and much of her face shaded from behind, where one
+    # averaged normal per vertex spanned a sharp fold.
+    import numpy as _npp
+    _pos = _npp.array([(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1), (1, 1, 0)], float)
+    _faces = _npp.array([(0, 1, 2), (0, 2, 1), (1, 4, 2), (1, 4, 2), (0, 3, 1)])
+    _kept = polypaint._drop_stacked(_pos, _faces)
+    expect("a fold (same triangle twice, facing opposite ways) is dropped whole",
+           not any(sorted(face) == [0, 1, 2] for face in _kept.tolist()), _kept.tolist())
+    expect("... a plain copy keeps one, and other triangles stay",
+           sum(sorted(face) == [1, 2, 4] for face in _kept.tolist()) == 1
+           and [0, 3, 1] in _kept.tolist() and len(_kept) == 2, _kept.tolist())
+    # A sharp ridge: two faces at 90 degrees share an edge. One normal per
+    # vertex would point between them; per corner, each face keeps its own.
+    _ridge = _npp.array([(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)], float)
+    _ridge_faces = _npp.array([(0, 1, 2), (0, 3, 1)])
+    _normals = polypaint._corner_normals(_ridge, _ridge_faces)
+    expect("across a sharp edge each triangle keeps its own normal",
+           _npp.allclose(_normals[0], [0, 0, 1]) and _npp.allclose(_normals[1], [0, 1, 0]),
+           _normals.round(2).tolist())
+    _gentle = _npp.array([(0, 0, 0), (1, 0, 0), (0, 1, 0), (1, -1, 0.3)], float)
+    _gentle_normals = polypaint._corner_normals(_gentle, _npp.array([(0, 1, 2), (0, 3, 1)]))
+    expect("... and a gentle bend is smoothed (the shared corners agree)",
+           _npp.allclose(_gentle_normals[0][0], _gentle_normals[1][0])
+           and _npp.allclose(_gentle_normals[0][1], _gentle_normals[1][2]),
+           _gentle_normals.round(2).tolist())
+    _p2, _uv2, _n2, _f2 = polypaint._split_by_normal(_ridge, _npp.zeros((4, 2)), _ridge_faces, _normals)
+    expect("a vertex on a hard edge gets a copy per normal",
+           len(_p2) == 6 and _npp.allclose(_n2[_f2[0]], _normals[0]), len(_p2))
     import importlib
     def _bake_ready():
         try:
@@ -852,6 +882,65 @@ try:
                and document["materials"][1]["name"] == "T_Hero_LP_Face"
                and len(made.faces) <= 1200,
                f"{len(primitives)} {len(document['materials'])} {len(images)} {len(made.faces)}")
+        def shading_faults(path):
+            """(triangles with a corner shaded from behind, triangles lying on another)."""
+            document_, arrays_, _ = read_glb_parts(path)
+            behind, stacked = 0, 0
+            for primitive in (p for mesh in document_["meshes"] for p in mesh["primitives"]):
+                P = arrays_[primitive["attributes"]["POSITION"]].astype(float)
+                N = arrays_[primitive["attributes"]["NORMAL"]].astype(float)
+                F = arrays_[primitive["indices"]].astype(int).reshape(-1, 3)
+                fn = _np.cross(P[F[:, 1]] - P[F[:, 0]], P[F[:, 2]] - P[F[:, 0]])
+                behind += int((_np.einsum("ikj,ij->ik", N[F], fn).min(axis=1) < 0).sum())
+                keys = {tuple(sorted(map(tuple, corners)))
+                        for corners in _np.round(P[F] * 1e5).astype(_np.int64).tolist()}
+                stacked += len(F) - len(keys)
+            return behind, stacked
+
+        _faults = shading_faults(hero / "SM_Hero_LP.glb")
+        expect("n64 bake: no triangle shaded from behind, none lying on another",
+               _faults == (0, 0), f"{_faults[0]} shaded from behind, {_faults[1]} stacked")
+
+        def blade_sculpt(rings=60, segments=80):
+            """A head with a thin blade behind it (a ponytail, an ear): reduced
+            hard, the blade's rim is shared by its two sides, and one averaged
+            normal there shaded 16 of 148 triangles from behind (12 Nov 2026)."""
+            import math
+            vertices, colours, faces = [], [], []
+
+            def sphere(cx, cy, cz, rx, ry, rz, colour):
+                base = len(vertices)
+                for i in range(rings + 1):
+                    theta = math.pi * i / rings
+                    for j in range(segments):
+                        phi = 2 * math.pi * j / segments
+                        vertices.append((cx + rx * math.sin(theta) * math.cos(phi),
+                                         cy + ry * math.cos(theta),
+                                         cz + rz * math.sin(theta) * math.sin(phi)))
+                        colours.append(colour)
+                for i in range(rings):
+                    for j in range(segments):
+                        a = base + i * segments + j
+                        b = base + i * segments + (j + 1) % segments
+                        faces.extend([(a, a + segments, b), (b, a + segments, b + segments)])
+
+            sphere(0, 0, 0, 0.5, 0.5, 0.5, (200, 160, 140))
+            sphere(0, 0.2, -0.6, 0.35, 0.9, 0.03, (230, 210, 120))
+            lines = ["# File exported by ZBrush version 2022"]
+            lines += [f"v {x:.5f} {y:.5f} {z:.5f}" for x, y, z in vertices]
+            groups = [f"ff{r:02x}{g:02x}{b:02x}" for r, g, b in colours]
+            lines += ["#MRGB " + "".join(groups[k:k + 64]) for k in range(0, len(groups), 64)]
+            lines += [f"f {a + 1} {b + 1} {c + 1}" for a, b, c in faces]
+            return "\n".join(lines) + "\n"
+
+        blade = WORK / "blade"
+        blade.mkdir()
+        (blade / "SM_Blade_HP.obj").write_text(blade_sculpt(), encoding="utf-8")
+        polypaint.bake(blade / "SM_Blade_HP.obj", blade, triangles=150, texture=64,
+                       normal_map=False, colours=16)
+        _faults = shading_faults(blade / "SM_Blade_LP.glb")
+        expect("a thin blade reduced hard: no triangle shaded from behind (was 16 of 148)",
+               _faults == (0, 0), f"{_faults[0]} shaded from behind, {_faults[1]} stacked")
         face_pixels = _np.asarray(_Image.open(hero / "T_Hero_LP_Face_BaseColor.png").convert("RGB"))
         dark_face = int((face_pixels.max(axis=2) < 70).sum())
         done = run_gate(hero / "SM_Hero_HP.obj", "--bake-polypaint", "--bake-preset", "n64",
