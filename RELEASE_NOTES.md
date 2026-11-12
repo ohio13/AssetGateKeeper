@@ -1,5 +1,11 @@
 # Unreleased (on `main`)
 
+* **Bake: a 2,000-triangle choice (12 Nov).** The review page's bake offers
+  2,000 triangles between 1,200 and 5,000: the budget of a showcase N64
+  model (title screens, menus, close-ups). N64 style still starts at 1,200;
+  pick 2,000 after it. With a folder's `max_triangles = 2000`, the command
+  line takes `--bake-preset n64 --bake-triangles 2000`.
+
 * **Bake: a triangle budget for the head, and game rips that bake cleanly
   (12 Nov).** `--bake-head-share 0.65` (or **Head** on the review page)
   gives the head - above the neck, found from the face - that share of the
