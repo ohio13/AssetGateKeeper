@@ -1,5 +1,12 @@
 # Unreleased (on `main`)
 
+* **Generated LODs are named after their model (12 Nov).** A LOD made by the
+  review page or `engine/lod_manager.py` / `lod_shippable.py` is now
+  `SM_Rock_LOD2.obj`, not `LOD2_SM_Rock.obj`: the old name failed the same
+  naming rules as its source as soon as it was saved into a project, and
+  engines and the gate's own `[lod]` rules group `<name>_LOD<n>` together.
+  A LOD downloaded from the review page is saved under that name too.
+
 * **Polypaint bake: no more black triangles (12 Nov).** Reducing a thin part
   (hair against the cheek, a ponytail) could fold it into two triangles on
   the same three points, facing opposite ways, and one normal per vertex

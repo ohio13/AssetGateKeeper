@@ -48,6 +48,15 @@ except ImportError:        # pragma: no cover - environment dependent
 DEFAULT_RATIOS = (0.5, 0.25, 0.125)
 LEVEL_NAMES = ("LOD1", "LOD2", "LOD3", "LOD4")
 
+
+def lod_file_name(stem: str, level: str, suffix: str) -> str:
+    """SM_Rock.obj's LOD2 is SM_Rock_LOD2.obj: the name keeps the source's
+    prefix, so the naming rules that pass the source pass its LODs, and engines
+    (Unreal, Unity) and the gate's own LOD rules group <name>_LOD<n> together.
+    LODs used to be LOD2_SM_Rock.obj, which failed the same naming rules as soon
+    as one was saved into a project (12 Nov 2026)."""
+    return f"{stem}_{level}{suffix}"
+
 GLTF_SUFFIXES = {".gltf", ".glb"}
 OBJ_SUFFIXES = {".obj"}
 
@@ -713,7 +722,7 @@ def generate(source: Path, out_dir: Path, ratios: Sequence[float] = DEFAULT_RATI
     out_dir.mkdir(parents=True, exist_ok=True)
     results: list[GeneratedLod] = []
     for level, target, ratio, reduced in planned:
-        path = out_dir / f"{level}_{source.stem}{source.suffix}"
+        path = out_dir / lod_file_name(source.stem, level, source.suffix)
         write_mesh(path, reduced, source, name or source.stem)
         results.append(GeneratedLod(level, path, ratio, target,
                                     reduced.triangles, reduced.vertices))

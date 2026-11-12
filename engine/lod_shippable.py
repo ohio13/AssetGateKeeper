@@ -51,6 +51,11 @@ if str(REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(REPO_ROOT))
 
 LEVEL_NAMES = ("LOD1", "LOD2", "LOD3", "LOD4")
+
+
+def lod_file_name(stem: str, level: str, suffix: str) -> str:
+    """<name>_LOD<n><suffix>, as lod_manager.lod_file_name names a preview LOD."""
+    return f"{stem}_{level}{suffix}"
 DEFAULT_RATIOS = (0.5, 0.25, 0.125)
 #: A collapse may tilt a neighbouring face by at most this much.
 MAX_FACE_TURN_DEGREES = 60.0
@@ -441,7 +446,7 @@ def generate(source: Path, out_dir: Path, ratios: Sequence[float] = DEFAULT_RATI
     results = []
     for number, (level, target, ratio, snapshot, error, triangles) in enumerate(levels):
         say("writing the files", number / max(len(levels), 1), f"writing {level}")
-        path = out_dir / f"{level}_{stem}.glb"
+        path = out_dir / lod_file_name(stem, level, ".glb")
         vertices = _export(path, parts, snapshot, offsets)
         reached = triangles <= target * 1.02
         notes = [] if reached else [

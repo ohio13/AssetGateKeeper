@@ -312,8 +312,13 @@ expect("the listing carries counts",
 status, raw, headers = client.call("/api/assets/1/file")
 expect("the raw file is served", status == 200 and raw.startswith(b"# a unit cube"))
 expect("obj is served as text", "text/plain" in headers.get("Content-Type", ""))
-status, _, _ = client.call("/api/assets/1/lods/LOD1/file")
+status, _, _lod_headers = client.call("/api/assets/1/lods/LOD1/file")
 expect("a LOD file is served", status == 200, str(status))
+_asset_stem = Path(listing["assets"][0]["filename"]).stem
+expect("... saved as <asset>_LOD1, so it passes the naming rules its source passes "
+       "(LOD3_SM_Samus_HP_03.obj failed them, 12 Nov 2026)",
+       f'{_asset_stem}_LOD1.' in _lod_headers.get("Content-Disposition", ""),
+       _lod_headers.get("Content-Disposition"))
 status, _, _ = client.call("/api/assets/1/lods/LOD9/file")
 expect("an unknown LOD is a 404", status == 404, str(status))
 
@@ -1108,7 +1113,8 @@ expect("a cross-site LOD delete is refused", status == 403, status)
 status, body = c3.json(f"/api/assets/{ball_asset['id']}/lods/LOD3", "DELETE")
 expect("a single LOD can be deleted, with its files",
        status == 200 and all(l["level"] != "LOD3" for l in body["lods"])
-       and not list((p3_data / "lods" / str(ball_asset["id"])).glob("LOD3_*")), body)
+       and not list((p3_data / "lods" / str(ball_asset["id"])).glob("LOD3_*"))
+       and not list((p3_data / "lods" / str(ball_asset["id"])).glob("*_LOD3.*")), body)
 status, _ = c3.json(f"/api/assets/{ball_asset['id']}/lods/LOD3", "DELETE")
 expect("deleting a LOD that is not there is a 404", status == 404, status)
 p3_server.shutdown()
@@ -1558,7 +1564,7 @@ _cli = subprocess.run([sys.executable, str(ROOT / "engine" / "lod_shippable.py")
                        str(s_data / s_asset["file_path"]), "--out-dir", str(WORK / "ship_cli"),
                        "--ratios", "0.5,0.25"], capture_output=True, text=True, timeout=300)
 expect("engine/lod_shippable.py runs on its own",
-       _cli.returncode == 0 and "LOD2:" in _cli.stdout and (WORK / "ship_cli" / "LOD2_globe.glb").is_file(),
+       _cli.returncode == 0 and "LOD2:" in _cli.stdout and (WORK / "ship_cli" / "globe_LOD2.glb").is_file(),
        _cli.stdout + _cli.stderr)
 
 print("32. audit fixes: approved versions are frozen, the newest decision wins")
