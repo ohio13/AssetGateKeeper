@@ -1979,6 +1979,9 @@ if _bake_ready():
                           ({"preset": "ps9"}, "preset must be one of"),
                           ({"normal_map": "yes"}, "normal_map must be true or false"),
                           ({"face_texture": 1}, "face_texture must be true or false"),
+                          ({"face_layout": "sideways"}, "face_layout must be one of"),
+                          ({"body_textures": 3}, "body_textures must be 1 or 2"),
+                          ({"body_textures": True}, "body_textures must be 1 or 2"),
                           ({"shiny": True}, "unknown field")):
         status, refused = pp.json(f"/api/assets/{made['id']}/bake-polypaint", method="POST",
                                   body=body)
@@ -2001,6 +2004,24 @@ if _bake_ready():
     expect("... and asks for a face texture; a sculpt with no face keeps one material",
            result.get("face_texture") is False and result.get("materials") == 1
            and "too little colour detail" in result.get("note", ""), str(result)[:400])
+    # 12 Nov 2026: the Expansion Pak preset, and a second body texture.
+    status, queued = pp.json(f"/api/assets/{made['id']}/bake-polypaint", method="POST",
+                             body={"preset": "n64-pak", "triangles": 1000, "body_textures": 2,
+                                   "face_layout": "mirror"})
+    job = queued["job"]
+    deadline = time.time() + 120
+    while job["state"] in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.3)
+        job = pp.json(f"/api/jobs/{job['id']}")[1]
+    result = job.get("result") or {}
+    expect("n64-pak with two body textures: two materials, each 64 px, named _BaseColor and "
+           "_Lower_BaseColor (no face on this sculpt)",
+           job["state"] == "done" and result.get("preset") == "n64-pak"
+           and result.get("body_textures") == 2 and result.get("materials") == 2
+           and [t["name"].endswith(suffix) for t, suffix in
+                zip(result.get("textures", []), ("LP_BaseColor.png", "_Lower_BaseColor.png"))]
+           == [True, True]
+           and all(t["size"] == [64, 64] for t in result.get("textures", [])), str(job)[:500])
     status, queued = pp.json(f"/api/assets/{made['id']}/bake-polypaint", method="POST",
                              body={"triangles": 300, "texture": 128, "normal_map": False})
     job = queued["job"]

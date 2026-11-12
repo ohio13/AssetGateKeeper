@@ -213,9 +213,13 @@
           <option value="" selected>Game asset</option>
           <option value="n64">N64 style</option>
         </select>
+        <label class="check" id="bake-pak-label" hidden title="The game uses the Expansion Pak (8 MB of RAM, not 4) and shows this character with little else on screen - a cutscene, a title screen. More textures fit in memory (each still fits the 4 KB texture memory): the face can be mirrored and the eyes get a strip of their own; 3,000-4,000 triangles.">
+          <input type="checkbox" id="bake-pak"> Expansion Pak</label>
         <select id="bake-triangles" title="Triangles in the game asset">
           <option value="1200">1,200 tris</option>
           <option value="2000" title="A showcase N64 model (title screens, menus, close-ups) used up to about 2,000">2,000 tris</option>
+          <option value="3000" class="pak-only" hidden disabled title="Expansion Pak: one character with little else on screen">3,000 tris</option>
+          <option value="4000" class="pak-only" hidden disabled title="Expansion Pak: the most for one character alone on screen">4,000 tris</option>
           <option value="5000">5,000 tris</option>
           <option value="15000">15,000 tris</option>
           <option value="30000" selected>30,000 tris</option>
@@ -247,8 +251,21 @@
           <option value="0" selected>Head: even</option>
           <option value="0.35">Head: 35% of tris</option>
           <option value="0.5">Head: 50% of tris</option>
+          <option value="0.6">Head: 60% of tris</option>
           <option value="0.65">Head: 65% of tris</option>
           <option value="0.8">Head: 80% of tris</option>
+        </select>
+      </div>
+      <div class="row" id="bake-pak-row" hidden>
+        <select id="bake-face-layout" title="How the face's own textures are laid out. Mirrored: half the face, drawn mirrored for the other half - twice the texels across (a face with hair across one side is not mirrored). Eye strip: the eyes and brows get a texture of their own. Each extra texture is another material.">
+          <option value="single">Face: one texture</option>
+          <option value="mirror">Face: mirrored</option>
+          <option value="eyes">Face + eye strip</option>
+          <option value="eyes-mirror" selected>Face + eye strip, mirrored</option>
+        </select>
+        <select id="bake-body" title="Textures for the body: two gives the lower body a texture of its own (another material) - twice the texels for the body.">
+          <option value="1" selected>Body: one texture</option>
+          <option value="2">Body: two textures</option>
         </select>
       </div>
       <div id="bake-skip-row" hidden>

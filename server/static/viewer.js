@@ -1042,17 +1042,47 @@ function renderLodList() {
  * a normal map. "N64 style" fills in ~1,200 tris, 64 px, 16 colours, no normal
  * map; any of them can still be changed before baking. */
 const BAKE_PRESETS = {
-  "": { triangles: "30000", texture: "2048", normal: true, colours: "0", face: false },
-  n64: { triangles: "1200", texture: "64", normal: false, colours: "16", face: true },
+  "": { triangles: "30000", texture: "2048", normal: true, colours: "0", face: false, head: "0" },
+  n64: { triangles: "1200", texture: "64", normal: false, colours: "16", face: true, head: "0" },
+  // 12 Nov 2026: the Expansion Pak - more textures in memory, for a character
+  // with little else on screen. Unlocks 3,000-4,000 tris and the face layouts.
+  "n64-pak": { triangles: "3000", texture: "64", normal: false, colours: "16", face: true,
+               head: "0.6", layout: "eyes-mirror", body: "1" },
 };
 
+/* The preset sent: N64 style with the Expansion Pak ticked is n64-pak. */
+function bakePreset() {
+  const preset = $("bake-preset").value;
+  return preset === "n64" && $("bake-pak").checked ? "n64-pak" : preset;
+}
+
+/* The Expansion Pak box shows with N64 style; ticked, it opens the choices a
+ * game without it has no memory for. */
+function showBakePak() {
+  const n64 = $("bake-preset").value === "n64";
+  const pak = n64 && $("bake-pak").checked;
+  $("bake-pak-label").hidden = !n64;
+  $("bake-pak-row").hidden = !pak;
+  document.querySelectorAll("#bake-triangles .pak-only").forEach((option) => {
+    option.hidden = !pak;
+    option.disabled = !pak;
+  });
+  if (!pak && ["3000", "4000"].includes($("bake-triangles").value)) {
+    $("bake-triangles").value = "1200";
+  }
+}
+
 function applyBakePreset() {
-  const chosen = BAKE_PRESETS[$("bake-preset").value] || BAKE_PRESETS[""];
+  showBakePak();
+  const chosen = BAKE_PRESETS[bakePreset()] || BAKE_PRESETS[""];
   $("bake-triangles").value = chosen.triangles;
   $("bake-texture").value = chosen.texture;
   $("bake-normal").checked = chosen.normal;
   $("bake-colours").value = chosen.colours;
   $("bake-face").checked = chosen.face;
+  $("bake-head").value = chosen.head;
+  if (chosen.layout) $("bake-face-layout").value = chosen.layout;
+  if (chosen.body) $("bake-body").value = chosen.body;
 }
 
 async function bakePolypaint() {
@@ -1061,19 +1091,24 @@ async function bakePolypaint() {
   $("bake-run").disabled = true;
   $("bake-progress").textContent = "queued";
   try {
+    const settings = { triangles: Number($("bake-triangles").value),
+                       texture: Number($("bake-texture").value),
+                       normal_map: $("bake-normal").checked,
+                       colours: Number($("bake-colours").value),
+                       face_texture: $("bake-face").checked,
+                       head_share: Number($("bake-head").value),
+                       skip_materials: Array.from(
+                         document.querySelectorAll("#bake-skip input:checked"),
+                         (box) => box.value),
+                       preset: bakePreset() };
+    if (!$("bake-pak-row").hidden) {
+      settings.face_layout = $("bake-face-layout").value;
+      settings.body_textures = Number($("bake-body").value);
+    }
     const response = await api(`/api/assets/${asset.id}/bake-polypaint`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ triangles: Number($("bake-triangles").value),
-                             texture: Number($("bake-texture").value),
-                             normal_map: $("bake-normal").checked,
-                             colours: Number($("bake-colours").value),
-                             face_texture: $("bake-face").checked,
-                             head_share: Number($("bake-head").value),
-                             skip_materials: Array.from(
-                               document.querySelectorAll("#bake-skip input:checked"),
-                               (box) => box.value),
-                             preset: $("bake-preset").value }),
+      body: JSON.stringify(settings),
     });
     let job = (await response.json()).job;
     while (job.state === "queued" || job.state === "running") {
@@ -1091,6 +1126,8 @@ async function bakePolypaint() {
       + `${result.normal_map ? "BaseColor + Normal" : "BaseColor"}`
       + `${result.colours ? ` in ${result.colours} colours` : ""}`
       + `${result.face_texture ? " + a face texture" : ""}`
+      + `${result.face_layout && result.face_layout !== "single" ? ` (${result.face_layout})` : ""}`
+      + `${result.body_textures > 1 ? " + a lower-body texture" : ""}`
       + `${result.head_share ? `, head ${Math.round(result.head_share * 100)}% of tris` : ""}, `
       + `${result.seconds} s - ${result.note || ""}`);
     $("bake-progress").textContent = "";
@@ -1878,6 +1915,7 @@ $("full-detail").addEventListener("click", async () => {
   }
 });
 $("bake-preset").addEventListener("change", applyBakePreset);
+$("bake-pak").addEventListener("change", applyBakePreset);
 $("asset-delete").addEventListener("click", () => { deleteSelected(); });
 $("lod-upload").addEventListener("change", async (event) => {
   const file = event.target.files && event.target.files[0];

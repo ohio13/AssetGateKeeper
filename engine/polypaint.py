@@ -87,10 +87,30 @@ DEFAULT_TEXTURE = 2048
 #: a texel (16 colours); it has no normal mapping; a character is ~1,000 tris.
 #: The n64 preset also gives the face a texture of its own (a second material):
 #: in one 64 px texture a whole character's face was about 6 x 6 texels.
+#: n64-pak: a game with the Expansion Pak (8 MB of RAM, not 4) that shows the
+#: character with little else on screen - a cutscene, a title screen. The Pak
+#: adds memory, not texture memory or speed: each texture still fits the 4 KB
+#: TMEM, but more of them fit in RAM, so the face gets more of its own
+#: (FACE_LAYOUTS), the body can have two (``body_textures``), and the head 60%
+#: of 3,000 triangles.
 PRESETS: dict[str, dict] = {
     "n64": {"label": "Nintendo 64", "triangles": 1_200, "texture": 64,
             "normal_map": False, "colours": 16, "face_texture": True},
+    "n64-pak": {"label": "Nintendo 64 + Expansion Pak", "triangles": 3_000, "texture": 64,
+                "normal_map": False, "colours": 16, "face_texture": True,
+                "head_share": 0.6, "face_layout": "eyes-mirror", "body_textures": 1},
 }
+#: How the face's own textures are laid out (face_texture on):
+#: single       one texture, the face seen from the front;
+#: mirror       one texture holding half the face, drawn mirrored for the other
+#:              half (the sampler's mirror setting): twice the texels across;
+#: eyes         a strip of its own for the eyes and brows (128 x 32 at 64 px:
+#:              the same 4,096 texels), the rest of the face on the face texture;
+#: eyes-mirror  both: half the eyes and half the face, each mirrored.
+FACE_LAYOUTS = ("single", "mirror", "eyes", "eyes-mirror")
+#: Texture name suffixes of the materials past the first (the body):
+#: the lower body (body_textures 2), the face and the eye strip.
+PART_SUFFIXES = ("_Lower", "_Face", "_Eyes")
 #: Colour counts a texture can be reduced to (0 keeps every colour).
 COLOUR_CHOICES = (0, 16, 32, 64, 256)
 #: Sculpt triangles that meet at a vertex, at most, considered when projecting.
@@ -518,24 +538,52 @@ def normal_map_name(source: Path) -> str:
     return output_names(source)[1][:-len("_BaseColor.png")] + "_Normal.png"
 
 
+def part_texture_names(source: Path, suffix: str = "") -> tuple[str, str]:
+    """(BaseColor, Normal) of one material of a bake: T_Hero_LP_03_BaseColor.png
+    for the body, T_Hero_LP_03<suffix>_BaseColor.png for the others (PART_SUFFIXES)."""
+    base = output_names(source)[1][:-len("_BaseColor.png")] + suffix
+    return f"{base}_BaseColor.png", f"{base}_Normal.png"
+
+
 def face_texture_names(source: Path) -> tuple[str, str]:
     """(BaseColor, Normal) of the face's own material: T_Hero_LP_03_Face_BaseColor.png
     and T_Hero_LP_03_Face_Normal.png."""
-    base = output_names(source)[1][:-len("_BaseColor.png")] + "_Face"
-    return f"{base}_BaseColor.png", f"{base}_Normal.png"
+    return part_texture_names(source, "_Face")
+
+
+def texture_names(source: Path) -> list:
+    """Every texture file a bake of ``source`` can write, whatever its settings:
+    what a later bake checks for left-overs."""
+    names = [normal_map_name(source)]
+    for suffix in PART_SUFFIXES:
+        names.extend(part_texture_names(source, suffix))
+    return names
+
+
+def material_count(face_texture: bool, face_layout: str = "single", body_textures: int = 1) -> int:
+    """Materials (one texture each) a bake with these settings makes, at most."""
+    face = (2 if face_layout.startswith("eyes") else 1) if face_texture else 0
+    return body_textures + face
 
 
 def resolve_settings(preset: str = "", triangles: int = 0, texture: int = 0,
                      normal_map: Optional[bool] = None, colours: Optional[int] = None,
                      max_triangles: int = 0, max_texture: int = 0,
-                     face_texture: Optional[bool] = None, max_materials: int = 0) -> dict:
+                     face_texture: Optional[bool] = None, max_materials: int = 0,
+                     head_share: Optional[float] = None, face_layout: str = "",
+                     body_textures: int = 0) -> dict:
     """What a bake will use: explicit values, else the preset's, else the defaults,
     and never more than ``max_triangles`` / ``max_texture`` when those are given
-    (a folder's rules). A face texture is a second material, so ``max_materials``
-    below 2 turns it off (``face_texture_note`` says why). Shared by the command
-    line and the review page."""
+    (a folder's rules). Each face texture and a second body texture is another
+    material, so ``max_materials`` turns them off - the lower body first, then
+    the eye strip, then the face - and ``face_texture_note`` says why. Shared
+    by the command line and the review page."""
     if preset and preset not in PRESETS:
         raise PolypaintError(f"unknown bake preset '{preset}' (choose: {', '.join(PRESETS)})")
+    if face_layout and face_layout not in FACE_LAYOUTS:
+        raise PolypaintError(f"unknown face layout '{face_layout}' (choose: {', '.join(FACE_LAYOUTS)})")
+    if body_textures not in (0, 1, 2):
+        raise PolypaintError(f"the body can have 1 or 2 textures (got {body_textures})")
     chosen = PRESETS.get(preset, {})
     settings = {
         "preset": preset,
@@ -545,13 +593,29 @@ def resolve_settings(preset: str = "", triangles: int = 0, texture: int = 0,
         "colours": int(chosen.get("colours", 0) if colours is None else colours),
         "face_texture": (bool(chosen.get("face_texture", False)) if face_texture is None
                          else bool(face_texture)),
+        "head_share": float(chosen.get("head_share", 0.0) if head_share is None else head_share),
+        "face_layout": face_layout or chosen.get("face_layout", "single"),
+        "body_textures": int(body_textures or chosen.get("body_textures", 1)),
         "face_texture_note": "",
     }
-    if settings["face_texture"] and 0 < max_materials < 2:
-        settings["face_texture"] = False
-        settings["face_texture_note"] = (
-            f"no separate face texture: the rules here allow {max_materials} material slot, "
-            "and the face texture is a second one")
+    if max_materials > 0:
+        dropped = []
+        if material_count(settings["face_texture"], settings["face_layout"],
+                          settings["body_textures"]) > max_materials and settings["body_textures"] > 1:
+            settings["body_textures"] = 1
+            dropped.append("no second body texture")
+        if material_count(settings["face_texture"], settings["face_layout"], 1) > max_materials \
+                and settings["face_layout"].startswith("eyes"):
+            settings["face_layout"] = settings["face_layout"].replace("eyes-", "").replace(
+                "eyes", "single")
+            dropped.append("no eye strip")
+        if settings["face_texture"] and max_materials < 2:
+            settings["face_texture"] = False
+            dropped.append("no separate face texture")
+        if dropped:
+            settings["face_texture_note"] = (
+                f"{', '.join(dropped)}: the rules here allow {max_materials} material "
+                f"slot{'s' if max_materials != 1 else ''}, and each texture is a material of its own")
     if preset and max_triangles and not triangles:
         settings["triangles"] = min(settings["triangles"], max_triangles)
     if preset and max_texture and not texture:
@@ -1485,11 +1549,11 @@ FACE_DIRECTION_SHARE = 0.05
 FACE_VISIBILITY_GRID = 384
 
 
-def _front_projection(positions, faces, region, centre, size: int, padding: int):
-    """The face mapped straight from the front, the way N64 faces were drawn:
-    one island, upright, filling its texture. Returns (region, mapping, uv
-    faces, uvs) for the triangles kept (``region`` narrowed to them), or None
-    when the region has no front to map from.
+def _front_view(positions, faces, region, centre):
+    """The face seen straight from the front, the way N64 faces were drawn:
+    returns (kept triangles, right, up) - the triangles of ``region`` that
+    can be mapped from the front and the two directions the front view's x
+    and y run along - or None when the region has no front to map from.
 
     xatlas cut the test sculpt's face into dozens of islands, the hair fringe took much
     of the 64 px texture and her eyes came out two or three texels wide (12 Nov
@@ -1550,14 +1614,213 @@ def _front_projection(positions, faces, region, centre, size: int, padding: int)
     keep = keep[visible]
     if len(keep) < 8:
         return None
-    used, local, xy, _ = project(keep)
+    return keep, right, up
+
+
+def _mirror_side(positions, faces, ids, right, axis: float) -> float:
+    """Which half of the face, seen from the front, a mirrored face texture
+    keeps: +1 for the half right of ``axis`` (along ``right``), -1 for the
+    left. The half with more of its triangles in view (_front_view has
+    dropped the hidden ones) - the other is the one behind hair."""
+    import numpy as np
+    corners = positions[faces[ids]]
+    area = 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0],
+                                         corners[:, 2] - corners[:, 0]), axis=1)
+    x = corners.mean(axis=1) @ right - axis
+    return 1.0 if float(area[x >= 0].sum()) >= float(area[x < 0].sum()) else -1.0
+
+
+#: A mirrored face texture mirrors about the plane the sculpt's face colours
+#: are most nearly symmetric in (_symmetry_plane): searched up to
+#: MIRROR_TURN_DEGREES either way from the front view's own, and
+#: MIRROR_SHIFT_REACH times the facial detail's reach to either side. A sculpt
+#: point matches its mirror image when a colour within MIRROR_COLOUR_MATCH
+#: (0-1 RGB distance) is among the MIRROR_NEIGHBOURS points nearest it.
+MIRROR_TURN_DEGREES = 8.0
+MIRROR_SHIFT_REACH = 0.3
+MIRROR_COLOUR_MATCH = 0.1
+MIRROR_NEIGHBOURS = 8
+#: A face whose best mirror plane still leaves more than this share of its
+#: points unmatched is not mirrored (the test sculpt: under 1%; a game rip
+#: with a fringe swept across one eye: 27%).
+MIRROR_MAX_MISMATCH = 0.15
+#: A triangle on the mirrored half with more than this share of its sculpt
+#: points unmatched (a lock of hair across one eye, a scar) is not mirrored:
+#: it keeps texels of its own on the body texture.
+MIRROR_MISMATCH = 0.5
+#: Sculpt points used to search for the mirror plane, and sculpt points round
+#: the face they are matched against, at most.
+MIRROR_SAMPLES = 3000
+MIRROR_TREE_POINTS = 100_000
+
+
+def _mirror_mismatch(points, colours, tree, all_colours, normal, offset: float):
+    """For each point, whether no sculpt point near its mirror image (in the
+    plane ``normal`` . x = ``offset``) has its colour."""
+    import numpy as np
+    image = points - 2.0 * ((points @ normal) - offset)[:, None] * normal
+    _, around = tree.query(image, k=MIRROR_NEIGHBOURS, workers=-1)
+    distance = np.linalg.norm(all_colours[around] - colours[:, None, :], axis=2).min(axis=1)
+    return distance > MIRROR_COLOUR_MATCH
+
+
+def _symmetry_plane(points, colours, sculpt_points, sculpt_colours, right, up, reach: float,
+                    spatial):
+    """(normal, offset, unmatched share) of the plane the face is most nearly
+    mirror-symmetric in, near the front view's: ``points`` (sculpt points on the face) and
+    their ``colours`` against the sculpt's (``sculpt_points``,
+    ``sculpt_colours``). The face centre (the detail's middle) is rarely on
+    the nose line - a fringe over one eye pulls it over - and a head is often
+    turned a little; mirrored about the wrong line the second eye lands a
+    texel or two off."""
+    import numpy as np
+    points = np.asarray(points, np.float64)
+    # Only the sculpt round the face is searched (a tree of the whole sculpt
+    # made the search 20 s on the test sculpt).
+    low = points.min(axis=0) - MIRROR_SHIFT_REACH * 2 * reach
+    high = points.max(axis=0) + MIRROR_SHIFT_REACH * 2 * reach
+    near = np.nonzero(np.all((sculpt_points >= low) & (sculpt_points <= high), axis=1))[0]
+    # A dense sculpt has far more points than a 64 px face has texels.
+    near = near[::max(1, len(near) // MIRROR_TREE_POINTS)]
+    tree = spatial.cKDTree(sculpt_points[near])
+    all_colours = sculpt_colours[near]
+    if len(points) > MIRROR_SAMPLES:
+        pick = np.linspace(0, len(points) - 1, MIRROR_SAMPLES).astype(np.int64)
+        points, colours = points[pick], colours[pick]
+    forward = np.cross(right, up)
+    middle = points.mean(axis=0)
+
+    def plane(degrees: float):
+        turn = np.radians(degrees)
+        return np.cos(turn) * right + np.sin(turn) * forward
+
+    def cost(degrees: float, shift: float) -> float:
+        normal = plane(degrees)
+        return float(_mirror_mismatch(points, colours, tree, all_colours, normal,
+                                      float(middle @ normal) + shift).mean())
+
+    # Every turn with every shift, then finer round the best: the match is
+    # sharp (on the test sculpt 5% of points unmatched at the best plane, 24%
+    # a fifth of an edge to one side), and turn and shift trade off.
+    turns = np.linspace(-MIRROR_TURN_DEGREES, MIRROR_TURN_DEGREES, 9)
+    shifts = np.linspace(-MIRROR_SHIFT_REACH, MIRROR_SHIFT_REACH, 13) * reach
+    degrees, shift = min(((t, v) for t in turns for v in shifts), key=lambda tv: cost(*tv))
+    turn_step, shift_step = turns[1] - turns[0], shifts[1] - shifts[0]
+    degrees, shift = min(((t, v) for t in np.linspace(degrees - turn_step / 2,
+                                                      degrees + turn_step / 2, 5)
+                          for v in np.linspace(shift - shift_step, shift + shift_step, 9)),
+                         key=lambda tv: cost(*tv))
+    normal = plane(degrees)
+    return normal, float(middle @ normal) + shift, cost(degrees, shift)
+
+
+def _front_image(sculpt, sculpt_vertices, positions, faces, nearest, ids, right, up,
+                 texture: int, padding: int, xatlas) -> dict:
+    """Triangles ``ids`` baked as seen from the front (along ``right`` and
+    ``up``), stretched to fill a ``texture`` x ``texture`` image, unmirrored:
+    what the face looks like, for laying out its textures. Returns colour
+    (rows from v = 0 up, 0-1), inside (texels covered) and the projection
+    (used, local, uvs)."""
+    import numpy as np
+    used, local, uvs = _projected_uvs(positions, faces, ids, right, up, (texture, texture),
+                                      padding, fill=True)
+    check = {"ids": ids, "uvs": (used, local, uvs)}
+    built = _assemble([check], positions, faces, nearest, xatlas, texture, padding)
+    image, _, inside = _bake_part(sculpt, sculpt_vertices, built, 0, (texture, texture), False)
+    return {"colour": np.flipud(np.asarray(image.convert("RGB"), np.float32) / 255.0),
+            "inside": np.flipud(inside), "used": used, "local": local, "uvs": uvs}
+
+
+def _mirror_misfits(front: dict, positions, faces, ids, across, axis: float, side: float,
+                    texture: int, padding: int):
+    """The triangles of ``ids`` on the mirrored half (the ``side`` of the plane
+    ``across`` . x = ``axis`` not kept) that would look wrong mirrored, from
+    the face baked from the front, unmirrored (_front_image, along ``across``):
+    a triangle whose texels mostly differ from their mirror image's
+    (MIRROR_MISMATCH, colours more than MIRROR_COLOUR_MATCH apart; the texel
+    either side counts too) is one - a lock of hair across one side of the
+    forehead, mirrored, became skin."""
+    import numpy as np
+    colour, inside = front["colour"], front["inside"]
+    used, local, uvs = front["used"], front["local"], front["uvs"]
+    owner, _ = _rasterise(uvs * texture, local, texture)
+    owner = owner.reshape(texture, texture)
+    # The mirror line in texels: x = axis, mapped as _projected_uvs maps x.
+    x = positions[used] @ across
+    low, extent = float(x.min()), max(float(x.max() - x.min()), 1e-12)
+    line = ((axis - low) / extent * (1.0 - 2 * padding / texture) + padding / texture) * texture
+    rows, cols = np.nonzero(owner >= 0)
+    tri = owner[rows, cols]
+    middles = positions[faces[ids]].mean(axis=1)
+    other = side * (middles @ across - axis) < 0
+    pick = other[tri]
+    rows, cols, tri = rows[pick], cols[pick], tri[pick]
+    if not len(tri):
+        return ids[:0]
+    mirror = np.floor(2.0 * line - (cols + 0.5)).astype(np.int64)
+    best = np.full(len(tri), np.inf)
+    for shift in (-1, 0, 1):
+        col = mirror + shift
+        ok = (col >= 0) & (col < texture)
+        safe = np.clip(col, 0, texture - 1)
+        ok &= inside[rows, safe]
+        distance = np.linalg.norm(colour[rows, safe] - colour[rows, cols], axis=1)
+        best = np.where(ok, np.minimum(best, distance), best)
+    differs = best > MIRROR_COLOUR_MATCH
+    share = (np.bincount(tri, differs, minlength=len(ids))
+             / np.maximum(np.bincount(tri, minlength=len(ids)), 1))
+    return ids[other & (share > MIRROR_MISMATCH)]
+
+
+def _projected_uvs(positions, faces, ids, right, up, shape, padding: int,
+                   fill: bool = False, axis: Optional[float] = None, side: float = 1.0):
+    """UVs for triangles ``ids`` as seen from the front (along ``right`` and
+    ``up``), for a texture ``shape`` = (width, height) texels with ``padding``
+    texels round the island. Returns (vertex mapping, faces, uvs).
+
+    By default the island is centred with square texels (a face texture of
+    its own). ``fill`` stretches it to fill both ways (a strip: the texture's
+    shape was chosen to keep its texels near square). With ``axis``, the face
+    is mirrored about the line x = ``axis``: the ``side`` half (+1 right of
+    the line) spans u 0..1 and the other half gets u below 0, which a
+    mirroring sampler (glTF MIRRORED_REPEAT, the N64's mirror bit) draws
+    with the same texels flipped - twice the texels across for the face."""
+    import numpy as np
+    used, local = np.unique(faces[ids], return_inverse=True)
+    points = positions[used]
+    xy = np.stack([points @ right, points @ up], axis=1)
+    size = np.asarray(shape, np.float64)
+    pad = padding / size
     low = xy.min(axis=0)
-    extent = xy.max(axis=0) - low
-    span = float(extent.max()) or 1.0
-    # Into the texture with ``padding`` texels round it, centred, square texels.
-    inner = (size - 2 * padding) / size
-    uvs = (xy - low) / span * inner + padding / size
-    uvs += (1.0 - 2 * padding / size - extent / span * inner) / 2.0
+    extent = np.maximum(xy.max(axis=0) - low, 1e-12)
+    if axis is not None:
+        across = side * (xy[:, 0] - axis)
+        # The wider half sets the scale, so neither half reads past the
+        # texture's far edge (mirrored again there).
+        reach = float(np.abs(across).max()) or 1.0
+        uvs = np.stack([across / reach * (1.0 - pad[0]),
+                        (xy[:, 1] - low[1]) / extent[1] * (1.0 - 2 * pad[1]) + pad[1]], axis=1)
+    elif fill:
+        uvs = (xy - low) / extent * (1.0 - 2 * pad) + pad
+    else:
+        # Square texels, centred: texels per unit set by the tighter axis.
+        scale = float(np.min((size - 2 * padding) / extent))
+        texels = (xy - low) * scale + (size - extent * scale) / 2.0
+        uvs = texels / size
+    return used, local.reshape(-1, 3), uvs
+
+
+def _front_projection(positions, faces, region, centre, size: int, padding: int):
+    """The face mapped straight from the front (_front_view): one island,
+    upright, filling a ``size`` x ``size`` texture. Returns (region, mapping,
+    uv faces, uvs) for the triangles kept (``region`` narrowed to them), or
+    None when the region has no front to map from."""
+    import numpy as np
+    view = _front_view(positions, faces, region, centre)
+    if view is None:
+        return None
+    keep, right, up = view
+    used, local, uvs = _projected_uvs(positions, faces, keep, right, up, (size, size), padding)
     narrowed = np.zeros(len(region), bool)
     narrowed[keep] = True
     return narrowed, used, local, uvs
@@ -1577,8 +1840,9 @@ def write_glb(path: Path, positions, normals, uvs, faces, base_png: bytes, name:
     flipped to glTF's v-down here); tangents and the normal map are optional.
     ``nearest`` asks viewers for blocky nearest-texel filtering (small retro
     textures). ``extra_parts`` adds more primitives over the same vertices,
-    each a dict with faces, base_png, name and optionally normal_png and
-    image_names (the face texture's own material)."""
+    each a dict with faces, base_png, name and optionally normal_png,
+    image_names (the face texture's own material) and mirror (its texture is
+    mirrored across: half a face drawn twice)."""
     import numpy as np
     blobs: list[bytes] = []
     views: list[dict] = []
@@ -1620,24 +1884,36 @@ def write_glb(path: Path, positions, normals, uvs, faces, base_png: bytes, name:
               "image_names": image_names}, *extra_parts]
     images, textures, materials, primitives = [], [], [], []
 
-    def add_texture(data: bytes, label: str) -> int:
+    samplers: list[dict] = []
+
+    def sampler(mirror: bool) -> int:
+        # MIRRORED_REPEAT across (33648) for a texture that holds half a face.
+        wanted = {"magFilter": 9728 if nearest else 9729, "minFilter": 9984 if nearest else 9987,
+                  "wrapS": 33648 if mirror else 10497, "wrapT": 10497}
+        if wanted not in samplers:
+            samplers.append(wanted)
+        return samplers.index(wanted)
+
+    def add_texture(data: bytes, label: str, mirror: bool = False) -> int:
         image = {"bufferView": add_view(data), "mimeType": "image/png"}
         if label:
             image["name"] = label
         images.append(image)
-        textures.append({"source": len(images) - 1, "sampler": 0})
+        textures.append({"source": len(images) - 1, "sampler": sampler(mirror)})
         return len(textures) - 1
 
     for part in parts:
         labels = tuple(part.get("image_names") or ("", ""))
+        mirror = bool(part.get("mirror"))
         indices = add_accessor(np.ascontiguousarray(part["faces"],
                                                     np.uint32 if big else np.uint16).ravel(),
                                "SCALAR", 5125 if big else 5123, 34963)
         material = {"name": part["name"], "pbrMetallicRoughness": {
-            "baseColorTexture": {"index": add_texture(part["base_png"], labels[0])},
+            "baseColorTexture": {"index": add_texture(part["base_png"], labels[0], mirror)},
             "metallicFactor": 0.0, "roughnessFactor": 0.8}}
         if part.get("normal_png") is not None:
-            material["normalTexture"] = {"index": add_texture(part["normal_png"], labels[1])}
+            material["normalTexture"] = {"index": add_texture(part["normal_png"], labels[1],
+                                                              mirror)}
         materials.append(material)
         primitives.append({"attributes": attributes, "indices": indices,
                            "material": len(materials) - 1, "mode": 4})
@@ -1647,9 +1923,7 @@ def write_glb(path: Path, positions, normals, uvs, faces, base_png: bytes, name:
         "nodes": [{"mesh": 0, "name": name}],
         "meshes": [{"name": name, "primitives": primitives}],
         "materials": materials,
-        "samplers": [{"magFilter": 9728 if nearest else 9729,
-                      "minFilter": 9984 if nearest else 9987,
-                      "wrapS": 10497, "wrapT": 10497}],
+        "samplers": samplers,
         "textures": textures, "images": images,
         "accessors": accessors, "bufferViews": views,
         "buffers": [{"byteLength": sum(len(blob) for blob in blobs)}],
@@ -1799,12 +2073,139 @@ def _reduce_with_head(simplify, positions, faces, triangles: int, neck_height: f
     return (*_reduce(simplify, joined, joined_faces, triangles), "")
 
 
+def _assemble(parts, low_positions, low_faces, nearest, xatlas, texture: int, padding: int,
+              priority=None, boost: float = 1.0) -> dict:
+    """The reduced mesh laid out for baking, one part (material) after another:
+    each part's UVs (its own, or xatlas'), shading normals split at hard folds,
+    tangents. ``nearest`` (the reduced triangle each sculpt vertex is nearest)
+    comes back numbered by the new triangle order, -1 for a triangle in no part."""
+    import numpy as np
+    mappings, part_faces, part_uvs, orders = [], [], [], []
+    offset = 0
+    for part in parts:
+        group = part["ids"]
+        if part.get("uvs") is not None:
+            mapping, uv_faces, uvs = part["uvs"]
+            order = np.arange(len(group))
+        else:
+            mapping, uv_faces, uvs, order = _unwrap(
+                xatlas, low_positions, low_faces[group], texture, padding,
+                priority[group] if priority is not None else None, boost)
+        mappings.append(mapping)
+        part_faces.append(uv_faces + offset)
+        part_uvs.append(uvs)
+        orders.append(group[order])
+        offset += len(mapping)
+    mapping = np.concatenate(mappings)
+    uvs = np.concatenate(part_uvs)
+    all_faces = np.concatenate(part_faces)
+    order = np.concatenate(orders)
+    renumber = np.full(len(low_faces), -1, np.int64)
+    renumber[order] = np.arange(len(order))
+    # Shading normals per corner, hard across sharp folds; corners that disagree
+    # get a vertex each. Neighbours are found through the reduced mesh's own
+    # vertices, so a UV seam does not cut the shading.
+    corner_normals = _corner_normals(low_positions, mapping[all_faces])
+    positions, uvs, normals, all_faces = _split_by_normal(
+        low_positions[mapping], uvs, all_faces, corner_normals)
+    sizes = np.cumsum([len(part) for part in part_faces])[:-1]
+    return {"positions": positions, "uvs": uvs, "normals": normals, "faces": all_faces,
+            "part_faces": np.split(all_faces, sizes),
+            "tangents": _tangents(positions, uvs, all_faces, normals),
+            "nearest": renumber[nearest]}
+
+
+def _bake_part(sculpt, sculpt_vertices, built: dict, index: int, shape, want_normal: bool,
+               colours: int = 0):
+    """One part's textures (_assemble): (BaseColor image, normal image or None,
+    covered texels (h, w) bool, rows top first). A strip is baked square at its
+    longer side, then averaged down to its ``shape`` (width, height): the same
+    samples per texel along both."""
+    import numpy as np
+    from PIL import Image
+    part_faces = built["part_faces"]
+    first = sum(len(faces) for faces in part_faces[:index])
+    last = first + len(part_faces[index])
+    nearest = built["nearest"]
+    local = np.where((nearest >= first) & (nearest < last), nearest - first, -1)
+    edge = max(shape)
+    colour, normal_pixels, inside = _bake_maps(sculpt, sculpt_vertices, local, built["positions"],
+                                                 built["normals"], built["tangents"], built["uvs"],
+                                                 part_faces[index], edge, want_normal,
+                                                 samples_per_texel(edge))
+    # Rows were filled with v going up; an image's first row is its top.
+    image = Image.fromarray((np.flipud(colour) * 255).clip(0, 255).round().astype(np.uint8))
+    inside = np.flipud(inside)
+    normal_image = None
+    if normal_pixels is not None:
+        normal_image = Image.fromarray(
+            (np.flipud(normal_pixels) * 255).clip(0, 255).round().astype(np.uint8))
+    if tuple(shape) != (edge, edge):
+        image = image.resize(tuple(shape), Image.BOX)
+        if normal_image is not None:
+            normal_image = normal_image.resize(tuple(shape), Image.BOX)
+        inside = np.asarray(Image.fromarray(inside.astype(np.uint8) * 255).resize(
+            tuple(shape), Image.BOX)) > 0
+    if colours:
+        image = _reduce_colours(image, colours, inside)
+    return image, normal_image, inside
+
+
+#: The eye strip (face layouts eyes, eyes-mirror) runs across the face where
+#: its darkest texels are, seen from the front: pupils, lashes and brows
+#: (EYE_DARK_SHARE of the face's texels; the rows holding the middle
+#: EYE_DARK_ROWS of them), EYE_BAND_PAD of the face's height wider at the top
+#: and bottom. Tried first and dropped: the densest colour detail above the
+#: face's centre - on a game rip the fringe swept over the brow is busier than
+#: the eyes, and the strip came out all hair.
+EYE_DARK_SHARE = 0.04
+EYE_DARK_ROWS = (0.1, 0.9)
+EYE_BAND_PAD = 0.04
+
+
+def _eye_band(front: dict, positions, up, texture: int, padding: int):
+    """(low, high) along ``up``: the strip across the eyes and brows, from the
+    face seen from the front (_front_image), or None if it shows no face."""
+    import numpy as np
+    colour, inside = front["colour"], front["inside"]
+    if inside.sum() < 16:
+        return None
+    light = colour @ np.array([0.299, 0.587, 0.114], np.float32)
+    cut = np.quantile(light[inside], EYE_DARK_SHARE)
+    rows, _ = np.nonzero(inside & (light <= cut))
+    if not len(rows):
+        return None
+    low_row, high_row = np.quantile(rows, EYE_DARK_ROWS)
+    low_row -= EYE_BAND_PAD * texture
+    high_row += EYE_BAND_PAD * texture + 1.0
+    # Texel rows back to heights, as _projected_uvs (fill) put heights in rows.
+    y = positions[front["used"]] @ up
+    bottom, extent = float(y.min()), max(float(y.max() - y.min()), 1e-12)
+
+    def height_of(row: float) -> float:
+        return bottom + (row / texture - padding / texture) / (1.0 - 2 * padding / texture) * extent
+
+    return height_of(low_row), height_of(high_row)
+
+
+def _strip_shape(width: float, height: float, texture: int) -> tuple:
+    """(width, height) in texels of a strip ``width`` x ``height`` (model units)
+    holding the texels of one ``texture`` x ``texture`` texture (so it fits the
+    same texture memory), whichever of 4:1, 1:1 and 1:4 leaves its texels
+    nearest square."""
+    import math
+    choices = [(texture * 2, texture // 2), (texture, texture), (texture // 2, texture * 2)]
+    ratio = max(width, 1e-12) / max(height, 1e-12)
+    return min(choices, key=lambda shape: abs(math.log((shape[0] / shape[1]) / ratio)))
+
+
 def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_TRIANGLES,
          texture: int = DEFAULT_TEXTURE,
          progress: Optional[Callable[[str, int, int], None]] = None,
          normal_map: bool = True, colours: int = 0, preset: str = "",
          detail_boost: float = DETAIL_BOOST, face_texture: bool = False,
-         head_share: float = 0.0, skip_materials=()) -> dict:
+         head_share: float = 0.0, skip_materials=(), face_layout: str = "single",
+         body_textures: int = 1) -> dict:
     """Reduce, unwrap and bake ``source`` into a game asset. Returns what it wrote.
 
     ``normal_map`` adds T_<name>_Normal.png (and puts it in the .glb);
@@ -1818,9 +2219,11 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     ``head_share`` (0-0.9; 0 is off) gives the head - above the neck, found
     from the face - that share of the triangles, and the body the rest
     (_reduce_with_head): the higher it is, the more of the head's shape is
-    kept, at the body's expense."""
+    kept, at the body's expense. ``face_layout`` (FACE_LAYOUTS) lays the face
+    texture out mirrored and/or with a strip of its own for the eyes;
+    ``body_textures`` 2 gives the lower body a texture of its own. Each is
+    another material (T_<name>_Face/_Eyes/_Lower_BaseColor.png)."""
     import numpy as np
-    from PIL import Image
     if texture < 16:
         raise PolypaintError(f"the texture size must be at least 16 px (got {texture})")
     if texture & (texture - 1):
@@ -1829,6 +2232,10 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
         raise PolypaintError(f"a triangle budget of {triangles} is too small to bake into")
     if colours and not 2 <= colours <= 256:
         raise PolypaintError(f"a texture can be reduced to 2-256 colours (got {colours})")
+    if face_layout not in FACE_LAYOUTS:
+        raise PolypaintError(f"unknown face layout '{face_layout}' (choose: {', '.join(FACE_LAYOUTS)})")
+    if body_textures not in (1, 2):
+        raise PolypaintError(f"the body can have 1 or 2 textures (got {body_textures})")
     simplify, xatlas, spatial = _require_bake_libraries()
     steps = 4
 
@@ -1914,86 +2321,137 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     # Gaps between UV islands: a few texels at 512 px and up, one at 64-128 px
     # where every texel counts (the background is filled anyway, see below).
     padding = 1 if texture <= 128 else 2 if texture <= 256 else 4
-    # One unwrap per material: the body, then (if any) the face, each packed
-    # into a texture of its own. ``groups`` holds the reduced triangles of each.
-    # The face texture is the face seen from the front, one island; xatlas
-    # unwraps it only when the region has no front to map from.
-    front = None
+    # One part per material, each a texture of its own: the body (one or two:
+    # upper, lower), then (if any) the face and the eye strip. A part holds its
+    # reduced triangles, its UVs (None: xatlas unwraps it) and its texture's
+    # shape. The face is seen from the front, one island; xatlas unwraps it
+    # only when the region has no front to map from.
+    view = None
+    layout_note = ""
+    mirror_own = 0
     if face_region is not None:
         # Hairline to chin: FACE_REACH times the reach of the eyes, brows and
         # lips from the centre (on the test sculpt, 3% of the surface rather than the 10%
         # an unwrapped face takes, where hair and collar filled the texture).
         middle = low_positions[low_faces].mean(axis=1)
         close = np.linalg.norm(middle - centre, axis=1) <= FACE_REACH * reach
-        front = _front_projection(low_positions, low_faces, close, centre, texture, padding)
-        if front is not None:
-            face_region = front[0]
-    groups = ([np.arange(len(low_faces))] if face_region is None
-              else [np.nonzero(~face_region)[0], np.nonzero(face_region)[0]])
-    mappings, part_faces, part_uvs, orders = [], [], [], []
-    offset = 0
-    for index, group in enumerate(groups):
-        if index == 1 and front is not None:
-            _, mapping, uv_faces, uvs = front
-            order = np.arange(len(group))
+        view = _front_view(low_positions, low_faces, close, centre)
+        if view is not None:
+            face_region = np.zeros(len(low_faces), bool)
+            face_region[view[0]] = True
+        elif face_layout != "single":
+            layout_note = f"face layout {face_layout} not used: the face has no front to map from"
+    face_parts = []
+    if face_region is not None and view is None:
+        face_parts.append({"ids": np.nonzero(face_region)[0], "suffix": PART_SUFFIXES[1]})
+    elif view is not None:
+        keep, right, up = view
+        mirrored = face_layout in ("mirror", "eyes-mirror")
+        across, axis, side = right, None, 1.0
+        front = None
+        if mirrored:
+            # Mirror about the face's own symmetry, found from the sculpt's
+            # colours; the half more in view is kept, and on the other half a
+            # triangle that does not match its mirror image (hair across one
+            # eye) keeps texels of its own on the body texture.
+            in_face = np.zeros(len(low_faces), bool)
+            in_face[keep] = True
+            on_face = np.nonzero(in_face[nearest])[0]
+            tint = np.asarray(obj.colours, np.float32)
+            if tint.max(initial=0.0) > 1.0:
+                tint = tint / 255.0
+            across, axis, unmatched = _symmetry_plane(obj.vertices[on_face], tint[on_face],
+                                                      obj.vertices, tint, right, up, reach, spatial)
+            if unmatched > MIRROR_MAX_MISMATCH:
+                layout_note = (layout_note + "; " if layout_note else "") + (
+                    f"face not mirrored: {unmatched:.0%} of it differs from its mirror image "
+                    "(hair across one side?)")
+                mirrored, across, axis = False, right, None
+            else:
+                side = _mirror_side(low_positions, low_faces, keep, across, axis)
+                front = _front_image(sculpt, obj.vertices, low_positions, low_faces, nearest, keep,
+                                     across, up, texture, padding, xatlas)
+                own = _mirror_misfits(front, low_positions, low_faces, keep, across, axis, side,
+                                      texture, padding)
+                if len(own):
+                    keep = np.setdiff1d(keep, own)
+                    mirror_own = len(own)
+        eyes = None
+        if face_layout.startswith("eyes"):
+            if front is None:
+                front = _front_image(sculpt, obj.vertices, low_positions, low_faces, nearest,
+                                     keep, across, up, texture, padding, xatlas)
+            band = _eye_band(front, low_positions, up, texture, padding)
+            height = low_positions[low_faces[keep]].mean(axis=1) @ up
+            inside_band = ((height >= band[0]) & (height <= band[1]) if band is not None
+                           else np.zeros(len(keep), bool))
+            if inside_band.sum() >= 8 and (~inside_band).sum() >= 8:
+                eyes = keep[inside_band]
+                keep = keep[~inside_band]
+            else:
+                layout_note = (layout_note + "; " if layout_note else "") + \
+                    "no eye strip: too few triangles across the eyes"
+        face_parts.append({"ids": keep, "suffix": PART_SUFFIXES[1], "mirror": mirrored,
+                           "uvs": _projected_uvs(low_positions, low_faces, keep, across, up,
+                                                 (texture, texture), padding, axis=axis, side=side)})
+        if eyes is not None:
+            # The strip's shape (same texels as a square texture) keeps its
+            # texels nearest square: 128 x 32 at 64 px for a long, low strip.
+            corners = low_positions[low_faces[eyes]].reshape(-1, 3)
+            wide = (float(np.abs(corners @ across - axis).max()) if mirrored
+                    else float(np.ptp(corners @ across)))
+            shape = _strip_shape(wide, float(np.ptp(corners @ up)), texture)
+            face_parts.append({"ids": eyes, "suffix": PART_SUFFIXES[2], "mirror": mirrored,
+                               "shape": shape,
+                               "uvs": _projected_uvs(low_positions, low_faces, eyes, across, up,
+                                                     shape, padding, fill=not mirrored, axis=axis,
+                                                     side=side)})
+    face_region = None
+    if face_parts:
+        face_region = np.zeros(len(low_faces), bool)
+        for part in face_parts:
+            face_region[part["ids"]] = True
+    body = np.nonzero(~face_region)[0] if face_region is not None else np.arange(len(low_faces))
+    parts = []
+    if body_textures == 2:
+        # Upper and lower body, cut across at the height that halves its area.
+        height = low_positions[low_faces[body]].mean(axis=1)[:, 1]
+        order = np.argsort(height, kind="stable")
+        halfway = height[order[min(np.searchsorted(np.cumsum(area[body][order]),
+                                                   0.5 * float(area[body].sum())), len(order) - 1)]]
+        upper = height >= halfway
+        if upper.all() or not upper.any():
+            layout_note = (layout_note + "; " if layout_note else "") + \
+                "one body texture: the body is too small to split"
+            parts.append({"ids": body, "suffix": ""})
         else:
-            mapping, uv_faces, uvs, order = _unwrap(
-                xatlas, low_positions, low_faces[group], texture, padding,
-                priority[group] if priority is not None else None, boost)
-        mappings.append(mapping)
-        part_faces.append(uv_faces + offset)
-        part_uvs.append(uvs)
-        orders.append(group[order])
-        offset += len(mapping)
-    mapping = np.concatenate(mappings)
-    uvs = np.concatenate(part_uvs)
-    all_faces = np.concatenate(part_faces)
-    order = np.concatenate(orders)
-    renumber = np.empty(len(order), np.int64)
-    renumber[order] = np.arange(len(order))
-    nearest = renumber[nearest]
-    # Shading normals per corner, hard across sharp folds; corners that disagree
-    # get a vertex each. Neighbours are found through the reduced mesh's own
-    # vertices, so a UV seam does not cut the shading.
-    corner_normals = _corner_normals(low_positions, mapping[all_faces])
-    positions, uvs, vertex_normals, all_faces = _split_by_normal(
-        low_positions[mapping], uvs, all_faces, corner_normals)
-    sizes = np.cumsum([len(part) for part in part_faces])[:-1]
-    part_faces = np.split(all_faces, sizes)
-    tangents = _tangents(positions, uvs, all_faces, vertex_normals)
-    per_side = samples_per_texel(texture)
+            parts.append({"ids": body[upper], "suffix": ""})
+            parts.append({"ids": body[~upper], "suffix": PART_SUFFIXES[0]})
+    else:
+        parts.append({"ids": body, "suffix": ""})
+    parts.extend(face_parts)
+    built = _assemble(parts, low_positions, low_faces, nearest, xatlas, texture, padding,
+                      priority, boost)
+    positions, uvs, vertex_normals = built["positions"], built["uvs"], built["normals"]
+    all_faces, part_faces, tangents = built["faces"], built["part_faces"], built["tangents"]
     step("baking the textures", 3)
     baked = []
-    first = 0
-    for uv_faces in part_faces:
-        last = first + len(uv_faces)
-        if len(part_faces) == 1:
-            local = nearest
-        else:
-            local = np.where((nearest >= first) & (nearest < last), nearest - first, -1)
-        colour, normal_pixels, inside = _bake_maps(sculpt, obj.vertices, local, positions,
-                                                     vertex_normals, tangents, uvs, uv_faces,
-                                                     texture, normal_map, per_side)
-        # Rows were filled with v going up; an image's first row is its top.
-        image = Image.fromarray((np.flipud(colour) * 255).clip(0, 255).round().astype(np.uint8))
-        if colours:
-            image = _reduce_colours(image, colours, np.flipud(inside))
-        normal_image = None
-        if normal_pixels is not None:
-            normal_image = Image.fromarray(
-                (np.flipud(normal_pixels) * 255).clip(0, 255).round().astype(np.uint8))
-        baked.append((image, normal_image, inside))
-        first = last
+    mirror_normal = False
+    for index, part in enumerate(parts):
+        # A normal map mirrored would point the other half's bumps the wrong
+        # way across (its sideways component flips); a mirrored part has none.
+        mirror_normal |= normal_map and bool(part.get("mirror"))
+        baked.append(_bake_part(sculpt, obj.vertices, built, index,
+                                part.get("shape", (texture, texture)),
+                                normal_map and not part.get("mirror"), colours))
     del sculpt, nearest
 
     out_dir = Path(out_dir) if out_dir is not None else Path(source).parent
     out_dir.mkdir(parents=True, exist_ok=True)
     mesh_name, texture_name = output_names(Path(source))
-    names = [(texture_name, normal_map_name(Path(source)))]
-    if len(baked) > 1:
-        names.append(face_texture_names(Path(source)))
     written = []
-    for (image, normal_image, _), (base_name, normal_name) in zip(baked, names):
+    for part, (image, normal_image, _) in zip(parts, baked):
+        base_name, normal_name = part_texture_names(Path(source), part["suffix"])
         # One encoding of each texture, written beside the mesh and packed inside it.
         base_png = _png_bytes(image)
         (out_dir / base_name).write_bytes(base_png)
@@ -2005,13 +2463,14 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     mesh_path = out_dir / mesh_name
     material = texture_name[:-len("_BaseColor.png")]
     extra = [{"faces": faces, "base_png": base_png, "normal_png": normal_png,
-              "name": base_name[:-len("_BaseColor.png")],
+              "name": base_name[:-len("_BaseColor.png")], "mirror": bool(part.get("mirror")),
               "image_names": (base_name[:-4], normal_name[:-4] if normal_name else "")}
-             for faces, (base_name, base_png, normal_name, normal_png)
-             in zip(part_faces[1:], written[1:])]
+             for part, faces, (base_name, base_png, normal_name, normal_png)
+             in zip(parts[1:], part_faces[1:], written[1:])]
     base_name, base_png, normal_name, normal_png = written[0]
     write_glb(mesh_path, positions, vertex_normals, uvs, part_faces[0], base_png, material,
-              tangents=tangents if normal_png is not None else None, normal_png=normal_png,
+              tangents=tangents if any(item[3] is not None for item in written) else None,
+              normal_png=normal_png,
               image_names=(base_name[:-4], normal_name[:-4] if normal_name else ""),
               nearest=texture <= NEAREST_TEXTURE, extra_parts=tuple(extra))
     if normal_png is not None:
@@ -2024,12 +2483,31 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
         note += (f"; WARNING: reduced to {len(all_faces):,} triangles, not {triangles:,} "
                  "(the sculpt has open edges the reducer keeps)")
     face_share = 0.0
-    if len(written) > 1:
-        face_share = float(area[face_region].sum() / max(area.sum(), 1e-30))
-        note += (f"; the face has its own {texture}x{texture} texture (second material, "
-                 f"{face_share:.0%} of the surface)")
-    elif face_note:
+    suffixes = [part["suffix"] for part in parts]
+    described = []
+    for part, (image, _, _) in zip(parts, baked):
+        share = float(area[part["ids"]].sum() / max(area.sum(), 1e-30))
+        part["share"] = share
+        part["size"] = list(image.size)
+        if part["suffix"] in PART_SUFFIXES[1:]:
+            face_share += share
+        if part["suffix"]:
+            what = {"_Lower": "the lower body", "_Face": "the face",
+                    "_Eyes": "the eyes and brows"}[part["suffix"]]
+            described.append(f"{what} {image.size[0]}x{image.size[1]}"
+                             + (" mirrored" if part.get("mirror") else "")
+                             + f" ({share:.0%} of the surface)")
+    if described:
+        note += f"; textures of their own: {', '.join(described)}"
+    if face_note:
         note += f"; {face_note}"
+    if layout_note:
+        note += f"; {layout_note}"
+    if mirror_own:
+        note += (f"; {mirror_own} triangles on the mirrored half of the face differ from "
+                 "the other half (hair across it?) and keep texels of their own on the body texture")
+    if mirror_normal:
+        note += "; no normal map on the mirrored face textures (it would point the wrong way on the mirrored half)"
     kept_share = 0.0
     if neck is not None:
         kept_share = float((positions[all_faces].mean(axis=1)[:, 1] > neck).mean())
@@ -2037,16 +2515,25 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     elif head_note:
         note += f"; {head_note}"
     inside = baked[0][2]
+    face_index = suffixes.index("_Face") if "_Face" in suffixes else -1
     return {
         "source": str(source), "colour": obj.source,
         "mesh": str(mesh_path), "texture": str(out_dir / written[0][0]),
         "normal": str(out_dir / written[0][2]) if written[0][2] else "",
-        "face_texture": str(out_dir / written[1][0]) if len(written) > 1 else "",
-        "face_normal": str(out_dir / written[1][2]) if len(written) > 1 and written[1][2] else "",
+        "face_texture": str(out_dir / written[face_index][0]) if face_index >= 0 else "",
+        "face_normal": (str(out_dir / written[face_index][2])
+                        if face_index >= 0 and written[face_index][2] else ""),
         "face_share": round(face_share, 3), "materials": len(written),
+        "textures": [str(out_dir / name) for item in written for name in (item[0], item[2]) if name],
+        "parts": [{"texture": str(out_dir / item[0]), "suffix": part["suffix"],
+                   "size": part["size"], "mirror": bool(part.get("mirror")),
+                   "share": round(part["share"], 3)} for part, item in zip(parts, written)],
+        "face_layout": face_layout if face_index >= 0 else "",
+        "body_textures": 2 if "_Lower" in suffixes else 1,
         "source_triangles": int(len(obj.faces)), "triangles": int(len(all_faces)),
         "texture_size": texture, "colours": colours, "preset": preset,
-        "samples_per_texel": per_side * per_side, "coverage": round(float(inside.mean()), 3),
+        "samples_per_texel": samples_per_texel(texture) ** 2,
+        "coverage": round(float(inside.mean()), 3),
         "detail_boost": round(boost, 2),
         "head_share": round(kept_share, 3),
         "seconds": round(time.time() - started, 1), "note": note,
