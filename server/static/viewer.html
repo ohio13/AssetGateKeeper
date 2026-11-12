@@ -241,6 +241,19 @@
         <label class="check" title="Gives the face (where the sculpt's colour detail is densest) a texture of its own, the same size, as a second material. In one 64 px texture a whole character's face is about 6 x 6 texels.">
           <input type="checkbox" id="bake-face"> Face texture</label>
       </div>
+      <div class="row">
+        <select id="bake-head" title="How much of the triangle budget goes to the head (above the neck). More keeps more of the head's shape - hair, nose, chin - and less of the body's.">
+          <option value="0" selected>Head: even</option>
+          <option value="0.35">Head: 35% of tris</option>
+          <option value="0.5">Head: 50% of tris</option>
+          <option value="0.65">Head: 65% of tris</option>
+          <option value="0.8">Head: 80% of tris</option>
+        </select>
+      </div>
+      <div id="bake-skip-row" hidden>
+        <div class="sub">Leave out of the bake (an outline shell, a helmet, a weapon):</div>
+        <div id="bake-skip" style="display:flex;flex-direction:column;gap:2px;margin:4px 0 8px"></div>
+      </div>
       <button id="bake-run" class="chip" type="button">Bake into a game asset</button>
       <div id="bake-progress" class="sub" aria-live="polite"></div>
     </div>

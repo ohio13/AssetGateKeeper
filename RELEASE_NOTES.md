@@ -1,5 +1,19 @@
 # Unreleased (on `main`)
 
+* **Bake: a triangle budget for the head, and game rips that bake cleanly
+  (12 Nov).** `--bake-head-share 0.65` (or **Head** on the review page)
+  gives the head - above the neck, found from the face - that share of the
+  triangles and the body the rest: on a 1,200-triangle N64 character the
+  even reduction left the head about a fifth, and its hair, nose and chin
+  went with it. Textured models: materials can be left out of a bake
+  (`--bake-skip-materials`, or a box per material on the review page) - a
+  rip's outline shell, helmet or weapon; see-through texels (decals, hair
+  cards) let the surface under them show; a material whose texture is
+  missing bakes in its flat colour instead of stopping the bake; texture
+  names with spaces are read whole. And an `.obj` whose normals were written
+  as `-1.#QNAN0` (old Microsoft compilers; common in game rips) is read by
+  the gate, the review page and the bake instead of "could not read mesh".
+
 * **Bake textured models too, not only Polypaint (12 Nov).** `--bake` (the
   same as `--bake-polypaint`) and the review page's **Bake** panel now take a
   textured `.obj` (with its `.mtl` and images beside it) or `.gltf`/`.glb`:

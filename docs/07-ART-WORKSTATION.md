@@ -117,7 +117,17 @@ A model that carries its colour in textures - an `.obj` uploaded with its
 `.mtl` and images, or a textured `.gltf`/`.glb` - gets the same **Bake**
 panel: every material's textures are baked into one, so a game rip with ten
 materials can be made into an N64-style asset with one or two. An `.obj`
-whose `.mtl` or textures are missing says which file to add. On a
+whose `.mtl` or textures are missing says which file to add; one texture
+missing on its own (a rip's material named just `.png`) bakes in that
+material's flat colour. Where a texture is see-through (a decal sheet over
+the suit, hair cards), the surface under it shows through in the bake. Each
+material is listed with its texture and a box to **leave it out**: game rips
+often carry an outline shell (a slightly larger, inside-out copy of the body
+for a cel-shaded edge), a helmet or a weapon that would otherwise be baked
+over the model. **Head** gives the head (above the neck) 35-80% of the
+triangles instead of an even share: more keeps the hair, nose and chin, and
+the body becomes blockier. Try the highest first and step back until the
+body looks right. On a
 1.08 million triangle sculpt it takes about 30-45 seconds at 15,000 triangles
 and 2048 px. A tangent-space normal map (`T_<name>_Normal.png`, glTF/OpenGL green
 up; tick Unreal's "Flip Green Channel" for the loose PNG) is baked too unless the

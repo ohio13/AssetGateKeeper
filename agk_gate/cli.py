@@ -566,10 +566,14 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
              " + a face texture" if settings.get("face_texture") else "",
              f" (preset {preset})" if preset else "")
     try:
+        skip = [name.strip() for name in (getattr(args, "bake_skip_materials", None) or "").split(",")
+                if name.strip()]
         result = module.bake(source, source.parent, triangles=settings["triangles"],
                              texture=edge, normal_map=settings["normal_map"],
                              colours=settings["colours"], preset=preset,
                              face_texture=settings.get("face_texture", False),
+                             head_share=getattr(args, "bake_head_share", None) or 0.0,
+                             skip_materials=skip,
                              progress=lambda name, i, n: LOG.info("bake    %d/%d %s", i + 1, n, name))
     except module.PolypaintError as exc:
         LOG.error("%s", exc)
@@ -1417,6 +1421,13 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bake-colours", type=int, default=None, metavar="N",
                         help="with --bake-polypaint: reduce the BaseColor to N colours "
                              "(16 or 256 like the N64's palette textures; 0 keeps them all)")
+    parser.add_argument("--bake-head-share", type=float, default=None, metavar="SHARE",
+                        help="with --bake: give the head (above the neck, found from the face) "
+                             "this share of the triangles, 0.35-0.8 say, and the body the "
+                             "rest: more keeps more of the head's shape (0 or unset: even)")
+    parser.add_argument("--bake-skip-materials", default=None, metavar="NAMES",
+                        help="with --bake on a textured model: leave out the materials named "
+                             "(comma-separated), e.g. a game rip's outline shell or weapon")
     parser.add_argument("--suggest-naming", action="store_true", dest="suggest_naming",
                         help="read the names in <folder> and print a [naming] block for "
                              "rules.toml that fits them, then exit (nothing is written)")

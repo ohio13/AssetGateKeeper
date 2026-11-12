@@ -2039,6 +2039,27 @@ if _bake_ready():
     status, globe_detail = pp.json(f"/api/assets/{globe['id']}")
     expect("a textured .obj with its files is offered a texture bake",
            globe_detail["preview"].get("bake") == "texture", str(globe_detail["preview"])[:200])
+    expect("... with its materials listed by texture, to leave any out",
+           globe_detail["preview"].get("materials") == [{"name": "Top", "texture": "T_Top.png"},
+                                                        {"name": "Bottom", "texture": "T_Bottom.png"}],
+           globe_detail["preview"].get("materials"))
+    for _body, _wording in (({"head_share": 2}, "head_share must be a number from 0"),
+                            ({"head_share": True}, "head_share must be a number from 0"),
+                            ({"skip_materials": "Top"}, "skip_materials must be a list")):
+        status, refused = pp.json(f"/api/assets/{globe['id']}/bake-polypaint", method="POST",
+                                  body=_body)
+        expect(f"a bad bake request is refused in words: {_body}",
+               status == 400 and _wording in refused.get("error", ""), str(refused)[:160])
+    status, queued = pp.json(f"/api/assets/{globe['id']}/bake-polypaint", method="POST",
+                             body={"triangles": 600, "texture": 64, "skip_materials": ["Top"]})
+    job = queued.get("job") or {}
+    deadline = time.time() + 120
+    while job.get("state") in ("queued", "running") and time.time() < deadline:
+        time.sleep(0.3)
+        job = pp.json(f"/api/jobs/{job['id']}")[1]
+    _half = (job.get("result") or {}).get("asset") or {}
+    expect("leaving the top's material out bakes only the bottom half",
+           job.get("state") == "done" and 0 < _half.get("triangle_count", 0) <= 600, str(job)[:300])
     status, queued = pp.json(f"/api/assets/{globe['id']}/bake-polypaint", method="POST",
                              body={"preset": "n64"})
     job = queued.get("job") or {}

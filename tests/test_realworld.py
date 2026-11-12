@@ -1054,6 +1054,115 @@ try:
         expect("a rip without its .mtl is refused, saying which file to put beside it",
                done.returncode == 2 and "rtm_hero.mtl, which is not beside it"
                in done.stdout + done.stderr, done.stdout[-300:] + done.stderr[-300:])
+
+        # 12 Nov 2026: a game rip, as the developer's test rip came -
+        # a decal sheet over the body (mostly see-through), an outline shell,
+        # a texture named with a space, one named just ".png", normals
+        # written as -1.#QNAN0 - and a head budget on top.
+        rip2 = WORK / "rip2"
+        rip2.mkdir()
+        _globe_text = textured_globe(WORK / "rip2_src").read_text(encoding="utf-8")
+        for _name in ("T_Top.png", "T_Bottom.png"):
+            shutil.copy(WORK / "rip2_src" / _name, rip2 / _name)
+        shutil.copy(rip2 / "T_Top.png", rip2 / "T top copy.png")
+        _decal = _np.zeros((32, 32, 4), _np.uint8)
+        _decal[:, 14:18] = (20, 200, 40, 255)                 # an opaque green stripe
+        _Image.fromarray(_decal, "RGBA").save(rip2 / "T_Decal.png")
+        _lines = _globe_text.replace("mtllib SM_Globe.mtl", "mtllib SM_Rip.mtl").splitlines()
+        _count = sum(line.startswith("v ") for line in _lines)
+        _lines.insert(2, "vn -1.#QNAN0 1.#INF00 0.000000")
+        _extra = []
+        import math as _m
+        for _scale, _material in ((1.02, "Decal"), (1.06, "Shell")):
+            _base = _count + sum(line.startswith("v ") for line in _extra)
+            for _i in range(7):                                 # a cap over the top
+                for _j in range(13):
+                    _th, _ph = _m.pi * 0.45 * _i / 6, 2 * _m.pi * _j / 12
+                    _extra.append(f"v {_scale * _m.sin(_th) * _m.cos(_ph):.5f} "
+                                  f"{_scale * _m.cos(_th):.5f} {_scale * _m.sin(_th) * _m.sin(_ph):.5f}")
+                    _extra.append(f"vt {_j / 12:.5f} {1 - _i / 6:.5f}")
+            _faces = [f"usemtl {_material}"]
+            for _i in range(6):
+                for _j in range(12):
+                    _a = _base + _i * 13 + _j + 1
+                    _b, _c, _d = _a + 1, _a + 13, _a + 14
+                    _faces += [f"f {_a}/{_a} {_c}/{_c} {_b}/{_b}", f"f {_b}/{_b} {_c}/{_c} {_d}/{_d}"]
+            _extra += _faces
+        _vertex_lines = [line for line in _extra if line.startswith(("v ", "vt "))]
+        _face_lines = [line for line in _extra if not line.startswith(("v ", "vt "))]
+        _first_face = next(i for i, line in enumerate(_lines) if line.startswith("usemtl"))
+        _lines = _lines[:_first_face] + _vertex_lines + _lines[_first_face:] + _face_lines
+        (rip2 / "SM_Rip.obj").write_text("\n".join(_lines) + "\n", encoding="utf-8")
+        (rip2 / "SM_Rip.mtl").write_text(
+            "newmtl Top\nmap_Kd T top copy.png\nnewmtl Bottom\nmap_Kd T_Bottom.png\n"
+            "newmtl Decal\nmap_Kd T_Decal.png\nnewmtl Shell\nKd 0.9 0.9 0.1\nmap_Kd .png\n",
+            encoding="utf-8")
+        _rip = rip2 / "SM_Rip.obj"
+        expect("a rip's materials are listed with their textures (names with spaces kept whole)",
+               polypaint.bake_materials(_rip) == [("Top", "T top copy.png"), ("Bottom", "T_Bottom.png"),
+                                                  ("Decal", "T_Decal.png"), ("Shell", ".png")],
+               polypaint.bake_materials(_rip))
+        expect("... and one texture missing (\".png\") does not stop the bake",
+               polypaint.bake_problem(_rip) == "", polypaint.bake_problem(_rip))
+        _model = polypaint.read_textured(_rip)
+        expect("-1.#QNAN0 in the normals is read, not an error",
+               len(_model.faces) == 24 * 48 * 2 + 2 * 6 * 12 * 2, len(_model.faces))
+        done = run_gate(_rip, "--once")
+        expect("... by the gate too: a verdict on the mesh, not 'could not read mesh'",
+               "could not read mesh" not in done.stdout + done.stderr
+               and f"{24 * 48 * 2 + 2 * 6 * 12 * 2:,} tris" in done.stdout,
+               done.stdout[-400:] + done.stderr[-200:])
+        polypaint.bake(_rip, rip2, triangles=900, texture=64, normal_map=False, colours=0,
+                       skip_materials=("Shell",))
+        _top, _bottom = baked_colour_by_height(rip2 / "SM_Rip_LP.glb")
+        expect("a mostly see-through decal over the top lets the red under it show",
+               _top[0] > 150 and _top[2] < 90, _top.round().tolist())
+        _document, _arrays, _images = read_glb_parts(rip2 / "SM_Rip_LP.glb")
+        _baked = _np.asarray(_Image.open(io.BytesIO(_images[0])).convert("RGB")).reshape(-1, 3).astype(int)
+        expect("... while its opaque stripe is baked green",
+               ((_baked[:, 1] > 150) & (_baked[:, 0] < 90)).sum() > 0)
+        def _yellow(path):
+            images = read_glb_parts(path)[2]
+            rgb = _np.asarray(_Image.open(io.BytesIO(images[0])).convert("RGB")).reshape(-1, 3).astype(int)
+            return int(((rgb[:, 0] > 180) & (rgb[:, 1] > 180) & (rgb[:, 2] < 80)).sum())
+
+        _without = _yellow(rip2 / "SM_Rip_LP.glb")
+        polypaint.bake(_rip, rip2, triangles=900, texture=64, normal_map=False, colours=0)
+        expect("a material whose texture is missing bakes in its flat colour (Kd yellow); "
+               "left out, none of it",
+               _yellow(rip2 / "SM_Rip_LP.glb") > 20 and _without == 0,
+               (_yellow(rip2 / "SM_Rip_LP.glb"), _without))
+
+        # The head budget: the test hero (a figure with a painted face), its
+        # head above the neck given 60% of 1,200 triangles.
+        _even = polypaint.bake(hero / "SM_Hero_HP.obj", WORK / "head_even", triangles=1200,
+                               texture=64, normal_map=False, colours=16)
+        _heady = polypaint.bake(hero / "SM_Hero_HP.obj", WORK / "head_share", triangles=1200,
+                                texture=64, normal_map=False, colours=16, head_share=0.6)
+        _even_mesh = _trimesh.load(WORK / "head_even" / "SM_Hero_LP.glb", force="mesh")
+        _heady_mesh = _trimesh.load(WORK / "head_share" / "SM_Hero_LP.glb", force="mesh")
+        expect("a head budget of 60% gives the head about 60% of the triangles",
+               0.55 <= _heady["head_share"] <= 0.65 and "the head (above the neck) has" in _heady["note"],
+               (_heady["head_share"], _heady["note"][-120:]))
+        expect("... the whole figure is still there (same size)",
+               _np.allclose(_heady_mesh.bounds, _even_mesh.bounds, atol=0.05 * _np.ptp(_even_mesh.bounds[:, 1])),
+               (_heady_mesh.bounds.round(2).tolist(), _even_mesh.bounds.round(2).tolist()))
+        # Welded first: the .glb splits its vertices at UV seams and hard edges.
+        _open = polypaint._open_vertices(polypaint._weld(_heady_mesh.vertices,
+                                                         _np.asarray(_heady_mesh.faces))[1])
+        _open_even = polypaint._open_vertices(polypaint._weld(_even_mesh.vertices,
+                                                              _np.asarray(_even_mesh.faces))[1])
+        expect("... and the neck is closed: no more open edges than an even reduction",
+               _open <= _open_even, (_open, _open_even))
+        done = run_gate(hero / "SM_Hero_HP.obj", "--bake", "--bake-preset", "n64",
+                        "--bake-head-share", "0.5")
+        expect("--bake-head-share on the command line",
+               done.returncode == 0 and "the head (above the neck) has" in done.stdout + done.stderr,
+               done.stdout[-500:] + done.stderr[-300:])
+        done = run_gate(hero / "SM_Hero_HP.obj", "--bake", "--bake-head-share", "1.5")
+        expect("... a share over 0.9 is refused in words",
+               done.returncode == 2 and "must be 0-0.9" in done.stdout + done.stderr,
+               done.stdout[-300:] + done.stderr[-300:])
         face_pixels = _np.asarray(_Image.open(hero / "T_Hero_LP_Face_BaseColor.png").convert("RGB"))
         dark_face = int((face_pixels.max(axis=2) < 70).sum())
         done = run_gate(hero / "SM_Hero_HP.obj", "--bake-polypaint", "--bake-preset", "n64",

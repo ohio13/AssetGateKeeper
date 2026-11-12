@@ -50,7 +50,10 @@ def _load(path: Path):
         except polypaint.PolypaintError:
             pass                                  # no colours: trimesh reads it plain
     import trimesh
-    loaded = trimesh.load(str(path), force="mesh", process=False)
+    import asset_gatekeeper as agk           # its loader reads a rip's "-1.#QNAN0" normals
+    loaded = agk.load_trimesh_scene(str(path), process=False)
+    if isinstance(loaded, trimesh.Scene):
+        loaded = loaded.to_geometry() if hasattr(loaded, "to_geometry") else loaded.dump(concatenate=True)
     positions = np.asarray(loaded.vertices, np.float64)
     faces = np.asarray(loaded.faces, np.int64)
     colours = None
