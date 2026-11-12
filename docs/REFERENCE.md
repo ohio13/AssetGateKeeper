@@ -1240,9 +1240,9 @@ decimator — but deterministic, dependency-free, and honest about its trade-off
 ```bash
 python engine/lod_manager.py big_statue.glb --ratios 0.5,0.25,0.125 --max-tris 20000,5000,1200
 # big_statue.glb: 38,080 tris, 19,042 verts
-#   LOD1    21,154 tris ( 55.6% of source, target 0.50) -> LOD1_big_statue.glb
-#   LOD2    10,716 tris ( 28.1% of source, target 0.25) -> LOD2_big_statue.glb
-#   LOD3     4,316 tris ( 11.3% of source, target 0.13) -> LOD3_big_statue.glb
+#   LOD1    21,154 tris ( 55.6% of source, target 0.50) -> big_statue_LOD1.glb
+#   LOD2    10,716 tris ( 28.1% of source, target 0.25) -> big_statue_LOD2.glb
+#   LOD3     4,316 tris ( 11.3% of source, target 0.13) -> big_statue_LOD3.glb
 ```
 
 Two things that make it work on real exports:
@@ -1270,9 +1270,9 @@ surface error and is written as a `.glb` with its materials and textures.
 
 ```bash
 python engine/lod_shippable.py globe.glb --ratios 0.5,0.25,0.125
-# LOD1: 8,064 tris (target 8,064), error 1.23 mm  -> lods/LOD1_globe.glb
-# LOD2: 4,032 tris (target 4,032), error 1.98 mm  -> lods/LOD2_globe.glb
-# LOD3: 2,016 tris (target 2,016), error 4.42 mm  -> lods/LOD3_globe.glb
+# LOD1: 8,064 tris (target 8,064), error 1.23 mm  -> lods/globe_LOD1.glb
+# LOD2: 4,032 tris (target 4,032), error 1.98 mm  -> lods/globe_LOD2.glb
+# LOD3: 2,016 tris (target 2,016), error 4.42 mm  -> lods/globe_LOD3.glb
 ```
 
 Slower than clustering (about 80 s per million triangles, pure Python), which is

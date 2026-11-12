@@ -2075,8 +2075,11 @@ def delete_lod(db_path: str | Path, data_dir: Path, asset_id: int, level: str) -
                            (asset_id, level))
     path = resolve_inside(Path(data_dir), row["file_path"])
     if path is not None:
-        for sibling in path.parent.glob(f"{level}_*"):
-            sibling.unlink(missing_ok=True)
+        # <name>_LOD3.* since 12 Nov 2026; LOD3_<name>.* before, and for levels
+        # uploaded by hand (LOD3_uploaded_<file> and its preview).
+        for pattern in (f"{level}_*", f"*_{level}.*"):
+            for sibling in path.parent.glob(pattern):
+                sibling.unlink(missing_ok=True)
     return list_lods(db_path, asset_id)
 
 
@@ -3222,7 +3225,12 @@ class Handler(BaseHTTPRequestHandler):
         path = resolve_inside(Path(server.data_dir), row["file_path"])
         if path is None or not path.is_file():
             raise WorkstationError("the LOD file is missing", 410)
-        self._send_file(path, download_name=path.name)
+        # Saved as SM_Rock_LOD3.obj, after the asset: the stored name can be the
+        # FBX preview's or LOD3_uploaded_..., and LOD3_SM_Rock.obj failed the
+        # naming rules the source passes once it was saved into a project.
+        asset = get_asset(server.db_path, asset_id)
+        name = lod_manager.lod_file_name(Path(asset["filename"]).stem, level, path.suffix)
+        self._send_file(path, download_name=name)
 
     def _send_file(self, path: Path, download_name: str = "") -> None:
         body = path.read_bytes()
