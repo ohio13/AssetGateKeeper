@@ -445,6 +445,10 @@ def init_db(db_path: str | Path) -> None:
             print("asset_health: migrated verdicts, added the project_id column")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS idx_verdicts_project ON verdicts(project_id, timestamp DESC)")
+        # The newest verdict for a file, looked up on every ingest to skip one
+        # that has not changed (record_verdict).
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_verdicts_file ON verdicts(filename, filepath, id DESC)")
 
 
 def _utc_now() -> str:
@@ -520,28 +524,77 @@ def _presented_hint(presented: str) -> str:
     return f"token:{digest}"
 
 
+def _unchanged_verdict(connection, row: dict, project_id: int | None) -> int:
+    """The id of the newest stored verdict for the same file, from the same
+    machine, if it says exactly what ``row`` says (size, result, problems);
+    else 0. A heal is always news, so a row with modifications never matches."""
+    if row["modifications"]:
+        return 0
+    tenant = "project_id IS NULL" if project_id is None else "project_id = ?"
+    params: tuple = (row["filename"], row["filepath"], row["hostname"])
+    if project_id is not None:
+        params += (project_id,)
+    latest = connection.execute(
+        "SELECT id, filesize, passed, metric, status FROM verdicts"
+        " WHERE filename = ? AND filepath = ? AND hostname = ? AND " + tenant +
+        " ORDER BY id DESC LIMIT 1", params).fetchone()
+    if latest is None:
+        return 0
+    if (int(latest["filesize"]) != int(row["filesize"]) or int(row["filesize"]) < 0
+            or bool(latest["passed"]) != bool(row["passed"])
+            or latest["metric"] != row["metric"] or latest["status"] != row["status"]):
+        return 0
+    stored = [item["message"] for item in connection.execute(
+        "SELECT message FROM problems WHERE verdict_id = ? ORDER BY id",
+        (latest["id"],)).fetchall()]
+    return int(latest["id"]) if stored == list(row["problems"]) else 0
+
+
+def record_verdict(db_path: str | Path, payload: dict,
+                   project_id: int | None = None) -> tuple[int, bool]:
+    """(row id, unchanged): store a verdict unless the newest one for the same
+    file from the same machine already says the same, size included.
+
+    Save & Run Audit re-checks a whole folder, and every file used to land on
+    the dashboard again with the same verdict: three audits, three identical
+    rows per model (12 Nov 2026). A file whose size or verdict changed is new
+    and is stored; one that did not keeps its first row."""
+    row = _normalise(payload)
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        # One lock for the look and the write: two identical posts at once must
+        # not both be stored.
+        same = _unchanged_verdict(connection, row, project_id)
+        if same:
+            return same, True
+        return _insert_verdict(connection, row, project_id), False
+
+
 def store_verdict(db_path: str | Path, payload: dict,
                   project_id: int | None = None) -> int:
     """Insert one verdict plus its problems atomically. Returns the new row id."""
     row = _normalise(payload)
     with _WRITE_LOCK, open_db(db_path) as connection:
-        verdict_id = insert_id(
-            connection,
-            "INSERT INTO verdicts (timestamp, received_at, hostname, username, os,"
-            " filename, filepath, filesize, passed, metric, status, project_id)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (row["timestamp"], row["received_at"], row["hostname"], row["username"],
-             row["os"], row["filename"], row["filepath"], row["filesize"],
-             row["passed"], row["metric"], row["status"], project_id),
-        )
-        connection.executemany(
-            "INSERT INTO problems (verdict_id, message) VALUES (?, ?)",
-            [(verdict_id, message) for message in row["problems"]],
-        )
-        connection.executemany(
-            "INSERT INTO modifications (verdict_id, action) VALUES (?, ?)",
-            [(verdict_id, action) for action in row["modifications"]],
-        )
+        return _insert_verdict(connection, row, project_id)
+
+
+def _insert_verdict(connection, row: dict, project_id: int | None) -> int:
+    verdict_id = insert_id(
+        connection,
+        "INSERT INTO verdicts (timestamp, received_at, hostname, username, os,"
+        " filename, filepath, filesize, passed, metric, status, project_id)"
+        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (row["timestamp"], row["received_at"], row["hostname"], row["username"],
+         row["os"], row["filename"], row["filepath"], row["filesize"],
+         row["passed"], row["metric"], row["status"], project_id),
+    )
+    connection.executemany(
+        "INSERT INTO problems (verdict_id, message) VALUES (?, ?)",
+        [(verdict_id, message) for message in row["problems"]],
+    )
+    connection.executemany(
+        "INSERT INTO modifications (verdict_id, action) VALUES (?, ?)",
+        [(verdict_id, action) for action in row["modifications"]],
+    )
     return verdict_id
 
 
@@ -3744,7 +3797,7 @@ class Handler(BaseHTTPRequestHandler):
 
         db_path = self.server.db_path  # type: ignore[attr-defined]
         try:
-            verdict_id = store_verdict(db_path, payload, project_id)
+            verdict_id, unchanged = record_verdict(db_path, payload, project_id)
         except ValueError as exc:   # shape problem: the client should fix it
             self._json(400, {"error": str(exc)})
             return
@@ -3752,6 +3805,15 @@ class Handler(BaseHTTPRequestHandler):
             self._json(500, {"error": "database error", "detail": str(exc)})
             return
 
+        if unchanged:
+            # Nothing new: the dashboard keeps the row it has, no live update,
+            # no second alert. A running scan counts it for its summary.
+            scanner = getattr(self.server, "scanner", None)
+            if scanner is not None:
+                scanner.note_unchanged()
+            self._json(200, {"stored": False, "unchanged": True, "id": verdict_id,
+                             "project_id": project_id})
+            return
         problems = payload.get("problems") or []
         if problems and not payload.get("passed"):
             _AUDIT.emit("budget.violation",
@@ -4282,7 +4344,14 @@ class ScanRunner:
         self.finished_at = ""
         self.totals = {"total": 0, "passed": 0, "failed": 0}
         self.skipped: dict = {}
+        self.unchanged = 0
         self._recent: list[dict] = []
+
+    def note_unchanged(self) -> None:
+        """A verdict this scan sent matched the one already stored."""
+        with self._lock:
+            if self.status == "running":
+                self.unchanged += 1
 
     def busy(self) -> bool:
         with self._lock:
@@ -4292,7 +4361,8 @@ class ScanRunner:
         with self._lock:
             return {"status": self.status, "root": self.root, "error": self.error,
                     "started_at": self.started_at, "finished_at": self.finished_at,
-                    "totals": dict(self.totals), "skipped": dict(self.skipped)}
+                    "totals": dict(self.totals), "skipped": dict(self.skipped),
+                    "unchanged": self.unchanged}
 
     def recent(self) -> list[dict]:
         with self._lock:
@@ -4315,6 +4385,7 @@ class ScanRunner:
             self.finished_at = ""
             self.totals = {"total": 0, "passed": 0, "failed": 0}
             self.skipped = {}
+            self.unchanged = 0
             self._recent = []
             self._thread = threading.Thread(
                 target=self._run, args=(str(root), Path(rules_path), telemetry_url),
@@ -4409,9 +4480,10 @@ class ScanRunner:
             totals = dict(self.totals)
         with self._lock:
             skipped = dict(self.skipped)
+            unchanged = self.unchanged
         self._emit({"type": "scan_end", "status": status, "error": error,
                     "exit_code": exit_code, "totals": totals, "skipped": skipped,
-                    "at": self.finished_at})
+                    "unchanged": unchanged, "at": self.finished_at})
 
 
 BOOTSTRAP_PAGE = """<!DOCTYPE html>

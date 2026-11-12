@@ -403,6 +403,16 @@ function setCounts(totals) {
   $("c-failed").textContent = totals.failed || 0;
 }
 
+let toastTimer = 0;
+function toast(text) {
+  const box = $("toast");
+  if (!box) return;
+  box.textContent = text;
+  box.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => box.classList.remove("show"), 7000);
+}
+
 function watchScan() {
   if (state.stream) return;
   const stream = new EventSource("/admin/api/scan/events");
@@ -434,6 +444,13 @@ function watchScan() {
       scanLine(event.status === "done"
         ? `done: ${event.totals.passed} passed, ${event.totals.failed} failed${skipped}`
         : `scan failed: ${event.error || "see the server log"}`, "muted");
+      if (event.unchanged) {
+        // The dashboard already has these verdicts: they were not added again.
+        const files = event.unchanged === 1 ? "1 file" : `${event.unchanged} files`;
+        const text = `${files} unchanged since the last audit: not added to the dashboard again`;
+        scanLine(text, "muted");
+        toast(text);
+      }
       stream.close();
       state.stream = null;
     }

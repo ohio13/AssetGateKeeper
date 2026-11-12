@@ -362,6 +362,38 @@ expect("... and saying the .jfif was skipped, with what to do",
        snapshot["skipped"].get("unsupported") == {".jfif": 1}
        and any(e.get("type") == "skipped" and "rename it to .jpg" in e.get("text", "")
                for e in server.scanner.recent()), json.dumps(snapshot.get("skipped")))
+# 12 Nov 2026: each Save & Run Audit added every unchanged file to the
+# dashboard again. The same folder twice: the second scan stores nothing new
+# and says so (the page shows it as a note in the bottom right).
+_rows_before = ahs.totals(server.db_path)["total"]
+status, body = anon.post("/admin/api/scan", csrf=csrf)
+deadline = time.time() + 120
+while time.time() < deadline:
+    snapshot = anon.state()["scan"]
+    if snapshot["status"] != "running":
+        break
+    time.sleep(0.4)
+_end = [e for e in server.scanner.recent() if e.get("type") == "scan_end"]
+expect("the same folder again: both files reported unchanged, no new dashboard rows",
+       snapshot["status"] == "done" and snapshot.get("unchanged") == 2
+       and _end and _end[-1].get("unchanged") == 2
+       and ahs.totals(server.db_path)["total"] == _rows_before,
+       (snapshot.get("unchanged"), ahs.totals(server.db_path)["total"], _rows_before))
+_Image.new("RGB", (128, 128), (200, 20, 20)).save(mixed / "T_Good_BaseColor.png")
+status, body = anon.post("/admin/api/scan", csrf=csrf)
+deadline = time.time() + 120
+while time.time() < deadline:
+    snapshot = anon.state()["scan"]
+    if snapshot["status"] != "running":
+        break
+    time.sleep(0.4)
+expect("... and a file exported again at another size is stored as new",
+       snapshot.get("unchanged") == 1
+       and ahs.totals(server.db_path)["total"] == _rows_before + 1,
+       (snapshot.get("unchanged"), ahs.totals(server.db_path)["total"], _rows_before))
+expect("the admin page shows the note (toast) at the end of a scan",
+       anon.get("/static/admin.js")[1].count(b"unchanged since the last audit") == 1
+       and b'id="toast"' in anon.get("/admin")[1])
 server.scan_root = _saved_root
 
 # 9 Nov 2026 audit, B1: with no project picked, the fallback folder was the

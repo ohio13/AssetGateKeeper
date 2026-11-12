@@ -95,3 +95,12 @@ a.ghost[hidden], button[hidden] { display: none; }
 label.keep { flex-direction: row; align-items: center; gap: 7px; font-size: 13px; color: var(--text); }
 label.keep input { width: 15px; height: 15px; min-width: 0; }
 label.keep[hidden] { display: none; }
+
+/* A short note in the bottom right, e.g. "3 files unchanged since the last
+   audit". It goes by itself; nothing waits on it. */
+.toast { position: fixed; right: 18px; bottom: 18px; z-index: 10; max-width: 360px;
+  background: var(--panel-2); border: 1px solid var(--line); border-left: 3px solid var(--warn);
+  border-radius: 8px; padding: 10px 14px; font-size: 13px; color: var(--text);
+  box-shadow: 0 6px 24px rgba(0,0,0,.45); opacity: 0; transform: translateY(8px);
+  transition: opacity .2s, transform .2s; pointer-events: none; }
+.toast.show { opacity: 1; transform: none; }
