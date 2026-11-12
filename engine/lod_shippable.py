@@ -116,7 +116,9 @@ def load_parts(path: Path, resources: Optional[Path] = None) -> list[Part]:
                 scene = load(handle, file_type=path.suffix.lower().lstrip("."),
                              resolver=resolver, process=False)
         else:
-            scene = load(str(path), process=False)
+            # The gate's loader: an .obj with "-1.#QNAN0" normals (a game rip) reads.
+            import asset_gatekeeper as agk
+            scene = agk.load_trimesh_scene(str(path), process=False)
         geometries = scene.dump(concatenate=False)
     except Exception as exc:      # trimesh raises many types for broken files
         raise ShippableLodError(f"could not read {path.name}: {exc}") from exc

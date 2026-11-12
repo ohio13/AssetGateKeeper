@@ -217,10 +217,23 @@ class TexturedModel:
     source: str = "texture"
 
 
-def _mtl_problem(path: Path) -> str:
-    """Why an .obj's textures cannot be read, or '' when they can: the .mtl it
-    names, or an image that .mtl names, is not where it says. Game rips often
-    come without them."""
+def _map_name(line: str) -> str:
+    """The image a ``map_Kd`` line names: everything after the keyword and its
+    options, so a name with spaces ("holster mini rtm.png") stays whole."""
+    rest = line.strip().split(None, 1)[1] if len(line.split()) > 1 else ""
+    words = rest.split()
+    while words and words[0].startswith("-"):      # -s 1 1 1, -bm 0.5, ...
+        option = words.pop(0)
+        count = {"-s": 3, "-o": 3, "-t": 3, "-mm": 2}.get(option, 1)
+        del words[:count]
+    return " ".join(words).replace("\\", "/")
+
+
+def _obj_textures(path: Path):
+    """(problem, textures found, textures missing) for an .obj's materials:
+    ``problem`` is why none can be baked ('' when at least one texture is
+    there); a missing one (a rip's mat5 named just ".png") bakes in the
+    material's flat colour instead."""
     libraries, has_uvs = [], False
     try:
         # Line by line, and only until the first UV: the review page asks this
@@ -234,26 +247,37 @@ def _mtl_problem(path: Path) -> str:
                     if libraries:
                         break
     except OSError as exc:
-        return f"cannot read {path.name}: {exc}"
+        return f"cannot read {path.name}: {exc}", [], []
     if not libraries:
-        return f"{path.name} names no .mtl (material file), so it has no textures"
+        return f"{path.name} names no .mtl (material file), so it has no textures", [], []
     if not has_uvs:
-        return f"{path.name} has no UVs (vt lines), so a texture cannot be placed on it"
-    maps = 0
+        return f"{path.name} has no UVs (vt lines), so a texture cannot be placed on it", [], []
+    found, missing = [], []
     for library in libraries:
         mtl = path.parent / library
         if not mtl.is_file():
             return (f"{path.name} names {library}, which is not beside it: put the .mtl "
-                    "and the textures it names next to the .obj")
+                    "and the textures it names next to the .obj"), [], []
         for line in mtl.read_text(encoding="utf-8", errors="replace").splitlines():
             parts = line.strip().split()
-            if parts and parts[0].lower() == "map_kd" and len(parts) > 1:
-                image = path.parent / parts[-1].replace("\\", "/")
-                if not image.is_file():
-                    return (f"{library} names the texture {parts[-1]}, which is not there: "
-                            "put it next to the .obj")
-                maps += 1
-    return "" if maps else f"{', '.join(libraries)} names no texture (map_Kd)"
+            if parts and parts[0].lower() == "map_kd":
+                name = _map_name(line)
+                image = path.parent / name
+                (found if name and image.is_file() else missing).append(name or "(no name)")
+    if found:
+        return "", sorted(set(found)), sorted(set(missing))
+    if missing:
+        return (f"{', '.join(libraries)} names textures that are not there "
+                f"({', '.join(sorted(set(missing))[:3])}): put them next to the .obj"), [], missing
+    return f"{', '.join(libraries)} names no texture (map_Kd)", [], []
+
+
+def _mtl_problem(path: Path) -> str:
+    """Why an .obj's textures cannot be baked at all, or ''. Game rips often
+    come without their .mtl or images."""
+    return _obj_textures(path)[0]
+
+
 
 
 def bake_source(path: Path) -> str:
@@ -286,6 +310,55 @@ def bake_source(path: Path) -> str:
     return ""
 
 
+def bake_materials(path: Path) -> list:
+    """[(material name, texture file or '')] of a textured .obj or .gltf/.glb,
+    in file order: what the review page lists for "leave out" (a rip's
+    materials are called mat1, mat2... - the texture says which is which)."""
+    found: list = []
+    suffix = path.suffix.lower()
+    try:
+        if suffix == ".obj":
+            libraries = []
+            with open(path, "r", encoding="utf-8", errors="replace") as handle:
+                for line in handle:
+                    if line.startswith("mtllib ") and len(line.split(None, 1)) > 1:
+                        libraries.append(line.split(None, 1)[1].strip())
+                    elif line.startswith(("v ", "vt ", "f ")) and libraries:
+                        break
+            for library in libraries:
+                mtl = path.parent / library
+                if not mtl.is_file():
+                    continue
+                for line in mtl.read_text(encoding="utf-8", errors="replace").splitlines():
+                    words = line.strip().split()
+                    if words and words[0] == "newmtl" and len(words) > 1:
+                        found.append([line.strip().split(None, 1)[1], ""])
+                    elif words and words[0].lower() == "map_kd" and found:
+                        found[-1][1] = _map_name(line)
+        elif suffix in (".gltf", ".glb"):
+            if suffix == ".glb":
+                with open(path, "rb") as handle:
+                    header = handle.read(20)
+                    document = json.loads(handle.read(int.from_bytes(header[12:16], "little")))
+            else:
+                document = json.loads(path.read_text(encoding="utf-8"))
+            images = document.get("images") or []
+            textures = document.get("textures") or []
+            for index, material in enumerate(document.get("materials") or []):
+                name = material.get("name") or f"material {index}"
+                texture = ((material.get("pbrMetallicRoughness") or {})
+                           .get("baseColorTexture") or {}).get("index")
+                image = ""
+                if isinstance(texture, int) and texture < len(textures):
+                    source = textures[texture].get("source")
+                    if isinstance(source, int) and source < len(images):
+                        image = images[source].get("uri") or images[source].get("name") or ""
+                found.append([name, image])
+    except (OSError, ValueError):
+        return []
+    return [tuple(item) for item in found]
+
+
 def bake_problem(path: Path) -> str:
     """Why ``path`` cannot be baked, in words, or '' when it can."""
     if path.suffix.lower() not in TEXTURED_SUFFIXES:
@@ -300,22 +373,33 @@ def bake_problem(path: Path) -> str:
 
 
 def _image_array(image):
+    """RGBA, 0..1: the alpha says where a decal or a hair card is see-through."""
     import numpy as np
     if image is None:
         return None
-    return np.asarray(image.convert("RGB"), np.float32) / 255.0
+    return np.asarray(image.convert("RGBA"), np.float32) / 255.0
 
 
-def read_textured(path: Path) -> TexturedModel:
+#: A material whose texture is see-through (alpha under a half) on at least
+#: this share of its texels is a decal or cut-out (hair cards, markings): the
+#: surface under it shows through where it is see-through.
+SEE_THROUGH_SHARE = 0.01
+
+
+def read_textured(path: Path, skip_materials=()) -> TexturedModel:
     """Every mesh of a textured .obj (with its .mtl and images) or .gltf/.glb,
-    placed by its node, with its UVs and its material's base colour texture."""
+    placed by its node, with its UVs and its material's base colour texture.
+    Meshes whose material is named in ``skip_materials`` are left out: a game
+    rip's outline shell (a slightly larger copy of the body, drawn inside out
+    for a cel-shaded edge), a helmet, a weapon."""
     import numpy as np
     import trimesh
     problem = bake_problem(path)
     if problem:
         raise PolypaintError(problem)
     try:
-        scene = trimesh.load(path, force="scene", process=False)
+        # The gate's loader: an .obj with "-1.#QNAN0" normals (a game rip) reads.
+        scene = agk.load_trimesh_scene(str(path), process=False)
     except Exception as exc:                     # noqa: BLE001 - any reader failure, said plainly
         raise PolypaintError(f"cannot read {path.name}: {exc}") from exc
     vertices, faces, uvs, material = [], [], [], []
@@ -329,6 +413,8 @@ def read_textured(path: Path) -> TexturedModel:
         visual = mesh.visual
         uv = getattr(visual, "uv", None)
         found = getattr(visual, "material", None)
+        if skip_materials and getattr(found, "name", None) in skip_materials:
+            continue
         if uv is None or found is None or len(uv) != len(mesh.vertices):
             uv = np.zeros((len(mesh.vertices), 2))
         image = getattr(found, "baseColorTexture", None)
@@ -369,17 +455,18 @@ def read_textured(path: Path) -> TexturedModel:
     return model
 
 
-def _sample_materials(images, tints, material, uv):
+def _sample_materials(images, tints, material, uv, with_alpha: bool = False):
     """Base colour at each ``uv`` (n, 2) of each ``material`` (n,): bilinear,
     repeating past 0-1 (a tiling texture), v going up; a material with no
-    image is its flat colour."""
+    image is its flat colour. With ``with_alpha``, (colour, alpha)."""
     import numpy as np
-    out = np.empty((len(uv), 3), np.float32)
+    out = np.empty((len(uv), 4), np.float32)
+    out[:, 3] = 1.0
     for index in np.unique(material):
         rows = np.nonzero(material == index)[0]
         image = images[int(index)]
         if image is None:
-            out[rows] = tints[int(index)]
+            out[rows, :3] = tints[int(index)]
             continue
         height, width = image.shape[:2]
         x = (uv[rows, 0] % 1.0) * width - 0.5
@@ -390,8 +477,11 @@ def _sample_materials(images, tints, material, uv):
         x0, y0 = x0 % width, y0 % height
         top = image[y0, x0] * (1 - fx) + image[y0, x1] * fx
         bottom = image[y1, x0] * (1 - fx) + image[y1, x1] * fx
-        out[rows] = (top * (1 - fy) + bottom * fy) * tints[int(index)]
-    return out.clip(0.0, 1.0)
+        texel = top * (1 - fy) + bottom * fy
+        out[rows, :3] = texel[:, :3] * tints[int(index)]
+        out[rows, 3] = texel[:, 3] if texel.shape[1] == 4 else 1.0
+    out = out.clip(0.0, 1.0)
+    return (out[:, :3], out[:, 3]) if with_alpha else out[:, :3]
 
 
 def write_preview_glb(obj: ObjColours, target: Path) -> None:
@@ -825,17 +915,44 @@ class TexturedSculpt(Sculpt):
     """A textured model as the high surface: its colour at a point is its own
     texture there (through its UVs), not a blend of vertex colours."""
 
-    def __init__(self, model: "TexturedModel", spatial):
+    def __init__(self, model: "TexturedModel", spatial, see_through: bool = True):
+        import numpy as np
         super().__init__(model.vertices, model.faces, model.colours, spatial)
         self.uvs = model.uvs
         self.material = model.material
         self.images = model.images
         self.tints = model.tints
+        # Decals and hair cards: where they are see-through, the opaque surface
+        # under them shows. A rip's suit markings were a sheet over the body,
+        # three quarters see-through, and its clear parts baked as colour
+        # (12 Nov 2026).
+        self.under = None
+        clear = [image is not None and image.shape[2] == 4
+                 and float((image[..., 3] < 0.5).mean()) >= SEE_THROUGH_SHARE
+                 for image in self.images]
+        self.clear = np.asarray(clear, bool)
+        if see_through and self.clear.any() and not self.clear.all():
+            opaque = ~self.clear[model.material]
+            used, local = np.unique(model.faces[opaque], return_inverse=True)
+            self.under = TexturedSculpt(
+                TexturedModel(model.vertices[used], local.reshape(-1, 3), model.colours[used],
+                              model.uvs[used], model.material[opaque], model.images, model.tints),
+                spatial, see_through=False)
 
     def colour(self, face, bary):
         import numpy as np
         uv = np.einsum("nk,nkc->nc", bary.astype(np.float64), self.uvs[self.faces[face]])
-        return _sample_materials(self.images, self.tints, self.material[face], uv)
+        colour, alpha = _sample_materials(self.images, self.tints, self.material[face], uv,
+                                          with_alpha=True)
+        if self.under is None:
+            return colour
+        blend = np.nonzero(alpha < 0.999)[0]
+        if len(blend):
+            below_face, below_bary, _ = self.under.closest(self.point(face[blend], bary[blend]))
+            below = self.under.colour(below_face, below_bary)
+            a = alpha[blend, None]
+            colour[blend] = colour[blend] * a + below * (1.0 - a)
+        return colour
 
 
 #: Bounding-box sizes (in pixels) triangles are grouped by when drawn; a larger
@@ -1606,11 +1723,88 @@ def _reduce_colours(image, colours: int, inside=None):
     return image.convert("RGB").quantize(palette=base, dither=Image.Dither.NONE)
 
 
+#: With a head budget, the head is everything above the neck: below the face's
+#: centre by this many times the reach of its detail (eyes, brows, lips) - on
+#: the test sculpt, through the neck under the chin, clear of the shoulders.
+NECK_REACH = 2.0
+#: The reduction to the head budget starts from this many times the budget,
+#: reduced evenly: few enough triangles that the cut round the neck crosses a
+#: few dozen vertices (32 on the test sculpt), each kept on both sides.
+HEAD_SPLIT_FACTOR = 4
+
+
+def _reduce(simplify, positions, faces, target: int, preserve_border: bool = False):
+    import numpy as np
+    if len(faces) <= target:
+        return np.asarray(positions, np.float64), np.asarray(faces, np.int64)
+    low_positions, low_faces = simplify.simplify(
+        np.asarray(positions, np.float32), np.asarray(faces, np.int32), target_count=int(target),
+        preserve_border=preserve_border)
+    return np.asarray(low_positions, np.float64), np.asarray(low_faces, np.int64)
+
+
+def _open_vertices(faces) -> int:
+    """How many vertices lie on an open edge (an edge of one triangle only)."""
+    import numpy as np
+    edges = np.sort(np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]), axis=1)
+    unique, counts = np.unique(edges, axis=0, return_counts=True)
+    return int(len(np.unique(unique[counts == 1])))
+
+
+def _reduce_with_head(simplify, positions, faces, triangles: int, neck_height: float,
+                      share: float):
+    """``faces`` reduced to ``triangles`` with ``share`` of them for the head
+    (everything above ``neck_height`` on the up axis, Y).
+
+    The reducer keeps what changes the shape least overall, and at N64 sizes
+    that starves a detailed head: the test sculpt's head kept about a fifth of
+    1,200 triangles. Here the whole model is first reduced evenly to
+    HEAD_SPLIT_FACTOR times the budget, cut at the neck, and the head and the
+    body are reduced to their own budgets with the cut's vertices kept on both
+    sides, so the two halves still meet exactly; then they are joined.
+    Returns (positions, faces, note): a note says why the head budget was not
+    used (then the reduction is even)."""
+    import numpy as np
+    middle, middle_faces = _reduce(simplify, positions, faces, triangles * HEAD_SPLIT_FACTOR)
+    above = middle[middle_faces].mean(axis=1)[:, 1] > neck_height
+    if above.all() or not above.any():
+        return (*_reduce(simplify, middle, middle_faces, triangles),
+                "no head budget: nothing above the neck to give it to")
+    pieces = []
+    for mask in (above, ~above):
+        used, local = np.unique(middle_faces[mask], return_inverse=True)
+        pieces.append((middle[used], local.reshape(-1, 3)))
+    # Every open edge of a piece is kept (the cut's must be), and a game rip
+    # has many more - decals, holsters, an outline shell. With too few
+    # triangles for the rest, the reducer collapsed a rip's legs to nothing
+    # (12 Nov 2026): give each piece at least two triangles per open-edge
+    # vertex, the head giving way first.
+    floors = [2 * _open_vertices(piece_faces) for _, piece_faces in pieces]
+    head_target = min(int(round(triangles * share)), len(pieces[0][1]))
+    head_target = max(min(head_target, triangles - floors[1]), min(floors[0], head_target))
+    parts = []
+    for (piece, piece_faces), target in zip(pieces, (head_target, triangles - head_target)):
+        reduced = _reduce(simplify, piece, piece_faces, max(target, 1), preserve_border=True)
+        # A piece that lost its shape (its size shrank) means the budget could
+        # not hold it: reduce the whole model evenly instead.
+        if np.any(np.ptp(reduced[0], axis=0) < 0.9 * np.ptp(piece, axis=0)):
+            return (*_reduce(simplify, middle, middle_faces, triangles),
+                    "no head budget: the body could not keep its shape with what was left "
+                    "(it has many open edges - an outline shell or decals? leave them out)")
+        parts.append(reduced)
+    joined = np.concatenate([parts[0][0], parts[1][0]])
+    joined_faces = np.concatenate([parts[0][1], parts[1][1] + len(parts[0][0])])
+    joined, joined_faces = _weld(joined, joined_faces)    # the cut, closed again
+    # Kept cut vertices can leave a few over: a budget is a ceiling.
+    return (*_reduce(simplify, joined, joined_faces, triangles), "")
+
+
 def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_TRIANGLES,
          texture: int = DEFAULT_TEXTURE,
          progress: Optional[Callable[[str, int, int], None]] = None,
          normal_map: bool = True, colours: int = 0, preset: str = "",
-         detail_boost: float = DETAIL_BOOST, face_texture: bool = False) -> dict:
+         detail_boost: float = DETAIL_BOOST, face_texture: bool = False,
+         head_share: float = 0.0, skip_materials=()) -> dict:
     """Reduce, unwrap and bake ``source`` into a game asset. Returns what it wrote.
 
     ``normal_map`` adds T_<name>_Normal.png (and puts it in the .glb);
@@ -1620,7 +1814,11 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     other fine colour detail more of the texture. ``face_texture`` gives the
     face a texture of its own, the same size, as a second material
     (T_<name>_Face_BaseColor.png): the region around the densest colour detail,
-    about a tenth of the surface. A sculpt with no such detail keeps one."""
+    about a tenth of the surface. A sculpt with no such detail keeps one.
+    ``head_share`` (0-0.9; 0 is off) gives the head - above the neck, found
+    from the face - that share of the triangles, and the body the rest
+    (_reduce_with_head): the higher it is, the more of the head's shape is
+    kept, at the body's expense."""
     import numpy as np
     from PIL import Image
     if texture < 16:
@@ -1641,13 +1839,29 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     started = time.time()
     step("reading the sculpt", 0)
     textured = bake_source(Path(source)) == "texture"
-    obj = read_textured(Path(source)) if textured else read_obj(Path(source))
+    obj = (read_textured(Path(source), tuple(skip_materials)) if textured
+           else read_obj(Path(source)))
     step("reducing the mesh", 1)
     # Reduce a welded copy: vertices that sit on top of each other (a UV seam,
     # a pole fan, pieces exported separately) are open edges to the reducer,
     # which keeps them, and a 1,200-triangle bake came out at 4,628.
     weld_positions, weld_faces = _weld(obj.vertices, obj.faces)
-    if len(weld_faces) > triangles:
+    neck = None
+    head_note = ""
+    if head_share:
+        if not 0.0 < head_share <= 0.9:
+            raise PolypaintError(f"the head's share of the triangles must be 0-0.9 (got {head_share})")
+        found = _face_centre(obj.vertices, obj.faces, obj.colours, with_radius=True)
+        if found is None:
+            head_note = "no head budget: the model has too little colour detail to find a face"
+        else:
+            neck = float(found[0][1] - NECK_REACH * found[1])
+    if neck is not None and len(weld_faces) > triangles:
+        low_positions, low_faces, head_note = _reduce_with_head(
+            simplify, weld_positions, weld_faces, triangles, neck, head_share)
+        if head_note:
+            neck = None
+    elif len(weld_faces) > triangles:
         low_positions, low_faces = simplify.simplify(
             weld_positions.astype(np.float32), weld_faces.astype(np.int32),
             target_reduction=1.0 - triangles / len(weld_faces))
@@ -1816,6 +2030,12 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
                  f"{face_share:.0%} of the surface)")
     elif face_note:
         note += f"; {face_note}"
+    kept_share = 0.0
+    if neck is not None:
+        kept_share = float((positions[all_faces].mean(axis=1)[:, 1] > neck).mean())
+        note += f"; the head (above the neck) has {kept_share:.0%} of the triangles"
+    elif head_note:
+        note += f"; {head_note}"
     inside = baked[0][2]
     return {
         "source": str(source), "colour": obj.source,
@@ -1828,6 +2048,7 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
         "texture_size": texture, "colours": colours, "preset": preset,
         "samples_per_texel": per_side * per_side, "coverage": round(float(inside.mean()), 3),
         "detail_boost": round(boost, 2),
+        "head_share": round(kept_share, 3),
         "seconds": round(time.time() - started, 1), "note": note,
     }
 

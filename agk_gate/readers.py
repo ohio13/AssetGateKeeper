@@ -84,9 +84,24 @@ def obj_colour_source(path: Path) -> str:
         return ""
 
 
+#: How old Microsoft compilers printed infinities and NaNs ("-1.#QNAN0",
+#: "1.#INF00"): game rips have them in their normals, and trimesh refused the
+#: whole .obj ("could not read mesh", 12 Nov 2026). Read as 0: normals do
+#: not decide any check, and the bake makes its own.
+MSVC_NAN = re.compile(rb"-?\d\.#(?:QNAN|SNAN|IND|INF)\d*")
+
+
 def load_trimesh_scene(source, **kwargs) -> object:
     """trimesh's scene loader, without the call trimesh marks as a compatibility
-    wrapper: ``trimesh.load(force='scene')`` (9 Nov 2026 audit, B7)."""
+    wrapper: ``trimesh.load(force='scene')`` (9 Nov 2026 audit, B7). An .obj path
+    with MSVC-style NaNs in it is read with them as 0 (MSVC_NAN), its .mtl and
+    textures still found beside it."""
+    if isinstance(source, (str, Path)) and str(source).lower().endswith(".obj"):
+        data = Path(source).read_bytes()
+        if MSVC_NAN.search(data):
+            import io
+            kwargs.setdefault("resolver", trimesh.resolvers.FilePathResolver(str(source)))
+            source, kwargs["file_type"] = io.BytesIO(MSVC_NAN.sub(b"0", data)), "obj"
     loader = getattr(trimesh, "load_scene", None)
     if loader is not None:
         return loader(source, **kwargs)

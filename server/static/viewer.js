@@ -1069,6 +1069,10 @@ async function bakePolypaint() {
                              normal_map: $("bake-normal").checked,
                              colours: Number($("bake-colours").value),
                              face_texture: $("bake-face").checked,
+                             head_share: Number($("bake-head").value),
+                             skip_materials: Array.from(
+                               document.querySelectorAll("#bake-skip input:checked"),
+                               (box) => box.value),
                              preset: $("bake-preset").value }),
     });
     let job = (await response.json()).job;
@@ -1086,7 +1090,8 @@ async function bakePolypaint() {
       + `${fmt(result.source_triangles || 0)}, ${result.texture_size}px `
       + `${result.normal_map ? "BaseColor + Normal" : "BaseColor"}`
       + `${result.colours ? ` in ${result.colours} colours` : ""}`
-      + `${result.face_texture ? " + a face texture" : ""}, `
+      + `${result.face_texture ? " + a face texture" : ""}`
+      + `${result.head_share ? `, head ${Math.round(result.head_share * 100)}% of tris` : ""}, `
       + `${result.seconds} s - ${result.note || ""}`);
     $("bake-progress").textContent = "";
   } catch (error) {
@@ -1101,6 +1106,27 @@ function setLodTools(asset) {
   // textured models too, their materials' textures into one).
   const bake = asset && asset.preview ? (asset.preview.bake || (asset.preview.polypaint ? "polypaint" : "")) : "";
   $("bake-tools").hidden = !bake;
+  // A textured model's materials, each with a box to leave it out: a rip
+  // can carry an outline shell over the body, a helmet or a weapon.
+  const materials = (asset && asset.preview && asset.preview.materials) || [];
+  $("bake-skip-row").hidden = !(bake === "texture" && materials.length > 1);
+  const skipBox = $("bake-skip");
+  // A refresh of the same asset keeps what was ticked.
+  const kept = skipBox.dataset.asset === String(asset && asset.id)
+    ? new Set(Array.from(skipBox.querySelectorAll("input:checked"), (box) => box.value))
+    : new Set();
+  skipBox.dataset.asset = String(asset && asset.id);
+  skipBox.textContent = "";
+  for (const material of materials) {
+    const label = document.createElement("label");
+    label.className = "check";
+    const box = document.createElement("input");
+    box.type = "checkbox";
+    box.value = material.name;
+    box.checked = kept.has(material.name);
+    label.append(box, ` ${material.name}${material.texture ? ` (${material.texture})` : ""}`);
+    skipBox.append(label);
+  }
   if (bake) {
     const textured = bake === "texture";
     $("bake-title").textContent = textured ? "Bake" : "Polypaint";

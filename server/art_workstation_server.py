@@ -768,6 +768,10 @@ def preview_of(data_dir: Path, asset: dict) -> dict:
         if stored is not None and stored.is_file():
             result["bake"] = ("polypaint" if result.get("polypaint")
                               else polypaint.bake_source(stored))
+            if result["bake"] == "texture":
+                # Named with their textures, for "leave out" (a rip's are mat1, mat2...).
+                result["materials"] = [{"name": name, "texture": texture}
+                                       for name, texture in polypaint.bake_materials(stored)]
     return result
 
 
@@ -790,7 +794,8 @@ def _preview_kind(folder: Path | None, asset: dict, suffix: str) -> dict:
 def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
                          triangles: int = 0, texture: int = 0, progress=None,
                          normal_map: bool | None = None, colours: int | None = None,
-                         preset: str = "", face_texture: bool | None = None) -> dict:
+                         preset: str = "", face_texture: bool | None = None,
+                         head_share: float = 0.0, skip_materials: tuple = ()) -> dict:
     """Make a game asset from an .obj with Polypaint: a new library asset holding
     a reduced .glb with UVs, the colours baked into its BaseColor texture and
     (unless switched off, or with the n64 preset) a normal map."""
@@ -813,6 +818,7 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
                                     normal_map=settings["normal_map"],
                                     colours=settings["colours"], preset=settings["preset"],
                                     face_texture=settings["face_texture"],
+                                    head_share=head_share, skip_materials=skip_materials,
                                     progress=progress)
         except polypaint.PolypaintError as exc:
             raise WorkstationError(str(exc), 400) from exc
@@ -829,7 +835,8 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
             "texture_size": result["texture_size"], "seconds": result["seconds"],
             "normal_map": bool(result["normal"]), "colours": result["colours"],
             "preset": result["preset"], "face_texture": bool(result.get("face_texture")),
-            "materials": result.get("materials", 1), "note": result["note"]}
+            "materials": result.get("materials", 1), "note": result["note"],
+            "head_share": result.get("head_share", 0.0)}
 
 
 def asset_files(data_dir: Path, asset: dict) -> list[str]:
@@ -3397,11 +3404,21 @@ class Handler(BaseHTTPRequestHandler):
                 if payload is None:
                     return
                 unknown = sorted(set(payload) - {"triangles", "texture", "normal_map",
-                                                 "colours", "preset", "face_texture"})
+                                                 "colours", "preset", "face_texture",
+                                                 "head_share", "skip_materials"})
                 if unknown:
                     raise WorkstationError(
                         f"unknown field(s) {', '.join(unknown)}; expected triangles, texture, "
-                        "normal_map, colours, face_texture and/or preset", 400)
+                        "normal_map, colours, face_texture, head_share, skip_materials "
+                        "and/or preset", 400)
+                head_share = payload.get("head_share", 0)
+                if (not isinstance(head_share, (int, float)) or isinstance(head_share, bool)
+                        or not 0 <= head_share <= 0.9):
+                    raise WorkstationError("head_share must be a number from 0 (off) to 0.9", 400)
+                skip_materials = payload.get("skip_materials") or []
+                if not isinstance(skip_materials, list) or not all(
+                        isinstance(name, str) for name in skip_materials):
+                    raise WorkstationError("skip_materials must be a list of material names", 400)
                 triangles, texture = payload.get("triangles", 0), payload.get("texture", 0)
                 for value, what in ((triangles, "triangles"), (texture, "texture")):
                     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
@@ -3436,12 +3453,13 @@ class Handler(BaseHTTPRequestHandler):
 
                 def bake_work(progress, _asset=asset_id, _tris=triangles, _tex=texture,
                               _normal=normal_map, _colours=colours, _preset=preset,
-                              _face=face_texture):
+                              _face=face_texture, _head=float(head_share),
+                              _skip=tuple(skip_materials)):
                     result = bake_polypaint_asset(
                         db_path, data_dir, _asset, _tris, _tex,
                         progress=lambda name, i, n: progress(name, i, n),
                         normal_map=_normal, colours=_colours, preset=_preset,
-                        face_texture=_face)
+                        face_texture=_face, head_share=_head, skip_materials=_skip)
                     publish("asset", result["asset"]["id"])
                     return result
                 job = server.jobs.submit(asset_id, bake_work, kind="bake")
