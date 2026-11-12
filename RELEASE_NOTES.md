@@ -1,5 +1,14 @@
 # Unreleased (on `main`)
 
+* **Save & Run Audit no longer re-adds unchanged files (12 Nov).** Every
+  audit used to add each file to the dashboard again with the same verdict,
+  so three audits showed three identical rows per model. A verdict that
+  matches the newest one stored for the same file from the same machine
+  (same size, same result, same problems) is now not stored again; a file
+  that changed in any of those is. At the end of the audit, a note in the
+  bottom right of the Rules page says how many files were unchanged. A
+  healed file is always recorded.
+
 * **Generated LODs are named after their model (12 Nov).** A LOD made by the
   review page or `engine/lod_manager.py` / `lod_shippable.py` is now
   `SM_Rock_LOD2.obj`, not `LOD2_SM_Rock.obj`: the old name failed the same
