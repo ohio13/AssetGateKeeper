@@ -21,8 +21,10 @@ jobs:
         python: ["3.11", "3.12"]
         # The README promises 3.9+; test the oldest and newest, and macOS once
         # (9 Nov 2026 audit, B5).
+        # 3.9 on Ubuntu 24.04: ubuntu-latest became 26.04 on 12 Nov 2026, and
+        # setup-python has no 3.9 for it (3.9 went end-of-life in Oct 2025).
         include:
-          - { os: ubuntu-latest, python: "3.9" }
+          - { os: ubuntu-24.04, python: "3.9" }
           - { os: ubuntu-latest, python: "3.10" }
           - { os: ubuntu-latest, python: "3.13" }
           - { os: macos-latest, python: "3.12" }
@@ -212,7 +214,7 @@ jobs:
         include:
           - { os: windows-latest, python: "3.12" }
           - { os: ubuntu-latest, python: "3.12" }
-          - { os: ubuntu-latest, python: "3.9" }
+          - { os: ubuntu-24.04, python: "3.9" }        # see the tests job
     steps:
       - uses: actions/checkout@v4
         with:
