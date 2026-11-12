@@ -1,5 +1,14 @@
 # Unreleased (on `main`)
 
+* **N64 bake: a face you can read (12 Nov).** The face texture is now the
+  face seen from the front, hairline to chin, one upright island, as N64
+  faces were drawn: the eyes, brows and lips fill the 64 px texture instead
+  of a few texels among hair and collar (a test character's eyes went from
+  two or three texels wide to about twelve). Triangles that face away or
+  sit behind hair stay on the main texture. And the 16-colour reduction
+  keeps 6 colours for small details a median cut would merge away - the
+  iris colour, the lips.
+
 * **Save & Run Audit no longer re-adds unchanged files (12 Nov).** Every
   audit used to add each file to the dashboard again with the same verdict,
   so three audits showed three identical rows per model. A verdict that

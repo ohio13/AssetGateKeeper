@@ -566,6 +566,34 @@ try:
            _npp.allclose(_gentle_normals[0][0], _gentle_normals[1][0])
            and _npp.allclose(_gentle_normals[0][1], _gentle_normals[1][2]),
            _gentle_normals.round(2).tolist())
+    # A palette for a 64 px face: a smooth skin gradient, two eyes with teal
+    # irises (18 texels), a mouth. A median cut alone spends every colour on the
+    # gradient and turns the irises dark (the test sculpt, 12 Nov 2026).
+    from PIL import Image as _PImage
+    _y, _x = _npp.mgrid[0:64, 0:64]
+    _tex = _npp.stack([200 + _x * 0.8, 150 + _y * 0.9, 120 + (_x + _y) * 0.4],
+                      axis=2).clip(0, 255).astype(_npp.uint8)
+    for _left in (10, 40):
+        _tex[20:24, _left:_left + 6] = (40, 30, 30)
+        _tex[21:24, _left + 2:_left + 5] = (30, 130, 140)
+    _tex[44:47, 24:40] = (190, 90, 100)
+
+    def _teal_kept(image):
+        rgb = _npp.asarray(image.convert("RGB")).reshape(-1, 3).astype(int)
+        return int((_npp.abs(rgb - (30, 130, 140)).max(axis=1) < 30).sum())
+
+    _small = polypaint._reduce_colours(_PImage.fromarray(_tex), 16)
+    expect("a 16-colour palette keeps the teal irises teal (all 18 texels)",
+           _teal_kept(_small) == 18, _teal_kept(_small))
+    expect("... and has exactly 16 entries (a 4-bit texture)",
+           len(_small.getpalette()) // 3 == 16, len(_small.getpalette()) // 3)
+    _share = polypaint.DETAIL_COLOUR_SHARE
+    polypaint.DETAIL_COLOUR_SHARE = 0
+    try:
+        _plain = polypaint._reduce_colours(_PImage.fromarray(_tex), 16)
+    finally:
+        polypaint.DETAIL_COLOUR_SHARE = _share
+    expect("... where a median cut alone loses them", _teal_kept(_plain) == 0, _teal_kept(_plain))
     _p2, _uv2, _n2, _f2 = polypaint._split_by_normal(_ridge, _npp.zeros((4, 2)), _ridge_faces, _normals)
     expect("a vertex on a hard edge gets a copy per normal",
            len(_p2) == 6 and _npp.allclose(_n2[_f2[0]], _normals[0]), len(_p2))
@@ -957,6 +985,18 @@ try:
                done.stdout[-400:] + done.stderr[-300:])
         expect("the eyes get at least 4x the texels with a face texture",
                dark_face >= 4 * max(dark_one, 1), f"{dark_face} vs {dark_one}")
+        # 12 Nov 2026: the face texture is the face seen from the front, upright,
+        # one island - xatlas cut the test sculpt's into dozens and its eyes got 2-3 texels.
+        _eye_rows = _np.nonzero(face_pixels.max(axis=2) < 70)[0]
+        _lip_rows = _np.nonzero((face_pixels[..., 0] > 150) & (face_pixels[..., 1] < 90))[0]
+        expect("the face texture is the face seen from the front: eyes above the mouth",
+               len(_eye_rows) and len(_lip_rows) and _eye_rows.mean() < _lip_rows.mean(),
+               (_eye_rows.mean() if len(_eye_rows) else None,
+                _lip_rows.mean() if len(_lip_rows) else None))
+        _eye_cols = _np.nonzero(face_pixels.max(axis=2) < 70)[1]
+        expect("... and the two eyes span a good part of its width (not a few texels)",
+               len(_eye_cols) and _eye_cols.max() - _eye_cols.min() >= 64 * 0.3,
+               (_eye_cols.min(), _eye_cols.max()) if len(_eye_cols) else None)
         expect("the reducer meets the budget on a sculpt with repeated points (was 4,628 of 1,200)",
                len(_trimesh.load(hero / "SM_Hero_LP.glb", force="mesh").faces) <= 1200)
         (hero / "rules.toml").write_text("[mesh]\nmax_triangles = 1200\nmax_material_slots = 1\n"
