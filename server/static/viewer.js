@@ -1097,7 +1097,19 @@ async function bakePolypaint() {
 }
 
 function setLodTools(asset) {
-  $("bake-tools").hidden = !(asset && asset.preview && asset.preview.polypaint);
+  // Polypaint, vertex colours or textures: any of them can be baked (12 Nov 2026:
+  // textured models too, their materials' textures into one).
+  const bake = asset && asset.preview ? (asset.preview.bake || (asset.preview.polypaint ? "polypaint" : "")) : "";
+  $("bake-tools").hidden = !bake;
+  if (bake) {
+    const textured = bake === "texture";
+    $("bake-title").textContent = textured ? "Bake" : "Polypaint";
+    $("bake-about").textContent = textured
+      ? "Bake this model into a game asset: reduced to the triangles below, its textures "
+        + "(every material) baked into one BaseColor texture, added to the library."
+      : "This sculpt's colour is stored per vertex. Bake it into a game asset: a reduced .glb "
+        + "with UVs, a BaseColor texture and a normal map, added to the library.";
+  }
   const measured = !!asset && asset.kind === "mesh";
   $("lod-generate").disabled = !(measured && previewable(asset)) || state.lodJob !== null;
   $("lod-upload").disabled = !measured;

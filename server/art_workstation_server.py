@@ -760,6 +760,14 @@ def preview_of(data_dir: Path, asset: dict) -> dict:
     result = _preview_kind(folder, asset, suffix)
     result["light"] = light if result["type"] == "glb" or (
         light and suffix in (".glb", ".gltf", ".obj")) else None
+    # What a bake would take colour from ('polypaint', 'vertex colours',
+    # 'texture' or ''): the viewer offers the bake for any of them.
+    result["bake"] = ""
+    if asset.get("kind") == "mesh" and suffix in polypaint.TEXTURED_SUFFIXES:
+        stored = resolve_inside(Path(data_dir), asset["file_path"])
+        if stored is not None and stored.is_file():
+            result["bake"] = ("polypaint" if result.get("polypaint")
+                              else polypaint.bake_source(stored))
     return result
 
 
@@ -788,12 +796,11 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
     (unless switched off, or with the n64 preset) a normal map."""
     asset = get_asset(db_path, asset_id)
     stored = resolve_inside(Path(data_dir), asset["file_path"])
-    if stored is None or not stored.is_file() or stored.suffix.lower() != ".obj":
-        raise WorkstationError("only an .obj with ZBrush Polypaint or vertex colours can be baked",
-                               400)
-    if not agk.obj_colour_source(stored):
-        raise WorkstationError(f"{asset['filename']} has no Polypaint or vertex colours to bake",
-                               400)
+    if stored is None or not stored.is_file():
+        raise WorkstationError("the stored file is missing", 410)
+    problem = polypaint.bake_problem(stored)
+    if problem:
+        raise WorkstationError(problem, 400)
     try:
         settings = polypaint.resolve_settings(preset, triangles, texture, normal_map, colours,
                                               face_texture=face_texture)
@@ -813,9 +820,10 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
         payload = made.read_bytes()
     # The library name follows the source: SM_Hero_HP_03.obj -> SM_Hero_LP_03.glb.
     # The textures travel inside it.
+    made_by = "texture bake" if result.get("colour") == "texture" else "polypaint bake"
     created = create_asset(db_path, data_dir, made.name, payload,
-                           uploader="polypaint bake", new_asset=True,
-                           provenance={"source": "polypaint bake"})
+                           uploader=made_by, new_asset=True,
+                           provenance={"source": made_by})
     return {"asset": created, "triangles": result["triangles"],
             "source_triangles": result["source_triangles"],
             "texture_size": result["texture_size"], "seconds": result["seconds"],
@@ -3419,11 +3427,10 @@ class Handler(BaseHTTPRequestHandler):
                 asset_id = int(match.group(1))
                 bakeable = get_asset(server.db_path, asset_id)      # 404 before queueing
                 stored = resolve_inside(Path(server.data_dir), bakeable["file_path"])
-                if stored is None or stored.suffix.lower() != ".obj" \
-                        or not agk.obj_colour_source(stored):
-                    raise WorkstationError(
-                        f"{bakeable['filename']} has no ZBrush Polypaint or vertex colours to "
-                        "bake (only an .obj that carries them can be baked)", 400)
+                problem = (polypaint.bake_problem(stored) if stored is not None
+                           else "the stored file is missing")
+                if problem:
+                    raise WorkstationError(problem, 400)
                 db_path, data_dir = server.db_path, Path(server.data_dir)
                 publish = self._publish
 

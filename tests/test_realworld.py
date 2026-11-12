@@ -969,6 +969,91 @@ try:
         _faults = shading_faults(blade / "SM_Blade_LP.glb")
         expect("a thin blade reduced hard: no triangle shaded from behind (was 16 of 148)",
                _faults == (0, 0), f"{_faults[0]} shaded from behind, {_faults[1]} stacked")
+
+        # 12 Nov 2026: models that carry colour in textures (game rips, a
+        # textured .obj or .glb) bake too - every material's textures into one.
+        def textured_globe(folder, rings=24, segments=48):
+            """SM_Globe.obj: a sphere, its top half one material (a red texture),
+            its bottom half another (blue), each .mtl entry with Kd 0.4 as many
+            exporters write it beside a texture."""
+            import math
+            folder.mkdir(parents=True, exist_ok=True)
+            lines = ["mtllib SM_Globe.mtl"]
+            for i in range(rings + 1):
+                for j in range(segments + 1):          # a UV seam: one more column
+                    theta, phi = math.pi * i / rings, 2 * math.pi * j / segments
+                    lines.append(f"v {math.sin(theta) * math.cos(phi):.5f} {math.cos(theta):.5f} "
+                                 f"{math.sin(theta) * math.sin(phi):.5f}")
+                    lines.append(f"vt {j / segments:.5f} {1 - i / rings:.5f}")
+            for half, name in ((range(rings // 2), "Top"), (range(rings // 2, rings), "Bottom")):
+                lines.append(f"usemtl {name}")
+                for i in half:
+                    for j in range(segments):
+                        a = i * (segments + 1) + j + 1
+                        b, c, d = a + 1, a + segments + 1, a + segments + 2
+                        lines += [f"f {a}/{a} {c}/{c} {b}/{b}", f"f {b}/{b} {c}/{c} {d}/{d}"]
+            (folder / "SM_Globe.obj").write_text("\n".join(lines) + "\n", encoding="utf-8")
+            (folder / "SM_Globe.mtl").write_text(
+                "newmtl Top\nKd 0.4 0.4 0.4\nmap_Kd T_Top.png\n"
+                "newmtl Bottom\nKd 0.4 0.4 0.4\nmap_Kd T_Bottom.png\n", encoding="utf-8")
+            _Image.new("RGB", (32, 32), (220, 40, 30)).save(folder / "T_Top.png")
+            _Image.new("RGB", (32, 32), (30, 60, 210)).save(folder / "T_Bottom.png")
+            return folder / "SM_Globe.obj"
+
+        def baked_colour_by_height(path):
+            """(mean colour of the top, of the bottom) of a baked .glb: its own
+            texture read at its vertices' UVs."""
+            document_, arrays_, images_ = read_glb_parts(path)
+            primitive = document_["meshes"][0]["primitives"][0]
+            P = arrays_[primitive["attributes"]["POSITION"]].astype(float)
+            UV = arrays_[primitive["attributes"]["TEXCOORD_0"]].astype(float)
+            image = _np.asarray(_Image.open(io.BytesIO(images_[0])).convert("RGB")).astype(float)
+            h, w = image.shape[:2]
+            colour = image[_np.clip(((UV[:, 1]) * h).astype(int), 0, h - 1),
+                           _np.clip((UV[:, 0] * w).astype(int), 0, w - 1)]
+            return colour[P[:, 1] > 0.6].mean(axis=0), colour[P[:, 1] < -0.6].mean(axis=0)
+
+        globe = textured_globe(WORK / "globe")
+        expect("a textured .obj (its .mtl and images beside it) is something to bake",
+               polypaint.bake_source(globe) == "texture" and polypaint.bake_problem(globe) == "")
+        (globe.parent / "rules.toml").write_text("[mesh]\nmax_triangles = 1200\nmax_material_slots = 2\n"
+                                                 "[texture]\nmax_edge = 64\npower_of_two = true\n"
+                                                 "pbr = false\n", encoding="utf-8")
+        done = run_gate(globe, "--bake", "--bake-preset", "n64")
+        expect("--bake: the textured .obj's two materials become one N64 asset that passes",
+               done.returncode == 0 and "PASSED  SM_Globe_LP.glb" in done.stdout
+               and "1 mat" in done.stdout.split("PASSED  SM_Globe_LP.glb", 1)[1].splitlines()[0],
+               done.stdout[-600:] + done.stderr[-300:])
+        _top, _bottom = baked_colour_by_height(globe.parent / "SM_Globe_LP.glb")
+        expect("... the top keeps the red texture and the bottom the blue one",
+               _top[0] > 150 and _top[2] < 90 and _bottom[2] > 150 and _bottom[0] < 90,
+               (_top.round().tolist(), _bottom.round().tolist()))
+        expect("... at full strength: Kd 0.4 beside a texture does not darken it",
+               _top[0] > 180, _top.round().tolist())
+        _scene = _trimesh.load(globe, force="scene")
+        for _geometry in _scene.geometry.values():
+            # trimesh carries the .obj's Kd 0.4 over as baseColorFactor, which a
+            # glTF multiplies its texture by: a full-strength one here.
+            _geometry.visual.material.diffuse = [255, 255, 255, 255]
+        glb_globe = WORK / "globe_glb" / "SM_Globe.glb"
+        glb_globe.parent.mkdir()
+        glb_globe.write_bytes(_scene.export(file_type="glb"))
+        expect("a textured .glb is something to bake too", polypaint.bake_source(glb_globe) == "texture")
+        polypaint.bake(glb_globe, glb_globe.parent, triangles=600, texture=64, normal_map=False,
+                       colours=16)
+        _top, _bottom = baked_colour_by_height(glb_globe.parent / "SM_Globe_LP.glb")
+        expect("... and bakes the same colours",
+               _top[0] > 150 and _top[2] < 90 and _bottom[2] > 150 and _bottom[0] < 90,
+               (_top.round().tolist(), _bottom.round().tolist()))
+        rip = WORK / "rip"
+        rip.mkdir()
+        (rip / "rtm_hero.obj").write_text("mtllib rtm_hero.mtl\nv 0 0 0\nv 1 0 0\nv 0 1 0\n"
+                                          "vt 0 0\nvt 1 0\nvt 0 1\nusemtl mat1\nf 1/1 2/2 3/3\n",
+                                          encoding="utf-8")
+        done = run_gate(rip / "rtm_hero.obj", "--bake")
+        expect("a rip without its .mtl is refused, saying which file to put beside it",
+               done.returncode == 2 and "rtm_hero.mtl, which is not beside it"
+               in done.stdout + done.stderr, done.stdout[-300:] + done.stderr[-300:])
         face_pixels = _np.asarray(_Image.open(hero / "T_Hero_LP_Face_BaseColor.png").convert("RGB"))
         dark_face = int((face_pixels.max(axis=2) < 70).sum())
         done = run_gate(hero / "SM_Hero_HP.obj", "--bake-polypaint", "--bake-preset", "n64",
