@@ -305,6 +305,95 @@ def _weld(vertices, faces):
     return np.asarray(vertices, np.float64)[first], welded[keep]
 
 
+def _drop_stacked(positions, faces):
+    """``faces`` without triangles that lie exactly on another one.
+
+    Reducing a thin part (an ear, a strand of hair against the cheek) can fold
+    it flat into two triangles on the same three points, facing opposite ways.
+    Their normals cancel, so the one facing out is shaded as if lit from
+    behind: the test sculpt's N64 bake had a black triangle on each side of the head
+    (12 Nov 2026). Such a fold has no inside, so both go; a plain copy facing
+    the same way keeps one."""
+    import numpy as np
+    if len(faces) == 0:
+        return faces
+    corners = np.asarray(positions, np.float64)[faces]
+    span = float(np.max(corners.reshape(-1, 3).max(0) - corners.reshape(-1, 3).min(0))) or 1.0
+    keys = np.round(corners / (span * 1e-6)).astype(np.int64)      # (faces, 3 corners, xyz)
+    # The same three points in any order: sort each triangle's corners.
+    corner_order = np.lexsort((keys[:, :, 2], keys[:, :, 1], keys[:, :, 0]), axis=1)
+    sorted_keys = np.take_along_axis(keys, corner_order[:, :, None], axis=1).reshape(len(faces), -1)
+    _, group, counts = np.unique(sorted_keys, axis=0, return_inverse=True, return_counts=True)
+    group = group.ravel()
+    if counts.max() < 2:
+        return faces
+    normals = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    keep = np.ones(len(faces), bool)
+    for index in np.nonzero(counts > 1)[0]:
+        members = np.nonzero(group == index)[0]
+        reference = normals[members[0]]
+        facing = np.einsum("ij,j->i", normals[members], reference) > 0
+        if facing.all():
+            keep[members[1:]] = False        # copies: one is enough
+        else:
+            keep[members] = False            # a fold: nothing inside it
+    return faces[keep]
+
+
+#: Neighbouring triangles further apart than this keep a hard edge between
+#: them in the baked mesh's shading (Blender's "auto smooth" does the same).
+CREASE_DEGREES = 60.0
+
+
+def _corner_normals(positions, faces, crease_degrees: float = CREASE_DEGREES):
+    """A normal for each corner of each triangle, shape (faces, 3, 3): the
+    area-weighted average of the triangles at that corner's vertex that face
+    within ``crease_degrees`` of this one.
+
+    One averaged normal per vertex (what the bake used before) goes wrong where
+    a 1,200-triangle head folds sharply - hair over the cheek, the jaw against
+    the neck: the average points away from some of the triangles that share it,
+    and they shade as if lit from behind. On the test sculpt's N64 bake that was a corner
+    of 4 triangles in 10 on the body, and of most of the face (12 Nov 2026)."""
+    import numpy as np
+    corners = positions[faces]
+    weighted = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    length = np.linalg.norm(weighted, axis=1, keepdims=True)
+    unit = weighted / np.where(length > 0, length, 1.0)
+    limit = np.cos(np.radians(crease_degrees))
+    # Corner k of face f is row 3f+k; group the rows by the vertex they sit on.
+    vertex = faces.ravel()
+    row = np.argsort(vertex, kind="stable")
+    vertex = vertex[row]
+    starts = np.flatnonzero(np.r_[True, vertex[1:] != vertex[:-1]])
+    ends = np.r_[starts[1:], len(vertex)]
+    result = np.empty((len(faces) * 3, 3))
+    for start, end in zip(starts, ends):
+        rows = row[start:end]
+        here = rows // 3
+        close = unit[here] @ unit[here].T >= limit
+        result[rows] = close.astype(np.float64) @ weighted[here]
+    length = np.linalg.norm(result, axis=1, keepdims=True)
+    fallback = np.repeat(unit, 3, axis=0)
+    result = np.where(length > 0, result / np.where(length > 0, length, 1.0), fallback)
+    return result.reshape(len(faces), 3, 3)
+
+
+def _split_by_normal(positions, uvs, faces, corner_normals):
+    """(positions, uvs, normals, faces) with a vertex wherever its corners want
+    different normals: a hard edge needs its own copy of each vertex on it."""
+    import numpy as np
+    vertex = faces.ravel()
+    normals = corner_normals.reshape(-1, 3)
+    keys = np.concatenate([vertex[:, None].astype(np.float64),
+                           np.round(normals * 1e4)], axis=1)
+    _, first, inverse = np.unique(keys, axis=0, return_index=True, return_inverse=True)
+    inverse = inverse.ravel()
+    source = vertex[first]
+    return (positions[source], uvs[source], normals[first],
+            inverse.reshape(faces.shape).astype(faces.dtype))
+
+
 def _smooth_normals(positions, faces):
     import numpy as np
     corners = positions[faces]
@@ -1221,7 +1310,7 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     flat = agk.degenerate_mask(corners[:, 0], corners[:, 1], corners[:, 2])
     if flat.any():
         low_faces = low_faces[~flat]
-    normals = _smooth_normals(low_positions, low_faces)
+    low_faces = _drop_stacked(low_positions, low_faces)
     step("unwrapping UVs", 2)
     sculpt = Sculpt(obj.vertices, obj.faces, obj.colours, spatial)
     nearest = _closest_low_triangles(obj.vertices, low_positions, low_faces, spatial)
@@ -1276,8 +1365,14 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     renumber = np.empty(len(order), np.int64)
     renumber[order] = np.arange(len(order))
     nearest = renumber[nearest]
-    positions = low_positions[mapping]
-    vertex_normals = normals[mapping]
+    # Shading normals per corner, hard across sharp folds; corners that disagree
+    # get a vertex each. Neighbours are found through the reduced mesh's own
+    # vertices, so a UV seam does not cut the shading.
+    corner_normals = _corner_normals(low_positions, mapping[all_faces])
+    positions, uvs, vertex_normals, all_faces = _split_by_normal(
+        low_positions[mapping], uvs, all_faces, corner_normals)
+    sizes = np.cumsum([len(part) for part in part_faces])[:-1]
+    part_faces = np.split(all_faces, sizes)
     tangents = _tangents(positions, uvs, all_faces, vertex_normals)
     per_side = samples_per_texel(texture)
     step("baking the textures", 3)
