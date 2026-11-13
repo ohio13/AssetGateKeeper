@@ -1243,6 +1243,46 @@ try:
         expect("a bake's notes are a list, one point each",
                isinstance(_mirror["notes"], list) and len(_mirror["notes"]) >= 3
                and "; ".join(_mirror["notes"]) == _mirror["note"], _mirror["notes"])
+        # The two boxes round the eyes of a face that is not mirrored, side by side.
+        _gapped = polypaint._close_gap(_np.array([-3.0, -1.0, -0.5, 0.0, 0.5, 1.0, 3.0]), 0.0, 1.0)
+        expect("_close_gap: the stretch between the eye boxes is closed, each side keeps its order",
+               _np.allclose(_gapped, [-2.0, 0.0, 0.0, 0.0, 0.0, 0.0, 2.0]), _gapped.tolist())
+        _pair_p = _np.array([(-3, 0, 0), (-1, 0, 0), (-1, 1, 0), (-3, 1, 0),
+                             (1, 0, 0), (3, 0, 0), (3, 1, 0), (1, 1, 0)], float)
+        _pair_f = _np.array([(0, 1, 2), (0, 2, 3), (4, 5, 6), (4, 6, 7)])
+        _, _, _pair_uv = polypaint._paired_uvs(_pair_p, _pair_f, _np.arange(4), _np.array([1.0, 0, 0]),
+                                               _np.array([0, 1.0, 0]), (64, 64), 1, 0.0, 1.0)
+        expect("_paired_uvs: each box takes half the texture, their inner edges meeting in the middle",
+               abs(_pair_uv[:4, 0].max() - 0.5) < 1e-6 and abs(_pair_uv[4:, 0].min() - 0.5) < 1e-6
+               and _pair_uv[:, 0].min() < 0.05 and _pair_uv[:, 0].max() > 0.95,
+               _pair_uv.round(3).tolist())
+        # The chin: a face 1 across the eyes whose surface falls back to the neck 1.7 below them.
+        _chin_rows = _np.linspace(0.0, 2.5, 26)
+        _chin_p = _np.array([(x, -y, 0.0 if y <= 1.7 else -1.0) for y in _chin_rows for x in (-0.5, 0.5)])
+        _chin_f = _np.array([quad for row in range(25)
+                             for quad in ((2 * row, 2 * row + 2, 2 * row + 1),
+                                          (2 * row + 1, 2 * row + 2, 2 * row + 3))])
+        _chin = polypaint._find_chin(_chin_p, _chin_f, _np.arange(len(_chin_f)), _np.array([1.0, 0, 0]),
+                                     _np.array([0, 1.0, 0]), 0.0, 0.0, 1.0)
+        expect("_find_chin: where the face falls back to the neck, not a fixed share of the eyes' distance",
+               _chin is not None and 1.6 < _chin < 1.9, _chin)
+        # A face shaded across its folds: the ridge above, as part of a face.
+        _soft_normals = polypaint._corner_normals(_np.array([(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 1)], float),
+                                                  _np.array([(0, 1, 2), (0, 3, 1)]),
+                                                  soft=_np.array([True, True]))
+        expect("a face's triangles are shaded smoothly across a 90-degree fold (a reduced chin is a wedge)",
+               _np.allclose(_soft_normals[0][0], _soft_normals[1][0])
+               and _np.allclose(_soft_normals[0][1], _soft_normals[1][2]),
+               _soft_normals.round(2).tolist())
+        # A palette that must hold another texture's colours.
+        _rng = _np.random.default_rng(3)
+        _noise = _rng.integers(0, 255, (16, 16, 3)).astype(_np.uint8)
+        _held = polypaint._reduce_colours(_Image.fromarray(_noise), 16,
+                                          fixed=_np.array([(1, 2, 3), (250, 240, 230)]))
+        _held_palette = _np.asarray(_held.getpalette()[:48]).reshape(-1, 3).tolist()
+        expect("_reduce_colours keeps the colours it is given and stays within 16",
+               [1, 2, 3] in _held_palette and [250, 240, 230] in _held_palette
+               and len(_held.getcolors()) <= 16, _held_palette)
         # Hidden triangles: a shell inside a shell, both above the line.
         def _shell(radius):
             ball = _trimesh.creation.icosphere(subdivisions=2, radius=radius)
@@ -1273,6 +1313,18 @@ try:
                and all((WORK / "pak_eyes" / f"T_Hero_LP{suffix}_BaseColor.png").is_file()
                        for suffix in _suffixes), (_suffixes, _strip["note"]))
         _eyes = _np.asarray(_Image.open(WORK / "pak_eyes" / "T_Hero_LP_Eyes_BaseColor.png").convert("RGB"))
+        _face_png = _Image.open(WORK / "pak_eyes" / "T_Hero_LP_Face_BaseColor.png")
+        _eyes_png = _Image.open(WORK / "pak_eyes" / "T_Hero_LP_Eyes_BaseColor.png")
+
+        def _colours_of(image):
+            palette = _np.asarray(image.getpalette()).reshape(-1, 3)
+            return {tuple(int(v) for v in palette[index]) for _, index in image.getcolors()}
+
+        expect("the face and its eyes each keep to 16 colours, and share the skin's where they meet",
+               len(_colours_of(_face_png)) <= 16 and len(_colours_of(_eyes_png)) <= 16
+               and len(_colours_of(_face_png) & _colours_of(_eyes_png)) >= 1,
+               (len(_colours_of(_face_png)), len(_colours_of(_eyes_png)),
+                len(_colours_of(_face_png) & _colours_of(_eyes_png))))
         expect("... every texture fits the N64's 4 KB texture memory in 16 colours (4,096 texels)",
                all(part["size"][0] * part["size"][1] <= 4096 for part in _strip["parts"])
                and _eyes.shape[0] * _eyes.shape[1] <= 4096, [part["size"] for part in _strip["parts"]])

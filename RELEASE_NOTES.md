@@ -25,6 +25,18 @@
   page. New rules preset `--preset n64-pak` (3,000 triangles, 4 materials,
   the TMEM rule) for a cutscene character. CI lints every Python file with
   ruff instead of a typed list for pyflakes.
+  And that evening, from a second model (a game model, hair combed across
+  one eye): the two eyes are told from other dark patches by being level
+  and mirror images of each other (an eye and a lock's shadow had been
+  taken for the pair, and the frame set from them); the frame reaches down
+  to the chin, found where the face falls back to the neck, and up over a
+  brow with hair across it; a face that is not mirrored still gets a box
+  round each eye, side by side in the eyes' texture; an edge of a box moves
+  to where the face is plainest, so it no longer cuts a brow in two; the
+  face has a palette of its own and the eyes keep only its colours where
+  they meet (in one palette of 16 the skin banded); a face is shaded
+  smoothly across its folds; and under the jaw the neck goes with the
+  head's texture, a collar as high with the body's, told apart by colour.
 
 * **Bake: the Expansion Pak (12 Nov).** For a character with little else
   on screen - an ending cutscene, a title screen - the review page's N64
