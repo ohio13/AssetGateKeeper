@@ -1191,9 +1191,69 @@ try:
         document, _, images = read_glb_parts(WORK / "pak_mirror" / "SM_Hero_LP.glb")
         _wraps = [document["samplers"][document["textures"][material["pbrMetallicRoughness"][
             "baseColorTexture"]["index"]]["sampler"]]["wrapS"] for material in document["materials"]]
-        expect("mirror: the face's texture repeats mirrored across (glTF MIRRORED_REPEAT), the "
-               "body's does not",
-               _wraps == [10497, 33648] and _mirror["parts"][1]["mirror"], (_wraps, _mirror["note"]))
+        # 13 Nov 2026: the face is cut down its middle and its two halves laid on
+        # the same texels (folded UVs), so no sampler has to mirror: that setting
+        # is lost in a fast64 / tiny3d export unless it is set again by hand.
+        _mirror_mesh = _trimesh.load(WORK / "pak_mirror" / "SM_Hero_LP.glb")
+        _face_part = next(geometry for geometry in _mirror_mesh.geometry.values()
+                          if geometry.visual.material.name == "T_Hero_LP_Face")
+        _face_uv = _np.asarray(_face_part.visual.uv)[_np.unique(_face_part.faces)]
+        _face_x = _np.asarray(_face_part.vertices)[_np.unique(_face_part.faces)][:, 0]
+        expect("mirror: half the face in the texture, both halves of the mesh on it, with plain "
+               "UVs inside 0-1 and no mirroring sampler",
+               _wraps == [10497, 10497] and _mirror["parts"][1]["mirror"]
+               and _face_uv.min() >= 0.0 and _face_uv.max() <= 1.0
+               and (_face_x < -0.02).any() and (_face_x > 0.02).any(),
+               (_wraps, float(_face_uv.min()), float(_face_uv.max()), _mirror["note"]))
+        # The middle is between the eyes as found and the view is the face's own
+        # front, so the cut is near x = 0, not on it.
+        _across = _np.asarray(_face_part.triangles)[:, :, 0]
+        expect("... no triangle of it crosses the middle (the mesh was cut there), within budget",
+               not ((_across.max(axis=1) > 0.08) & (_across.min(axis=1) < -0.08)).any()
+               and _mirror["triangles"] <= 3000,
+               (int(_mirror["triangles"]),
+                int(((_across.max(axis=1) > 0.08) & (_across.min(axis=1) < -0.08)).sum())))
+        # Cutting: a square of two triangles cut across - same area, nothing left
+        # crossing the line, and a neighbour beside the region is split too.
+        _square = _np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [2, 0, 0], [2, 1, 0]], float)
+        _square_faces = _np.array([[0, 1, 2], [0, 2, 3], [1, 4, 5], [1, 5, 2]])
+        _cut_p, _cut_f, _cut_parent = polypaint._cut_mesh(
+            _square, _square_faces, _np.array([0.0, 1.0, 0.0]), 0.5,
+            _np.array([True, True, False, False]))
+
+        def _area(points, faces):
+            t = points[faces]
+            return float(_np.linalg.norm(_np.cross(t[:, 1] - t[:, 0], t[:, 2] - t[:, 0]), axis=1).sum() / 2)
+
+        _heights = _cut_p[_cut_f][:, :, 1] - 0.5
+        _edges = _np.sort(_np.concatenate([_cut_f[:, [0, 1]], _cut_f[:, [1, 2]], _cut_f[:, [2, 0]]]), axis=1)
+        _, _edge_uses = _np.unique(_edges, axis=0, return_counts=True)
+        expect("_cut_mesh: the area is kept, no triangle of the region crosses the line, and "
+               "the triangle beside it is split along the shared edge (no vertex left mid-edge)",
+               abs(_area(_cut_p, _cut_f) - 2.0) < 1e-9
+               and not ((_heights.max(axis=1) > 1e-9) & (_heights.min(axis=1) < -1e-9))[
+                   _np.isin(_cut_parent, [0, 1])].any()
+               and len(_cut_f) > 6 and (_cut_parent == 3).sum() == 2 and (_cut_parent == 2).sum() == 1,
+               (len(_cut_f), _cut_parent.tolist()))
+        expect("an eye strip keeps to the folder's texture edge: 128x32 when 128 is allowed, "
+               "64x64 when it is not",
+               polypaint._strip_shape(4.0, 1.0, 64) == (128, 32)
+               and polypaint._strip_shape(4.0, 1.0, 64, max_edge=64) == (64, 64)
+               and polypaint._strip_shape(1.0, 1.0, 64, max_edge=128) == (64, 64))
+        expect("a bake's notes are a list, one point each",
+               isinstance(_mirror["notes"], list) and len(_mirror["notes"]) >= 3
+               and "; ".join(_mirror["notes"]) == _mirror["note"], _mirror["notes"])
+        # Hidden triangles: a shell inside a shell, both above the line.
+        def _shell(radius):
+            ball = _trimesh.creation.icosphere(subdivisions=2, radius=radius)
+            return _np.asarray(ball.vertices) + [0.0, 5.0, 0.0], _np.asarray(ball.faces)
+
+        _outer, _inner = _shell(1.0), _shell(0.6)
+        _nested = polypaint._hidden_faces(_np.concatenate([_outer[0], _inner[0]]),
+                                          _np.concatenate([_outer[1], _inner[1] + len(_outer[0])]), 0.0)
+        expect("_hidden_faces: the inner shell is hidden, none of the outer one is",
+               _nested[len(_outer[1]):].all() and not _nested[:len(_outer[1])].any(),
+               (int(_nested[:len(_outer[1])].sum()), int(_nested[len(_outer[1]):].sum())))
         _mirror_face = _np.asarray(_Image.open(WORK / "pak_mirror" / "T_Hero_LP_Face_BaseColor.png")
                                    .convert("RGB"))
         _dark_cols = _np.nonzero(_mirror_face.max(axis=2) < 70)[1]
@@ -1216,8 +1276,10 @@ try:
         expect("... every texture fits the N64's 4 KB texture memory in 16 colours (4,096 texels)",
                all(part["size"][0] * part["size"][1] <= 4096 for part in _strip["parts"])
                and _eyes.shape[0] * _eyes.shape[1] <= 4096, [part["size"] for part in _strip["parts"]])
-        expect("... and the eye strip holds the eye",
-               int((_eyes.max(axis=2) < 70).sum()) > 0, _strip["note"])
+        expect("... and the eye strip holds the eye: cut round it, the eye fills a good part of "
+               "its texture (it was a fifth of the height, the rest brow and cheek)",
+               (_eyes.max(axis=2) < 70).mean() >= 0.15 and _strip["triangles"] <= 3000,
+               (float((_eyes.max(axis=2) < 70).mean()), _strip["triangles"], _strip["note"]))
         _head_mesh = _trimesh.load(WORK / "pak_eyes" / "SM_Hero_LP.glb")
         _by_material = {geometry.visual.material.name: geometry.triangles[:, :, 1].mean(axis=1)
                         for geometry in _head_mesh.geometry.values()}

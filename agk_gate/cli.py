@@ -594,6 +594,7 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
                              if settings.get("face_texture") else "single",
                              body_textures=settings.get("body_textures", 1),
                              painted_parts=settings.get("painted_parts", False),
+                             max_edge=budget.max_texture_edge,
                              progress=lambda name, i, n: LOG.info("bake    %d/%d %s", i + 1, n, name))
     except module.PolypaintError as exc:
         LOG.error("%s", exc)
@@ -605,8 +606,9 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
                   "--bake-triangles", source.name, edge, edge, f"{settings['triangles']:,}")
         return 2
     made = [Path(result["mesh"])] + [Path(name) for name in result["textures"]]
-    LOG.info("bake    wrote %s in %s s (%s)", ", ".join(path.name for path in made),
-             result["seconds"], result["note"])
+    LOG.info("bake    wrote %s in %s s", ", ".join(path.name for path in made), result["seconds"])
+    for line in result["notes"]:
+        (LOG.warning if line.startswith("WARNING") else LOG.info)("bake    - %s", line)
     # A texture an earlier bake wrote that this one did not (a normal map before
     # an N64 bake, say) is not part of the new .glb; say so rather than leave it
     # looking current. Nothing is deleted.

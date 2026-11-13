@@ -227,9 +227,21 @@ with sync_playwright() as playwright:
 
     def pick(asset_id):
         # Wait for *this* asset: the status bar names it once it has settled.
-        name = page.locator(f'#asset-list .asset[data-id="{asset_id}"] .name').inner_text()
-        name = name.replace("FAILED", "").replace("PASSED", "").strip()
-        page.locator(f'#asset-list .asset[data-id="{asset_id}"]').click()
+        # The list is redrawn when the library refreshes: an asset found a
+        # moment before a redraw is gone when the click arrives (the job timed
+        # out here once in CI, 11 Nov 2026), so wait for it and try once more.
+        card = f'#asset-list .asset[data-id="{asset_id}"]'
+        for attempt in (0, 1):
+            try:
+                page.wait_for_selector(card, state="attached", timeout=20000)
+                name = page.locator(f"{card} .name").inner_text(timeout=5000)
+                name = name.replace("FAILED", "").replace("PASSED", "").strip()
+                page.locator(card).click(timeout=5000)
+                break
+            except Exception:
+                if attempt:
+                    raise
+                page.wait_for_timeout(500)
         page.wait_for_function(
             "(name) => { const s = document.getElementById('status').textContent;"
             " return s.includes(name) && !s.startsWith('loading'); }",

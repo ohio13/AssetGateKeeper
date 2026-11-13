@@ -124,3 +124,12 @@ packages = ["agk_gate", "agk_suite", "agk_suite.server", "agk_suite.engine", "ag
 
 [tool.setuptools.dynamic]
 version = { attr = "agk_gate.__version__" }
+
+# Lint (CI: ruff check .): syntax errors and what pyflakes finds - unused and
+# undefined names - over every Python file, so a new file is checked without
+# anyone adding it to a list. Vendored code is not ours to lint.
+[tool.ruff]
+extend-exclude = ["agk_vendor", "server/static/vendor"]
+
+[tool.ruff.lint]
+select = ["E9", "F"]

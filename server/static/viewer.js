@@ -1133,8 +1133,9 @@ async function bakePolypaint() {
       + `${result.face_layout && result.face_layout !== "single" ? ` (${result.face_layout})` : ""}`
       + `${result.body_textures > 1 ? " + a second body texture" : ""}`
       + `${result.head_share ? `, head ${Math.round(result.head_share * 100)}% of tris` : ""}, `
-      + `${result.seconds} s - ${result.note || ""}`);
-    $("bake-progress").textContent = "";
+      + `${result.seconds} s`);
+    // What the bake made, left out or fell back on, one point a line.
+    $("bake-progress").textContent = (result.notes || []).map((line) => `- ${line}`).join("\n");
   } catch (error) {
     $("bake-progress").textContent = `error: ${error.message}`;
   } finally {

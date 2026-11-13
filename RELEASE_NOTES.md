@@ -15,6 +15,16 @@
   is found. See-through textures: a face texture that also holds the lashes
   no longer makes the whole face see-through, and a strand's edge keeps its
   colour (blonde hair cards baked olive).
+  Then, the same day: the mesh is cut where the face's textures end, so an
+  eye fills its own texture (it had filled about 30 x 10 of 64 x 64 texels)
+  and a mirrored face needs no mirroring sampler - its halves share texels
+  through plain UVs, which survive a fast64 / tiny3d export. The head's
+  triangles that nothing can see (the inside of a shell of hair: a third of
+  one sculpt's 3,000) are dropped and the budget spent on what shows. Bake
+  results are listed one point a line, on the command line and the review
+  page. New rules preset `--preset n64-pak` (3,000 triangles, 4 materials,
+  the TMEM rule) for a cutscene character. CI lints every Python file with
+  ruff instead of a typed list for pyflakes.
 
 * **Bake: the Expansion Pak (12 Nov).** For a character with little else
   on screen - an ending cutscene, a title screen - the review page's N64
