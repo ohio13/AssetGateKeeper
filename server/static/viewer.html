@@ -245,6 +245,8 @@
         </select>
         <label class="check" title="Gives the face (where the sculpt's colour detail is densest) a texture of its own, the same size, as a second material. In one 64 px texture a whole character's face is about 6 x 6 texels.">
           <input type="checkbox" id="bake-face"> Face texture</label>
+        <label class="check" title="Leaves the small parts in the head - eyeballs, lashes, teeth - off the reduced mesh and paints them on the surface behind them, the way an N64 face is drawn. Reduced as geometry they turn into dark spikes and take the triangles the face needs.">
+          <input type="checkbox" id="bake-paint"> Paint eyes on</label>
       </div>
       <div class="row">
         <select id="bake-head" title="How much of the triangle budget goes to the head (above the neck). More keeps more of the head's shape - hair, nose, chin - and less of the body's.">
@@ -263,9 +265,9 @@
           <option value="eyes">Face + eye strip</option>
           <option value="eyes-mirror" selected>Face + eye strip, mirrored</option>
         </select>
-        <select id="bake-body" title="Textures for the body: two gives the lower body a texture of its own (another material) - twice the texels for the body.">
+        <select id="bake-body" title="Two gives the rest of the head (hair, ears) a texture of its own, apart from the body's (another material). On a model with no face found, the lower body gets it.">
           <option value="1" selected>Body: one texture</option>
-          <option value="2">Body: two textures</option>
+          <option value="2">Body + head textures</option>
         </select>
       </div>
       <div id="bake-skip-row" hidden>

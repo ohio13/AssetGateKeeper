@@ -751,7 +751,7 @@ try:
                                                      "texture": 64, "normal_map": False,
                                                      "colours": 16, "face_texture": True,
                                                      "head_share": 0.0, "face_layout": "single",
-                                                     "body_textures": 1,
+                                                     "body_textures": 1, "painted_parts": True,
                                                      "face_texture_note": ""}
                and settings["triangles"] == 400 and settings["texture"] == 32,
                str(settings))
@@ -1207,8 +1207,9 @@ try:
                                 texture=64, normal_map=False, colours=16, face_texture=True,
                                 face_layout="eyes-mirror", body_textures=2)
         _suffixes = [part["suffix"] for part in _strip["parts"]]
-        expect("eyes-mirror, two body textures: four materials - body, lower body, face, eyes",
-               _suffixes == ["", "_Lower", "_Face", "_Eyes"] and _strip["materials"] == 4
+        expect("eyes-mirror, two body textures: four materials - body, the rest of the head, "
+               "face, eyes",
+               _suffixes == ["", "_Head", "_Face", "_Eyes"] and _strip["materials"] == 4
                and all((WORK / "pak_eyes" / f"T_Hero_LP{suffix}_BaseColor.png").is_file()
                        for suffix in _suffixes), (_suffixes, _strip["note"]))
         _eyes = _np.asarray(_Image.open(WORK / "pak_eyes" / "T_Hero_LP_Eyes_BaseColor.png").convert("RGB"))
@@ -1217,10 +1218,106 @@ try:
                and _eyes.shape[0] * _eyes.shape[1] <= 4096, [part["size"] for part in _strip["parts"]])
         expect("... and the eye strip holds the eye",
                int((_eyes.max(axis=2) < 70).sum()) > 0, _strip["note"])
-        expect("... the body split in two at about half its area",
-               0.3 <= _strip["parts"][0]["share"] / max(_strip["parts"][0]["share"]
-                                                        + _strip["parts"][1]["share"], 1e-9) <= 0.7,
-               [part["share"] for part in _strip["parts"]])
+        _head_mesh = _trimesh.load(WORK / "pak_eyes" / "SM_Hero_LP.glb")
+        _by_material = {geometry.visual.material.name: geometry.triangles[:, :, 1].mean(axis=1)
+                        for geometry in _head_mesh.geometry.values()}
+        expect("... split at the neck: the head's texture holds what is above it, the body's "
+               "what is below",
+               _by_material["T_Hero_LP_Head"].min() > _by_material["T_Hero_LP"].mean()
+               and _by_material["T_Hero_LP_Head"].mean() > _by_material["T_Hero_LP"].max() - 0.6,
+               {name: (float(heights.min()), float(heights.max()))
+                for name, heights in _by_material.items()})
+        _ball = polypaint.bake(paint / "SM_Ball_HP.obj", WORK / "pak_ball", triangles=600,
+                               texture=64, normal_map=False, body_textures=2)
+        expect("... a model with no face: upper and lower body, at half its area",
+               [part["suffix"] for part in _ball["parts"]] == ["", "_Lower"]
+               and 0.3 <= _ball["parts"][0]["share"] <= 0.7,
+               [(part["suffix"], part["share"]) for part in _ball["parts"]])
+
+        # 13 Nov 2026: eyes. A sculpt's eyeballs are pieces of their own, sitting in
+        # sockets (the test sculpt's four were 450,000 of its 1.08 million
+        # triangles). Reduced with the head they became dark spikes; an N64
+        # face is one surface with the eyes painted on.
+        def _with_eyeballs():
+            import math
+            lines = [line for line in figure_text.splitlines() if not line.startswith("#MRGB ")]
+            points = [line for line in lines if line.startswith("v ")]
+            faces = [line for line in lines if line.startswith("f ")]
+            colour_rows = [line for line in figure_text.splitlines() if line.startswith("#MRGB ")]
+            groups = [chunk for row in colour_rows
+                      for chunk in (row[6:][i:i + 8] for i in range(0, len(row) - 6, 8))]
+            base = len(points)
+            for centre_x in (-0.112, 0.112):                      # where the painted eyes are
+                start = base
+                rings, segments = 12, 24
+                for i in range(rings + 1):
+                    theta = math.pi * i / rings
+                    for j in range(segments):
+                        phi = 2 * math.pi * j / segments
+                        x, y, z = (math.sin(theta) * math.cos(phi), math.cos(theta),
+                                   math.sin(theta) * math.sin(phi))
+                        points.append(f"v {centre_x + 0.05 * x:.5f} {1.61 + 0.05 * y:.5f} "
+                                      f"{0.275 + 0.05 * z:.5f}")
+                        groups.append("ff1040c0" if z > 0.6 else "fff0f0f0")   # blue iris, white
+                        base += 1
+                for i in range(rings):
+                    for j in range(segments):
+                        a = start + i * segments + j
+                        b = start + i * segments + (j + 1) % segments
+                        faces.append(f"f {a + 1} {a + segments + 1} {b + 1}")
+                        faces.append(f"f {b + 1} {a + segments + 1} {b + segments + 1}")
+            rows = ["#MRGB " + "".join(groups[i:i + 64]) for i in range(0, len(groups), 64)]
+            return "\n".join(["# File exported by ZBrush version 2022"] + points + rows + faces) + "\n"
+
+        _eyed = WORK / "eyeballs"
+        _eyed.mkdir()
+        (_eyed / "SM_Hero_HP.obj").write_text(_with_eyeballs(), encoding="utf-8")
+        _kept = polypaint.bake(_eyed / "SM_Hero_HP.obj", WORK / "eyeballs_kept", triangles=1200,
+                               texture=64, normal_map=False, colours=16, face_texture=True)
+        _painted = polypaint.bake(_eyed / "SM_Hero_HP.obj", WORK / "eyeballs_painted", triangles=1200,
+                                  texture=64, normal_map=False, colours=16, face_texture=True,
+                                  painted_parts=True)
+
+        def _piece_count(folder):
+            mesh = _trimesh.load(folder / "SM_Hero_LP.glb", force="mesh")
+            welded = polypaint._weld(_np.asarray(mesh.vertices), _np.asarray(mesh.faces))
+            return polypaint._pieces(len(welded[0]), welded[1])[0]
+
+        expect("painted parts: the two eyeballs are left off the reduced mesh, and the note says so",
+               "2 small parts in the head" in _painted["note"]
+               and _piece_count(WORK / "eyeballs_painted") == _piece_count(WORK / "eyeballs_kept") - 2,
+               (_painted["note"][-200:], _piece_count(WORK / "eyeballs_painted"),
+                _piece_count(WORK / "eyeballs_kept")))
+        _iris = _np.asarray(_Image.open(WORK / "eyeballs_painted" / "T_Hero_LP_Face_BaseColor.png")
+                            .convert("RGB")).astype(int)
+        _blue = (_iris[..., 2] > 120) & (_iris[..., 0] < 90)
+        expect("... and they are painted on the face: two blue irises, side by side",
+               _blue.sum() >= 4 and _np.ptp(_np.nonzero(_blue)[1]) >= 64 * 0.15
+               and _np.ptp(_np.nonzero(_blue)[0]) <= 64 * 0.2,
+               (int(_blue.sum()), _np.nonzero(_blue)))
+        expect("... off by default, on with the n64 presets",
+               "small parts" not in _kept["note"]
+               and polypaint.resolve_settings("n64")["painted_parts"] is True
+               and polypaint.resolve_settings("")["painted_parts"] is False
+               and polypaint.resolve_settings("n64", painted_parts=False)["painted_parts"] is False)
+        # The face is framed from its two eyes: brow to chin.
+        _framed = _np.asarray(_Image.open(WORK / "pak_single" / "T_Hero_LP_Face_BaseColor.png")
+                              .convert("RGB")).astype(int)
+        _lips = (_framed[..., 0] > 150) & (_framed[..., 1] < 90)
+        _dark = _framed.max(axis=2) < 70
+        expect("the face texture is framed from the eyes: both eyes and the whole mouth are in it",
+               _lips.sum() >= 6 and _dark.sum() >= 20
+               and _np.nonzero(_lips)[0].max() < 62 and _np.nonzero(_dark)[0].min() > 1,
+               (int(_lips.sum()), int(_dark.sum())))
+        # Colour next to see-through texels: weighted by how solid each is.
+        _texels = _np.zeros((1, 2, 4), _np.float32)
+        _texels[0, 0] = (1.0, 0.9, 0.2, 1.0)                     # a solid blonde texel
+        _between = polypaint._sample_materials([_texels], _np.ones((1, 3), _np.float32),
+                                               _np.zeros(1, int), _np.array([[0.5, 0.5]]),
+                                               with_alpha=True)
+        expect("a hair strand's edge keeps its colour (the clear texel beside it is not blended in)",
+               _np.allclose(_between[0][0], (1.0, 0.9, 0.2), atol=0.02)
+               and abs(float(_between[1][0]) - 0.5) < 0.02, _between)
         # A face that is not symmetric (hair painted across one eye): mirrored,
         # that eye would be drawn on top of the hair. It is not mirrored.
         _lopsided = WORK / "lopsided"

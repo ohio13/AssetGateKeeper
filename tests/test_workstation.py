@@ -1980,6 +1980,7 @@ if _bake_ready():
                           ({"normal_map": "yes"}, "normal_map must be true or false"),
                           ({"face_texture": 1}, "face_texture must be true or false"),
                           ({"face_layout": "sideways"}, "face_layout must be one of"),
+                          ({"painted_parts": "yes"}, "painted_parts must be true or false"),
                           ({"body_textures": 3}, "body_textures must be 1 or 2"),
                           ({"body_textures": True}, "body_textures must be 1 or 2"),
                           ({"shiny": True}, "unknown field")):
@@ -2015,7 +2016,7 @@ if _bake_ready():
         job = pp.json(f"/api/jobs/{job['id']}")[1]
     result = job.get("result") or {}
     expect("n64-pak with two body textures: two materials, each 64 px, named _BaseColor and "
-           "_Lower_BaseColor (no face on this sculpt)",
+           "_Lower_BaseColor (no face on this sculpt: upper and lower body)",
            job["state"] == "done" and result.get("preset") == "n64-pak"
            and result.get("body_textures") == 2 and result.get("materials") == 2
            and [t["name"].endswith(suffix) for t, suffix in

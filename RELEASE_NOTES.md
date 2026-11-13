@@ -1,5 +1,21 @@
 # Unreleased (on `main`)
 
+* **Bake: eyes painted on, and a face framed from its eyes (13 Nov).** A
+  sculpt's eyeballs, lashes and teeth are pieces of their own; reduced with
+  the head to N64 size they became dark spikes and took the face's
+  triangles (one sculpt's four eyeballs were 450,000 of its 1.08 million).
+  With the `n64` presets (`--bake-paint-parts`, **Paint eyes on** on the
+  review page) such small parts in the head are left off the mesh and
+  painted on the surface behind them. The face texture is now the model as
+  it looks from the front - before, an eye in its socket landed bent round
+  the socket's walls - and is framed from the two eyes, brow to chin; on a
+  game model the fringe's strands had pulled the frame up over the hair and
+  cut the mouth off. A mirrored face mirrors about the middle of the eyes.
+  Two body textures now split at the neck (`_Head`: hair, ears) when a face
+  is found. See-through textures: a face texture that also holds the lashes
+  no longer makes the whole face see-through, and a strand's edge keeps its
+  colour (blonde hair cards baked olive).
+
 * **Bake: the Expansion Pak (12 Nov).** For a character with little else
   on screen - an ending cutscene, a title screen - the review page's N64
   style has an **Expansion Pak** box. Ticked, it starts at 3,000 triangles

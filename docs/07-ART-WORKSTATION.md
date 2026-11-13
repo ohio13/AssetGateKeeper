@@ -137,12 +137,16 @@ sculpt's colour detail is densest) gets a 64 px texture of its own as a second
 material, mapped straight from the front like an N64 face, hairline to chin, so
 the eyes, brows and lips fill it instead of about 6 x 6 texels of the body's.
 Of the 16 colours, 6 go to small details the rest would lose, such as the
-colour of the irises. With N64 style an **Expansion Pak** box appears: for a
+colour of the irises. **Paint eyes on** (ticked with N64 style) leaves the
+small parts in the head - eyeballs, lashes, teeth - off the reduced mesh and
+paints them on the surface behind them, as an N64 face is drawn; reduced as
+geometry they become dark spikes. With N64 style an **Expansion Pak** box appears: for a
 game with the Pak that shows the character with little else on screen (a
 cutscene, a title screen), it starts at 3,000 triangles with 60% for the head,
 offers 3,000 and 4,000, and opens the face's layout - one texture, mirrored
 (half the face drawn twice by the texture's mirror setting: twice the texels
-across), an eye strip of its own, or both - and one or two body textures. Each
+across), an eye strip of its own, or both - and a second texture for the rest of
+the head (hair, ears). Each
 texture is still 64 px in 16 colours, so it fits the N64's 4 KB texture memory;
 the Pak's extra RAM holds more of them. A face that is not symmetric (hair
 across one eye) is not mirrored, and the result says so. It needs

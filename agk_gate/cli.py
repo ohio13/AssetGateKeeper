@@ -539,7 +539,8 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
                 max_materials=budget.max_material_slots,
                 head_share=getattr(args, "bake_head_share", None),
                 face_layout=getattr(args, "bake_face_layout", None) or "",
-                body_textures=getattr(args, "bake_body_textures", None) or 0)
+                body_textures=getattr(args, "bake_body_textures", None) or 0,
+                painted_parts=getattr(args, "bake_paint_parts", None))
         except module.PolypaintError as exc:
             LOG.error("%s", exc)
             return 2
@@ -562,7 +563,8 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
                 max_materials=budget.max_material_slots,
                 head_share=getattr(args, "bake_head_share", None),
                 face_layout=getattr(args, "bake_face_layout", None) or "",
-                body_textures=getattr(args, "bake_body_textures", None) or 0)
+                body_textures=getattr(args, "bake_body_textures", None) or 0,
+                painted_parts=getattr(args, "bake_paint_parts", None))
         except module.PolypaintError as exc:
             LOG.error("%s", exc)
             return 2
@@ -577,7 +579,7 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
              f" in {settings['colours']} colours" if settings["colours"] else "",
              (" + a face texture" + (f" ({layout})" if layout != "single" else ""))
              if settings.get("face_texture") else "",
-             " + a lower-body texture" if settings.get("body_textures", 1) > 1 else "",
+             " + a second body texture" if settings.get("body_textures", 1) > 1 else "",
              f" (preset {preset})" if preset else "")
     try:
         skip = [name.strip() for name in (getattr(args, "bake_skip_materials", None) or "").split(",")
@@ -591,6 +593,7 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
                              face_layout=settings.get("face_layout", "single")
                              if settings.get("face_texture") else "single",
                              body_textures=settings.get("body_textures", 1),
+                             painted_parts=settings.get("painted_parts", False),
                              progress=lambda name, i, n: LOG.info("bake    %d/%d %s", i + 1, n, name))
     except module.PolypaintError as exc:
         LOG.error("%s", exc)
@@ -1449,8 +1452,17 @@ def build_parser() -> argparse.ArgumentParser:
                              "(both); each extra texture is another material")
     parser.add_argument("--bake-body-textures", type=int, default=None, choices=(1, 2),
                         metavar="N",
-                        help="with --bake: 2 gives the lower body a texture of its own "
-                             "(another material); 1 by default")
+                        help="with --bake: 2 gives the rest of the head (hair, ears) a "
+                             "texture of its own, split from the body at the neck - or the "
+                             "lower body, on a model with no face (another material); 1 by "
+                             "default")
+    parser.add_argument("--bake-paint-parts", action="store_true", dest="bake_paint_parts",
+                        default=None,
+                        help="with --bake: leave the small parts in the head (eyeballs, lashes, "
+                             "teeth) off the reduced mesh and paint them on the surface behind "
+                             "them, as an N64 face is (on with the n64 presets)")
+    parser.add_argument("--bake-no-paint-parts", action="store_false", dest="bake_paint_parts",
+                        help="with --bake: keep every small part as geometry")
     parser.add_argument("--bake-skip-materials", default=None, metavar="NAMES",
                         help="with --bake on a textured model: leave out the materials named "
                              "(comma-separated), e.g. a game rip's outline shell or weapon")

@@ -836,15 +836,17 @@ with sync_playwright() as playwright:
             tris: document.getElementById("bake-triangles").value,
             head: document.getElementById("bake-head").value,
             layout: document.getElementById("bake-face-layout").value,
+            paint: document.getElementById("bake-paint").checked,
             pakTris: Array.from(document.querySelectorAll("#bake-triangles .pak-only"))
                           .filter((o) => !o.hidden && !o.disabled).length })""")
     bake_set("#bake-preset", "")
-    expect("no Expansion Pak box for a modern game asset",
-           not bake_state()["pak"] and not bake_state()["row"], bake_state())
+    expect("no Expansion Pak box for a modern game asset, and its eyes stay geometry",
+           not bake_state()["pak"] and not bake_state()["row"] and not bake_state()["paint"],
+           bake_state())
     bake_set("#bake-preset", "n64")
     expect("N64 style shows the Expansion Pak box, its choices still closed",
            bake_state()["pak"] and not bake_state()["row"] and bake_state()["pakTris"] == 0
-           and bake_state()["tris"] == "1200", bake_state())
+           and bake_state()["tris"] == "1200" and bake_state()["paint"], bake_state())
     bake_set("#bake-pak", True)
     expect("ticked: 3,000 tris, the head 60%, the face layouts and 3,000-4,000 tris open",
            bake_state()["row"] and bake_state()["tris"] == "3000" and bake_state()["head"] == "0.6"
