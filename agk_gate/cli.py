@@ -536,7 +536,10 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
                 getattr(args, "bake_normal", None), getattr(args, "bake_colours", None),
                 max_triangles=budget.max_triangles, max_texture=budget.max_texture_edge,
                 face_texture=getattr(args, "bake_face", None),
-                max_materials=budget.max_material_slots)
+                max_materials=budget.max_material_slots,
+                head_share=getattr(args, "bake_head_share", None),
+                face_layout=getattr(args, "bake_face_layout", None) or "",
+                body_textures=getattr(args, "bake_body_textures", None) or 0)
         except module.PolypaintError as exc:
             LOG.error("%s", exc)
             return 2
@@ -551,19 +554,30 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
             LOG.warning("the triangle budget here is %s, so the baked mesh will have %s triangles; "
                         "use --bake-triangles 30000 for more", f"{triangles:,}", f"{triangles:,}")
         normal = getattr(args, "bake_normal", None)
-        settings = module.resolve_settings(
-            "", args.bake_triangles or triangles, args.bake_texture or edge,
-            True if normal is None else normal, getattr(args, "bake_colours", None) or 0,
-            face_texture=getattr(args, "bake_face", None),
-            max_materials=budget.max_material_slots)
+        try:
+            settings = module.resolve_settings(
+                "", args.bake_triangles or triangles, args.bake_texture or edge,
+                True if normal is None else normal, getattr(args, "bake_colours", None) or 0,
+                face_texture=getattr(args, "bake_face", None),
+                max_materials=budget.max_material_slots,
+                head_share=getattr(args, "bake_head_share", None),
+                face_layout=getattr(args, "bake_face_layout", None) or "",
+                body_textures=getattr(args, "bake_body_textures", None) or 0)
+        except module.PolypaintError as exc:
+            LOG.error("%s", exc)
+            return 2
     if settings.get("face_texture_note"):
-        LOG.warning("%s; allow 2 with max_material_slots = 2 in rules.toml", settings["face_texture_note"])
+        LOG.warning("%s; raise max_material_slots in rules.toml to allow more",
+                    settings["face_texture_note"])
     edge = settings["texture"]
-    LOG.info("bake    %s -> %s triangles, %dx%d BaseColor%s%s%s%s", source.name,
+    layout = settings.get("face_layout", "single")
+    LOG.info("bake    %s -> %s triangles, %dx%d BaseColor%s%s%s%s%s", source.name,
              f"{settings['triangles']:,}", edge, edge,
              " + Normal" if settings["normal_map"] else "",
              f" in {settings['colours']} colours" if settings["colours"] else "",
-             " + a face texture" if settings.get("face_texture") else "",
+             (" + a face texture" + (f" ({layout})" if layout != "single" else ""))
+             if settings.get("face_texture") else "",
+             " + a lower-body texture" if settings.get("body_textures", 1) > 1 else "",
              f" (preset {preset})" if preset else "")
     try:
         skip = [name.strip() for name in (getattr(args, "bake_skip_materials", None) or "").split(",")
@@ -572,8 +586,11 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
                              texture=edge, normal_map=settings["normal_map"],
                              colours=settings["colours"], preset=preset,
                              face_texture=settings.get("face_texture", False),
-                             head_share=getattr(args, "bake_head_share", None) or 0.0,
+                             head_share=settings.get("head_share", 0.0),
                              skip_materials=skip,
+                             face_layout=settings.get("face_layout", "single")
+                             if settings.get("face_texture") else "single",
+                             body_textures=settings.get("body_textures", 1),
                              progress=lambda name, i, n: LOG.info("bake    %d/%d %s", i + 1, n, name))
     except module.PolypaintError as exc:
         LOG.error("%s", exc)
@@ -584,17 +601,13 @@ def run_bake_polypaint(source: Path, budget: "Budget", args: argparse.Namespace)
                   "--bake-texture (2048 is the default; 8192 needs about 4 GB) or "
                   "--bake-triangles", source.name, edge, edge, f"{settings['triangles']:,}")
         return 2
-    made = [Path(result["mesh"]), Path(result["texture"])]
-    for key in ("normal", "face_texture", "face_normal"):
-        if result.get(key):
-            made.append(Path(result[key]))
+    made = [Path(result["mesh"])] + [Path(name) for name in result["textures"]]
     LOG.info("bake    wrote %s in %s s (%s)", ", ".join(path.name for path in made),
              result["seconds"], result["note"])
     # A texture an earlier bake wrote that this one did not (a normal map before
     # an N64 bake, say) is not part of the new .glb; say so rather than leave it
     # looking current. Nothing is deleted.
-    face_base, face_normal = module.face_texture_names(source)
-    for name in (module.normal_map_name(source), face_base, face_normal):
+    for name in module.texture_names(source):
         old = source.parent / name
         if old.is_file() and old not in made:
             LOG.warning("bake    %s is from an earlier bake and is not used by %s; "
@@ -1404,9 +1417,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--bake-texture", type=int, default=None, metavar="PX",
                         help="with --bake-polypaint: texture size, a power of two (default: "
                              "the texture budget, at most 2048)")
-    parser.add_argument("--bake-preset", default=None, metavar="NAME", choices=("n64",),
+    parser.add_argument("--bake-preset", default=None, metavar="NAME", choices=("n64", "n64-pak"),
                         help="with --bake-polypaint: n64 = Nintendo 64 style: about 1,200 "
-                             "triangles, a 64 px texture in 16 colours, no normal map "
+                             "triangles, a 64 px texture in 16 colours, no normal map; "
+                             "n64-pak = with the Expansion Pak, for a character with little "
+                             "else on screen: 3,000 triangles (60%% for the head), the face "
+                             "mirrored with an eye strip of its own "
                              "(never more than the folder's rules allow)")
     parser.add_argument("--bake-no-normal", action="store_false", dest="bake_normal",
                         default=None,
@@ -1425,6 +1441,16 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --bake: give the head (above the neck, found from the face) "
                              "this share of the triangles, 0.35-0.8 say, and the body the "
                              "rest: more keeps more of the head's shape (0 or unset: even)")
+    parser.add_argument("--bake-face-layout", default=None, metavar="LAYOUT",
+                        choices=("single", "mirror", "eyes", "eyes-mirror"),
+                        help="with --bake and a face texture: single (the face from the front), "
+                             "mirror (half the face, drawn mirrored: twice the texels across), "
+                             "eyes (a strip of its own for the eyes and brows) or eyes-mirror "
+                             "(both); each extra texture is another material")
+    parser.add_argument("--bake-body-textures", type=int, default=None, choices=(1, 2),
+                        metavar="N",
+                        help="with --bake: 2 gives the lower body a texture of its own "
+                             "(another material); 1 by default")
     parser.add_argument("--bake-skip-materials", default=None, metavar="NAMES",
                         help="with --bake on a textured model: leave out the materials named "
                              "(comma-separated), e.g. a game rip's outline shell or weapon")

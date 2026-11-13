@@ -69,6 +69,7 @@ one asset and gets one budget. If you need per-object budgets, export per object
 | `pbr_floor` | float | 0.02 | mean luminance below this is "black" |
 | `pbr_ceiling` | float | 0.94 | above this is "white" |
 | `pbr_suffixes` | list | `["_Albedo","_Diffuse","_BaseColor"]` | which suffixes are tested for PBR sanity |
+| `n64_tmem` | bool | false | each texture must fit the Nintendo 64's 4 KB texture memory in the format its colours allow: 16 colours or fewer load as CI4 (4,096 texels: 64x64, 128x32), 256 or fewer as CI8 (2,048: 64x32), more as RGBA16 (2,048). Textures packed in a `.glb` are held to 4,096 texels. On in the `n64` preset. The Expansion Pak adds RAM, not texture memory, so the limit is the same with it |
 
 The suffix list is a studio convention, not a universal truth. Change the list
 rather than switching `naming` off: a list documents the convention, a boolean

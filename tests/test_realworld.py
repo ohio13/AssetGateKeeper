@@ -750,6 +750,8 @@ try:
                polypaint.resolve_settings("n64") == {"preset": "n64", "triangles": 1200,
                                                      "texture": 64, "normal_map": False,
                                                      "colours": 16, "face_texture": True,
+                                                     "head_share": 0.0, "face_layout": "single",
+                                                     "body_textures": 1,
                                                      "face_texture_note": ""}
                and settings["triangles"] == 400 and settings["texture"] == 32,
                str(settings))
@@ -899,7 +901,7 @@ try:
                done.returncode == 0 and "PASSED  SM_Hero_LP.glb" in done.stdout
                and "PASSED  T_Hero_LP_BaseColor.png" in done.stdout
                and "PASSED  T_Hero_LP_Face_BaseColor.png" in done.stdout
-               and "the face has its own 64x64 texture" in done.stdout + done.stderr,
+               and "textures of their own: the face 64x64" in done.stdout + done.stderr,
                done.stdout[-700:] + done.stderr[-300:])
         document, _, images = read_glb_parts(hero / "SM_Hero_LP.glb")
         primitives = document["meshes"][0]["primitives"]
@@ -1154,6 +1156,100 @@ try:
                                                               _np.asarray(_even_mesh.faces))[1])
         expect("... and the neck is closed: no more open edges than an even reduction",
                _open <= _open_even, (_open, _open_even))
+        # 12 Nov 2026, the Expansion Pak: more textures in memory for a character
+        # alone on screen - the face mirrored (half of it, drawn twice: twice
+        # the texels across) and the eyes on a strip of their own.
+        _pak = polypaint.resolve_settings("n64-pak")
+        expect("the n64-pak preset: 3,000 tris, the head 60%, the face mirrored with an eye "
+               "strip, 64 px in 16 colours, no normal map",
+               (_pak["triangles"], _pak["head_share"], _pak["face_layout"], _pak["texture"],
+                _pak["colours"], _pak["normal_map"], _pak["face_texture"])
+               == (3000, 0.6, "eyes-mirror", 64, 16, False, True), _pak)
+        _two = polypaint.resolve_settings("n64-pak", body_textures=2, max_materials=2)
+        expect("... rules with two material slots: the lower body and the eye strip go first, "
+               "and the note says why",
+               _two["body_textures"] == 1 and _two["face_layout"] == "mirror" and _two["face_texture"]
+               and "no second body texture" in _two["face_texture_note"]
+               and "no eye strip" in _two["face_texture_note"], _two)
+        expect("... a material count per layout",
+               [polypaint.material_count(True, layout) for layout in polypaint.FACE_LAYOUTS]
+               == [2, 2, 3, 3] and polypaint.material_count(True, "eyes-mirror", 2) == 4)
+        for _bad in ({"face_layout": "sideways"}, {"body_textures": 3}):
+            try:
+                polypaint.resolve_settings("n64-pak", **_bad)
+            except polypaint.PolypaintError:
+                pass
+            else:
+                expect(f"{_bad} is refused", False)
+        _single = polypaint.bake(hero / "SM_Hero_HP.obj", WORK / "pak_single", triangles=3000,
+                                 texture=64, normal_map=False, colours=16, face_texture=True)
+        _single_dark = int((_np.asarray(_Image.open(WORK / "pak_single" / "T_Hero_LP_Face_BaseColor.png")
+                                        .convert("RGB")).max(axis=2) < 70).sum())
+        _mirror = polypaint.bake(hero / "SM_Hero_HP.obj", WORK / "pak_mirror", triangles=3000,
+                                 texture=64, normal_map=False, colours=16, face_texture=True,
+                                 face_layout="mirror")
+        document, _, images = read_glb_parts(WORK / "pak_mirror" / "SM_Hero_LP.glb")
+        _wraps = [document["samplers"][document["textures"][material["pbrMetallicRoughness"][
+            "baseColorTexture"]["index"]]["sampler"]]["wrapS"] for material in document["materials"]]
+        expect("mirror: the face's texture repeats mirrored across (glTF MIRRORED_REPEAT), the "
+               "body's does not",
+               _wraps == [10497, 33648] and _mirror["parts"][1]["mirror"], (_wraps, _mirror["note"]))
+        _mirror_face = _np.asarray(_Image.open(WORK / "pak_mirror" / "T_Hero_LP_Face_BaseColor.png")
+                                   .convert("RGB"))
+        _dark_cols = _np.nonzero(_mirror_face.max(axis=2) < 70)[1]
+        expect("... it holds one eye (half the face), the nose line at its left edge",
+               len(_dark_cols) and _dark_cols.min() > 4 and _dark_cols.max() < 64 * 0.95,
+               (_dark_cols.min(), _dark_cols.max()) if len(_dark_cols) else None)
+        expect("... with about twice the texels of one eye in the unmirrored face texture",
+               int((_mirror_face.max(axis=2) < 70).sum()) >= 1.6 * _single_dark / 2,
+               (int((_mirror_face.max(axis=2) < 70).sum()), _single_dark))
+        _strip = polypaint.bake(hero / "SM_Hero_HP.obj", WORK / "pak_eyes", triangles=3000,
+                                texture=64, normal_map=False, colours=16, face_texture=True,
+                                face_layout="eyes-mirror", body_textures=2)
+        _suffixes = [part["suffix"] for part in _strip["parts"]]
+        expect("eyes-mirror, two body textures: four materials - body, lower body, face, eyes",
+               _suffixes == ["", "_Lower", "_Face", "_Eyes"] and _strip["materials"] == 4
+               and all((WORK / "pak_eyes" / f"T_Hero_LP{suffix}_BaseColor.png").is_file()
+                       for suffix in _suffixes), (_suffixes, _strip["note"]))
+        _eyes = _np.asarray(_Image.open(WORK / "pak_eyes" / "T_Hero_LP_Eyes_BaseColor.png").convert("RGB"))
+        expect("... every texture fits the N64's 4 KB texture memory in 16 colours (4,096 texels)",
+               all(part["size"][0] * part["size"][1] <= 4096 for part in _strip["parts"])
+               and _eyes.shape[0] * _eyes.shape[1] <= 4096, [part["size"] for part in _strip["parts"]])
+        expect("... and the eye strip holds the eye",
+               int((_eyes.max(axis=2) < 70).sum()) > 0, _strip["note"])
+        expect("... the body split in two at about half its area",
+               0.3 <= _strip["parts"][0]["share"] / max(_strip["parts"][0]["share"]
+                                                        + _strip["parts"][1]["share"], 1e-9) <= 0.7,
+               [part["share"] for part in _strip["parts"]])
+        # A face that is not symmetric (hair painted across one eye): mirrored,
+        # that eye would be drawn on top of the hair. It is not mirrored.
+        _lopsided = WORK / "lopsided"
+        _lopsided.mkdir()
+        _text = figure_text.splitlines()
+        _vertex_rows = [k for k, line in enumerate(_text) if line.startswith("v ")]
+        _colour_rows = [k for k, line in enumerate(_text) if line.startswith("#MRGB ")]
+        _points = _np.array([[float(x) for x in _text[k].split()[1:4]] for k in _vertex_rows])
+        _groups = [chunk for k in _colour_rows for chunk in
+                   (_text[k][6:][i:i + 8] for i in range(0, len(_text[k]) - 6, 8))]
+        for _k, (_x, _y, _z) in enumerate(_points):
+            if _y > 1.45 and _x < -0.02 and _z > 0:          # one side of the face: hair
+                _groups[_k] = "ffe6c85a"
+        _rows = ["#MRGB " + "".join(_groups[i:i + 64]) for i in range(0, len(_groups), 64)]
+        _out = [line for line in _text if not line.startswith("#MRGB ")]
+        _first_face = next(k for k, line in enumerate(_out) if line.startswith("f "))
+        (_lopsided / "SM_Hero_HP.obj").write_text(
+            "\n".join(_out[:_first_face] + _rows + _out[_first_face:]) + "\n", encoding="utf-8")
+        _flat = polypaint.bake(_lopsided / "SM_Hero_HP.obj", _lopsided, triangles=3000, texture=64,
+                               normal_map=False, colours=16, face_texture=True, face_layout="mirror")
+        expect("a face with hair across one eye is not mirrored, and the note says why",
+               not any(part["mirror"] for part in _flat["parts"]) and "not mirrored" in _flat["note"],
+               _flat["note"][-300:])
+        done = run_gate(hero / "SM_Hero_HP.obj", "--bake", "--bake-preset", "n64-pak",
+                        "--bake-face-layout", "mirror")
+        expect("--bake-preset n64-pak --bake-face-layout mirror on the command line (rules with "
+               "two material slots and 1,200 tris here: within them)",
+               done.returncode == 0 and "the face 64x64 mirrored" in done.stdout + done.stderr,
+               done.stdout[-600:] + done.stderr[-300:])
         done = run_gate(hero / "SM_Hero_HP.obj", "--bake", "--bake-preset", "n64",
                         "--bake-head-share", "0.5")
         expect("--bake-head-share on the command line",

@@ -770,6 +770,40 @@ def lightmap_problems(facts: dict, budget: "Budget", problems: list, warnings: l
                                 "lightmap UVs so no islands overlap")
 
 
+#: Texels of one texture the Nintendo 64's 4 KB texture memory (TMEM) holds,
+#: by the format its colours allow: 16 colours or fewer load as CI4 (4 bits a
+#: texel; the palette takes half of TMEM), 256 or fewer as CI8 (8 bits; the
+#: palette again half), more as RGBA16 (16 bits, the whole 4 KB).
+N64_TMEM_TEXELS = {"CI4": 4096, "CI8": 2048, "RGBA16": 2048}
+
+
+def n64_tmem_check(path: Path, width: int, height: int) -> tuple:
+    """(format, problem): the N64 format a texture's colours allow, and why it
+    does not fit the 4 KB texture memory ("" if it does)."""
+    if Image is None or path.suffix.lower() in HEADER_ONLY_TEXTURES:
+        return "", ""
+    try:
+        with Image.open(path) as image:
+            colours = image.convert("RGBA").getcolors(maxcolors=257)
+    except (OSError, ValueError):
+        return "", ""
+    count = len(colours) if colours is not None else 257
+    kind = "CI4" if count <= 16 else "CI8" if count <= 256 else "RGBA16"
+    limit = N64_TMEM_TEXELS[kind]
+    texels = width * height
+    if texels <= limit:
+        return kind, ""
+    many = "over 256" if colours is None else f"{count}"
+    if kind == "CI4":
+        advice = "the most any N64 texture can have; make it smaller (64x64, 128x32)"
+    else:
+        smaller = "reduce it to 16 colours (CI4: 4,096 texels)" if texels <= 4096 else \
+            "make it smaller"
+        advice = f"{smaller} or keep it to {limit:,} texels (64x32)"
+    return kind, (f"{width}x{height} ({texels:,} texels, {many} colours: {kind}) does not fit "
+                  f"the N64's 4 KB texture memory - {kind} holds {limit:,} texels; {advice}")
+
+
 class Gatekeeper:
     """Applies the budget rules and returns a Verdict. No I/O side effects.
 
@@ -1067,14 +1101,21 @@ class Gatekeeper:
             # Up to three are named one per line; more become one line, so a
             # file with 100 packed textures (NodePerformanceTest.glb) is not a
             # hundred-line verdict.
+            # The N64's texture memory holds 4,096 texels at most (16 colours);
+            # packed textures are not decoded here, so only that ceiling is checked.
+            over_tmem = [(label, width, height) for label, width, height in packed
+                         if self.budget.n64_tmem and width * height > N64_TMEM_TEXELS["CI4"]]
             for found, wording in ((too_big, f"exceeds the {edge}x{edge} maximum resolution"),
-                                   (not_pot, "is not a power of two")):
+                                   (not_pot, "is not a power of two"),
+                                   (over_tmem, "has more texels than the N64's 4 KB texture "
+                                               "memory holds at any colour depth (4,096)")):
                 if len(found) <= 3:
                     problems.extend(f"embedded texture '{label}' {width}x{height} {wording}"
                                     for label, width, height in found)
                 else:
                     named = ", ".join(f"'{label}' {width}x{height}" for label, width, height in found[:3])
-                    verb = wording.replace("exceeds", "exceed").replace("is not a power", "are not powers")
+                    verb = (wording.replace("exceeds", "exceed").replace("is not a power", "are not powers")
+                            .replace("has more", "have more"))
                     problems.append(f"{len(found)} embedded textures {verb} ({named} and "
                                     f"{len(found) - 3} more)")
 
@@ -1234,6 +1275,12 @@ class Gatekeeper:
         if self.budget.require_power_of_two and not (is_power_of_two(width) and is_power_of_two(height)):
             problems.append(f"{width}x{height} is not a power of two")
 
+        n64_format = ""
+        if self.budget.n64_tmem:
+            n64_format, tmem_problem = n64_tmem_check(path, width, height)
+            if tmem_problem:
+                problems.append(tmem_problem)
+
         # GPU memory in the target's compressed format, mips included (G2).
         texture_format = (self.budget.normal_format if is_normal_name(path)
                           else self.budget.texture_format)
@@ -1258,7 +1305,8 @@ class Gatekeeper:
             if violation:
                 problems.append(violation)
 
-        return Verdict(path, tuple(problems), f"{width}x{height}{memory_metric}",
+        return Verdict(path, tuple(problems),
+                       f"{width}x{height}{memory_metric}" + (f" {n64_format}" if n64_format else ""),
                        (("width", width), ("height", height), ("memory_kb", memory // 1024)))
 
     def _is_pbr(self, path: Path) -> bool:

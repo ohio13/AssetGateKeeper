@@ -1,5 +1,26 @@
 # Unreleased (on `main`)
 
+* **Bake: the Expansion Pak (12 Nov).** For a character with little else
+  on screen - an ending cutscene, a title screen - the review page's N64
+  style has an **Expansion Pak** box. Ticked, it starts at 3,000 triangles
+  with 60% for the head, offers 3,000 and 4,000, and opens two choices:
+  the face's layout (one texture; mirrored - half the face drawn twice by
+  the texture's mirror setting, twice the texels across; an eye strip of
+  its own; or both) and one or two body textures. Every texture is still
+  64 px in 16 colours, so each fits the N64's 4 KB texture memory; the Pak
+  adds RAM, which holds more of them. The mirror line is found from the
+  sculpt's colours, and a face with hair across one eye is not mirrored.
+  On the command line: `--bake-preset n64-pak`, `--bake-face-layout`,
+  `--bake-body-textures`. New rule: `[texture] n64_tmem = true` (on in the
+  `n64` preset) fails a texture that does not fit TMEM in the format its
+  colours allow - CI4 4,096 texels, CI8 and RGBA16 2,048.
+
+* **Bake: a 2,000-triangle choice (12 Nov).** The review page's bake offers
+  2,000 triangles between 1,200 and 5,000: the budget of a showcase N64
+  model (title screens, menus, close-ups). N64 style still starts at 1,200;
+  pick 2,000 after it. With a folder's `max_triangles = 2000`, the command
+  line takes `--bake-preset n64 --bake-triangles 2000`.
+
 * **Bake: a triangle budget for the head, and game rips that bake cleanly
   (12 Nov).** `--bake-head-share 0.65` (or **Head** on the review page)
   gives the head - above the neck, found from the face - that share of the

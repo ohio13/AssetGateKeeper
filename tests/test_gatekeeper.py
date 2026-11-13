@@ -178,6 +178,42 @@ budget2, _, overrides2 = agk.resolve_budget(cfg, parse("--triangles", "99999"))
 expect("CLI overrides rules.toml", budget2.max_triangles == 99_999 and "max_triangles" in overrides2)
 expect("CLI only overrides what was passed", budget2.max_texture_edge == 512)
 
+# [texture] n64_tmem (12 Nov 2026): a texture must fit the N64's 4 KB texture
+# memory in the format its colours allow (CI4 4,096 texels, CI8 and RGBA16 2,048).
+from PIL import Image as _TmemImage  # noqa: E402
+tmem = scratch / "tmem"
+tmem.mkdir(exist_ok=True)
+(tmem / "rules.toml").write_text("[texture]\nmax_edge = 256\nnaming = false\npbr = false\n"
+                                 "n64_tmem = true\n", encoding="utf-8")
+tmem_budget, _, _ = agk.resolve_budget(tmem, agk.build_parser().parse_args([str(tmem)]))
+expect("[texture] n64_tmem is read", tmem_budget.n64_tmem is True and agk.Budget().n64_tmem is False)
+
+
+def _tmem_png(name, width, height, colours):
+    image = _TmemImage.new("RGB", (width, height))
+    image.putdata([((k % colours) * 7 % 256, (k % colours) * 13 % 256, (k % colours) // 3 % 256)
+                   for k in range(width * height)])
+    image.save(tmem / name)
+    return agk.Gatekeeper(tmem_budget).check(tmem / name)
+
+
+for name, size, colours, fits, kind in (("ci4_64.png", (64, 64), 16, True, "CI4"),
+                                        ("ci4_128x32.png", (128, 32), 16, True, "CI4"),
+                                        ("ci4_128.png", (128, 128), 16, False, "CI4"),
+                                        ("ci8_64.png", (64, 64), 200, False, "CI8"),
+                                        ("ci8_64x32.png", (64, 32), 200, True, "CI8"),
+                                        ("rgba_64.png", (64, 64), 1000, False, "RGBA16")):
+    verdict = _tmem_png(name, *size, colours)
+    over = [p for p in verdict.problems if "4 KB texture memory" in p]
+    expect(f"n64_tmem: {size[0]}x{size[1]} in {colours} colours is {kind} and "
+           f"{'fits' if fits else 'does not fit'}",
+           (not over) == fits and kind in verdict.metric, (verdict.metric, over))
+expect("... and the problem says what would fit",
+       any("reduce it to 16 colours" in p for p in _tmem_png("ci8_64.png", 64, 64, 200).problems),
+       _tmem_png("ci8_64.png", 64, 64, 200).problems)
+expect("the n64 platform preset turns it on",
+       agk.PLATFORM_PRESETS["n64"]["document"]["texture"].get("n64_tmem") is True)
+
 # A negative cap is a typo, not a tighter budget: it used to be accepted and then
 # failed every mesh in the repository, blaming the art.
 for flag, value, label in (("--triangles", "-1", "a negative triangle cap"),

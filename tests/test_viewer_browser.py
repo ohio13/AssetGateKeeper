@@ -819,6 +819,43 @@ with sync_playwright() as playwright:
     page.uncheck("#lod-shippable")
     page.select_option("#lod-preset", "0.5,0.25,0.125")
 
+    print("8k. bake settings: the Expansion Pak (12 Nov 2026)")
+    # The controls are driven directly: they work the same whether or not the
+    # asset on screen can be baked.
+    def bake_set(selector, value):
+        page.evaluate("""([selector, value]) => {
+            const element = document.querySelector(selector);
+            if (element.type === "checkbox") element.checked = value; else element.value = value;
+            element.dispatchEvent(new Event("change"));
+        }""", [selector, value])
+
+    def bake_state():
+        return page.evaluate("""() => ({
+            pak: !document.getElementById("bake-pak-label").hidden,
+            row: !document.getElementById("bake-pak-row").hidden,
+            tris: document.getElementById("bake-triangles").value,
+            head: document.getElementById("bake-head").value,
+            layout: document.getElementById("bake-face-layout").value,
+            pakTris: Array.from(document.querySelectorAll("#bake-triangles .pak-only"))
+                          .filter((o) => !o.hidden && !o.disabled).length })""")
+    bake_set("#bake-preset", "")
+    expect("no Expansion Pak box for a modern game asset",
+           not bake_state()["pak"] and not bake_state()["row"], bake_state())
+    bake_set("#bake-preset", "n64")
+    expect("N64 style shows the Expansion Pak box, its choices still closed",
+           bake_state()["pak"] and not bake_state()["row"] and bake_state()["pakTris"] == 0
+           and bake_state()["tris"] == "1200", bake_state())
+    bake_set("#bake-pak", True)
+    expect("ticked: 3,000 tris, the head 60%, the face layouts and 3,000-4,000 tris open",
+           bake_state()["row"] and bake_state()["tris"] == "3000" and bake_state()["head"] == "0.6"
+           and bake_state()["layout"] == "eyes-mirror" and bake_state()["pakTris"] == 2,
+           bake_state())
+    bake_set("#bake-pak", False)
+    expect("unticked: back to 1,200 and the Pak's choices closed",
+           not bake_state()["row"] and bake_state()["tris"] == "1200" and bake_state()["pakTris"] == 0,
+           bake_state())
+    bake_set("#bake-preset", "")
+
     print("8b. a big model: a lighter preview first, a progress bar, then full detail (10 Nov 2026)")
     if aws.light_preview.available():
         _saved = (aws.light_preview.LIGHT_TRIANGLES, aws.light_preview.LIGHT_TARGET)

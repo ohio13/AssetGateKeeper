@@ -101,6 +101,11 @@ class Budget:
     # indices. Estimates, calibrated against the engine's own numbers.
     max_texture_mb: float = 0.0
     max_mesh_mb: float = 0.0
+    # [texture] n64_tmem (12 Nov 2026): each texture must fit the Nintendo 64's
+    # 4 KB texture memory in the format its colours allow - 16 colours or fewer
+    # load as CI4 (4,096 texels), 256 or fewer as CI8 (2,048), more as RGBA16
+    # (2,048). The Expansion Pak adds RAM, not texture memory: the same limit.
+    n64_tmem: bool = False
     texture_format: str = "bc7"           # colour textures
     normal_format: str = "bc5"            # textures named _Normal/_nrm/_n
     # What the engine adds to every static mesh on import. Unreal's defaults:
@@ -286,7 +291,7 @@ class Budget:
                                "depth_index_buffer"), "[mesh]")
         _reject_unknown(texture, ("max_edge", "power_of_two", "naming", "suffixes",
                                   "pbr", "pbr_floor", "pbr_ceiling", "pbr_suffixes",
-                                  "max_mb", "format", "normal_format"), "[texture]")
+                                  "max_mb", "format", "normal_format", "n64_tmem"), "[texture]")
         memory = _read_memory(mesh, texture)
         structure = _read_structure(document)
         rigging = _read_skeleton_lightmap(document)
@@ -316,6 +321,7 @@ class Budget:
         pbr_floor = _read_float(texture, "pbr_floor", "[texture]")
         pbr_ceiling = _read_float(texture, "pbr_ceiling", "[texture]")
         pbr_suffixes = _read_strings(texture, "pbr_suffixes", "[texture]")
+        n64_tmem = _read_bool(texture, "n64_tmem", "[texture]")
 
         # Geometric boundary profiling
         audit_transforms = _read_bool(mesh, "audit_transforms", "[mesh]")
@@ -361,6 +367,7 @@ class Budget:
             ),
             exclude=defaults.exclude if exclude is None else exclude,
             pbr_check=defaults.pbr_check if pbr_check is None else pbr_check,
+            n64_tmem=defaults.n64_tmem if n64_tmem is None else n64_tmem,
             pbr_floor=defaults.pbr_floor if pbr_floor is None else pbr_floor,
             pbr_ceiling=defaults.pbr_ceiling if pbr_ceiling is None else pbr_ceiling,
             pbr_suffixes=defaults.pbr_suffixes if pbr_suffixes is None else pbr_suffixes,
@@ -826,7 +833,8 @@ def apply_platform(document: dict, platform: str) -> dict:
 
 def _preset(label: str, notes: str, *, character: int, prop: int, texture: int,
             slots: int, power_of_two: bool, pbr: bool, uv: int, influences: int,
-            naming: bool = False, legacy: bool = False) -> dict[str, object]:
+            naming: bool = False, legacy: bool = False,
+            texture_rules: Optional[dict] = None) -> dict[str, object]:
     return {
         "label": label,
         "notes": notes,
@@ -850,6 +858,7 @@ def _preset(label: str, notes: str, *, character: int, prop: int, texture: int,
                 "power_of_two": power_of_two,
                 "pbr": pbr,
                 "naming": naming,
+                **(texture_rules or {}),
             },
             "tags": {
                 "character": {"max_triangles": character},
@@ -862,7 +871,7 @@ def _preset(label: str, notes: str, *, character: int, prop: int, texture: int,
 PLATFORM_PRESETS: dict[str, dict[str, object]] = {
     "n64": _preset("Nintendo 64", "4 MB RDRAM, 4 KB TMEM, no programmable shading",
                     character=1_200, prop=400, texture=64, slots=2, power_of_two=True,
-                    pbr=False, uv=1, influences=1),
+                    pbr=False, uv=1, influences=1, texture_rules={"n64_tmem": True}),
     "ps1": _preset("Sony PlayStation", "1 MB VRAM, affine texture mapping",
                     character=1_100, prop=350, texture=256, slots=1, power_of_two=True,
                     pbr=False, uv=1, influences=1),
