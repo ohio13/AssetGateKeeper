@@ -1637,6 +1637,9 @@ def _bake_view(sculpt: Sculpt, sculpt_vertices, refs, positions, normals, tangen
     to_uv, *_ = np.linalg.lstsq(flat, uvs[used], rcond=None)            # (3, 2)
     face_of = np.nonzero((refs >= 0).any(axis=1))[0]
     face_of = face_of[_dot(sculpt.face_normals[face_of].astype(np.float64), towards[None, :]) > 0.0]
+    in_shell = getattr(sculpt, "wrapped", None)
+    if in_shell is not None:
+        face_of = face_of[~in_shell[face_of]]
     corners = sculpt_vertices[sculpt.faces[face_of]].reshape(-1, 3)
     uv_corners = (np.stack([across_of(corners), corners @ up, np.ones(len(corners))], axis=1)
                   @ to_uv) * grid
@@ -2723,6 +2726,63 @@ def _assemble(parts, low_positions, low_faces, nearest, xatlas, texture: int, pa
             "nearest": renumber[nearest]}
 
 
+#: A triangle whose UVs cover less than this (in UV area; a texel of a 128 px
+#: texture is 6e-5) has no texel to call its own; it takes one from the
+#: POINT_UV_NEAR triangles of its part nearest it.
+POINT_UV_AREA = 1e-7
+POINT_UV_NEAR = 12
+
+
+def _mend_point_uvs(positions, uvs, part_faces, images, sculpt, spatial) -> int:
+    """Give each triangle whose UVs have shrunk to a point or a line a texel
+    that is its colour (in place); how many were mended.
+
+    A sliver a hundredth of a texel across gets no room in a small texture and
+    its UVs end at the texture's corner: on a face it showed as a speck of
+    whatever colour lies there (hair yellow on the bridge of the nose, 14 Nov
+    2026). It takes the UV of the triangle of its part, among the nearest,
+    whose texel is closest to the sculpt's colour where the sliver is.
+    ``images``: each part's baked BaseColor."""
+    import numpy as np
+    mended = 0
+    for faces, image in zip(part_faces, images):
+        if len(faces) < 2:
+            continue
+        corner = uvs[faces]
+        size = 0.5 * np.abs((corner[:, 1, 0] - corner[:, 0, 0]) * (corner[:, 2, 1] - corner[:, 0, 1])
+                            - (corner[:, 2, 0] - corner[:, 0, 0]) * (corner[:, 1, 1] - corner[:, 0, 1]))
+        point = size < POINT_UV_AREA
+        if not point.any() or point.all():
+            continue
+        good = faces[~point]
+        texels = np.asarray(image.convert("RGB"), np.float32) / 255.0
+        high, wide = texels.shape[:2]
+        middle_uv = uvs[good].mean(axis=1)
+        column = np.clip((middle_uv[:, 0] * wide).astype(np.int64), 0, wide - 1)
+        row = np.clip(((1.0 - middle_uv[:, 1]) * high).astype(np.int64), 0, high - 1)
+        shown = texels[row, column]
+        middles = positions[faces[point]].mean(axis=1)
+        face, bary, _ = sculpt.closest(middles)
+        wanted = sculpt.colour(face, bary)
+        tree = spatial.cKDTree(positions[good].mean(axis=1))
+        _, near = tree.query(middles, k=min(POINT_UV_NEAR, len(good)))
+        near = near.reshape(len(middles), -1)
+        best = near[np.arange(len(middles)),
+                    np.argmin(np.abs(shown[near] - wanted[:, None, :]).sum(axis=2), axis=1)]
+        in_shell = getattr(sculpt, "wrapped", None)
+        if in_shell is not None:
+            # Nearest a strand that is now inside the hair's shell: the strand's
+            # colour is not the sliver's. The nearest triangle's will do.
+            best = np.where(in_shell[face], near[:, 0], best)
+        shared = np.zeros(len(uvs), bool)
+        shared[good] = True
+        for triangle, source in zip(faces[point], best):
+            own = triangle[~shared[triangle]]
+            uvs[own] = middle_uv[source]
+        mended += int(point.sum())
+    return mended
+
+
 def _bake_part(sculpt, sculpt_vertices, built: dict, index: int, shape, want_normal: bool,
                colours: int = 0, view=None):
     """One part's textures (_assemble): (BaseColor image, normal image or None,
@@ -2937,6 +2997,11 @@ FACE_LOOSE_BELOW = 0.9
 #: walls) join the face when they sit inside its outline and no further behind
 #: it than FACE_HOLLOW times the eyes' distance apart.
 FACE_HOLLOW = 0.5
+#: Once the face is framed from the eyes, a triangle turned further than this
+#: from the front leaves the face's texture (14 Nov 2026), except within
+#: FACE_STEEP_EYE (across, up; in eye distances) of an eye's middle.
+FACE_STEEP_DEGREES = 62.0
+FACE_STEEP_EYE = (0.3, 0.3)
 FACE_HOLLOW_GRID = 128
 
 
@@ -3771,6 +3836,7 @@ def _bake_one(source: Path, out_dir: Optional[Path] = None, triangles: int = DEF
     # which keeps them, and a 1,200-triangle bake came out at 4,628.
     weld_positions, weld_faces, kept = _weld(obj.vertices, obj.faces, with_kept=True)
     strand_note = ""
+    wrapped = []
     if textured:
         weld_positions, weld_faces, wrapped, strands = _wrap_strands(
             weld_positions, weld_faces, np.asarray(obj.material)[kept], simplify, triangles)
@@ -3902,6 +3968,10 @@ def _bake_one(source: Path, out_dir: Optional[Path] = None, triangles: int = DEF
         if sculpt is None:
             sculpt = (TexturedSculpt(obj, spatial) if textured
                       else Sculpt(obj.vertices, obj.faces, obj.colours, spatial))
+            if wrapped:
+                # Strands now inside a shell are the shell's to show: drawn on
+                # the face behind them, a strand's tip is a speck of hair colour.
+                sculpt.wrapped = np.isin(np.asarray(obj.material), wrapped)
         low_origin = None
         if sculpt_piece is not None:
             low_origin = piece_of_face[sculpt.closest(np.asarray(low_positions, np.float64))[0]]
@@ -4026,6 +4096,22 @@ def _bake_one(source: Path, out_dir: Optional[Path] = None, triangles: int = DEF
                         # painted on the forehead - 14 Nov 2026.)
                         if (~loose).sum() >= 8:
                             keep = keep[~loose]
+                        # The sides of the face (cheeks turning to the ears, the
+                        # temples) leave the front view: drawn from the front they
+                        # are a texel or two wide, pulled out into streaks, and an
+                        # eye's liner ran to the ear. Not round the eyes: lids and
+                        # the flat across a socket face every way.
+                        corners = low_positions[low_faces[keep]]
+                        facing = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+                        facing /= np.maximum(np.linalg.norm(facing, axis=1), 1e-30)[:, None]
+                        at = corners.mean(axis=1)
+                        by_eye = ((np.abs(np.abs(at @ right - across_eyes) - 0.5 * apart)
+                                   <= FACE_STEEP_EYE[0] * apart)
+                                  & (np.abs(at @ up - eye_height) <= FACE_STEEP_EYE[1] * apart))
+                        steep = (facing @ np.cross(right, up)
+                                 < np.cos(np.radians(FACE_STEEP_DEGREES))) & ~by_eye
+                        if (~steep).sum() >= 8:
+                            keep = keep[~steep]
                         keep = np.union1d(keep, _face_hollows(low_positions, low_faces, keep, right, up,
                                                               FACE_HOLLOW * apart))
                         if face_layout.startswith("eyes"):
@@ -4325,6 +4411,7 @@ def _bake_one(source: Path, out_dir: Optional[Path] = None, triangles: int = DEF
             fixed = face_palette[order[counts[order] > 0]]
         baked[eye_index] = (_reduce_colours(baked[eye_index][0].convert("RGB"), colours, covered,
                                             fixed=fixed),) + baked[eye_index][1:]
+    _mend_point_uvs(positions, uvs, part_faces, [item[0] for item in baked], sculpt, spatial)
     del sculpt, nearest
 
     out_dir = Path(out_dir) if out_dir is not None else Path(source).parent

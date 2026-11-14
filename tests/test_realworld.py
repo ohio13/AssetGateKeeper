@@ -1456,6 +1456,33 @@ try:
                                      texture=32, skip_materials=("membrane_mat",))
         expect("... left out of the bake, it is left out",
                "see-through" not in _solid_only["note"] and _solid_only["materials"] == 1)
+        # 14 Nov 2026: a sliver with no room in the texture had its UVs at the
+        # texture's corner and showed as a speck of the colour there.
+        _quad_p = _np.array([[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0],
+                             [0.4, 0.4, 0.001], [0.41, 0.4, 0.001], [0.4, 0.41, 0.001]], float)
+        _quad_uv = _np.array([[0.1, 0.1], [0.5, 0.1], [0.5, 0.5], [0.1, 0.5],
+                              [0.996, 0.008], [0.996, 0.008], [0.996, 0.008]], float)
+        _quad_f = _np.array([[0, 1, 2], [0, 2, 3], [4, 5, 6]])
+        _half = Image.new("RGB", (8, 8), (255, 0, 0))                 # red; the lower right half blue
+        for _px in range(8):
+            for _py in range(8):
+                if _px + _py >= 8:
+                    _half.putpixel((_px, _py), (0, 0, 255))
+
+        class _BlueSource:
+            def closest(self, points):
+                return _np.zeros(len(points), int), _np.tile([1.0, 0.0, 0.0], (len(points), 1)), None
+
+            def colour(self, face, bary):
+                return _np.tile(_np.array([0.0, 0.0, 1.0], _np.float32), (len(face), 1))
+
+        _quad_uv[:4] = [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]
+        _mended = polypaint._mend_point_uvs(_quad_p, _quad_uv, [_quad_f], [_half], _BlueSource(), _spatial)
+        _at = _half.getpixel((min(int(_quad_uv[4, 0] * 8), 7), min(int((1 - _quad_uv[4, 1]) * 8), 7)))
+        expect("a triangle whose UVs shrank to a point takes a texel of its own colour from a triangle near it",
+               _mended == 1 and _at == (0, 0, 255) and _np.allclose(_quad_uv[4], _quad_uv[6])
+               and _np.allclose(_quad_uv[:4], [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
+               (_mended, _quad_uv[4:].tolist(), _at))
         # Hidden triangles: a shell inside a shell, both above the line.
         def _shell(radius):
             ball = _trimesh.creation.icosphere(subdivisions=2, radius=radius)
