@@ -16,6 +16,7 @@ import shutil
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import types
 import urllib.error
@@ -176,6 +177,31 @@ textured = fbx_preview.measure(FIXTURES / "tex_relative.fbx")
 expect("the texture beside the FBX sets the density (64 px wood: 1/16 of the assumed 1,024)",
        not textured["assumed_texture"]
        and abs(textured["texel_density"] * 16 - cube["texel_density"]) < 0.5, textured)
+# 14 Nov 2026: an FBX that carries its textures inside it previewed in flat slot
+# colours - the preview named the image by a path nothing was stored under.
+packed_glb = Path(tempfile.mkdtemp()) / "packed.glb"
+packed_info = fbx_preview.convert(FIXTURES / "tex_embedded.fbx", packed_glb)
+packed_blob = packed_glb.read_bytes()
+packed_json = json.loads(packed_blob[20:20 + struct.unpack("<I", packed_blob[12:16])[0]])
+packed_image = (packed_json.get("images") or [{}])[0]
+packed_view = packed_json["bufferViews"][packed_image.get("bufferView", 0)]
+packed_start = 20 + struct.unpack("<I", packed_blob[12:16])[0] + 8 + packed_view["byteOffset"]
+expect("a texture packed inside the FBX goes into the preview itself (no file beside it needed)",
+       packed_info["packed_textures"] and "uri" not in packed_image
+       and packed_image.get("mimeType") == "image/png"
+       and packed_blob[packed_start:packed_start + 8] == b"\x89PNG\r\n\x1a\n"
+       and packed_json["materials"][0]["pbrMetallicRoughness"].get("baseColorTexture") == {"index": 0}
+       and packed_json["buffers"][0]["byteLength"] == len(packed_blob) - packed_start
+       + packed_view["byteOffset"], packed_image)
+linked_glb = packed_glb.with_name("linked.glb")
+fbx_preview.convert(FIXTURES / "tex_relative.fbx", linked_glb)
+linked_blob = linked_glb.read_bytes()
+linked_json = json.loads(linked_blob[20:20 + struct.unpack("<I", linked_blob[12:16])[0]])
+expect("... and a texture beside the FBX is still named by its path",
+       linked_json["images"] == [{"uri": "tex_relative_wood_Albedo.png"}], linked_json.get("images"))
+expect("a packed image a glTF cannot carry is left out, not written as broken bytes",
+       fbx_preview._as_web_image(b"not an image") == b""
+       and fbx_preview._image_type(b"\xff\xd8\xff\xe0") == "image/jpeg")
 expect("an FBX with no mesh measures as nothing, not as an error",
        fbx_preview.measure(FIXTURES / "empty.fbx")["vertices"] == 0)
 verdict = agk.Gatekeeper(agk.Budget(max_mesh_mb=0.0001, max_material_slots=8)).check(FIXTURES / "mats5.fbx")

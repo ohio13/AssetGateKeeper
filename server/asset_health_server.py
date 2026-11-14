@@ -920,10 +920,20 @@ def totals(db_path: str | Path, project_id: int | None = None) -> dict:
 
 
 def wall_of_shame(db_path: str | Path, limit: int = WALL_OF_SHAME_LIMIT,
-                  project_id: int | None = None) -> list[dict]:
-    """The last N failures, each with every reason it broke."""
+                  project_id: int | None = None, kind: str = "all") -> list[dict]:
+    """The last N failures, each with every reason it broke.
+
+    ``kind`` "models" or "textures" counts the N within that kind alone: one
+    model's sixteen failed textures used to take sixteen of the twenty places,
+    and the models after it had no row and no send button (14 Nov 2026)."""
     tenant = " AND v.project_id = ?" if project_id is not None else ""
-    params: tuple = (project_id, limit) if project_id is not None else (limit,)
+    params: tuple = (project_id,) if project_id is not None else ()
+    if kind in ("models", "textures"):
+        suffixes = sorted(agk.TEXTURE_SUFFIXES)
+        match = " OR ".join("LOWER(v.filename) LIKE ?" for _ in suffixes)
+        tenant += f" AND {'' if kind == 'textures' else 'NOT '}({match})"
+        params += tuple("%" + suffix for suffix in suffixes)
+    params += (limit,)
     with open_db(db_path) as connection:
         rows = connection.execute(
             "SELECT v.id, v.timestamp, v.username, v.hostname, v.filename, v.filepath,"
@@ -2015,7 +2025,7 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
                      project_name: str | None = None, warn: str = "",
                      refresh: int = 0) -> str:
     stats = totals(db_path, project_id)
-    shame = wall_of_shame(db_path, project_id=project_id)
+    shame = wall_of_shame(db_path, project_id=project_id, kind="models")
     tops = bottlenecks(db_path, project_id=project_id)
     budget = budget_for_project(db_path, project_id)
     # Say it on the page, not just in the console: a demo pass rate that looks
@@ -2038,8 +2048,8 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
 
     # Textures apart from models: a model's failed textures sat above it in the
     # list. They are still here, in a panel of their own under the models.
-    texture_shame = [entry for entry in shame if is_texture_name(entry.get("filename"))]
-    shame = [entry for entry in shame if not is_texture_name(entry.get("filename"))]
+    # Each has its own "last 20", so textures cannot crowd a model off the page.
+    texture_shame = wall_of_shame(db_path, project_id=project_id, kind="textures")
 
     def shame_table(entries) -> str:
         shame_rows = []
