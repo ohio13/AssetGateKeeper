@@ -1240,8 +1240,7 @@ def _closest_low_triangles(points, positions, faces, spatial):
 
 #: A point of the sculpt goes to its own piece's nearest reduced triangle when
 #: that is no more than this share of the model's size further than the nearest of all.
-#: (0.005 left a fringe's underside painted on the forehead under it.)
-PIECE_SLACK = 0.05
+PIECE_SLACK = 0.005
 
 
 def _closest_by_piece(points, piece, positions, faces, spatial, origin=None):
@@ -2532,8 +2531,8 @@ def _assemble(parts, low_positions, low_faces, nearest, xatlas, texture: int, pa
     tree, smooth = getattr(sculpt, "tree", None), getattr(sculpt, "normals", None)
     if tree is not None and smooth is not None:
         for part, faces_of in zip(parts, np.split(all_faces, sizes)):
-            if part.get("view") is None or not len(faces_of):
-                continue
+            if part.get("view") is None or not len(faces_of) or part["suffix"] == PART_SUFFIXES[2]:
+                continue                 # (not the eyes: painted flat, lit evenly)
             used = np.unique(faces_of)
             _, around = tree.query(positions[used], k=min(FACE_NORMAL_POINTS, len(smooth)), workers=-1)
             taken = np.asarray(smooth, np.float64)[around.reshape(len(used), -1)]
@@ -3579,14 +3578,20 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
                     if inside_frame.sum() >= 8:
                         keep = keep[inside_frame]
                         # Pieces of the frame apart from the face itself (the one
-                        # nearest the eyes) stay only above the mouth - a fringe,
-                        # brows; below it they are a collar's rim, a hanging lock.
+                        # nearest the eyes) stay only where hair is combed across
+                        # the brow, and then only above the mouth - strands on the
+                        # skin; below it they are a collar's rim, a hanging lock.
                         _, piece = _pieces(len(low_positions), low_faces[keep])
                         at = low_positions[low_faces[keep]].mean(axis=1)
                         main = piece[int(np.argmin(np.linalg.norm(at - eye_point, axis=1)))]
                         largest = int(np.argmax(np.bincount(piece, area[keep])))
-                        loose = ((piece != main) & (piece != largest)
-                                 & (at @ up < eye_height - FACE_LOOSE_BELOW * apart))
+                        loose = (piece != main) & (piece != largest)
+                        if framed["brow"] > FACE_BUSY_STEP:
+                            loose &= at @ up < eye_height - FACE_LOOSE_BELOW * apart
+                        # (With a plain brow all of them go: a fringe that stands
+                        # off the forehead is hair, a shell of its own, and its
+                        # lower edge in the face's texture read as hair colour
+                        # painted on the forehead - 14 Nov 2026.)
                         if (~loose).sum() >= 8:
                             keep = keep[~loose]
                         keep = np.union1d(keep, _face_hollows(low_positions, low_faces, keep, right, up,

@@ -7,8 +7,9 @@
   button to load the full model and to go back. `Start AssetGatekeeper.bat`
   run again no longer lists the two pages twice. Bake: a face is shaded
   with the sculpt's own normals (the cuts along its textures leave slivers,
-  and the bridge of the nose shaded in facets), and a fringe standing off
-  the brow is no longer painted on the forehead under it.
+  and the bridge of the nose shaded in facets), and a fringe that stands
+  off the forehead stays out of the face's texture - its lower edge there
+  read as hair colour painted round the eyebrows.
 
 * **Textures listed apart from models (14 Nov).** A model's textures
   buried it in the lists. The Art Workstation's library has a **Textures**
