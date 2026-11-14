@@ -1313,6 +1313,21 @@ expect("... and the base-colour texture, by the path it is stored under",
 expect("the triangle count is still the gate's", aws.get_asset(t_db, t_asset["id"])["triangle_count"] == 12)
 expect("the banner says what the preview now shows",
        "base-colour textures" in aws.fbx_preview.PREVIEW_WARNING and "Geometry only" not in aws.fbx_preview.PREVIEW_WARNING)
+# 14 Nov 2026: the low-poly bake was offered for .obj and .glb only, so a
+# textured FBX model had no way to be reduced.
+expect("a textured FBX is offered the bake, from the textures its preview shows",
+       aws.preview_of(t_data, aws.get_asset(t_db, t_asset["id"]))["bake"] == "texture",
+       aws.preview_of(t_data, aws.get_asset(t_db, t_asset["id"])))
+_packed = aws.create_asset(t_db, t_data, "tex_embedded.fbx", (_fx / "tex_embedded.fbx").read_bytes())
+_baked = aws.bake_polypaint_asset(t_db, t_data, _packed["id"], triangles=200, texture=32)
+_linked = aws.bake_polypaint_asset(t_db, t_data, t_asset["id"], triangles=200, texture=32)
+expect("... and bakes: an FBX with its texture packed inside becomes a .glb asset of its own",
+       _baked["asset"]["filename"] == "tex_embedded_LP.glb" and 0 < _baked["triangles"] <= 200
+       and _baked["source_triangles"] == 12 and _linked["asset"]["filename"] == "tex_relative_LP.glb",
+       (_baked["asset"]["filename"], _baked["triangles"], _linked["asset"]["filename"]))
+_plain = aws.create_asset(t_db, t_data, "mats5.fbx", (_fx / "mats5.fbx").read_bytes())
+expect("an FBX with no texture is not offered one",
+       aws.preview_of(t_data, aws.get_asset(t_db, _plain["id"]))["bake"] == "")
 
 import os  # noqa: E402
 import subprocess  # noqa: E402

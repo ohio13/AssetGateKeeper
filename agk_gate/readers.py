@@ -715,6 +715,7 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float,
 
     references = []
     packed: dict = {}
+    carried: set = set()
     for texture_id, texture in textures.items():
         relative = _fbx_string(texture.child("RelativeFilename"))
         absolute = _fbx_string(texture.child("FileName"))
@@ -730,10 +731,16 @@ def _read_fbx_cached(path_string: str, modified_ns: int, epsilon: float,
                     label = (relative or absolute).replace("\\", "/").rsplit("/", 1)[-1] \
                         or f"texture {len(packed) + 1}"
                     packed[video_id] = (label, size[0], size[1])
+        if embedded:
+            carried.add((relative or absolute).replace("\\", "/"))
         if embedded or not (relative or absolute):
             continue
         written = relative or absolute
         references.append((written, tuple(item for item in (relative, absolute) if item)))
+    # A file the FBX lists twice may carry the image only once (14 Nov 2026: a
+    # creature whose second copy was empty read as a broken link). An importer
+    # unpacks it once, under that name, and both entries find it.
+    references = [item for item in references if item[0].replace("\\", "/") not in carried]
     return FbxSummary(triangles, slots, uv_channels, max_influences, degenerate,
                       tuple(references), collision_meshes, lower_lod_meshes,
                       tuple(packed.values()), lods, render_names, shapes, skinned)
