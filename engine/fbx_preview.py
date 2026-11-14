@@ -261,11 +261,49 @@ def _as_web_image(content: bytes) -> bytes:
         return b""
 
 
-def _textures_by_material(objects, connections) -> tuple[dict, dict]:
+#: Material inputs that carry opacity (white = solid), as exporters name them.
+OPACITY_PROPERTIES = ("transparentcolor", "maya|opacity", "opacity", "transparencyfactor",
+                      "3dsmax|parameters|opacity_map")
+
+#: Material numbers that say how solid the whole slot is (1 = solid). The
+#: classic TransparencyFactor is left out: exporters disagree on which way it runs.
+OPACITY_VALUES = ("Maya|opacity", "Opacity")
+
+#: A see-through texture is drawn no larger than this in the preview (colour
+#: and opacity are joined into one RGBA image, which is heavy at 4,096 px).
+OPACITY_EDGE = 2048
+
+#: An opacity image with fewer in-between pixels than this share is a cut-out
+#: (hair cards, leaves): drawn solid-or-nothing, which needs no depth sorting.
+OPACITY_SOFT_SHARE = 0.2
+
+#: Stored normals are not trusted when more than this share of the polygons'
+#: normals point away from the side the polygon faces.
+NORMALS_WRONG_SHARE = 0.2
+
+
+def _slot_opacity(material) -> float:
+    """How solid a material is as a whole, 0..1, from the numbers it carries."""
+    properties = material.child("Properties70")
+    if properties is None:
+        return 1.0
+    for item in properties.children:
+        if item.props and item.props[0] in OPACITY_VALUES:
+            numbers = [float(v) for v in item.props[4:] if isinstance(v, (int, float))]
+            if numbers:
+                return min(1.0, max(0.0, sum(numbers) / len(numbers)))
+    return 1.0
+
+
+def _textures_by_material(objects, connections) -> tuple[dict, dict, dict]:
     """(material id -> the base-colour texture's path as the FBX names it,
-    that path -> the image's bytes when the FBX carries the texture inside it)."""
-    textures, videos = {}, {}
+    that path -> the image's bytes when the FBX carries the texture inside it,
+    material id -> (opacity texture's path or "", how solid the slot is 0..1))."""
+    textures, videos, solid = {}, {}, {}
     for node in objects.children:
+        if node.name == "Material":
+            solid[agk._fbx_id(node)] = _slot_opacity(node)
+            continue
         if node.name == "Video":
             content = node.child("Content")
             if content is not None and content.props and isinstance(content.props[0], bytes) \
@@ -283,10 +321,11 @@ def _textures_by_material(objects, connections) -> tuple[dict, dict]:
         chosen = chosen.removeprefix("./")
         if chosen:
             textures[agk._fbx_id(node)] = chosen
-    found, packed = {}, {}
+    found, packed, see_through = {}, {}, {}
     links = list(connections.all("C") if connections else [])
     for link in links:
         # A texture the FBX carries inside it: its Video node holds the bytes.
+        # A file listed twice may carry the image only once; either copy serves.
         if len(link.props) >= 3 and link.props[0] == "OO" and link.props[1] in videos \
                 and link.props[2] in textures:
             packed.setdefault(textures[link.props[2]], videos[link.props[1]])
@@ -294,21 +333,105 @@ def _textures_by_material(objects, connections) -> tuple[dict, dict]:
         if len(link.props) < 4 or link.props[0] != "OP":
             continue
         texture, material, slot = link.props[1], link.props[2], str(link.props[3]).lower()
-        if texture in textures and slot in BASE_COLOUR_PROPERTIES and material not in found:
+        if texture not in textures:
+            continue
+        if slot in BASE_COLOUR_PROPERTIES and material not in found:
             found[material] = textures[texture]
-    return found, packed
+        elif slot in OPACITY_PROPERTIES and material not in see_through:
+            see_through[material] = textures[texture]
+    opacity = {}
+    for material, value in solid.items():
+        image = see_through.get(material, "")
+        # With an opacity image the number is only what the image replaces.
+        if image or value < 1.0:
+            opacity[material] = (image, 1.0 if image else value)
+    return found, packed, opacity
 
 
-def convert(path: Path, out_path: Path) -> dict:
+def _checked_normals(positions, corners, starts, sizes, normals):
+    """(normals to use per corner, the share of polygons whose stored normals
+    point away from the side they face). Past NORMALS_WRONG_SHARE the stored
+    ones are replaced by smooth normals worked out from the surface: a file
+    like that shades in dark patches wherever its normals are believed."""
+    if not len(sizes):
+        return normals, 0.0
+    first = positions[corners[starts]]
+    second = positions[corners[starts + 1]]
+    third = positions[corners[starts + 2]]
+    last = positions[corners[starts + sizes - 1]]
+    # Triangle: the two edges from the first corner. Larger: the two diagonals.
+    facing = np.where((sizes > 3)[:, None], np.cross(third - first, last - second),
+                      np.cross(second - first, third - first))
+    area = np.linalg.norm(facing, axis=1)
+    real = area > 1e-12
+    if not real.any():
+        return normals, 0.0
+    stored = normals[starts] + normals[starts + 1] + normals[starts + 2]
+    wrong = float(((facing * stored).sum(axis=1)[real] < 0).mean())
+    if wrong <= NORMALS_WRONG_SHARE:
+        return normals, wrong
+    smooth = np.zeros_like(positions)
+    np.add.at(smooth, corners, np.repeat(facing, sizes, axis=0))
+    length = np.linalg.norm(smooth, axis=1, keepdims=True)
+    smooth = np.divide(smooth, length, out=np.zeros_like(smooth), where=length > 1e-12)
+    return smooth[corners], wrong
+
+
+def _loose_image(folder: Path | None, name: str) -> bytes:
+    """The bytes of a texture the FBX names, found beside it, or b""."""
+    if folder is None or not name:
+        return b""
+    for candidate in (folder / name, folder / name.rsplit("/", 1)[-1]):
+        try:
+            if candidate.is_file():
+                return candidate.read_bytes()
+        except OSError:
+            continue
+    return b""
+
+
+def _with_opacity(colour: bytes, opacity: bytes) -> tuple[bytes, str]:
+    """(the colour image with the opacity image as its alpha, as a PNG;
+    "MASK" for a cut-out or "BLEND" for a soft one), or (b"", "") when the
+    images cannot be joined or the opacity image is solid everywhere."""
+    try:
+        import io
+        from PIL import Image
+        with Image.open(io.BytesIO(colour)) as base, Image.open(io.BytesIO(opacity)) as mask:
+            base, mask = base.convert("RGB"), mask.convert("L")
+            if max(base.size) > OPACITY_EDGE:
+                scale = OPACITY_EDGE / max(base.size)
+                base = base.resize((max(1, round(base.width * scale)),
+                                    max(1, round(base.height * scale))))
+            if mask.size != base.size:
+                mask = mask.resize(base.size)
+            counts = mask.histogram()
+            total = float(sum(counts)) or 1.0
+            if sum(counts[:250]) / total < 0.001:
+                return b"", ""
+            soft = sum(counts[26:230]) / total
+            base.putalpha(mask)
+            out = io.BytesIO()
+            base.save(out, "PNG", compress_level=3)
+            return out.getvalue(), "BLEND" if soft > OPACITY_SOFT_SHARE else "MASK"
+    except Exception:
+        return b"", ""
+
+
+def convert(path: Path, out_path: Path, pack_files: bool = False) -> dict:
     """Write a preview GLB for ``path``; return what was converted.
 
     {"triangles", "vertices", "materials": [names], "meshes", "bounds": (min, max),
      "axes": "+Z up, 1 unit = 1 cm", "skipped": {"collision": n, "lower_lod": n}}
+
+    ``pack_files`` also puts the textures found beside the FBX inside the GLB,
+    so the result stands alone (the bake reads it from a scratch folder).
     """
     scene = _collect(path)
     _write_glb(Path(out_path), scene["positions"], scene["groups"], scene["material_names"],
                Path(path).stem, uvs=scene["uvs"], normals=scene["normals"],
-               textures=scene["textures"], packed=scene["packed"])
+               textures=scene["textures"], packed=scene["packed"], opacity=scene["opacity"],
+               folder=Path(path).parent, pack_files=pack_files)
     return scene["info"]
 
 
@@ -346,7 +469,9 @@ def _collect(path: Path) -> dict:
         parents.setdefault(child, []).append(parent)
         children.setdefault(parent, []).append(child)
 
-    material_textures, packed_textures = _textures_by_material(objects, connections)
+    material_textures, packed_textures, material_opacity = _textures_by_material(
+        objects, connections)
+    slot_opacity, rebuilt_normals = {}, []
 
     # Same selection as the gate: no collision hulls, no LOD1+ levels.
     collision = {m for m, name in model_names.items()
@@ -418,6 +543,8 @@ def _collect(path: Path) -> dict:
         for material_id, slot_name in zip(slot_ids, slot_names):
             if material_id in material_textures:
                 material_texture.setdefault(slot_name, material_textures[material_id])
+            if material_id in material_opacity:
+                slot_opacity.setdefault(slot_name, material_opacity[material_id])
         per_polygon = np.zeros(len(sizes), dtype=np.int64)
         layer = geometry.child("LayerElementMaterial")
         if layer is not None:
@@ -459,6 +586,9 @@ def _collect(path: Path) -> dict:
             normals = np.zeros((len(corners), 3))
         else:
             has_normals = True
+            normals, wrong = _checked_normals(positions, corners, starts, sizes, normals)
+            if wrong > NORMALS_WRONG_SHARE:
+                rebuilt_normals.append(wrong)
             inverse_transpose = np.linalg.inv(transform[:3, :3]).T
             normals = normals @ inverse_transpose.T
             length = np.linalg.norm(normals, axis=1, keepdims=True)
@@ -498,14 +628,23 @@ def _collect(path: Path) -> dict:
     normals_out = np.vstack(all_normals).astype(np.float32) if has_normals else None
     groups = [(slot, np.vstack(parts).astype(np.uint32)) for slot, parts in sorted(primitives.items())]
     textures = [material_texture.get(name, "") if has_uv else "" for name in material_names]
-    packed = {name: content for name, content in packed_textures.items() if name in textures}
+    opacity = [slot_opacity.get(name, ("", 1.0)) if has_uv else ("", slot_opacity.get(
+        name, ("", 1.0))[1]) for name in material_names]
+    wanted = set(textures) | {image for image, _ in opacity}
+    packed = {name: content for name, content in packed_textures.items() if name in wanted}
     info = {
         "uvs": has_uv,
         "normals": has_normals,
         "textures": sorted({item for item in textures if item}),
         # Textures the FBX carries inside it: the preview shows these without
         # any file beside it.
-        "packed_textures": sorted(packed),
+        "packed_textures": sorted(name for name in packed if name in textures),
+        # Slots the FBX makes see-through, by an opacity image or a number.
+        "see_through": [name for name, (image, solid) in zip(material_names, opacity)
+                        if image or solid < 1.0],
+        # The largest share of polygons whose stored normals faced the wrong
+        # way, when that was enough for the preview to work its own out; else 0.
+        "normals_rebuilt": round(max(rebuilt_normals), 3) if rebuilt_normals else 0.0,
         "triangles": triangle_total,
         "vertices": vertex_total,
         "materials": material_names,
@@ -518,7 +657,7 @@ def _collect(path: Path) -> dict:
     }
     return {"positions": positions, "uvs": uvs, "normals": normals_out, "groups": groups,
             "material_names": material_names, "textures": textures, "packed": packed,
-            "colours": has_colours, "info": info}
+            "opacity": opacity, "colours": has_colours, "info": info}
 
 
 def _texture_edge(fbx: Path, name: str) -> int:
@@ -597,14 +736,18 @@ def _pad(blob: bytes, filler: bytes) -> bytes:
 
 def _write_glb(path: Path, positions, groups, material_names: list, name: str,
                uvs=None, normals=None, textures: list | None = None,
-               packed: dict | None = None) -> None:
+               packed: dict | None = None, opacity: list | None = None,
+               folder: Path | None = None, pack_files: bool = False) -> None:
     """One mesh, one primitive per material slot, vertex arrays shared. GLB 2.0.
 
     ``textures`` names each material's base-colour image by the path the
     workstation stores it under; the viewer resolves it against the asset's
     files, so a texture uploaded with the FBX shows, and one that was not
     falls back to the slot colour. ``packed`` holds the bytes of the textures
-    the FBX carries inside it; those go into the preview itself."""
+    the FBX carries inside it; those go into the preview itself. ``opacity``
+    gives each material (opacity image or "", how solid 0..1): the image
+    becomes the colour image's alpha (looked for in ``packed``, then beside the
+    FBX in ``folder``). ``pack_files`` packs the loose colour images as well."""
     position_bytes = positions.tobytes()
     buffer = bytearray(_pad(position_bytes, b"\x00"))
     views = [{"buffer": 0, "byteOffset": 0, "byteLength": len(position_bytes), "target": 34962}]
@@ -637,17 +780,35 @@ def _write_glb(path: Path, positions, groups, material_names: list, name: str,
         mesh_primitives.append({"attributes": dict(attributes), "indices": len(accessors) - 1,
                                 "material": int(slot), "mode": 4})
     textures = textures or [""] * len(material_names)
-    images = sorted({item for item in textures if item})
-    material_list = []
+    packed = packed or {}
+
+    def content_of(image: str) -> bytes:
+        return packed.get(image) or _loose_image(folder, image)
+
+    # One image per (colour, opacity) pair: the same colour image can be solid
+    # on one material and cut out on another.
+    images, material_list = [], []
     for i, material in enumerate(material_names):
         image = textures[i] if i < len(textures) else ""
+        cut, solid = opacity[i] if opacity and i < len(opacity) else ("", 1.0)
         pbr = {"metallicFactor": 0.0, "roughnessFactor": 0.8}
+        entry = {"name": material, "doubleSided": True, "pbrMetallicRoughness": pbr}
         if image:
-            pbr["baseColorFactor"] = [1.0, 1.0, 1.0, 1.0]
-            pbr["baseColorTexture"] = {"index": images.index(image)}
+            joined, mode = _with_opacity(content_of(image), content_of(cut)) if cut else (b"", "")
+            key = (image, cut if joined else "")
+            if key not in [item[0] for item in images]:
+                images.append((key, joined))
+            pbr["baseColorFactor"] = [1.0, 1.0, 1.0, float(solid)]
+            pbr["baseColorTexture"] = {"index": [item[0] for item in images].index(key)}
+            if joined:
+                entry["alphaMode"] = mode
+                if mode == "MASK":
+                    entry["alphaCutoff"] = 0.5
         else:
-            pbr["baseColorFactor"] = list(SLOT_COLOURS[i % len(SLOT_COLOURS)]) + [1.0]
-        material_list.append({"name": material, "doubleSided": True, "pbrMetallicRoughness": pbr})
+            pbr["baseColorFactor"] = list(SLOT_COLOURS[i % len(SLOT_COLOURS)]) + [float(solid)]
+        if solid < 1.0:
+            entry["alphaMode"] = "BLEND"
+        material_list.append(entry)
     document = {
         "asset": {"version": "2.0", "generator": "AssetGatekeeper fbx_preview (preview only)"},
         "scene": 0,
@@ -662,8 +823,9 @@ def _write_glb(path: Path, positions, groups, material_names: list, name: str,
     if images:
         document["images"] = []
         packed_total = 0
-        for image in images:
-            content = _as_web_image((packed or {}).get(image, b""))
+        for (image, _cut), joined in images:
+            content = joined or _as_web_image(
+                packed.get(image, b"") or (_loose_image(folder, image) if pack_files else b""))
             if content and packed_total + len(content) <= EMBEDDED_BYTES_LIMIT:
                 packed_total += len(content)
                 offset = len(buffer)

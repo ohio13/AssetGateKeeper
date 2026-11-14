@@ -590,6 +590,14 @@ def analyse_asset(path: Path, preview_dir: Path | None = None) -> dict:
                 vertices, bounds = int(info["vertices"]), info["bounds"]
                 notes.insert(0, f"measured from the FBX ({info['axes']}); "
                                 "3D preview is a converted .glb")
+                if info.get("normals_rebuilt"):
+                    # 14 Nov 2026: a rigged character shaded in dark patches -
+                    # its textures were fine, its stored normals were not.
+                    notes.append(
+                        f"the normals saved in this FBX do not match its surface "
+                        f"({info['normals_rebuilt']:.0%} of polygons face the wrong way): the "
+                        "preview shows recalculated ones; an engine that trusts the file "
+                        "shades it in dark patches - recalculate the normals and export again")
             except Exception as exc:
                 notes.insert(0, f"measured from the FBX; no 3D preview: {exc}")
         return {"triangles": int(summary.triangles), "vertices": vertices,
@@ -763,8 +771,11 @@ def preview_of(data_dir: Path, asset: dict) -> dict:
     # What a bake would take colour from ('polypaint', 'vertex colours',
     # 'texture' or ''): the viewer offers the bake for any of them.
     result["bake"] = ""
-    if asset.get("kind") == "mesh" and suffix in polypaint.TEXTURED_SUFFIXES:
+    if asset.get("kind") == "mesh" and suffix in (*polypaint.TEXTURED_SUFFIXES, *FBX_SUFFIXES):
         stored = resolve_inside(Path(data_dir), asset["file_path"])
+        if suffix in FBX_SUFFIXES:
+            # An FBX is baked from its converted preview, textures and all.
+            stored = folder / PREVIEW_DIR / "preview.glb" if folder is not None else None
         if stored is not None and stored.is_file():
             result["bake"] = ("polypaint" if result.get("polypaint")
                               else polypaint.bake_source(stored))
@@ -806,6 +817,31 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
     stored = resolve_inside(Path(data_dir), asset["file_path"])
     if stored is None or not stored.is_file():
         raise WorkstationError("the stored file is missing", 410)
+    converted = None
+    if stored.suffix.lower() in FBX_SUFFIXES:
+        # The bake reads .obj and .glb. An FBX goes in as the same conversion
+        # the preview shows, with its textures packed inside (the rig is not kept).
+        converted = tempfile.TemporaryDirectory(prefix="agk_bake_fbx_")
+        try:
+            target = Path(converted.name) / (stored.stem + ".glb")
+            fbx_preview.convert(stored, target, pack_files=True)
+        except Exception as exc:
+            converted.cleanup()
+            raise WorkstationError(f"the FBX cannot be converted for the bake: {exc}", 400) from exc
+        stored = target
+    try:
+        return _bake_stored(db_path, data_dir, stored, triangles, texture, progress, normal_map,
+                            colours, preset, face_texture, head_share, skip_materials,
+                            face_layout, body_textures, painted_parts)
+    finally:
+        if converted is not None:
+            converted.cleanup()
+
+
+def _bake_stored(db_path, data_dir, stored, triangles, texture, progress, normal_map, colours,
+                 preset, face_texture, head_share, skip_materials, face_layout, body_textures,
+                 painted_parts) -> dict:
+    """bake_polypaint_asset() once the file to bake from is known."""
     problem = polypaint.bake_problem(stored)
     if problem:
         raise WorkstationError(problem, 400)
@@ -3475,8 +3511,16 @@ class Handler(BaseHTTPRequestHandler):
                 asset_id = int(match.group(1))
                 bakeable = get_asset(server.db_path, asset_id)      # 404 before queueing
                 stored = resolve_inside(Path(server.data_dir), bakeable["file_path"])
-                problem = (polypaint.bake_problem(stored) if stored is not None
-                           else "the stored file is missing")
+                if stored is None:
+                    problem = "the stored file is missing"
+                elif stored.suffix.lower() in FBX_SUFFIXES:
+                    # Baked from its converted preview: that is what says
+                    # whether there is a texture to bake.
+                    problem = "" if preview_of(Path(server.data_dir), bakeable).get("bake") else (
+                        f"{stored.name}: this FBX has no base-colour texture to bake "
+                        "(none packed inside it, none uploaded with it)")
+                else:
+                    problem = polypaint.bake_problem(stored)
                 if problem:
                     raise WorkstationError(problem, 400)
                 db_path, data_dir = server.db_path, Path(server.data_dir)

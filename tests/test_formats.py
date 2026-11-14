@@ -12,6 +12,7 @@ import io
 import json
 import logging
 import os
+import re
 import shutil
 import struct
 import subprocess
@@ -1231,6 +1232,90 @@ core_body = preflight_core.assess(
     skeleton={"bones": [(name, None if parent is None else BONES[parent][0]) for name, parent in BONES],
               "sections": [("skin_mat", 4)]})
 same_verdict("core, skeleton (bones, roots, depth, per section)", core_body, body_fbx, body_budget)
+# --- 14 Nov 2026: see-through materials, untrustworthy normals --------------
+def _glb_json(path):
+    blob = Path(path).read_bytes()
+    return json.loads(blob[20:20 + struct.unpack("<I", blob[12:16])[0]])
+
+
+def _see_through_fbx(name, properties="", links=()):
+    """A textured box whose one material gets ``properties`` and texture ``links``
+    [(file name, material input)]."""
+    path = write_fbx(PANEL_WORK / name, [_mesh("Leaf", _box(), uv_sets=[_corner_uvs(_box()[1])],
+                                               material="leaf_mat")])
+    text = path.read_text(encoding="utf-8")
+    material = re.search(r'Material: (\d+), "Material::leaf_mat", "" \{\n\t\}', text)
+    extra, joins = "", ""
+    for index, (file_name, slot) in enumerate(links):
+        extra += (f'\tTexture: {9000 + index}, "Texture::t{index}", "" {{\n'
+                  f'\t\tRelativeFilename: "{file_name}"\n\t}}\n')
+        joins += f'\tC: "OP",{9000 + index},{material.group(1)}, "{slot}"\n'
+    text = text.replace(material.group(0), f'Material: {material.group(1)}, "Material::leaf_mat", "" {{\n'
+                        f"\t\tProperties70:  {{\n{properties}\t\t}}\n\t}}\n{extra.rstrip()}")
+    text = text.replace("Connections:  {\n", "Connections:  {\n" + joins)
+    path.write_text(text, encoding="utf-8")
+    return path
+
+
+glass_fbx = _see_through_fbx("glass.fbx", '\t\t\tP: "Maya|opacity", "Color", "", "A",0.5,0.5,0.5\n')
+glass_glb = PANEL_WORK / "glass.glb"
+glass_info = fbx_preview.convert(glass_fbx, glass_glb)
+glass_material = _glb_json(glass_glb)["materials"][0]
+expect("a material the FBX makes half solid previews half solid, not as a solid shell",
+       glass_material.get("alphaMode") == "BLEND"
+       and abs(glass_material["pbrMetallicRoughness"]["baseColorFactor"][3] - 0.5) < 1e-6
+       and glass_info["see_through"] == ["leaf_mat"], glass_material)
+try:
+    from PIL import Image as _Image
+except ImportError:
+    _Image = None
+if _Image is not None:
+    _Image.new("RGB", (8, 8), (40, 160, 60)).save(PANEL_WORK / "leaf_Color.png")
+    _cut = _Image.new("L", (8, 8), 0)
+    _cut.paste(255, (0, 0, 4, 8))
+    _cut.save(PANEL_WORK / "leaf_Opacity.png")
+    _Image.linear_gradient("L").resize((8, 8)).save(PANEL_WORK / "mist_Opacity.png")
+    _Image.new("L", (8, 8), 255).save(PANEL_WORK / "solid_Opacity.png")
+    for _name, _opacity, _slot, _mode in (("leaf.fbx", "leaf_Opacity.png", "TransparentColor", "MASK"),
+                                          ("mist.fbx", "mist_Opacity.png", "Maya|opacity", "BLEND"),
+                                          ("solid.fbx", "solid_Opacity.png", "TransparentColor", None)):
+        _fbx = _see_through_fbx(_name, links=[("leaf_Color.png", "DiffuseColor"), (_opacity, _slot)])
+        fbx_preview.convert(_fbx, _fbx.with_suffix(".glb"))
+        _document = _glb_json(_fbx.with_suffix(".glb"))
+        _material, _image = _document["materials"][0], _document["images"][0]
+        expect(f"an opacity image beside the FBX: {_name} previews as {_mode or 'solid'}",
+               _material.get("alphaMode") == _mode
+               and (_image.get("mimeType") == "image/png" if _mode else _image == {"uri": "leaf_Color.png"})
+               and (_material.get("alphaCutoff") == 0.5) == (_mode == "MASK"), (_material, _image))
+    _fbx = _see_through_fbx("standalone.fbx", links=[("leaf_Color.png", "DiffuseColor")])
+    fbx_preview.convert(_fbx, PANEL_WORK / "standalone.glb", pack_files=True)
+    expect("asked to stand alone, the conversion packs the texture found beside the FBX",
+           "bufferView" in _glb_json(PANEL_WORK / "standalone.glb")["images"][0])
+
+_cube_points = np.array(_box()[0], dtype=float)
+_cube_corners, _cube_starts, _cube_sizes = agk._fbx_polygons(
+    [value for polygon in _box()[1] for value in list(polygon[:-1]) + [-polygon[-1] - 1]])
+_outward = np.repeat(np.array([[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, -1], [0, 0, 1]],
+                              dtype=float), 4, axis=0)
+_kept, _wrong = fbx_preview._checked_normals(_cube_points, _cube_corners, _cube_starts, _cube_sizes,
+                                             _outward)
+expect("stored normals that face the way the surface does are kept as they are",
+       _wrong == 0.0 and _kept is _outward, _wrong)
+_scrambled = _outward.copy()
+_scrambled[:12] *= -1                     # three of six faces point inwards
+_rebuilt, _wrong = fbx_preview._checked_normals(_cube_points, _cube_corners, _cube_starts,
+                                                _cube_sizes, _scrambled)
+_centre = _cube_points.mean(axis=0)
+expect("stored normals that point away from half the surface are replaced by ones worked out from it",
+       abs(_wrong - 0.5) < 1e-9
+       and bool(((_rebuilt * (_cube_points[_cube_corners] - _centre)).sum(axis=1) > 0.5).all()),
+       (_wrong, _rebuilt[:4]))
+_one_bad = _outward.copy()
+_one_bad[:4] *= -1                        # one face in six: bent on purpose (hair cards do this)
+expect("... a few odd normals are left alone",
+       fbx_preview._checked_normals(_cube_points, _cube_corners, _cube_starts, _cube_sizes,
+                                    _one_bad)[0] is _one_bad)
+
 clean_fbx = write_fbx(PANEL_WORK / "clean.fbx", [_mesh("Barrel", _box(), uv_sets=[
     _corner_uvs(_box()[1]), [((k % 4) // 2 * 0.1 + f * 0.15, (k % 2) * 0.1) for f in range(6) for k in range(4)]]),
     _mesh("UCX_Barrel_00", _box(), material=None)])
