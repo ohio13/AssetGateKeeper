@@ -133,10 +133,8 @@ DETAIL_MIN_TEXTURE = 512
 #: At this size and below the .glb asks for nearest-texel filtering: islands are
 #: a texel or two wide and smooth filtering would blend in the next island.
 NEAREST_TEXTURE = 128
-#: _unwrap looks for the largest scale that fits a texture this small, for a
-#: mesh of no more triangles than this, in at most this many packings.
-PACK_SEARCH_TRIANGLES = 8000
-PACK_SEARCH_STEPS = 16
+#: _pack_texels halves in on the largest scale that fits this many times.
+TEXEL_PACK_STEPS = 28
 #: Face texture (second material): the region around the sculpt's densest colour
 #: detail (eyes, brows, lips) that gets a texture of its own: colours counted in
 #: small cells, summed on a FACE_GRID-cell grid over the model (_face_centre);
@@ -1608,8 +1606,97 @@ def _bake_samples(sculpt: Sculpt, positions, normals, tangents, triangles, size:
     return texture, normal_image, filled.reshape(size, size)
 
 
+def _pack_texels(uvs, faces, width: int, height: int):
+    """UV islands (xatlas', any scale) packed into a ``width`` x ``height`` texture
+    a whole block of texels to each: no texel holds two islands, and no gap is
+    needed between them. Returns (uvs, bake uvs), both 0-1 across the texture
+    (the bake's across a square of the longer side).
+
+    The UVs to draw with keep each island between the centres of its block's
+    outer texels, so a filtered sample at its very edge is still all its own;
+    the bake's spread it over the whole block, so every texel of the block is
+    filled from it. An island's shape is stretched to its block, each way on
+    its own - at a texel or two an island that costs nothing.
+
+    Why (14 Nov 2026): xatlas packs to a tenth of a texel and leaves gaps, and
+    with an island to every seven triangles a 64x32 body texture had a third
+    of its texels in use, one in four of those shared by two islands, and
+    half the islands with no texel of their own - a suit's triangles came out
+    the colour of the skin or hair packed beside them."""
+    import numpy as np
+    uvs = np.asarray(uvs, np.float64)
+    island_of_face = _chart_ids(faces, len(uvs))
+    island = np.zeros(len(uvs), np.int64)
+    island[faces] = island_of_face[:, None]
+    labels, island = np.unique(island[np.unique(faces)], return_inverse=True)
+    members = np.unique(faces)
+    count = len(labels)
+    low = np.full((count, 2), np.inf)
+    high = np.full((count, 2), -np.inf)
+    np.minimum.at(low, island, uvs[members])
+    np.maximum.at(high, island, uvs[members])
+    extent = high - low
+    turned = extent[:, 1] > extent[:, 0]                 # the long side across
+    extent[turned] = extent[turned][:, ::-1]
+
+    def blocks(scale: float):
+        size = np.maximum(np.ceil(extent * scale - 1e-9), 1).astype(np.int64)
+        return np.minimum(size, [width, height])
+
+    def place(size):
+        """Rows, tallest blocks first; a block goes in the first row with room."""
+        order = np.lexsort((-size[:, 0], -size[:, 1]))
+        at = np.zeros((count, 2), np.int64)
+        rows = []                                        # [y, height, used width]
+        top = 0
+        for index in order:
+            wide, tall = int(size[index, 0]), int(size[index, 1])
+            for row in rows:
+                if row[1] >= tall and row[2] + wide <= width:
+                    at[index] = (row[2], row[0])
+                    row[2] += wide
+                    break
+            else:
+                if top + tall > height:
+                    return None
+                rows.append([top, tall, wide])
+                at[index] = (0, top)
+                top += tall
+        return at
+
+    longest = max(float(extent.max()), 1e-12)
+    fits, too_big = 0.0, width / longest * 2.0
+    best = None
+    for _ in range(TEXEL_PACK_STEPS):
+        scale = 0.5 * (fits + too_big)
+        size = blocks(scale)
+        at = place(size) if (extent * scale <= [width + 1e-9, height + 1e-9]).all() else None
+        if at is None:
+            too_big = scale
+        else:
+            fits, best = scale, (at, size)
+    if best is None:
+        size = np.ones((count, 2), np.int64)             # a texel each ...
+        at = place(size)
+        if at is None:                                   # ... or, with more islands than texels, shared
+            index = np.arange(count) % (width * height)
+            at = np.stack([index % width, index // width], axis=1)
+        best = (at, size)
+    at, size = best
+    local = uvs[members] - low[island]
+    local[turned[island]] = np.stack([local[turned[island], 1],
+                                      extent[island[turned[island]], 1] - local[turned[island], 0]],
+                                     axis=1)
+    share = np.where(extent[island] > 1e-12, local / np.maximum(extent[island], 1e-12), 0.5)
+    drawn = np.zeros_like(uvs)
+    baked = np.zeros_like(uvs)
+    drawn[members] = (at[island] + 0.5 + share * (size[island] - 1)) / [width, height]
+    baked[members] = (at[island] + share * size[island]) / max(width, height)
+    return drawn, baked
+
+
 def _unwrap(xatlas, positions, faces, size: int, padding: int, priority=None,
-            boost: float = 1.0):
+            boost: float = 1.0, shape=None, packed=None):
     """xatlas charts packed into ``size`` x ``size`` with ``padding`` texels between
     islands. Returns (vertex mapping, faces, uvs, order): ``order`` is the input
     triangle each output triangle came from.
@@ -1618,7 +1705,12 @@ def _unwrap(xatlas, positions, faces, size: int, padding: int, priority=None,
     ``boost`` times larger, so its islands get boost^2 times the texels: the
     face and other fine colour detail. xatlas' first guess at the scale usually
     overshoots the size (and the padding then shrinks when the UVs are fitted
-    back), so it is re-packed at the scale that fits."""
+    back), so it is re-packed at the scale that fits.
+
+    A small texture (to NEAREST_TEXTURE) is packed by the texel instead
+    (_pack_texels), into ``shape`` (width, height) if given: the UVs that come
+    back are across that shape, and ``packed`` (a dict) is given "bake_uvs",
+    the ones to bake with."""
     import numpy as np
     groups = [np.arange(len(faces))]
     scales = [1.0]
@@ -1636,7 +1728,8 @@ def _unwrap(xatlas, positions, faces, size: int, padding: int, priority=None,
     # again costs as much as the first time (5 s at 30,000 triangles).
     slack = 1.3
     gap = int(-(-padding * slack // 1))
-    for attempt in range(4):
+    small = size <= NEAREST_TEXTURE          # only the islands are wanted: one pass
+    for attempt in range(1 if small else 4):
         atlas = xatlas.Atlas()
         for _, local, scaled in parts:
             atlas.add_mesh(scaled.astype(np.float32), local.astype(np.uint32))
@@ -1650,46 +1743,6 @@ def _unwrap(xatlas, positions, faces, size: int, padding: int, priority=None,
         if atlas.atlas_count == 1 and largest <= (size * slack if attempt == 0 else size):
             break
         texels_per_unit = atlas.texels_per_unit * size / max(largest, 1) * (0.96 - 0.03 * attempt)
-    if size <= NEAREST_TEXTURE and len(faces) <= PACK_SEARCH_TRIANGLES:
-        # A small texture, a small mesh: the largest scale that fits, by trial.
-        # Shrinking in proportion (above) goes wrong when most islands are a
-        # texel or two and the gaps between them do not shrink: it overshoots,
-        # or - with wider gaps - never fits at all, and the islands were
-        # squeezed in on top of each other (13 Nov 2026).
-        def packed(scale: float):
-            trial = xatlas.Atlas()
-            for _, local, scaled in parts:
-                trial.add_mesh(scaled.astype(np.float32), local.astype(np.uint32))
-            options = xatlas.PackOptions()
-            options.resolution = size
-            options.padding = padding
-            options.bilinear = True
-            options.texels_per_unit = scale
-            trial.generate(chart, options)
-            fits = trial.atlas_count == 1 and max(trial.width, trial.height) <= size
-            return trial if fits else None
-
-        fits_at, too_big = None, None
-        scale = float(atlas.texels_per_unit)
-        if atlas.atlas_count == 1 and largest <= size:
-            fits_at = scale
-        else:
-            too_big = scale
-        for _ in range(PACK_SEARCH_STEPS):
-            if fits_at is None:
-                scale = too_big * 0.7
-            elif too_big is None:
-                scale = fits_at * 1.5
-            else:
-                scale = 0.5 * (fits_at + too_big)
-            trial = packed(scale)
-            if trial is not None:
-                atlas, fits_at = trial, scale
-            else:
-                too_big = scale
-            if fits_at is not None and too_big is not None and too_big - fits_at < 0.03 * fits_at:
-                break
-        largest = max(atlas.width, atlas.height)
     mappings, all_faces, all_uvs = [], [], []
     offset = 0
     for index, (used, _, _) in enumerate(parts):
@@ -1704,6 +1757,13 @@ def _unwrap(xatlas, positions, faces, size: int, padding: int, priority=None,
     # out bigger), so every texel stays square.
     uvs[:, 0] *= atlas.width
     uvs[:, 1] *= atlas.height
+    if small:
+        wide, tall = shape if shape is not None else (size, size)
+        uvs, bake_uvs = _pack_texels(uvs, np.concatenate(all_faces), int(wide), int(tall))
+        if packed is not None:
+            packed["bake_uvs"] = bake_uvs
+        return (np.concatenate(mappings), np.concatenate(all_faces), uvs,
+                np.concatenate(groups))
     uvs /= max(size, largest)
     if atlas.atlas_count > 1:                        # never expected: squeeze in
         uvs /= max(1.0, uvs.max())
@@ -2429,9 +2489,16 @@ def _assemble(parts, low_positions, low_faces, nearest, xatlas, texture: int, pa
             mapping, uv_faces, uvs = part["uvs"]
             order = np.arange(len(group))
         else:
+            got = {}
             mapping, uv_faces, uvs, order = _unwrap(
                 xatlas, low_positions, low_faces[group], texture, part.get("padding", padding),
-                priority[group] if priority is not None else None, boost)
+                priority[group] if priority is not None else None, boost,
+                shape=part.get("shape"), packed=got)
+            if "bake_uvs" in got:                     # packed by the texel: UVs to bake with
+                part["packed"] = True
+                uvs = np.concatenate([uvs, got["bake_uvs"]], axis=1)
+        if uvs.shape[1] == 2:
+            uvs = np.concatenate([uvs, uvs], axis=1)
         mappings.append(mapping)
         part_faces.append(uv_faces + offset)
         part_uvs.append(uvs)
@@ -2451,6 +2518,7 @@ def _assemble(parts, low_positions, low_faces, nearest, xatlas, texture: int, pa
     corner_normals = _corner_normals(low_positions, mapping[all_faces], soft=soft)
     positions, uvs, normals, all_faces = _split_by_normal(
         low_positions[mapping], uvs, all_faces, corner_normals)
+    uvs, bake_uvs = np.ascontiguousarray(uvs[:, :2]), np.ascontiguousarray(uvs[:, 2:])
     sizes = np.cumsum([len(part) for part in part_faces])[:-1]
     # A part seen from the front (a face) is shaded as facing the viewer at
     # least a little everywhere: the inside of a lip, a socket's wall, turned
@@ -2478,7 +2546,8 @@ def _assemble(parts, low_positions, low_faces, nearest, xatlas, texture: int, pa
                 todo &= np.isin(ids, np.unique(faces_of[behind]))
                 if not todo.any():
                     break
-    return {"positions": positions, "uvs": uvs, "normals": normals, "faces": all_faces,
+    return {"positions": positions, "uvs": uvs, "bake_uvs": bake_uvs, "normals": normals,
+            "faces": all_faces, "packed": [bool(part.get("packed")) for part in parts],
             "part_faces": np.split(all_faces, sizes),
             "tangents": _tangents(positions, uvs, all_faces, normals),
             "nearest": renumber[nearest]}
@@ -2500,10 +2569,21 @@ def _bake_part(sculpt, sculpt_vertices, built: dict, index: int, shape, want_nor
     local = np.where((nearest >= first) & (nearest < last), nearest - first, -1)
     edge = max(shape)
     colour, normal_pixels, inside = _bake_maps(sculpt, sculpt_vertices, local, built["positions"],
-                                                 built["normals"], built["tangents"], built["uvs"],
+                                                 built["normals"], built["tangents"],
+                                                 built.get("bake_uvs", built["uvs"]),
                                                  part_faces[index], edge, want_normal,
                                                  samples_per_texel(edge), view=view)
-    narrow = tuple(shape) != (edge, edge) and edge % shape[0] == 0 and edge % shape[1] == 0
+    if built.get("packed", [False] * (index + 1))[index] and tuple(shape) != (edge, edge):
+        # Packed by the texel into its shape, baked across a square of the longer
+        # side: the rows (v upward) and columns it has are the texture.
+        colour, inside = colour[:shape[1], :shape[0]], inside[:shape[1], :shape[0]]
+        if normal_pixels is not None:
+            normal_pixels = normal_pixels[:shape[1], :shape[0]]
+        edge_done = True
+    else:
+        edge_done = False
+    narrow = (not edge_done and tuple(shape) != (edge, edge) and edge % shape[0] == 0
+              and edge % shape[1] == 0)
     if narrow:
         # Averaged down to the strip's shape over the texels the islands cover
         # only: the gaps hold their neighbours' colours (filled in), and
@@ -2524,7 +2604,7 @@ def _bake_part(sculpt, sculpt_vertices, built: dict, index: int, shape, want_nor
     if normal_pixels is not None:
         normal_image = Image.fromarray(
             (np.flipud(normal_pixels) * 255).clip(0, 255).round().astype(np.uint8))
-    if tuple(shape) != (edge, edge):
+    if tuple(shape) != (edge, edge) and not edge_done:
         if not narrow:
             image = image.resize(tuple(shape), Image.BOX)
             inside = np.asarray(Image.fromarray(inside.astype(np.uint8) * 255).resize(
@@ -3050,6 +3130,57 @@ HIDDEN_BELOW = 1.0
 HIDDEN_PIXELS = 1
 
 
+#: A hole in the head is closed (_cap_holes) when its rim has no more edges
+#: than HOLE_EDGES and is no wider than HOLE_SIZE of the model's size.
+HOLE_EDGES = 40
+HOLE_SIZE = 0.04
+
+
+def _cap_holes(positions, faces, above: float):
+    """(positions, faces, holes closed): small holes in the head (above height
+    ``above``) closed with a fan of triangles to the middle of their rim.
+
+    Dropping what nothing can see (_hidden_faces) takes the back of the mouth
+    with it - seen through the slit between the lips at no more than a pixel
+    in any of its views - and through the lips, parted a hair, the collar
+    behind the head then showed (14 Nov 2026). The fan is painted like any
+    other triangle: the dark of the mouth, seen from the front."""
+    import numpy as np
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    directed = np.concatenate([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]]).astype(np.int64)
+    count = int(positions.shape[0])
+    key = directed[:, 0] * count + directed[:, 1]
+    back = directed[:, 1] * count + directed[:, 0]
+    rim = directed[~np.isin(key, back)]                  # an edge no triangle runs back along
+    rim = rim[(positions[rim][..., 1] > above).all(axis=1)]
+    if not len(rim):
+        return positions, faces, 0
+    graph = coo_matrix((np.ones(len(rim), np.int8), (rim[:, 0], rim[:, 1])), shape=(count, count))
+    _, label = connected_components(graph, directed=False)
+    reach = HOLE_SIZE * float(np.ptp(positions, axis=0).max())
+    added_points, added_faces = [], []
+    for loop in np.unique(label[rim[:, 0]]):
+        edges = rim[label[rim[:, 0]] == loop]
+        points = np.unique(edges)
+        if not 3 <= len(edges) <= HOLE_EDGES:
+            continue
+        # A closed rim: every point on it left once and reached once.
+        if not (np.bincount(edges[:, 0], minlength=count)[points] == 1).all() \
+                or not (np.bincount(edges[:, 1], minlength=count)[points] == 1).all():
+            continue
+        if float(np.linalg.norm(np.ptp(positions[points], axis=0))) > reach:
+            continue
+        middle = count + len(added_points)
+        added_points.append(positions[points].mean(axis=0))
+        added_faces.append(np.stack([edges[:, 1], edges[:, 0], np.full(len(edges), middle)], axis=1))
+    if not added_points:
+        return positions, faces, 0
+    return (np.concatenate([positions, np.asarray(added_points, positions.dtype)]),
+            np.concatenate([faces, np.concatenate(added_faces).astype(faces.dtype)]),
+            len(added_points))
+
+
 def _hidden_faces(positions, faces, above: float):
     """Which triangles above the height ``above`` nothing can see from outside
     (bool per triangle): the inside of a shell of hair, the back of a mouth."""
@@ -3245,6 +3376,7 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     # more triangles than were kept back for them.
     ask, ask_share = target, head_share
     hidden_dropped = 0
+    holes_closed = 0
     for attempt in range(4):
         neck = first_neck
         if neck is not None and len(weld_faces) > ask:
@@ -3304,6 +3436,12 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
                 corners = low_positions[low_faces]
                 flat = agk.degenerate_mask(corners[:, 0], corners[:, 1], corners[:, 2])
                 low_faces = _drop_stacked(low_positions, low_faces[~flat])
+            # Small holes that leaves in the head (between the lips) are closed.
+            low_positions, low_faces, holes_closed = _cap_holes(low_positions, low_faces, head_floor)
+            corners = low_positions[low_faces]
+            flat = agk.degenerate_mask(corners[:, 0], corners[:, 1], corners[:, 2])
+            if flat.any():
+                low_faces = low_faces[~flat]
         if sculpt is None:
             step("unwrapping UVs", 2)
         if sculpt is None:
@@ -3793,6 +3931,9 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     if hidden_dropped:
         note += (f"; {hidden_dropped:,} triangles of the head that nothing can see were dropped "
                  "and the budget spent on the rest")
+    if holes_closed:
+        note += (f"; {holes_closed} small hole{'s' if holes_closed != 1 else ''} in the head closed "
+                 "(between the lips)")
     if face_note:
         note += f"; {face_note}"
     if layout_note:

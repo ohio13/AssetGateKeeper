@@ -49,6 +49,13 @@
   sliver left by a cut, never turned away from the viewer; and colours are
   told apart by hue as well as brightness when a texture is reduced (a
   lip's red had gone to a dark hair's olive).
+  14 Nov: a small texture's UV islands are packed by the texel, a block of
+  whole texels to each island and none shared. Packed to a tenth of a texel
+  with gaps, a 64x32 body texture had a third of its texels in use and half
+  its islands with no texel of their own, so triangles of a suit came out
+  the colour of the skin or hair packed beside them. And small holes left
+  in the head by dropping what nothing can see are closed: through the lips
+  the collar behind the head had shown.
 
 * **Bake: the Expansion Pak (12 Nov).** For a character with little else
   on screen - an ending cutscene, a title screen - the review page's N64
