@@ -3450,6 +3450,209 @@ def _painted_parts(positions, faces, neck: float, spatial):
     return painted[piece], int(painted.sum())
 
 
+#: Sockets (14 Nov 2026): a game model's eyeball is a ball of its own (often
+#: only its front), sat in a hollow of the head. With the ball painted on, the
+#: eye was painted on the hollow and looked sunk in. The hollow is taken out
+#: and the hole it leaves closed flat across the lids. A ball is a painted
+#: part of BALL_LEAST points or more, at least BALL_DEEP as deep as it is
+#: wide, whose points lie within BALL_ROUND of a radius from one ball's
+#: surface; its hollow is the surface more than BALL_BEHIND of a radius behind
+#: the ball's front, down to BALL_DEEPEST radii behind its middle.
+BALL_ROUND = 0.1
+BALL_DEEP = 0.5
+BALL_LEAST = 12
+BALL_BEHIND = 0.15
+BALL_DEEPEST = 2.5
+
+
+def _socket_faces(positions, faces, small):
+    """(mask over faces: the hollow behind each painted ball, how many balls).
+    The hollow is what lies inside the ball's outline seen from its front and
+    behind its front surface; with it gone the lids' edge is a small hole,
+    which is closed flat like any other (_cap_holes)."""
+    import numpy as np
+    hollow = np.zeros(len(faces), bool)
+    if not small.any():
+        return hollow, 0
+    _, piece = _pieces(len(positions), faces)
+    found = 0
+    for index in np.unique(piece[small]):
+        ids = np.unique(faces[piece == index])
+        if len(ids) < BALL_LEAST:
+            continue
+        points = positions[ids]
+        spread = np.ptp(points, axis=0)
+        if float(spread.min()) < BALL_DEEP * float(spread.max()):
+            continue                         # a sheet (lashes, a row of teeth), not a ball
+        # The ball the points lie on (least squares): a game eye is often only
+        # the front of one, so the middle of its points is not the ball's.
+        solved, *_ = np.linalg.lstsq(np.c_[2.0 * points, np.ones(len(points))],
+                                     (points ** 2).sum(axis=1), rcond=None)
+        middle = solved[:3]
+        radius = float(np.sqrt(max(solved[3] + middle @ middle, 0.0)))
+        reach = np.linalg.norm(points - middle, axis=1)
+        if radius <= 0 or radius > float(spread.max()) \
+                or float(np.abs(reach - radius).mean()) > BALL_ROUND * radius:
+            continue
+        away = positions - middle
+        # Which way is out: where the ball's own points are, if it is only a
+        # front; else away from the surface round it.
+        out = points.mean(axis=0) - middle
+        if float(np.linalg.norm(out)) < 0.2 * radius:
+            near = np.linalg.norm(away, axis=1) < 3.0 * radius
+            near[ids] = False
+            if near.sum() < 3:
+                continue
+            out = middle - positions[near].mean(axis=0)
+        length = float(np.linalg.norm(out))
+        if length < 1e-12:
+            continue
+        out = out / length
+        depth = away @ out
+        off = np.linalg.norm(away - depth[:, None] * out, axis=1)
+        front = np.sqrt(np.maximum(radius ** 2 - off ** 2, 0.0))
+        behind = (off < radius) & (depth < front - BALL_BEHIND * radius) & (depth > -BALL_DEEPEST * radius)
+        chosen = behind[faces].all(axis=1) & ~small
+        if chosen.any():
+            hollow |= chosen
+            found += 1
+    return hollow, found
+
+
+#: See-through materials (14 Nov 2026): a material the model makes partly
+#: solid as a whole (a membrane, glass: glTF alphaMode BLEND with a colour
+#: factor under CLEAR_BELOW) is baked as a part of its own and stays
+#: see-through; baked with the rest it became a solid shell, and what was
+#: inside it was dropped as hidden. It gets its share of the triangles by how
+#: many it has in the model, held between CLEAR_SHARE's two ends.
+CLEAR_BELOW = 0.999
+CLEAR_SHARE = (0.1, 0.4)
+CLEAR_SUFFIX = "_Clear"
+
+
+def _gltf_document(path: Path) -> tuple[dict, bytes]:
+    """(the JSON, the binary chunk) of a .glb; (the JSON, b"") of a .gltf."""
+    if path.suffix.lower() == ".glb":
+        blob = path.read_bytes()
+        length = int.from_bytes(blob[12:16], "little")
+        document = json.loads(blob[20:20 + length])
+        rest = blob[20 + length:]
+        return document, rest[8:8 + int.from_bytes(rest[:4], "little")] if len(rest) >= 8 else b""
+    return json.loads(path.read_text(encoding="utf-8")), b""
+
+
+def clear_materials(path: Path) -> list:
+    """[(material name, how solid 0..1, its triangles, the model's triangles)]
+    for the materials of a .gltf/.glb that are see-through as a whole."""
+    if Path(path).suffix.lower() not in (".gltf", ".glb"):
+        return []
+    try:
+        document, _ = _gltf_document(Path(path))
+    except (OSError, ValueError):
+        return []
+    materials = document.get("materials") or []
+    accessors = document.get("accessors") or []
+    counts = [0] * len(materials)
+    total = 0
+    for mesh in document.get("meshes") or []:
+        for primitive in mesh.get("primitives") or []:
+            index = primitive.get("indices")
+            position = (primitive.get("attributes") or {}).get("POSITION")
+            use = index if isinstance(index, int) else position
+            count = accessors[use].get("count", 0) // 3 if isinstance(use, int) \
+                and use < len(accessors) else 0
+            total += count
+            slot = primitive.get("material")
+            if isinstance(slot, int) and slot < len(counts):
+                counts[slot] += count
+    found = []
+    for index, material in enumerate(materials):
+        factor = (material.get("pbrMetallicRoughness") or {}).get("baseColorFactor") or [1, 1, 1, 1]
+        solid = float(factor[3]) if len(factor) > 3 else 1.0
+        if material.get("alphaMode") == "BLEND" and solid < CLEAR_BELOW and counts[index]:
+            found.append((material.get("name") or f"material {index}", solid, counts[index], total))
+    return found
+
+
+def _join_glb(path: Path, other: Path, solid: dict, suffix: str = CLEAR_SUFFIX) -> list:
+    """Add the mesh in ``other`` to the one in ``path`` as further materials of
+    the same mesh, each see-through (``solid``: material name in ``other`` ->
+    how solid, or one value for all under ""). Returns the image names added."""
+    first, first_bin = _gltf_document(path)
+    second, second_bin = _gltf_document(other)
+    first_bin = first_bin + b"\0" * (-len(first_bin) % 4)
+    shift = {key: len(first.get(key) or []) for key in
+             ("bufferViews", "accessors", "images", "samplers", "textures", "materials")}
+    for view in second.get("bufferViews") or []:
+        view = dict(view, byteOffset=view.get("byteOffset", 0) + len(first_bin))
+        first.setdefault("bufferViews", []).append(view)
+    for accessor in second.get("accessors") or []:
+        accessor = dict(accessor)
+        if "bufferView" in accessor:
+            accessor["bufferView"] += shift["bufferViews"]
+        first.setdefault("accessors", []).append(accessor)
+    names = []
+    for image in second.get("images") or []:
+        image = dict(image)
+        if "bufferView" in image:
+            image["bufferView"] += shift["bufferViews"]
+        if image.get("name"):
+            image["name"] = _clear_name(image["name"], suffix)
+            names.append(image["name"])
+        first.setdefault("images", []).append(image)
+    for sampler in second.get("samplers") or []:
+        first.setdefault("samplers", []).append(dict(sampler))
+    for texture in second.get("textures") or []:
+        texture = dict(texture)
+        if "source" in texture:
+            texture["source"] += shift["images"]
+        if "sampler" in texture:
+            texture["sampler"] += shift["samplers"]
+        first.setdefault("textures", []).append(texture)
+    for material in second.get("materials") or []:
+        material = json.loads(json.dumps(material))
+        pbr = material.setdefault("pbrMetallicRoughness", {})
+        for holder in (pbr, material):
+            for key, value in holder.items():
+                if key.endswith("Texture") and isinstance(value, dict) and "index" in value:
+                    value["index"] += shift["textures"]
+        factor = list(pbr.get("baseColorFactor") or [1.0, 1.0, 1.0, 1.0])
+        factor[3] = float(solid.get(material.get("name"), solid.get("", 1.0)))
+        pbr["baseColorFactor"] = factor
+        material["alphaMode"] = "BLEND"
+        material["doubleSided"] = True
+        material["name"] = _clear_name(material.get("name") or "material", suffix)
+        first.setdefault("materials", []).append(material)
+    target = first["meshes"][0]["primitives"]
+    for mesh in second.get("meshes") or []:
+        for primitive in mesh.get("primitives") or []:
+            primitive = json.loads(json.dumps(primitive))
+            primitive["attributes"] = {key: value + shift["accessors"]
+                                       for key, value in primitive["attributes"].items()}
+            if "indices" in primitive:
+                primitive["indices"] += shift["accessors"]
+            if "material" in primitive:
+                primitive["material"] += shift["materials"]
+            target.append(primitive)
+    binary = first_bin + second_bin
+    binary += b"\0" * (-len(binary) % 4)
+    first["buffers"] = [{"byteLength": len(binary)}]
+    text = json.dumps(first, separators=(",", ":")).encode("utf-8")
+    text += b" " * (-len(text) % 4)
+    path.write_bytes(b"glTF" + struct.pack("<II", 2, 28 + len(text) + len(binary))
+                     + struct.pack("<I", len(text)) + b"JSON" + text
+                     + struct.pack("<I", len(binary)) + b"BIN\0" + binary)
+    return names
+
+
+def _clear_name(name: str, suffix: str) -> str:
+    """T_Hero_LP_BaseColor -> T_Hero_LP_Clear_BaseColor; M_Hero_LP -> M_Hero_LP_Clear."""
+    for ending in ("_BaseColor", "_Normal"):
+        if name.endswith(ending):
+            return name[:-len(ending)] + suffix + ending
+    return name + suffix
+
+
 def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_TRIANGLES,
          texture: int = DEFAULT_TEXTURE,
          progress: Optional[Callable[[str, int, int], None]] = None,
@@ -3457,6 +3660,69 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
          detail_boost: float = DETAIL_BOOST, face_texture: bool = False,
          head_share: float = 0.0, skip_materials=(), face_layout: str = "single",
          body_textures: int = 1, painted_parts: bool = False, max_edge: int = 0) -> dict:
+    """Reduce, unwrap and bake ``source`` into a game asset. Returns what it wrote.
+
+    A model with see-through materials (clear_materials) is baked in two goes -
+    the solid materials as below, the see-through ones as a part of their own
+    with a plain texture - and the two joined in one .glb; otherwise this is
+    _bake_one()."""
+    import shutil
+    import tempfile
+    source = Path(source)
+    options = dict(texture=texture, normal_map=normal_map, colours=colours, preset=preset,
+                   detail_boost=detail_boost, max_edge=max_edge)
+    shaped = dict(face_texture=face_texture, head_share=head_share, face_layout=face_layout,
+                  body_textures=body_textures, painted_parts=painted_parts)
+    skipped = tuple(skip_materials)
+    clear = [item for item in clear_materials(source) if item[0] not in skipped]
+    names = [name for name, _ in bake_materials(source)]
+    others = [name for name in names if name not in skipped
+              and name not in {item[0] for item in clear}]
+    # Names must tell the materials apart for one go to leave the others out.
+    if not clear or not others or len(set(names)) != len(names) or triangles < 20:
+        return _bake_one(source, out_dir, triangles=triangles, progress=progress,
+                         skip_materials=skipped, **options, **shaped)
+    share = sum(item[2] for item in clear) / max(clear[0][3], 1)
+    share = min(max(share, CLEAR_SHARE[0]), CLEAR_SHARE[1])
+    clear_triangles = max(4, int(round(triangles * share)))
+    made = _bake_one(source, out_dir, triangles=triangles - clear_triangles, progress=progress,
+                     skip_materials=skipped + tuple(item[0] for item in clear),
+                     **options, **shaped)
+    with tempfile.TemporaryDirectory(prefix="agk_bake_clear_") as scratch:
+        # Plain: one texture, no face, no head budget - a shell, not a character.
+        options["normal_map"] = False
+        shell = _bake_one(source, Path(scratch), triangles=clear_triangles,
+                          skip_materials=skipped + tuple(others), **options)
+        # One see-through part: the least solid of its materials speaks for it.
+        _join_glb(Path(made["mesh"]), Path(shell["mesh"]), {"": min(item[1] for item in clear)})
+        for written in shell["textures"]:
+            name = _clear_name(Path(written).stem, CLEAR_SUFFIX) + Path(written).suffix
+            shutil.copyfile(written, Path(made["mesh"]).parent / name)
+            made["textures"].append(str(Path(made["mesh"]).parent / name))
+        for part in shell["parts"]:
+            name = _clear_name(Path(part["texture"]).stem, CLEAR_SUFFIX) + Path(part["texture"]).suffix
+            made["parts"].append(dict(part, texture=str(Path(made["mesh"]).parent / name),
+                                      suffix=CLEAR_SUFFIX))
+    made["triangles"] += shell["triangles"]
+    made["source_triangles"] += shell["source_triangles"]
+    made["materials"] += shell["materials"]
+    made["seconds"] = round(made["seconds"] + shell["seconds"], 1)
+    labels = ", ".join(item[0] for item in clear)
+    line = (f"see-through: {labels} baked as a part of its own, {min(item[1] for item in clear):.0%} "
+            f"solid ({shell['triangles']:,} triangles, its own texture); draw it after the solid "
+            "parts, blended")
+    made["note"] += f"; {line}"
+    made["notes"].append(line)
+    return made
+
+
+def _bake_one(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_TRIANGLES,
+              texture: int = DEFAULT_TEXTURE,
+              progress: Optional[Callable[[str, int, int], None]] = None,
+              normal_map: bool = True, colours: int = 0, preset: str = "",
+              detail_boost: float = DETAIL_BOOST, face_texture: bool = False,
+              head_share: float = 0.0, skip_materials=(), face_layout: str = "single",
+              body_textures: int = 1, painted_parts: bool = False, max_edge: int = 0) -> dict:
     """Reduce, unwrap and bake ``source`` into a game asset. Returns what it wrote.
 
     ``normal_map`` adds T_<name>_Normal.png (and puts it in the .glb);
@@ -3543,6 +3809,11 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
                     painted_note = (f"{parts} small parts in the head (eyes, lashes, teeth: "
                                     f"{int(small.sum()):,} triangles) are painted on "
                                     "the surface behind them")
+                    hollow, sockets = _socket_faces(weld_positions, weld_faces, small)
+                    if sockets:
+                        small |= hollow
+                        painted_note += (f"; the hollow behind {sockets} of them (eyeballs) taken "
+                                         "out and closed flat, so the eyes are not sunk in")
                     weld_faces = weld_faces[~small]
             if not head_share:
                 neck = None
