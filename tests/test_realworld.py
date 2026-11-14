@@ -1316,6 +1316,36 @@ try:
                "lies on another",
                _apart and _uv.min() >= 0.0 and _uv.max() <= 1.0 and len(_np.unique(_charts)) > 1,
                (bool(_apart), float(_uv.min()), float(_uv.max()), len(_np.unique(_charts))))
+        # Islands packed by the texel: every island a block of whole texels to itself.
+        _, _tex_faces, _tex_uv, _ = polypaint._unwrap(_xatlas, _bumpy, _np.asarray(_ball.faces), 64, 1,
+                                                      shape=(64, 32))
+        _tex_charts = polypaint._chart_ids(_tex_faces, len(_tex_uv))
+        _claimed = _np.zeros((32, 64), int)
+        for _chart in _np.unique(_tex_charts):
+            _t = _tex_uv[_np.unique(_tex_faces[_tex_charts == _chart])] * [64, 32]
+            _lo = _np.floor(_t.min(axis=0) + 1e-6).astype(int)
+            _hi = _np.maximum(_np.floor(_t.max(axis=0) - 1e-6).astype(int), _lo)
+            _claimed[_lo[1]:_hi[1] + 1, _lo[0]:_hi[0] + 1] += 1
+        expect("a small texture's islands are packed by the texel: no texel holds two islands "
+               "(a suit's triangles came out the colour of the skin packed beside them), and "
+               "most of the texture is used",
+               _claimed.max() == 1 and (_claimed > 0).mean() > 0.5
+               and _tex_uv.min() >= 0.0 and _tex_uv.max() <= 1.0,
+               (int(_claimed.max()), float((_claimed > 0).mean())))
+        # A small hole in the head is closed; a large opening (the neck) is left.
+        _open = _trimesh.creation.icosphere(subdivisions=5, radius=1.0)
+        _open_p = _np.asarray(_open.vertices, float)
+        _open_faces = _np.asarray(_open.faces)[1:]                     # one triangle out
+        _cap_p, _cap_f, _closed = polypaint._cap_holes(_open_p, _open_faces, -2.0)
+        _edges = _np.sort(_np.concatenate([_cap_f[:, [0, 1]], _cap_f[:, [1, 2]], _cap_f[:, [2, 0]]]), axis=1)
+        _, _edge_count = _np.unique(_edges, axis=0, return_counts=True)
+        _neck = _np.asarray(_open.faces)[_open_p[_np.asarray(_open.faces)].mean(axis=1)[:, 1] > -0.8]
+        _wide_p, _wide_f, _wide_closed = polypaint._cap_holes(_open_p, _neck, -2.0)
+        expect("_cap_holes closes a small hole in the head (the slit between the lips, once the "
+               "mouth behind it is dropped) and leaves a large one",
+               _closed == 1 and (_edge_count == 2).all() and len(_cap_f) == len(_open_faces) + 3
+               and _wide_closed == 0 and len(_wide_f) == len(_neck),
+               (_closed, int(_edge_count.min()), _wide_closed))
         # Hidden triangles: a shell inside a shell, both above the line.
         def _shell(radius):
             ball = _trimesh.creation.icosphere(subdivisions=2, radius=radius)
