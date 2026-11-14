@@ -831,8 +831,12 @@ try:
         palette = _Image.open(retro / "T_Ball_LP_BaseColor.png")
         made = _trimesh.load(retro / "SM_Ball_LP.glb", force="mesh")
         document, _, images = read_glb_parts(retro / "SM_Ball_LP.glb")
-        expect("... 64x64 in at most 16 colours, at most 1,200 triangles, nearest filtering",
-               palette.size == (64, 64) and len(palette.convert("RGB").getcolors(4096)) <= 16
+        # 13 Nov 2026: the body's texture is 64x32 in 256 colours - the N64 texture memory
+        # of 64x64 in 16 (CI8 for CI4) - because 16 colours left its shading in blocks.
+        expect("... 64x32 in at most 256 colours (the texture memory of 64x64 in 16), at most "
+               "1,200 triangles, nearest filtering",
+               palette.size == (64, 32) and len(palette.convert("RGB").getcolors(4096)) <= 256
+               and palette.size[0] * palette.size[1] <= 2048
                and len(made.faces) <= 1200 and len(images) == 1
                and "normalTexture" not in document["materials"][0]
                and document["samplers"][0]["magFilter"] == 9728,
@@ -1283,6 +1287,35 @@ try:
         expect("_reduce_colours keeps the colours it is given and stays within 16",
                [1, 2, 3] in _held_palette and [250, 240, 230] in _held_palette
                and len(_held.getcolors()) <= 16, _held_palette)
+        # Two sheets, one just over the other: a point of the upper sheet's piece that is
+        # a little nearer the lower sheet still goes to its own.
+        _sheet_p = _np.array([(0, 0, 0), (1, 0, 0), (0, 1, 0), (0, 0, 0.02), (1, 0, 0.02), (0, 1, 0.02)], float)
+        _sheet_f = _np.array([(0, 1, 2), (3, 4, 5)])
+        _between_sheets = _np.array([(0.3, 0.3, 0.009)])
+        import scipy.spatial as _spatial
+        _own = polypaint._closest_by_piece(_between_sheets, _np.array([1]), _sheet_p, _sheet_f, _spatial,
+                                           _np.array([0, 0, 0, 1, 1, 1]))
+        _any = polypaint._closest_by_piece(_between_sheets, None, _sheet_p, _sheet_f, _spatial)
+        expect("_closest_by_piece: a point goes to its own piece's triangle when that is about as near "
+               "(a collar's point is not painted on the neck under it)",
+               _own.tolist() == [1] and _any.tolist() == [0], (_own.tolist(), _any.tolist()))
+        # Islands with wide gaps on a small texture: packed smaller until they fit, never squeezed
+        # in on top of each other.
+        import xatlas as _xatlas
+        _ball = _trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+        _bumpy = _np.asarray(_ball.vertices) * (1.0 + 0.35 * _np.sin(7.0 * _np.asarray(_ball.vertices)).prod(axis=1))[:, None]
+        _, _uv_faces, _uv, _ = polypaint._unwrap(_xatlas, _bumpy, _np.asarray(_ball.faces), 64, 3)
+        _charts = polypaint._chart_ids(_uv_faces, len(_uv))
+        _owner_all, _ = polypaint._rasterise(_uv * 256, _uv_faces, 256)
+        _apart = True
+        for _chart in _np.unique(_charts):
+            _own_pixels, _ = polypaint._rasterise(_uv * 256, _uv_faces[_charts == _chart], 256)
+            _others, _ = polypaint._rasterise(_uv * 256, _uv_faces[_charts != _chart], 256)
+            _apart &= not ((_own_pixels >= 0) & (_others >= 0)).any()
+        expect("_unwrap: at 64 px with 3 texels between islands, they fit inside the texture and none "
+               "lies on another",
+               _apart and _uv.min() >= 0.0 and _uv.max() <= 1.0 and len(_np.unique(_charts)) > 1,
+               (bool(_apart), float(_uv.min()), float(_uv.max()), len(_np.unique(_charts))))
         # Hidden triangles: a shell inside a shell, both above the line.
         def _shell(radius):
             ball = _trimesh.creation.icosphere(subdivisions=2, radius=radius)
@@ -1305,13 +1338,21 @@ try:
                (int((_mirror_face.max(axis=2) < 70).sum()), _single_dark))
         _strip = polypaint.bake(hero / "SM_Hero_HP.obj", WORK / "pak_eyes", triangles=3000,
                                 texture=64, normal_map=False, colours=16, face_texture=True,
-                                face_layout="eyes-mirror", body_textures=2)
+                                face_layout="eyes-mirror", body_textures=2, preset="n64-pak")
         _suffixes = [part["suffix"] for part in _strip["parts"]]
         expect("eyes-mirror, two body textures: four materials - body, the rest of the head, "
                "face, eyes",
                _suffixes == ["", "_Head", "_Face", "_Eyes"] and _strip["materials"] == 4
                and all((WORK / "pak_eyes" / f"T_Hero_LP{suffix}_BaseColor.png").is_file()
                        for suffix in _suffixes), (_suffixes, _strip["note"]))
+        _head_parts = [part for part in _strip["parts"] if part["suffix"] == "_Head"]
+        if True:
+            _head_png = _Image.open(_head_parts[0]["texture"])
+            expect("the head's texture is 256 colours at half the texels (CI8 for CI4: the same N64 "
+                   "texture memory), and the note says so",
+                   _head_parts[0]["size"] == [64, 32] and _head_png.size == (64, 32)
+                   and len(_head_png.getcolors(4096)) <= 256
+                   and "64x32 in 256 colours" in _strip["note"], (_head_parts[0]["size"], _strip["note"]))
         _eyes = _np.asarray(_Image.open(WORK / "pak_eyes" / "T_Hero_LP_Eyes_BaseColor.png").convert("RGB"))
         _face_png = _Image.open(WORK / "pak_eyes" / "T_Hero_LP_Face_BaseColor.png")
         _eyes_png = _Image.open(WORK / "pak_eyes" / "T_Hero_LP_Eyes_BaseColor.png")

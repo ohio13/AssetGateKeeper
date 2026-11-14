@@ -37,6 +37,18 @@
   they meet (in one palette of 16 the skin banded); a face is shaded
   smoothly across its folds; and under the jaw the neck goes with the
   head's texture, a collar as high with the body's, told apart by colour.
+  Later still: with the N64 presets the body's and the head's textures
+  are 256 colours at 64x32, the face's and eyes' 16 at 64x64 - CI8 for
+  CI4, the same texture memory on an N64 - because 16 colours left a suit's
+  and a head of hair's shading in blocks; each piece of the sculpt is painted on its own reduced triangles
+  (a collar's points were nearest the neck under its rim, and the neck came
+  out the collar's colour); UV islands on a small texture are packed smaller
+  until they fit (with wide gaps they had been squeezed in on top of each
+  other); a strip texture is averaged down over its islands only (the gaps'
+  fill tinted their edges); and a face is shaded as one surface across a
+  sliver left by a cut, never turned away from the viewer; and colours are
+  told apart by hue as well as brightness when a texture is reduced (a
+  lip's red had gone to a dark hair's olive).
 
 * **Bake: the Expansion Pak (12 Nov).** For a character with little else
   on screen - an ending cutscene, a title screen - the review page's N64

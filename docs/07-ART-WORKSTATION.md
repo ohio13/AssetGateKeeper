@@ -136,6 +136,8 @@ up; tick Unreal's "Flip Green Channel" for the loose PNG) is baked too unless th
 sculpt's colour detail is densest) gets a 64 px texture of its own as a second
 material, mapped straight from the front like an N64 face, hairline to chin, so
 the eyes, brows and lips fill it instead of about 6 x 6 texels of the body's.
+The body's texture is written 64x32 in 256 colours - the same N64 texture
+memory as 64x64 in 16, with smoother shading; the face's stays 64x64 in 16.
 Of the 16 colours, 6 go to small details the rest would lose, such as the
 colour of the irises. **Paint eyes on** (ticked with N64 style) leaves the
 small parts in the head - eyeballs, lashes, teeth - off the reduced mesh and
