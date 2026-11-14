@@ -258,6 +258,21 @@ _audit_html = ahs.render_audit_page(_models, title="All verdicts", status_filter
 expect("... with a link to the textures that says one failed",
        "Textures: 2, 1 failed" in _audit_html and "kind=textures" in _audit_html
        and "<option value='models' selected>" in _audit_html, _audit_html[-1500:-900])
+# 14 Nov 2026: one model's 21 failed textures took all 20 places in the list,
+# so the model checked first had no row and no way to be sent on.
+crowd_db = fresh_db("crowd.db")
+for _name in ["creature_final.fbx"] + [f"T_Hero_{i:02d}_Color.JPG" for i in range(21)] + ["SM_Hero.fbx"]:
+    ahs.store_verdict(crowd_db, {"filename": _name, "path": _name, "passed": False,
+                                 "status": "FAILED", "problems": ["over budget"],
+                                 "hostname": "PC", "username": ""})
+crowd_page = ahs.render_dashboard(crowd_db)
+expect("failed textures do not push a failed model off the dashboard",
+       "creature_final.fbx" in crowd_page and "SM_Hero.fbx" in crowd_page
+       and "Recent failures - last 2<" in crowd_page, crowd_page[crowd_page.find("Recent failures"):][:200])
+expect("... the textures keep their own last 20, whatever the case of the suffix",
+       [e["filename"] for e in ahs.wall_of_shame(crowd_db, kind="models")] == ["SM_Hero.fbx", "creature_final.fbx"]
+       and len(ahs.wall_of_shame(crowd_db, kind="textures")) == ahs.WALL_OF_SHAME_LIMIT
+       and len(ahs.wall_of_shame(crowd_db, limit=50)) == 23)
 expect("a row with only a machine name shows the machine, not 'unknown'",
        "DESKTOP-AB12CD3" in host_page and "unknown (" not in host_page
        and "identity = &quot;full&quot;" in host_page, host_page[host_page.find("rock.obj"):][:300])

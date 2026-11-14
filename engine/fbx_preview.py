@@ -47,7 +47,8 @@ except ImportError:                                   # pragma: no cover
 #: the report and the page cannot drift apart.
 PREVIEW_WARNING = (
     "You are viewing a .glb converted from this FBX, not the FBX itself. "
-    "Geometry, UVs, normals and base-colour textures (those uploaded with it); "
+    "Geometry, UVs, normals and base-colour textures (those packed inside the FBX "
+    "or uploaded with it); "
     "a slot with no texture gets a flat colour. No animation, skinning or other "
     "material inputs; pivots are not applied, so placement can differ from your "
     "DCC or engine. The numbers on the right are measured from the FBX."
@@ -229,10 +230,48 @@ def _layer_values(geometry, layer_name: str, values_name: str, index_name: str, 
     return values[lookup]
 
 
-def _textures_by_material(objects, connections) -> dict:
-    """material id -> the base-colour texture's path as the FBX names it."""
-    textures = {}
+#: Image formats a glTF may carry, by their first bytes.
+IMAGE_SIGNATURES = ((b"\x89PNG\r\n\x1a\n", "image/png"), (b"\xff\xd8\xff", "image/jpeg"))
+
+#: The preview stops packing textures past this many bytes: it is a preview,
+#: and the browser has to hold every one of them.
+EMBEDDED_BYTES_LIMIT = 96 * 1024 * 1024
+
+
+def _image_type(content: bytes) -> str:
+    """The glTF mime type of ``content``, or "" when a glTF cannot carry it."""
+    for signature, mime in IMAGE_SIGNATURES:
+        if content.startswith(signature):
+            return mime
+    return ""
+
+
+def _as_web_image(content: bytes) -> bytes:
+    """``content`` as a PNG or JPEG: itself, or converted (a packed .tga), or b""."""
+    if _image_type(content):
+        return content
+    try:
+        import io
+        from PIL import Image
+        with Image.open(io.BytesIO(content)) as image:
+            out = io.BytesIO()
+            image.convert("RGBA" if "A" in image.getbands() else "RGB").save(out, "PNG")
+            return out.getvalue()
+    except Exception:
+        return b""
+
+
+def _textures_by_material(objects, connections) -> tuple[dict, dict]:
+    """(material id -> the base-colour texture's path as the FBX names it,
+    that path -> the image's bytes when the FBX carries the texture inside it)."""
+    textures, videos = {}, {}
     for node in objects.children:
+        if node.name == "Video":
+            content = node.child("Content")
+            if content is not None and content.props and isinstance(content.props[0], bytes) \
+                    and content.props[0]:
+                videos[agk._fbx_id(node)] = content.props[0]
+            continue
         if node.name != "Texture":
             continue
         relative = agk._fbx_string(node.child("RelativeFilename")).replace("\\", "/")
@@ -244,14 +283,20 @@ def _textures_by_material(objects, connections) -> dict:
         chosen = chosen.removeprefix("./")
         if chosen:
             textures[agk._fbx_id(node)] = chosen
-    found = {}
-    for link in (connections.all("C") if connections else []):
+    found, packed = {}, {}
+    links = list(connections.all("C") if connections else [])
+    for link in links:
+        # A texture the FBX carries inside it: its Video node holds the bytes.
+        if len(link.props) >= 3 and link.props[0] == "OO" and link.props[1] in videos \
+                and link.props[2] in textures:
+            packed.setdefault(textures[link.props[2]], videos[link.props[1]])
+    for link in links:
         if len(link.props) < 4 or link.props[0] != "OP":
             continue
         texture, material, slot = link.props[1], link.props[2], str(link.props[3]).lower()
         if texture in textures and slot in BASE_COLOUR_PROPERTIES and material not in found:
             found[material] = textures[texture]
-    return found
+    return found, packed
 
 
 def convert(path: Path, out_path: Path) -> dict:
@@ -263,7 +308,7 @@ def convert(path: Path, out_path: Path) -> dict:
     scene = _collect(path)
     _write_glb(Path(out_path), scene["positions"], scene["groups"], scene["material_names"],
                Path(path).stem, uvs=scene["uvs"], normals=scene["normals"],
-               textures=scene["textures"])
+               textures=scene["textures"], packed=scene["packed"])
     return scene["info"]
 
 
@@ -301,7 +346,7 @@ def _collect(path: Path) -> dict:
         parents.setdefault(child, []).append(parent)
         children.setdefault(parent, []).append(child)
 
-    material_textures = _textures_by_material(objects, connections)
+    material_textures, packed_textures = _textures_by_material(objects, connections)
 
     # Same selection as the gate: no collision hulls, no LOD1+ levels.
     collision = {m for m, name in model_names.items()
@@ -453,10 +498,14 @@ def _collect(path: Path) -> dict:
     normals_out = np.vstack(all_normals).astype(np.float32) if has_normals else None
     groups = [(slot, np.vstack(parts).astype(np.uint32)) for slot, parts in sorted(primitives.items())]
     textures = [material_texture.get(name, "") if has_uv else "" for name in material_names]
+    packed = {name: content for name, content in packed_textures.items() if name in textures}
     info = {
         "uvs": has_uv,
         "normals": has_normals,
         "textures": sorted({item for item in textures if item}),
+        # Textures the FBX carries inside it: the preview shows these without
+        # any file beside it.
+        "packed_textures": sorted(packed),
         "triangles": triangle_total,
         "vertices": vertex_total,
         "materials": material_names,
@@ -468,8 +517,8 @@ def _collect(path: Path) -> dict:
         "skipped": skipped,
     }
     return {"positions": positions, "uvs": uvs, "normals": normals_out, "groups": groups,
-            "material_names": material_names, "textures": textures, "colours": has_colours,
-            "info": info}
+            "material_names": material_names, "textures": textures, "packed": packed,
+            "colours": has_colours, "info": info}
 
 
 def _texture_edge(fbx: Path, name: str) -> int:
@@ -547,13 +596,15 @@ def _pad(blob: bytes, filler: bytes) -> bytes:
 
 
 def _write_glb(path: Path, positions, groups, material_names: list, name: str,
-               uvs=None, normals=None, textures: list | None = None) -> None:
+               uvs=None, normals=None, textures: list | None = None,
+               packed: dict | None = None) -> None:
     """One mesh, one primitive per material slot, vertex arrays shared. GLB 2.0.
 
     ``textures`` names each material's base-colour image by the path the
     workstation stores it under; the viewer resolves it against the asset's
     files, so a texture uploaded with the FBX shows, and one that was not
-    falls back to the slot colour."""
+    falls back to the slot colour. ``packed`` holds the bytes of the textures
+    the FBX carries inside it; those go into the preview itself."""
     position_bytes = positions.tobytes()
     buffer = bytearray(_pad(position_bytes, b"\x00"))
     views = [{"buffer": 0, "byteOffset": 0, "byteLength": len(position_bytes), "target": 34962}]
@@ -609,8 +660,22 @@ def _write_glb(path: Path, positions, groups, material_names: list, name: str,
         "accessors": accessors,
     }
     if images:
-        document["images"] = [{"uri": "/".join(quote(part) for part in image.split("/"))}
-                              for image in images]
+        document["images"] = []
+        packed_total = 0
+        for image in images:
+            content = _as_web_image((packed or {}).get(image, b""))
+            if content and packed_total + len(content) <= EMBEDDED_BYTES_LIMIT:
+                packed_total += len(content)
+                offset = len(buffer)
+                buffer += _pad(content, b"\x00")
+                views.append({"buffer": 0, "byteOffset": offset, "byteLength": len(content)})
+                document["images"].append({"bufferView": len(views) - 1,
+                                           "mimeType": _image_type(content),
+                                           "name": image.rsplit("/", 1)[-1]})
+            else:
+                document["images"].append(
+                    {"uri": "/".join(quote(part) for part in image.split("/"))})
+        document["buffers"][0]["byteLength"] = len(buffer)
         document["samplers"] = [{"wrapS": 10497, "wrapT": 10497}]
         document["textures"] = [{"source": i, "sampler": 0} for i in range(len(images))]
     json_blob = _pad(json.dumps(document, separators=(",", ":")).encode("utf-8"), b" ")
