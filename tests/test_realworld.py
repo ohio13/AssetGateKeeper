@@ -1346,6 +1346,116 @@ try:
                _closed == 1 and (_edge_count == 2).all() and len(_cap_f) == len(_open_faces) + 3
                and _wide_closed == 0 and len(_wide_f) == len(_neck),
                (_closed, int(_edge_count.min()), _wide_closed))
+        # 14 Nov 2026: hair modelled as dozens of ribbons reduced to splinters.
+        def _ribbons(count, spread):
+            points, faces = [], []
+            for k in range(count):
+                tube = _trimesh.creation.cylinder(radius=0.05, height=1.0, sections=8)
+                faces.append(_np.asarray(tube.faces) + sum(len(p) for p in points))
+                points.append(_np.asarray(tube.vertices) + [spread * (k % 4), spread * (k // 4), 0.0])
+            return _np.concatenate(points), _np.concatenate(faces)
+        _body = _trimesh.creation.box(extents=(3.0, 3.0, 3.0))
+        _body_p = _np.asarray(_body.vertices) + [0.0, 0.0, -3.0]
+        for _label, _count, _spread, _expected in (("layered", 16, 0.06, [1]), ("apart", 16, 0.5, []),
+                                                   ("few", 4, 0.06, [])):
+            _hair_p, _hair_f = _ribbons(_count, _spread)
+            _all_p = _np.concatenate([_body_p, _hair_p])
+            _all_f = _np.concatenate([_np.asarray(_body.faces), _hair_f + len(_body_p)])
+            _slots = _np.r_[_np.zeros(len(_body.faces), int), _np.ones(len(_hair_f), int)]
+            _out_p, _out_f, _wrapped, _strands = polypaint._wrap_strands(_all_p, _all_f, _slots)
+            _pieces_after = polypaint._pieces(len(_out_p), _out_f)[1]
+            _e = _np.sort(_np.concatenate([_out_f[:, [0, 1]], _out_f[:, [1, 2]], _out_f[:, [2, 0]]]), axis=1)
+            _, _uses = _np.unique(_e, axis=0, return_counts=True)
+            expect(f"_wrap_strands: {_count} strands {_label} are "
+                   + ("wrapped in one closed shell" if _expected else "left as they are"),
+                   _wrapped == _expected
+                   and (len(_np.unique(_pieces_after)) == 2 and _strands == _count
+                        and (_uses % 2 == 0).all() if _expected
+                        else _out_f is _all_f),
+                   (_wrapped, _strands, len(_np.unique(_pieces_after))))
+        _faded = _np.zeros((4, 4, 4), _np.float32)
+        _faded[:, :2] = [0.9, 0.7, 0.1, 1.0]                 # solid yellow; the rest see-through black
+        _made_solid = polypaint._solid_image(_faded)
+        expect("a wrapped strand's see-through texels take the nearest solid colour",
+               _np.allclose(_made_solid[:, :, :3], [0.9, 0.7, 0.1]) and (_made_solid[:, :, 3] == 1).all()
+               and polypaint._solid_image(_faded[:, :, :3]) is not None)
+        # A vertex no triangle uses is a piece of its own with nothing in it
+        # (a material left out of the bake leaves them): it crashed the bake.
+        _ball = _trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+        _speck = _trimesh.creation.icosphere(subdivisions=1, radius=0.02)
+        _loose_p = _np.concatenate([_np.asarray(_ball.vertices), _np.asarray(_speck.vertices) + [0.0, 0.0, 0.97],
+                                    [[0.0, 0.5, 0.0]]])
+        _loose_f = _np.concatenate([_np.asarray(_ball.faces), _np.asarray(_speck.faces) + len(_ball.vertices)])
+        try:
+            _small, _parts = polypaint._painted_parts(_loose_p, _loose_f, -2.0, _spatial)
+        except ValueError as _exc:
+            _small, _parts = None, str(_exc)
+        expect("_painted_parts skips a piece no triangle carries (a vertex left by a material that "
+               "was left out) and does not stop the bake",
+               _small is not None and len(_small) == len(_loose_f), _parts)
+        # 14 Nov 2026: an eyeball in a hollow of the head; painted on, the eye looked sunk in.
+        _skull = _trimesh.creation.icosphere(subdivisions=4, radius=1.0)
+        _skull_p = _np.asarray(_skull.vertices, float).copy()
+        _dent = _np.linalg.norm(_skull_p - [0.0, 0.0, 1.0], axis=1) < 0.25
+        _skull_p[_dent, 2] -= 0.3                                     # the socket
+        _eye = _trimesh.creation.icosphere(subdivisions=2, radius=0.2)
+        _eye_p = _np.asarray(_eye.vertices) + [0.0, 0.0, 0.8]
+        _lash = _np.array([[-0.2, 0.2, 1.0], [0.2, 0.2, 1.0], [0.0, 0.25, 1.0]])
+        _sock_p = _np.concatenate([_skull_p, _eye_p, _lash])
+        _sock_f = _np.concatenate([_np.asarray(_skull.faces), _np.asarray(_eye.faces) + len(_skull_p),
+                                   [[len(_skull_p) + len(_eye_p) + k for k in range(3)]]])
+        _is_small = _np.r_[_np.zeros(len(_skull.faces), bool), _np.ones(len(_eye.faces) + 1, bool)]
+        _hollow, _balls = polypaint._socket_faces(_sock_p, _sock_f, _is_small)
+        _hollow_mid = _sock_p[_sock_f[_hollow]].mean(axis=1)
+        expect("_socket_faces: the hollow behind a painted eyeball is found (and only that: not the "
+               "ball, not the lash, not the skull round it)",
+               _balls == 1 and _hollow.any() and not (_hollow & _is_small).any()
+               and bool((_np.linalg.norm(_hollow_mid[:, :2], axis=1) < 0.2).all())
+               and bool((_hollow_mid[:, 2] > 0).all()), (_balls, int(_hollow.sum())))
+        expect("... a painted part that is a sheet has no hollow",
+               polypaint._socket_faces(_sock_p, _sock_f,
+                                       _np.r_[_np.zeros(len(_sock_f) - 1, bool), True])[1] == 0)
+        # 14 Nov 2026: a see-through shell baked solid and hid what was inside it.
+        import tempfile as _tempfile
+        _clear_dir = Path(_tempfile.mkdtemp(prefix="agk_clear_"))
+        _core = _trimesh.creation.icosphere(subdivisions=3, radius=0.5)
+        _membrane = _trimesh.creation.icosphere(subdivisions=3, radius=1.0)
+        for _ball, _colour in ((_core, (200, 30, 40, 255)), (_membrane, (40, 200, 120, 255))):
+            _polar = _np.asarray(_ball.vertices)
+            _ball.visual = _trimesh.visual.TextureVisuals(
+                uv=_np.c_[_np.arctan2(_polar[:, 0], _polar[:, 2]) / (2 * _np.pi) + 0.5,
+                          _polar[:, 1] / (2 * _np.abs(_polar[:, 1]).max()) + 0.5],
+                material=_trimesh.visual.material.PBRMaterial(
+                    name="core_mat" if _ball is _core else "membrane_mat",
+                    baseColorTexture=Image.new("RGBA", (8, 8), _colour),
+                    baseColorFactor=[255, 255, 255, 255 if _ball is _core else 128],
+                    alphaMode="OPAQUE" if _ball is _core else "BLEND"))
+        _scene = _trimesh.Scene()
+        _scene.add_geometry(_core, geom_name="core")
+        _scene.add_geometry(_membrane, geom_name="membrane")
+        (_clear_dir / "creature.glb").write_bytes(_scene.export(file_type="glb"))
+        _found_clear = polypaint.clear_materials(_clear_dir / "creature.glb")
+        _clear_bake = polypaint.bake(_clear_dir / "creature.glb", _clear_dir, triangles=400, texture=32)
+        _clear_doc, _ = polypaint._gltf_document(Path(_clear_bake["mesh"]))
+        _clear_mats = _clear_doc["materials"]
+        _see = [m for m in _clear_mats if m.get("alphaMode") == "BLEND"]
+        _inner = _trimesh.load(_clear_bake["mesh"], process=False)
+        _radii = sorted(float(_np.linalg.norm(g.vertices, axis=1).mean()) for g in _inner.geometry.values())
+        expect("a see-through material is found by what the file says (blended, half solid)",
+               [(name, round(solid, 2)) for name, solid, _, _ in _found_clear] == [("membrane_mat", 0.5)],
+               _found_clear)
+        expect("... and bakes as a part of its own that stays see-through, with what is inside it kept",
+               len(_see) == 1 and abs(_see[0]["pbrMetallicRoughness"]["baseColorFactor"][3] - 128 / 255) < 0.01
+               and _see[0]["name"].endswith("_Clear") and len(_clear_mats) == 2
+               and len(_radii) == 2 and _radii[0] < 0.6 and _radii[1] > 0.9
+               and _clear_bake["triangles"] <= 400
+               and any(name.endswith("_Clear_BaseColor.png") for name in _clear_bake["textures"])
+               and "see-through" in _clear_bake["note"],
+               ([m.get("name") for m in _clear_mats], _radii, _clear_bake["triangles"]))
+        _solid_only = polypaint.bake(_clear_dir / "creature.glb", _clear_dir / "left_out", triangles=400,
+                                     texture=32, skip_materials=("membrane_mat",))
+        expect("... left out of the bake, it is left out",
+               "see-through" not in _solid_only["note"] and _solid_only["materials"] == 1)
         # Hidden triangles: a shell inside a shell, both above the line.
         def _shell(radius):
             ball = _trimesh.creation.icosphere(subdivisions=2, radius=radius)
