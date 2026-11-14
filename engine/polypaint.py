@@ -720,6 +720,10 @@ SOFT_REACH = 0.0025
 SOFT_SLIVER = 0.3
 #: ... and no normal of it turned further from the viewer than this (the cosine).
 SOFT_FACING = 0.35
+#: A face's vertex takes the mean of the sculpt's normals at this many of its
+#: nearest points, those within FACE_NORMAL_AGREE (a cosine) of its own.
+FACE_NORMAL_POINTS = 16
+FACE_NORMAL_AGREE = 0.3
 
 
 def _corner_normals(positions, faces, crease_degrees: float = CREASE_DEGREES, soft=None):
@@ -1236,7 +1240,8 @@ def _closest_low_triangles(points, positions, faces, spatial):
 
 #: A point of the sculpt goes to its own piece's nearest reduced triangle when
 #: that is no more than this share of the model's size further than the nearest of all.
-PIECE_SLACK = 0.005
+#: (0.005 left a fringe's underside painted on the forehead under it.)
+PIECE_SLACK = 0.05
 
 
 def _closest_by_piece(points, piece, positions, faces, spatial, origin=None):
@@ -2475,7 +2480,7 @@ def _reduce_with_head(simplify, positions, faces, triangles: int, neck_height: f
 
 
 def _assemble(parts, low_positions, low_faces, nearest, xatlas, texture: int, padding: int,
-              priority=None, boost: float = 1.0) -> dict:
+              priority=None, boost: float = 1.0, sculpt=None) -> dict:
     """The reduced mesh laid out for baking, one part (material) after another:
     each part's UVs (its own, or xatlas'), shading normals split at hard folds,
     tangents. ``nearest`` (the reduced triangle each sculpt vertex is nearest)
@@ -2520,6 +2525,25 @@ def _assemble(parts, low_positions, low_faces, nearest, xatlas, texture: int, pa
         low_positions[mapping], uvs, all_faces, corner_normals)
     uvs, bake_uvs = np.ascontiguousarray(uvs[:, :2]), np.ascontiguousarray(uvs[:, 2:])
     sizes = np.cumsum([len(part) for part in part_faces])[:-1]
+    # A face is shaded as the sculpt is there: each vertex takes the sculpt's own
+    # smooth normal round the nearest point of it. The reduced face is cut along
+    # its textures' edges, and the slivers that leaves (a sixth of its
+    # triangles) shaded the bridge of the nose in facets (14 Nov 2026).
+    tree, smooth = getattr(sculpt, "tree", None), getattr(sculpt, "normals", None)
+    if tree is not None and smooth is not None:
+        for part, faces_of in zip(parts, np.split(all_faces, sizes)):
+            if part.get("view") is None or not len(faces_of):
+                continue
+            used = np.unique(faces_of)
+            _, around = tree.query(positions[used], k=min(FACE_NORMAL_POINTS, len(smooth)), workers=-1)
+            taken = np.asarray(smooth, np.float64)[around.reshape(len(used), -1)]
+            # Only those that agree with the reduced surface: not an eyeball's
+            # or a lash's behind or in front of it.
+            agree = (taken * normals[used][:, None, :]).sum(axis=2) > FACE_NORMAL_AGREE
+            mean = (taken * agree[..., None]).sum(axis=1)
+            length = np.linalg.norm(mean, axis=1)
+            fine = (length > 1e-6) & (agree.sum(axis=1) >= FACE_NORMAL_POINTS // 4)
+            normals[used[fine]] = mean[fine] / length[fine, None]
     # A part seen from the front (a face) is shaded as facing the viewer at
     # least a little everywhere: the inside of a lip, a socket's wall, turned
     # away and shaded dark, showed as dark triangles in the mouth and eyes.
@@ -3817,7 +3841,7 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
                         padding=2 * padding)
     parts.extend(face_parts)
     built = _assemble(parts, low_positions, low_faces, nearest, xatlas, texture, padding,
-                      priority, boost)
+                      priority, boost, sculpt=sculpt)
     positions, uvs, vertex_normals = built["positions"], built["uvs"], built["normals"]
     all_faces, part_faces, tangents = built["faces"], built["part_faces"], built["tangents"]
     step("baking the textures", 3)

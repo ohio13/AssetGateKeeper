@@ -261,9 +261,9 @@ def command_up(args: argparse.Namespace) -> int:
                and health_ok(current[key]["url"], current[key].get("probe", default_probe[key]))
                for key in ("dashboard", "workstation")}
     if healthy["dashboard"] and healthy["workstation"]:
+        # One line each: say_portline names both pages. (The two were listed
+        # here as well, bare, and read as four things running.)
         say("Already running:")
-        for key in ("dashboard", "workstation"):
-            say(f"  {key:<12} {current[key]['url']}")
         say_portline(current)
         open_ui(args, current)          # a second double-click still opens the page
         return 0
