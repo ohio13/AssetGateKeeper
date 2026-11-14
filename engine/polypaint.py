@@ -660,9 +660,10 @@ def _require_bake_libraries():
     return modules["fast_simplification"], modules["xatlas"], modules["scipy.spatial"]
 
 
-def _weld(vertices, faces):
+def _weld(vertices, faces, with_kept: bool = False):
     """(positions, faces) with vertices closer than a ten-millionth of the model's
-    size merged, and the triangles that collapse dropped."""
+    size merged, and the triangles that collapse dropped. ``with_kept`` adds
+    which of ``faces`` are still there."""
     import numpy as np
     span = float(np.max(vertices.max(axis=0) - vertices.min(axis=0))) if len(vertices) else 0.0
     step = span * 1e-7 or 1e-12
@@ -672,7 +673,153 @@ def _weld(vertices, faces):
     welded = inverse[faces]
     keep = ((welded[:, 0] != welded[:, 1]) & (welded[:, 1] != welded[:, 2])
             & (welded[:, 0] != welded[:, 2]))
+    if with_kept:
+        return np.asarray(vertices, np.float64)[first], welded[keep], keep
     return np.asarray(vertices, np.float64)[first], welded[keep]
+
+
+#: Strands (14 Nov 2026): hair built as dozens of separate ribbons and tubes
+#: lying over each other reduces to splinters - each strand gets a handful of
+#: triangles and none of them meet. A material with at least STRAND_PIECES
+#: separate pieces, none of them more than STRAND_PIECE_SHARE of the model,
+#: is wrapped in one closed shell first (STRAND_GRID cells across its longest
+#: side, smoothed), if the pieces lie in layers: together at least
+#: STRAND_LAYERS times the area of the shell round them. The shell is what is
+#: reduced; the colour still comes from the strands.
+STRAND_PIECES = 12
+STRAND_PIECE_SHARE = 0.25
+STRAND_GRID = 72
+STRAND_LAYERS = 1.5
+STRAND_SMOOTH = 8
+#: The shell is reduced on its own first, to this share of the bake's
+#: triangles (and no fewer than STRAND_SHELL_LEAST): left at the grid's tens of
+#: thousands, its ripples took the face's share of the budget.
+STRAND_SHELL_SHARE = 0.2
+STRAND_SHELL_LEAST = 200
+
+
+def _triangle_points(corners, spacing: float):
+    """Points on the triangles ``corners`` (n, 3, 3), no further apart than ``spacing``."""
+    import numpy as np
+    edges = np.linalg.norm(corners - np.roll(corners, 1, axis=1), axis=2).max(axis=1)
+    steps = np.clip(np.ceil(edges / max(spacing, 1e-30)).astype(np.int64), 1, 96)
+    points = []
+    for count in np.unique(steps):
+        chosen = corners[steps == count]
+        i, j = np.meshgrid(np.arange(count + 1), np.arange(count + 1), indexing="ij")
+        inside = (i + j) <= count
+        weights = np.stack([i[inside], j[inside], count - i[inside] - j[inside]], axis=1) / count
+        points.append(np.einsum("sk,fkd->fsd", weights, chosen).reshape(-1, 3))
+    return np.concatenate(points) if points else np.zeros((0, 3))
+
+
+def _shell(positions, faces):
+    """(positions, triangles) of one closed, smoothed shell round ``faces``."""
+    import numpy as np
+    from scipy import ndimage
+    corners = positions[faces]
+    low, high = corners.reshape(-1, 3).min(axis=0), corners.reshape(-1, 3).max(axis=0)
+    cell = float((high - low).max()) / STRAND_GRID or 1e-9
+    cells = np.floor((_triangle_points(corners, cell / 2) - low) / cell).astype(np.int64) + 2
+    shape = tuple(int(n) for n in np.ceil((high - low) / cell).astype(np.int64) + 5)
+    filled = np.zeros(shape, bool)
+    filled[cells[:, 0], cells[:, 1], cells[:, 2]] = True
+    # Close the gaps between strands, fill what they enclose, then take the
+    # closing's growth back off (a lone thin strand stays).
+    closed = ndimage.binary_fill_holes(ndimage.binary_dilation(filled))
+    solid = ndimage.binary_erosion(closed) | filled
+    square = np.array([[0, 0], [1, 0], [1, 1], [0, 1]])
+    quads = []
+    for axis in range(3):
+        others = [k for k in range(3) if k != axis]
+        for side in (0, 1):
+            beyond = np.roll(solid, -1 if side else 1, axis=axis)
+            at = np.argwhere(solid & ~beyond)
+            if not len(at):
+                continue
+            quad = np.repeat(at[:, None, :], 4, axis=1)
+            quad[:, :, axis] += side
+            quad[:, :, others[0]] += square[:, 0]
+            quad[:, :, others[1]] += square[:, 1]
+            # Wound so the normal points out of the solid, along +/- axis.
+            if (side == 1) != (axis != 1):
+                quad = quad[:, ::-1]
+            quads.append(quad)
+    quads = np.concatenate(quads)
+    points, index = np.unique(quads.reshape(-1, 3), axis=0, return_inverse=True)
+    index = index.reshape(-1, 4)
+    triangles = np.concatenate([index[:, [0, 1, 2]], index[:, [0, 2, 3]]])
+    points = points.astype(np.float64)
+    # The steps of the grid smoothed away (Taubin: in, then out, so it does not shrink).
+    a = np.concatenate([triangles[:, 0], triangles[:, 1], triangles[:, 2]])
+    b = np.concatenate([triangles[:, 1], triangles[:, 2], triangles[:, 0]])
+    degree = np.maximum(np.bincount(a, minlength=len(points)) + np.bincount(b, minlength=len(points)), 1)
+    for _ in range(STRAND_SMOOTH):
+        for weight in (0.5, -0.52):
+            total = np.zeros_like(points)
+            np.add.at(total, a, points[b])
+            np.add.at(total, b, points[a])
+            points = points + weight * (total / degree[:, None] - points)
+    return (points - 2) * cell + low, triangles
+
+
+def _solid_image(image):
+    """``image`` (h, w, 4) with every see-through texel given the colour of the
+    nearest solid one, and made solid. Others are returned as they are."""
+    from scipy import ndimage
+    if image is None or image.ndim != 3 or image.shape[2] < 4:
+        return image
+    faint = image[:, :, 3] < 0.5
+    if not faint.any() or faint.all():
+        return image
+    _, nearest = ndimage.distance_transform_edt(faint, return_indices=True)
+    solid = image[nearest[0], nearest[1]].copy()
+    solid[:, :, 3] = 1.0
+    return solid
+
+
+def _wrap_strands(positions, faces, material, simplify=None, triangles: int = 0):
+    """(positions, faces, the materials that were wrapped, pieces wrapped):
+    each material built of many layered pieces (hair in strands) replaced by
+    one closed shell round them."""
+    import numpy as np
+    if len(faces) == 0 or material is None:
+        return positions, faces, [], 0
+    count, piece = _pieces(len(positions), faces)
+    corners = positions[faces]
+    area = np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0],
+                                   corners[:, 2] - corners[:, 0]), axis=1) / 2
+    piece_area = np.bincount(piece, area, minlength=count)
+    whole = float(piece_area.sum()) or 1.0
+    wrapped, pieces_wrapped = [], 0
+    for slot in np.unique(material):
+        # The pieces that are this material's alone, and not the body itself.
+        mine = np.bincount(piece[material == slot], minlength=count)
+        own = np.nonzero((mine > 0) & (mine == np.bincount(piece, minlength=count))
+                         & (piece_area < STRAND_PIECE_SHARE * whole))[0]
+        if len(own) < STRAND_PIECES:
+            continue
+        chosen = np.isin(piece, own)
+        shell_positions, shell_faces = _shell(positions, faces[chosen])
+        if simplify is not None and triangles:
+            shell_positions, shell_faces = _reduce(
+                simplify, shell_positions, shell_faces,
+                max(STRAND_SHELL_LEAST, int(STRAND_SHELL_SHARE * triangles)))
+        around = shell_positions[shell_faces]
+        shell_area = float(np.linalg.norm(np.cross(around[:, 1] - around[:, 0],
+                                                   around[:, 2] - around[:, 0]), axis=1).sum()) / 2
+        if float(area[chosen].sum()) < STRAND_LAYERS * shell_area:
+            continue
+        faces = np.concatenate([faces[~chosen], shell_faces + len(positions)])
+        material = np.concatenate([material[~chosen], np.full(len(shell_faces), slot)])
+        piece = np.concatenate([piece[~chosen], np.full(len(shell_faces), count)])
+        area = np.concatenate([area[~chosen], np.zeros(len(shell_faces))])
+        piece_area = np.bincount(piece, area, minlength=count + 1)
+        count += 1
+        positions = np.concatenate([positions, shell_positions])
+        wrapped.append(int(slot))
+        pieces_wrapped += len(own)
+    return positions, faces, wrapped, pieces_wrapped
 
 
 def _drop_stacked(positions, faces):
@@ -3288,6 +3435,8 @@ def _painted_parts(positions, faces, neck: float, spatial):
     order = np.argsort(piece, kind="stable")
     starts = np.searchsorted(piece[order], np.arange(count + 1))
     for index in np.nonzero(~major & (middle_height > neck))[0]:
+        if starts[index] == starts[index + 1]:
+            continue                     # a piece number no triangle carries
         points = positions[np.unique(faces[order[starts[index]:starts[index + 1]]])]
         if float(np.linalg.norm(np.ptp(points, axis=0))) > PAINT_MAX_SIZE * extent:
             continue
@@ -3354,7 +3503,19 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     # Reduce a welded copy: vertices that sit on top of each other (a UV seam,
     # a pole fan, pieces exported separately) are open edges to the reducer,
     # which keeps them, and a 1,200-triangle bake came out at 4,628.
-    weld_positions, weld_faces = _weld(obj.vertices, obj.faces)
+    weld_positions, weld_faces, kept = _weld(obj.vertices, obj.faces, with_kept=True)
+    strand_note = ""
+    if textured:
+        weld_positions, weld_faces, wrapped, strands = _wrap_strands(
+            weld_positions, weld_faces, np.asarray(obj.material)[kept], simplify, triangles)
+        for slot in wrapped:
+            # The shell is solid: where a strand's texture fades out (a tip, a
+            # cut-out edge) it takes the nearest solid colour, not the black
+            # that lies under the see-through texels.
+            obj.images[slot] = _solid_image(obj.images[slot])
+        if wrapped:
+            strand_note = (f"{strands} separate strands (hair in ribbons) wrapped in one shell "
+                           "before reducing: strand by strand they reduce to splinters")
     # The sculpt's pieces, a label per vertex (_closest_by_piece).
     sculpt_piece = None
     if len(obj.faces):
@@ -3955,6 +4116,8 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
                              + f" ({share:.0%} of the surface)")
     if described:
         note += f"; textures of their own: {', '.join(described)}"
+    if strand_note:
+        note += f"; {strand_note}"
     if painted_note:
         note += f"; {painted_note}"
     if hidden_dropped:

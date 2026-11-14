@@ -1346,6 +1346,53 @@ try:
                _closed == 1 and (_edge_count == 2).all() and len(_cap_f) == len(_open_faces) + 3
                and _wide_closed == 0 and len(_wide_f) == len(_neck),
                (_closed, int(_edge_count.min()), _wide_closed))
+        # 14 Nov 2026: hair modelled as dozens of ribbons reduced to splinters.
+        def _ribbons(count, spread):
+            points, faces = [], []
+            for k in range(count):
+                tube = _trimesh.creation.cylinder(radius=0.05, height=1.0, sections=8)
+                faces.append(_np.asarray(tube.faces) + sum(len(p) for p in points))
+                points.append(_np.asarray(tube.vertices) + [spread * (k % 4), spread * (k // 4), 0.0])
+            return _np.concatenate(points), _np.concatenate(faces)
+        _body = _trimesh.creation.box(extents=(3.0, 3.0, 3.0))
+        _body_p = _np.asarray(_body.vertices) + [0.0, 0.0, -3.0]
+        for _label, _count, _spread, _expected in (("layered", 16, 0.06, [1]), ("apart", 16, 0.5, []),
+                                                   ("few", 4, 0.06, [])):
+            _hair_p, _hair_f = _ribbons(_count, _spread)
+            _all_p = _np.concatenate([_body_p, _hair_p])
+            _all_f = _np.concatenate([_np.asarray(_body.faces), _hair_f + len(_body_p)])
+            _slots = _np.r_[_np.zeros(len(_body.faces), int), _np.ones(len(_hair_f), int)]
+            _out_p, _out_f, _wrapped, _strands = polypaint._wrap_strands(_all_p, _all_f, _slots)
+            _pieces_after = polypaint._pieces(len(_out_p), _out_f)[1]
+            _e = _np.sort(_np.concatenate([_out_f[:, [0, 1]], _out_f[:, [1, 2]], _out_f[:, [2, 0]]]), axis=1)
+            _, _uses = _np.unique(_e, axis=0, return_counts=True)
+            expect(f"_wrap_strands: {_count} strands {_label} are "
+                   + ("wrapped in one closed shell" if _expected else "left as they are"),
+                   _wrapped == _expected
+                   and (len(_np.unique(_pieces_after)) == 2 and _strands == _count
+                        and (_uses % 2 == 0).all() if _expected
+                        else _out_f is _all_f),
+                   (_wrapped, _strands, len(_np.unique(_pieces_after))))
+        _faded = _np.zeros((4, 4, 4), _np.float32)
+        _faded[:, :2] = [0.9, 0.7, 0.1, 1.0]                 # solid yellow; the rest see-through black
+        _made_solid = polypaint._solid_image(_faded)
+        expect("a wrapped strand's see-through texels take the nearest solid colour",
+               _np.allclose(_made_solid[:, :, :3], [0.9, 0.7, 0.1]) and (_made_solid[:, :, 3] == 1).all()
+               and polypaint._solid_image(_faded[:, :, :3]) is not None)
+        # A vertex no triangle uses is a piece of its own with nothing in it
+        # (a material left out of the bake leaves them): it crashed the bake.
+        _ball = _trimesh.creation.icosphere(subdivisions=2, radius=1.0)
+        _speck = _trimesh.creation.icosphere(subdivisions=1, radius=0.02)
+        _loose_p = _np.concatenate([_np.asarray(_ball.vertices), _np.asarray(_speck.vertices) + [0.0, 0.0, 0.97],
+                                    [[0.0, 0.5, 0.0]]])
+        _loose_f = _np.concatenate([_np.asarray(_ball.faces), _np.asarray(_speck.faces) + len(_ball.vertices)])
+        try:
+            _small, _parts = polypaint._painted_parts(_loose_p, _loose_f, -2.0, _spatial)
+        except ValueError as _exc:
+            _small, _parts = None, str(_exc)
+        expect("_painted_parts skips a piece no triangle carries (a vertex left by a material that "
+               "was left out) and does not stop the bake",
+               _small is not None and len(_small) == len(_loose_f), _parts)
         # Hidden triangles: a shell inside a shell, both above the line.
         def _shell(radius):
             ball = _trimesh.creation.icosphere(subdivisions=2, radius=radius)
