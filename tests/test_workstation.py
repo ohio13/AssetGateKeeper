@@ -1980,6 +1980,7 @@ if _bake_ready():
                           ({"normal_map": "yes"}, "normal_map must be true or false"),
                           ({"face_texture": 1}, "face_texture must be true or false"),
                           ({"face_layout": "sideways"}, "face_layout must be one of"),
+                          ({"painted_parts": "yes"}, "painted_parts must be true or false"),
                           ({"body_textures": 3}, "body_textures must be 1 or 2"),
                           ({"body_textures": True}, "body_textures must be 1 or 2"),
                           ({"shiny": True}, "unknown field")):
@@ -2014,14 +2015,16 @@ if _bake_ready():
         time.sleep(0.3)
         job = pp.json(f"/api/jobs/{job['id']}")[1]
     result = job.get("result") or {}
-    expect("n64-pak with two body textures: two materials, each 64 px, named _BaseColor and "
-           "_Lower_BaseColor (no face on this sculpt)",
+    # 13 Nov 2026: a body texture of the N64 presets is 64x32 in 256 colours, the texture
+    # memory of 64x64 in 16.
+    expect("n64-pak with two body textures: two materials, each 64x32, named _BaseColor and "
+           "_Lower_BaseColor (no face on this sculpt: upper and lower body)",
            job["state"] == "done" and result.get("preset") == "n64-pak"
            and result.get("body_textures") == 2 and result.get("materials") == 2
            and [t["name"].endswith(suffix) for t, suffix in
                 zip(result.get("textures", []), ("LP_BaseColor.png", "_Lower_BaseColor.png"))]
            == [True, True]
-           and all(t["size"] == [64, 64] for t in result.get("textures", [])), str(job)[:500])
+           and all(t["size"] == [64, 32] for t in result.get("textures", [])), str(job)[:500])
     status, queued = pp.json(f"/api/assets/{made['id']}/bake-polypaint", method="POST",
                              body={"triangles": 300, "texture": 128, "normal_map": False})
     job = queued["job"]

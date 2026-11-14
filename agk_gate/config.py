@@ -872,6 +872,15 @@ PLATFORM_PRESETS: dict[str, dict[str, object]] = {
     "n64": _preset("Nintendo 64", "4 MB RDRAM, 4 KB TMEM, no programmable shading",
                     character=1_200, prop=400, texture=64, slots=2, power_of_two=True,
                     pbr=False, uv=1, influences=1, texture_rules={"n64_tmem": True}),
+    # 13 Nov 2026. A character shown with little else on screen (a cutscene,
+    # a title screen) in a game that uses the Expansion Pak: the Pak's RAM
+    # holds more textures, each still inside TMEM (n64_tmem), so four
+    # materials - body, head, face, eyes. A 128 px edge is for strips
+    # (128 x 32 is the same 4,096 texels as 64 x 64).
+    "n64-pak": _preset("Nintendo 64 + Expansion Pak (cutscene character)",
+                        "8 MB RDRAM, 4 KB TMEM; one character with little else on screen",
+                        character=3_000, prop=400, texture=128, slots=4, power_of_two=True,
+                        pbr=False, uv=1, influences=1, texture_rules={"n64_tmem": True}),
     "ps1": _preset("Sony PlayStation", "1 MB VRAM, affine texture mapping",
                     character=1_100, prop=350, texture=256, slots=1, power_of_two=True,
                     pbr=False, uv=1, influences=1),

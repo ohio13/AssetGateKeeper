@@ -50,7 +50,7 @@ Use the **Bug report** form and include:
    python tests/test_realworld.py
    python tests/test_gatekeeper.py
    python tests/test_formats.py
-   python -m pyflakes asset_gatekeeper.py agk_gate healer.py
+   python -m ruff check .
    ```
 
 The gate's code is in `agk_gate/`, in seven parts (`agk_gate/__init__.py` says

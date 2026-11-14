@@ -95,10 +95,11 @@ DEFAULT_TEXTURE = 2048
 #: of 3,000 triangles.
 PRESETS: dict[str, dict] = {
     "n64": {"label": "Nintendo 64", "triangles": 1_200, "texture": 64,
-            "normal_map": False, "colours": 16, "face_texture": True},
+            "normal_map": False, "colours": 16, "face_texture": True, "painted_parts": True},
     "n64-pak": {"label": "Nintendo 64 + Expansion Pak", "triangles": 3_000, "texture": 64,
                 "normal_map": False, "colours": 16, "face_texture": True,
-                "head_share": 0.6, "face_layout": "eyes-mirror", "body_textures": 1},
+                "head_share": 0.6, "face_layout": "eyes-mirror", "body_textures": 1,
+                "painted_parts": True},
 }
 #: How the face's own textures are laid out (face_texture on):
 #: single       one texture, the face seen from the front;
@@ -108,9 +109,10 @@ PRESETS: dict[str, dict] = {
 #:              the same 4,096 texels), the rest of the face on the face texture;
 #: eyes-mirror  both: half the eyes and half the face, each mirrored.
 FACE_LAYOUTS = ("single", "mirror", "eyes", "eyes-mirror")
-#: Texture name suffixes of the materials past the first (the body):
-#: the lower body (body_textures 2), the face and the eye strip.
-PART_SUFFIXES = ("_Lower", "_Face", "_Eyes")
+#: Texture name suffixes of the materials past the first (the body): the
+#: lower body (body_textures 2 on a model with no head found), the face, the
+#: eye strip, and the rest of the head (body_textures 2 on one with a face).
+PART_SUFFIXES = ("_Lower", "_Face", "_Eyes", "_Head")
 #: Colour counts a texture can be reduced to (0 keeps every colour).
 COLOUR_CHOICES = (0, 16, 32, 64, 256)
 #: Sculpt triangles that meet at a vertex, at most, considered when projecting.
@@ -131,6 +133,10 @@ DETAIL_MIN_TEXTURE = 512
 #: At this size and below the .glb asks for nearest-texel filtering: islands are
 #: a texel or two wide and smooth filtering would blend in the next island.
 NEAREST_TEXTURE = 128
+#: _unwrap looks for the largest scale that fits a texture this small, for a
+#: mesh of no more triangles than this, in at most this many packings.
+PACK_SEARCH_TRIANGLES = 8000
+PACK_SEARCH_STEPS = 16
 #: Face texture (second material): the region around the sculpt's densest colour
 #: detail (eyes, brows, lips) that gets a texture of its own: colours counted in
 #: small cells, summed on a FACE_GRID-cell grid over the model (_face_centre);
@@ -495,9 +501,17 @@ def _sample_materials(images, tints, material, uv, with_alpha: bool = False):
         fx, fy = (x - x0)[:, None].astype(np.float32), (y - y0)[:, None].astype(np.float32)
         x1, y1 = (x0 + 1) % width, (y0 + 1) % height
         x0, y0 = x0 % width, y0 % height
-        top = image[y0, x0] * (1 - fx) + image[y0, x1] * fx
-        bottom = image[y1, x0] * (1 - fx) + image[y1, x1] * fx
+        corners = [image[y0, x0], image[y0, x1], image[y1, x0], image[y1, x1]]
+        if image.shape[2] == 4:
+            # Colour weighted by how solid each texel is: the clear texels round
+            # a hair strand are stored black, and blended in plainly they
+            # darkened every strand's edge (blonde hair cards baked olive).
+            corners = [np.concatenate([c[:, :3] * c[:, 3:4], c[:, 3:4]], axis=1) for c in corners]
+        top = corners[0] * (1 - fx) + corners[1] * fx
+        bottom = corners[2] * (1 - fx) + corners[3] * fx
         texel = top * (1 - fy) + bottom * fy
+        if image.shape[2] == 4:
+            texel[:, :3] /= np.maximum(texel[:, 3:4], 1e-6)
         out[rows, :3] = texel[:, :3] * tints[int(index)]
         out[rows, 3] = texel[:, 3] if texel.shape[1] == 4 else 1.0
     out = out.clip(0.0, 1.0)
@@ -571,7 +585,7 @@ def resolve_settings(preset: str = "", triangles: int = 0, texture: int = 0,
                      max_triangles: int = 0, max_texture: int = 0,
                      face_texture: Optional[bool] = None, max_materials: int = 0,
                      head_share: Optional[float] = None, face_layout: str = "",
-                     body_textures: int = 0) -> dict:
+                     body_textures: int = 0, painted_parts: Optional[bool] = None) -> dict:
     """What a bake will use: explicit values, else the preset's, else the defaults,
     and never more than ``max_triangles`` / ``max_texture`` when those are given
     (a folder's rules). Each face texture and a second body texture is another
@@ -596,6 +610,8 @@ def resolve_settings(preset: str = "", triangles: int = 0, texture: int = 0,
         "head_share": float(chosen.get("head_share", 0.0) if head_share is None else head_share),
         "face_layout": face_layout or chosen.get("face_layout", "single"),
         "body_textures": int(body_textures or chosen.get("body_textures", 1)),
+        "painted_parts": (bool(chosen.get("painted_parts", False)) if painted_parts is None
+                          else bool(painted_parts)),
         "face_texture_note": "",
     }
     if max_materials > 0:
@@ -699,9 +715,16 @@ def _drop_stacked(positions, faces):
 #: Neighbouring triangles further apart than this keep a hard edge between
 #: them in the baked mesh's shading (Blender's "auto smooth" does the same).
 CREASE_DEGREES = 60.0
+SOFT_CREASE_DEGREES = 110.0
+#: ... the two ends of a sliver's short side - shorter than this share of the
+#: model's size, and than SOFT_SLIVER of the triangle's longest - shaded as one.
+SOFT_REACH = 0.0025
+SOFT_SLIVER = 0.3
+#: ... and no normal of it turned further from the viewer than this (the cosine).
+SOFT_FACING = 0.35
 
 
-def _corner_normals(positions, faces, crease_degrees: float = CREASE_DEGREES):
+def _corner_normals(positions, faces, crease_degrees: float = CREASE_DEGREES, soft=None):
     """A normal for each corner of each triangle, shape (faces, 3, 3): the
     area-weighted average of the triangles at that corner's vertex that face
     within ``crease_degrees`` of this one.
@@ -710,15 +733,43 @@ def _corner_normals(positions, faces, crease_degrees: float = CREASE_DEGREES):
     a 1,200-triangle head folds sharply - hair over the cheek, the jaw against
     the neck: the average points away from some of the triangles that share it,
     and they shade as if lit from behind. On the test sculpt's N64 bake that was a corner
-    of 4 triangles in 10 on the body, and of most of the face (12 Nov 2026)."""
+    of 4 triangles in 10 on the body, and of most of the face (12 Nov 2026).
+
+    ``soft`` (bool per triangle): those fold only past SOFT_CREASE_DEGREES - a
+    face, where a reduced chin is a wedge whose two sides, each shaded flat,
+    showed a line down its middle (13 Nov 2026)."""
     import numpy as np
     corners = positions[faces]
     weighted = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
     length = np.linalg.norm(weighted, axis=1, keepdims=True)
     unit = weighted / np.where(length > 0, length, 1.0)
-    limit = np.cos(np.radians(crease_degrees))
-    # Corner k of face f is row 3f+k; group the rows by the vertex they sit on.
+    limit = np.full(len(faces), np.cos(np.radians(crease_degrees)))
+    if soft is not None:
+        limit[np.asarray(soft, bool)] = np.cos(np.radians(SOFT_CREASE_DEGREES))
+    # Corner k of face f is row 3f+k; group the rows by the vertex they sit on -
+    # in a face, the two ends of a sliver's short side (shorter than SOFT_REACH)
+    # count as one: a chin cut down the middle had a sliver between its halves, a vertex
+    # to each side of it, and each half was shaded to its own side. (Any two
+    # vertices that near, joined or not, was tried: the upper lip took in the
+    # lower, across the mouth.)
     vertex = faces.ravel()
+    if soft is not None and np.asarray(soft, bool).any():
+        from scipy.sparse import coo_matrix
+        from scipy.sparse.csgraph import connected_components
+        soft = np.asarray(soft, bool)
+        edges = np.stack([faces[soft][:, [0, 1]], faces[soft][:, [1, 2]], faces[soft][:, [2, 0]]],
+                         axis=1)                                    # (f, 3, 2)
+        long = np.linalg.norm(positions[edges[..., 0]] - positions[edges[..., 1]], axis=2)
+        reach = SOFT_REACH * float(np.ptp(positions, axis=0).max())
+        # Only the short side of a sliver: short edges of well-shaped small
+        # triangles, joined in chains, made one spot of a whole nose.
+        short = edges[(long < reach) & (long < SOFT_SLIVER * long.max(axis=1, keepdims=True))]
+        if len(short):
+            graph = coo_matrix((np.ones(len(short), np.int8), (short[:, 0], short[:, 1])),
+                               shape=(len(positions), len(positions)))
+            _, spot = connected_components(graph, directed=False)
+            first = np.unique(spot, return_index=True)[1][spot]     # one vertex stands for its spot
+            vertex = np.where(np.repeat(soft, 3), first[vertex], vertex)
     row = np.argsort(vertex, kind="stable")
     vertex = vertex[row]
     starts = np.flatnonzero(np.r_[True, vertex[1:] != vertex[:-1]])
@@ -727,7 +778,7 @@ def _corner_normals(positions, faces, crease_degrees: float = CREASE_DEGREES):
     for start, end in zip(starts, ends):
         rows = row[start:end]
         here = rows // 3
-        close = unit[here] @ unit[here].T >= limit
+        close = unit[here] @ unit[here].T >= limit[here][:, None]
         result[rows] = close.astype(np.float64) @ weighted[here]
     length = np.linalg.norm(result, axis=1, keepdims=True)
     fallback = np.repeat(unit, 3, axis=0)
@@ -975,6 +1026,12 @@ class Sculpt:
                                     self.normals[corners]))
 
 
+#: Where a triangle of a see-through material is tested for being solid
+#: itself: its corners (just inside), edge middles and centre.
+_CLEAR_SAMPLES = ((0.9, 0.05, 0.05), (0.05, 0.9, 0.05), (0.05, 0.05, 0.9),
+                  (0.5, 0.5, 0.0), (0.0, 0.5, 0.5), (0.5, 0.0, 0.5), (1 / 3, 1 / 3, 1 / 3))
+
+
 class TexturedSculpt(Sculpt):
     """A textured model as the high surface: its colour at a point is its own
     texture there (through its UVs), not a blend of vertex colours."""
@@ -991,23 +1048,47 @@ class TexturedSculpt(Sculpt):
         # three quarters see-through, and its clear parts baked as colour
         # (12 Nov 2026).
         self.under = None
+        #: Per triangle: solid all over (None: every triangle is).
+        self.solid = None
         clear = [image is not None and image.shape[2] == 4
                  and float((image[..., 3] < 0.5).mean()) >= SEE_THROUGH_SHARE
                  for image in self.images]
         self.clear = np.asarray(clear, bool)
-        if see_through and self.clear.any() and not self.clear.all():
+        if see_through and self.clear.any():
+            # Opaque = every triangle that is not itself see-through: a face
+            # texture that also holds the lashes (see-through round them) made
+            # the whole face "clear", and what showed under the lashes was the
+            # nearest hair (13 Nov 2026).
             opaque = ~self.clear[model.material]
+            for index in np.nonzero(self.clear)[0]:
+                rows = np.nonzero(model.material == index)[0]
+                if not len(rows):
+                    continue
+                solid = np.ones(len(rows), bool)
+                for weights in _CLEAR_SAMPLES:
+                    uv = np.einsum("k,nkc->nc", np.asarray(weights), model.uvs[model.faces[rows]])
+                    solid &= _sample_materials(self.images, self.tints, model.material[rows], uv,
+                                               with_alpha=True)[1] >= 0.5
+                opaque[rows] = solid
+        if see_through and self.clear.any() and opaque.any() and not opaque.all():
+            self.solid = opaque
             used, local = np.unique(model.faces[opaque], return_inverse=True)
             self.under = TexturedSculpt(
                 TexturedModel(model.vertices[used], local.reshape(-1, 3), model.colours[used],
                               model.uvs[used], model.material[opaque], model.images, model.tints),
                 spatial, see_through=False)
 
-    def colour(self, face, bary):
+    def colour_alpha(self, face, bary):
+        """(colour, how solid) of the surface itself at each point, nothing
+        showing through."""
         import numpy as np
         uv = np.einsum("nk,nkc->nc", bary.astype(np.float64), self.uvs[self.faces[face]])
-        colour, alpha = _sample_materials(self.images, self.tints, self.material[face], uv,
-                                          with_alpha=True)
+        return _sample_materials(self.images, self.tints, self.material[face], uv,
+                                 with_alpha=True)
+
+    def colour(self, face, bary):
+        import numpy as np
+        colour, alpha = self.colour_alpha(face, bary)
         if self.under is None:
             return colour
         blend = np.nonzero(alpha < 0.999)[0]
@@ -1145,13 +1226,68 @@ def _closest_low_triangles(points, positions, faces, spatial):
     nearest = np.empty(len(points), np.int64)
     for start in range(0, len(points), QUERY_BATCH):
         p = points[start:start + QUERY_BATCH]
-        _, found = tree.query(p, k=8, workers=-1)
-        candidates = owner[found]
+        _, found = tree.query(p, k=min(8, len(spots)), workers=-1)
+        candidates = owner[found.reshape(len(p), -1)]
         rel = a[candidates] - p[:, None, :]
         v, w = _closest_on_triangles(rel, ab[candidates], ac[candidates])
         offset = rel + v[..., None] * ab[candidates] + w[..., None] * ac[candidates]
         distance = np.where(np.isfinite(_dot(offset, offset)), _dot(offset, offset), np.inf)
         nearest[start:start + len(p)] = candidates[np.arange(len(p)), np.argmin(distance, axis=1)]
+    return nearest
+
+
+#: A point of the sculpt goes to its own piece's nearest reduced triangle when
+#: that is no more than this share of the model's size further than the nearest of all.
+PIECE_SLACK = 0.005
+
+
+def _closest_by_piece(points, piece, positions, faces, spatial, origin=None):
+    """_closest_low_triangles, each of the sculpt's pieces (``piece``: one
+    label per point) kept to its own: a piece that has triangles of its own
+    in the reduced mesh - a suit and its collar, a shell of hair - takes the
+    nearest of those, not a nearer triangle of another piece. A reduced neck
+    reached under the collar's rim, the collar's points were nearest it, and
+    it was baked the collar's colour (13 Nov 2026). A piece with none (eyes
+    painted on, a decal) takes the nearest triangle of all, as before.
+    ``origin``: the sculpt piece each reduced vertex lies on."""
+    import numpy as np
+    nearest = _closest_low_triangles(points, positions, faces, spatial)
+    count, part = _pieces(len(positions), faces)
+    if count < 2 or piece is None or origin is None:
+        return nearest
+    # The piece each reduced part came from: the one most of its corners lie
+    # on. (Not the one most of the points nearest it are of: four eyeballs of
+    # 113,000 triangles each outnumber the face they sit in.)
+    pieces = int(piece.max()) + 1
+    pairs, tally = np.unique((np.repeat(part, 3).astype(np.int64) * pieces
+                              + origin[faces].ravel()), return_counts=True)
+    owner = np.full(count, -1, np.int64)
+    best = np.zeros(count, np.int64)
+    for pair, number in zip(pairs, tally):
+        if number > best[pair // pieces]:
+            best[pair // pieces], owner[pair // pieces] = number, pair % pieces
+    owned = np.zeros(pieces, bool)
+    owned[owner[owner >= 0]] = True
+    astray = np.nonzero(owned[piece] & (owner[part[nearest]] != piece))[0]
+    corners = positions[faces].astype(np.float64)
+
+    def distance(rows, triangles):
+        a = corners[triangles, 0]
+        ab, ac = corners[triangles, 1] - a, corners[triangles, 2] - a
+        rel = a - points[rows]
+        v, w = _closest_on_triangles(rel, ab, ac)
+        return np.linalg.norm(rel + v[:, None] * ab + w[:, None] * ac, axis=1)
+
+    # ... if its own are about as near. Where a piece has none of its own left
+    # near by (a fringe over a brow, the hair under it reduced away), it is
+    # painted on what is there.
+    slack = PIECE_SLACK * float(np.ptp(positions, axis=0).max())
+    for label in np.unique(piece[astray]):
+        rows = astray[piece[astray] == label]
+        own = np.nonzero(owner[part] == label)[0]
+        mine = own[_closest_low_triangles(points[rows], positions, faces[own], spatial)]
+        near = distance(rows, mine) <= distance(rows, nearest[rows]) + slack
+        nearest[rows[near]] = mine[near]
     return nearest
 
 
@@ -1223,8 +1359,16 @@ def _tangent_space(high, n, t, handed):
     return _normalise(local)
 
 
+#: A sculpt triangle is drawn on the reduced triangle nearest it only when
+#: it is no further above it than this share of the model's largest extent.
+BAKE_LIFT = 0.012
+#: A part seen from the front (_bake_view) is not painted with what lies more
+#: than this share of its size behind it.
+VIEW_BEHIND = 0.12
+
+
 def _bake_maps(sculpt: Sculpt, sculpt_vertices, nearest, positions, normals, tangents, uvs,
-               triangles, size: int, want_normal: bool, per_side: int):
+               triangles, size: int, want_normal: bool, per_side: int, view=None):
     """BaseColor (size, size, 3) and, if wanted, a tangent-space normal map, both
     0..1 with v going up (row 0 is the bottom).
 
@@ -1238,6 +1382,13 @@ def _bake_maps(sculpt: Sculpt, sculpt_vertices, nearest, positions, normals, tan
        (eyebrows, eyeliner, decals) lands on the texture this way;
     3. samples no sculpt triangle reached (a sliver along a seam) are projected
        from the reduced surface instead (Sculpt.project).
+
+    With ``view`` = (right, up, towards the viewer) the part's UVs are the
+    model seen along that view (a face texture, _projected_uvs), and step 2
+    draws the sculpt as seen along it too: each sculpt triangle where it is
+    in the view, the one nearest the viewer on top. Laid onto reduced
+    triangles one by one, an eyeball in its socket landed bent round the
+    socket's walls, its side where the iris should be (13 Nov 2026).
     """
     import numpy as np
     grid = size * per_side
@@ -1256,6 +1407,10 @@ def _bake_maps(sculpt: Sculpt, sculpt_vertices, nearest, positions, normals, tan
     # -1: that sculpt vertex is nearest a part of the reduced mesh with another
     # texture (the face's own material); it is drawn there, not here.
     refs = nearest[sculpt.faces]                             # (f, 3)
+    if view is not None:
+        return _bake_view(sculpt, sculpt_vertices, refs, positions, normals, tangents, uvs,
+                          triangles, size, want_normal, per_side, view, low_owner, low_bary,
+                          low_chart, charts)
     copies = [np.arange(len(refs))]
     which = [refs[:, 0]]
     for k in (1, 2):
@@ -1286,6 +1441,12 @@ def _bake_maps(sculpt: Sculpt, sculpt_vertices, nearest, positions, normals, tan
                                         low_normal[target][:, None, :])
         uv_corners[part] = np.einsum("ckj,cjd->ckd", bary, uvs[triangles[target]]) * grid
         height[part] = lift
+    # Not what hangs clear of the surface: a ponytail beside a neck whose own
+    # triangles went in the reduction was painted on the neck.
+    near_by = height.min(axis=1) <= BAKE_LIFT * float(np.ptp(positions, axis=0).max())
+    if not near_by.all():
+        face_of, onto = face_of[near_by], onto[near_by]
+        uv_corners, height = uv_corners[near_by], height[near_by]
     high_owner, high_bary = _rasterise(uv_corners.reshape(-1, 2),
                                        np.arange(3 * len(face_of)).reshape(-1, 3), grid,
                                        depth=height.reshape(-1), labels=charts[onto],
@@ -1293,6 +1454,87 @@ def _bake_maps(sculpt: Sculpt, sculpt_vertices, nearest, positions, normals, tan
     del uv_corners, height, low_chart, onto
     high_face = np.where(high_owner >= 0, face_of[np.maximum(high_owner, 0)], -1).astype(np.int32)
     del high_owner, face_of
+    return _bake_samples(sculpt, positions, normals, tangents, triangles, size, want_normal,
+                         per_side, low_owner, low_bary, high_face, high_bary)
+
+
+def _bake_view(sculpt: Sculpt, sculpt_vertices, refs, positions, normals, tangents, uvs,
+               triangles, size: int, want_normal: bool, per_side: int, view, low_owner, low_bary,
+               low_chart, charts):
+    """_bake_maps for a part seen along ``view`` (right, up, towards the
+    viewer): the sculpt's triangles that belong to the part (a corner nearest
+    it), facing the viewer, drawn where the view puts them."""
+    import numpy as np
+    right, up, towards = (np.asarray(axis, np.float64) for axis in view[:3])
+    grid = size * per_side
+    # The part's UVs are its positions along right and up, scaled and shifted
+    # (_projected_uvs); the same for the sculpt, found from the part's corners.
+    used = np.unique(triangles)
+    if len(view) > 3 and view[3] is not None:
+        # Folded about a line (_folded_uvs): the half the texture is drawn
+        # from says how; the sculpt's other half lands off the texture.
+        axis, side = view[3]
+        kept = used[side * (positions[used] @ right - axis) >= -1e-9]
+        used = kept if len(kept) >= 3 else used
+    # Two boxes side by side (_paired_uvs): the gap between them closed, for
+    # the sculpt as for the part.
+    gap = view[4] if len(view) > 4 and view[4] is not None else None
+
+    def across_of(points):
+        x = points @ right
+        return _close_gap(x, gap[0], gap[1]) if gap is not None else x
+
+    flat = np.stack([across_of(positions[used]), positions[used] @ up, np.ones(len(used))], axis=1)
+    to_uv, *_ = np.linalg.lstsq(flat, uvs[used], rcond=None)            # (3, 2)
+    face_of = np.nonzero((refs >= 0).any(axis=1))[0]
+    face_of = face_of[_dot(sculpt.face_normals[face_of].astype(np.float64), towards[None, :]) > 0.0]
+    corners = sculpt_vertices[sculpt.faces[face_of]].reshape(-1, 3)
+    uv_corners = (np.stack([across_of(corners), corners @ up, np.ones(len(corners))], axis=1)
+                  @ to_uv) * grid
+    depth = (corners @ towards).astype(np.float32)
+    # One island: every triangle may draw on every sample of the part.
+    high_owner, high_bary = _rasterise(uv_corners, np.arange(len(corners)).reshape(-1, 3), grid,
+                                       depth=depth)
+    high_face = np.where(high_owner >= 0, face_of[np.maximum(high_owner, 0)], -1).astype(np.int32)
+    # Not what lies far behind the part: where the reduced chin reaches past
+    # the sculpt's, the view shows the neck under it, in shadow. Those samples
+    # take the nearest surface instead (_bake_samples).
+    reach = VIEW_BEHIND * max(float(np.ptp(positions[used] @ right)),
+                              float(np.ptp(positions[used] @ up)))
+    shown = np.nonzero((high_owner >= 0) & (low_owner >= 0))[0]
+    if len(shown):
+        seen_depth = (depth[high_owner[shown][:, None] * 3 + np.arange(3)]
+                      * high_bary[shown]).sum(axis=1)
+        part_depth = ((positions[triangles[low_owner[shown]]] @ towards)
+                      * low_bary[shown]).sum(axis=1)
+        high_face[shown[seen_depth < part_depth - reach]] = -1
+    below = None
+    solid = getattr(sculpt, "solid", None)
+    if solid is not None:
+        # What shows through a see-through triangle (a lash card) is what is
+        # behind it in the view - the eye - not the solid surface nearest it
+        # (the lid above): the solid triangles drawn on their own.
+        keep = np.nonzero(solid[face_of])[0]
+        if len(keep):
+            rows = (keep[:, None] * 3 + np.arange(3)).ravel()
+            owner, below_bary = _rasterise(uv_corners[rows], np.arange(len(rows)).reshape(-1, 3),
+                                           grid, depth=depth[rows])
+            below = (np.where(owner >= 0, face_of[keep[np.maximum(owner, 0)]], -1).astype(np.int32),
+                     below_bary)
+    del uv_corners, depth, corners
+    return _bake_samples(sculpt, positions, normals, tangents, triangles, size, want_normal,
+                         per_side, low_owner, low_bary, high_face, high_bary, below)
+
+
+def _bake_samples(sculpt: Sculpt, positions, normals, tangents, triangles, size: int,
+                  want_normal: bool, per_side: int, low_owner, low_bary, high_face, high_bary,
+                  below=None):
+    """The textures from the two drawings of _bake_maps: per sample, the reduced
+    triangle (``low_owner``, ``low_bary``) and the sculpt triangle on it
+    (``high_face``, ``high_bary``). ``below``: per sample, the solid sculpt
+    triangle behind it (triangle, barycentric), shown through a see-through one."""
+    import numpy as np
+    grid = size * per_side
 
     texels = size * size
     # Sums per texel, float32: a texel averages at most 64 samples.
@@ -1326,6 +1568,15 @@ def _bake_maps(sculpt: Sculpt, sculpt_vertices, nearest, positions, normals, tan
             continue
         where = slice(first_texel, first_texel + span)
         colour = sculpt.colour(face[used], bary[used])
+        if below is not None:
+            own, alpha = sculpt.colour_alpha(face[used], bary[used])
+            behind = below[0][band][used].astype(np.int64)
+            thin = np.nonzero((alpha < 0.999) & (behind >= 0) & (highs[used] >= 0))[0]
+            if len(thin):
+                under, _ = sculpt.colour_alpha(behind[thin],
+                                               below[1][band][used][thin].astype(np.float64))
+                a = alpha[thin, None]
+                colour[thin] = own[thin] * a + under * (1.0 - a)
         for channel in range(3):
             colour_total[where, channel] += np.bincount(texel[used], colour[:, channel],
                                                         minlength=span)
@@ -1399,6 +1650,46 @@ def _unwrap(xatlas, positions, faces, size: int, padding: int, priority=None,
         if atlas.atlas_count == 1 and largest <= (size * slack if attempt == 0 else size):
             break
         texels_per_unit = atlas.texels_per_unit * size / max(largest, 1) * (0.96 - 0.03 * attempt)
+    if size <= NEAREST_TEXTURE and len(faces) <= PACK_SEARCH_TRIANGLES:
+        # A small texture, a small mesh: the largest scale that fits, by trial.
+        # Shrinking in proportion (above) goes wrong when most islands are a
+        # texel or two and the gaps between them do not shrink: it overshoots,
+        # or - with wider gaps - never fits at all, and the islands were
+        # squeezed in on top of each other (13 Nov 2026).
+        def packed(scale: float):
+            trial = xatlas.Atlas()
+            for _, local, scaled in parts:
+                trial.add_mesh(scaled.astype(np.float32), local.astype(np.uint32))
+            options = xatlas.PackOptions()
+            options.resolution = size
+            options.padding = padding
+            options.bilinear = True
+            options.texels_per_unit = scale
+            trial.generate(chart, options)
+            fits = trial.atlas_count == 1 and max(trial.width, trial.height) <= size
+            return trial if fits else None
+
+        fits_at, too_big = None, None
+        scale = float(atlas.texels_per_unit)
+        if atlas.atlas_count == 1 and largest <= size:
+            fits_at = scale
+        else:
+            too_big = scale
+        for _ in range(PACK_SEARCH_STEPS):
+            if fits_at is None:
+                scale = too_big * 0.7
+            elif too_big is None:
+                scale = fits_at * 1.5
+            else:
+                scale = 0.5 * (fits_at + too_big)
+            trial = packed(scale)
+            if trial is not None:
+                atlas, fits_at = trial, scale
+            else:
+                too_big = scale
+            if fits_at is not None and too_big is not None and too_big - fits_at < 0.03 * fits_at:
+                break
+        largest = max(atlas.width, atlas.height)
     mappings, all_faces, all_uvs = [], [], []
     offset = 0
     for index, (used, _, _) in enumerate(parts):
@@ -1549,7 +1840,7 @@ FACE_DIRECTION_SHARE = 0.05
 FACE_VISIBILITY_GRID = 384
 
 
-def _front_view(positions, faces, region, centre):
+def _front_view(positions, faces, region, centre, direction=None):
     """The face seen straight from the front, the way N64 faces were drawn:
     returns (kept triangles, right, up) - the triangles of ``region`` that
     can be mapped from the front and the two directions the front view's x
@@ -1560,7 +1851,8 @@ def _front_view(positions, faces, region, centre):
     2026). From the front, eyes, brows and lips span most of the texture.
     Kept: triangles facing within FACE_FRONT_DEGREES of the face's direction
     and not hidden from the front behind another one (they would share its
-    texels); the others go back to the main texture."""
+    texels); the others go back to the main texture. ``direction``: the way
+    the face looks, when it is known already."""
     import numpy as np
     chosen = np.nonzero(region)[0]
     if len(chosen) < 8:
@@ -1568,6 +1860,7 @@ def _front_view(positions, faces, region, centre):
     corners = positions[faces[chosen]]
     normal = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
     doubled = np.linalg.norm(normal, axis=1)
+    known = direction
     # Which way the face looks: the triangles nearest its centre (eyes, nose,
     # lips), FACE_DIRECTION_SHARE of the region. The whole region is most of a
     # low-poly head - back and hair too - whose facings cancel out; even the
@@ -1580,9 +1873,12 @@ def _front_view(positions, faces, region, centre):
         nearest = order[:12]
     direction = normal[nearest].sum(axis=0)         # area-weighted
     length = float(np.linalg.norm(direction))
-    if length < 0.25 * float(doubled[nearest].sum()):  # no one way it looks
+    if known is not None:
+        direction = np.asarray(known, np.float64) / np.linalg.norm(known)
+    elif length < 0.25 * float(doubled[nearest].sum()):  # no one way it looks
         return None
-    direction /= length
+    else:
+        direction /= length
     up = np.array([0.0, 1.0, 0.0])
     if abs(float(up @ direction)) > 0.9:            # looking up or down: use depth
         up = np.array([0.0, 0.0, 1.0])
@@ -1644,6 +1940,10 @@ MIRROR_NEIGHBOURS = 8
 #: points unmatched is not mirrored (the test sculpt: under 1%; a game rip
 #: with a fringe swept across one eye: 27%).
 MIRROR_MAX_MISMATCH = 0.15
+#: ... and neither is one where more than this share of the half that would
+#: be mirrored (by area) is made of triangles that differ from their mirror
+#: image (MIRROR_MISMATCH).
+MIRROR_MAX_MISFITS = 0.25
 #: A triangle on the mirrored half with more than this share of its sculpt
 #: points unmatched (a lock of hair across one eye, a scar) is not mirrored:
 #: it keeps texels of its own on the body texture.
@@ -1726,7 +2026,8 @@ def _front_image(sculpt, sculpt_vertices, positions, faces, nearest, ids, right,
                                       padding, fill=True)
     check = {"ids": ids, "uvs": (used, local, uvs)}
     built = _assemble([check], positions, faces, nearest, xatlas, texture, padding)
-    image, _, inside = _bake_part(sculpt, sculpt_vertices, built, 0, (texture, texture), False)
+    image, _, inside = _bake_part(sculpt, sculpt_vertices, built, 0, (texture, texture), False,
+                                  view=(right, up, np.cross(right, up)))
     return {"colour": np.flipud(np.asarray(image.convert("RGB"), np.float32) / 255.0),
             "inside": np.flipud(inside), "used": used, "local": local, "uvs": uvs}
 
@@ -1944,9 +2245,18 @@ DETAIL_COLOUR_SHARE = 3 / 8
 #: Above this many distinct colours the detail colours are skipped (the search
 #: compares every colour with every other); a 64-128 px texture is far below.
 DETAIL_COLOUR_LIMIT = 8192
+#: Colours are told apart by brightness and, this many times as much, by hue.
+HUE_WEIGHT = 1.5
+#: The eyes' texture keeps up to EYE_PALETTE_SHARED of its colours from the
+#: face's palette: those nearest its outer EYE_PALETTE_RING texels.
+#: The body's and the head's textures when 16 colours are asked for: this many,
+#: at half the texels.
+SMOOTH_COLOURS = 256
+EYE_PALETTE_SHARED = 0.5
+EYE_PALETTE_RING = 3
 
 
-def _reduce_colours(image, colours: int, inside=None):
+def _reduce_colours(image, colours: int, inside=None, fixed=None):
     """The texture in ``colours`` colours, no dithering: a palette texture like the
     N64's 4-bit (16) and 8-bit (256) colour-index formats.
 
@@ -1956,7 +2266,10 @@ def _reduce_colours(image, colours: int, inside=None):
     eyebrows grey. The last DETAIL_COLOUR_SHARE are then added one at a time,
     each the colour that most lowers the error left (counted the same way):
     small, distinct details - the test sculpt's teal irises, its lip colour - that a
-    median cut merges into their dark or skin-toned neighbours (12 Nov 2026)."""
+    median cut merges into their dark or skin-toned neighbours (12 Nov 2026).
+
+    ``fixed`` (n x 3, 0-255) starts the palette with colours it must hold -
+    those of the texture this one meets - and all the rest are added that way."""
     import numpy as np
     from PIL import Image
     pixels = np.asarray(image.convert("RGB"))
@@ -1969,20 +2282,36 @@ def _reduce_colours(image, colours: int, inside=None):
     extra = int(colours * DETAIL_COLOUR_SHARE)
     if len(distinct) > DETAIL_COLOUR_LIMIT or colours - extra < 2:
         extra = 0
-    weighted = np.repeat(distinct, np.ceil(weight).astype(np.int64), axis=0)
-    sample = Image.fromarray(weighted.reshape(1, -1, 3).astype(np.uint8))
-    base = sample.quantize(colors=colours - extra, method=Image.Quantize.MEDIANCUT,
-                           dither=Image.Dither.NONE)
-    if extra:
+    if fixed is not None and len(fixed) and len(distinct) <= DETAIL_COLOUR_LIMIT:
+        palette = np.asarray(fixed, np.float64).reshape(-1, 3)[:colours]
+        extra = colours - len(palette)
+        base = None
+    else:
+        weighted = np.repeat(distinct, np.ceil(weight).astype(np.int64), axis=0)
+        sample = Image.fromarray(weighted.reshape(1, -1, 3).astype(np.uint8))
+        base = sample.quantize(colors=colours - extra, method=Image.Quantize.MEDIANCUT,
+                               dither=Image.Dither.NONE)
+    def apart(colour):
+        """Colours as told apart here: brightness, and hue counted for more
+        (HUE_WEIGHT) - by plain RGB a lip's red was nearest a dark hair's olive,
+        and a face with much hair in its texture had its lips that colour."""
+        colour = np.asarray(colour, np.float64)
+        light = colour @ np.array([0.299, 0.587, 0.114])
+        return np.stack([light, HUE_WEIGHT * (colour[..., 2] - light),
+                         HUE_WEIGHT * (colour[..., 0] - light)], axis=-1)
+
+    if base is not None:
         found = len(base.getcolors(1 << 16) or ()) or colours - extra
         palette = np.asarray(base.getpalette()[:3 * found], np.float64).reshape(-1, 3)
+    if extra:
         points = distinct.astype(np.float64)
-        error = ((points[:, None, :] - palette[None]) ** 2).sum(axis=2).min(axis=1)
+        spread = apart(points)
+        error = ((spread[:, None, :] - apart(palette)[None]) ** 2).sum(axis=2).min(axis=1)
         for _ in range(extra):
             best_gain, best = 0.0, -1
             for first in range(0, len(points), 256):
-                candidates = points[first:first + 256]
-                after = ((candidates[:, None, :] - points[None]) ** 2).sum(axis=2)
+                candidates = spread[first:first + 256]
+                after = ((candidates[:, None, :] - spread[None]) ** 2).sum(axis=2)
                 gain = (np.maximum(error[None] - after, 0.0) * weight[None]).sum(axis=1)
                 index = int(np.argmax(gain))
                 if gain[index] > best_gain:
@@ -1990,17 +2319,29 @@ def _reduce_colours(image, colours: int, inside=None):
             if best < 0:                    # every colour is already in the palette
                 break
             palette = np.vstack([palette, points[best]])
-            error = np.minimum(error, ((points - points[best]) ** 2).sum(axis=1))
-        base = Image.new("P", (1, 1))
-        # Exactly these colours: a 16-colour texture keeps a 16-entry palette.
-        base.putpalette(palette.round().clip(0, 255).astype(np.uint8).ravel().tolist())
-    return image.convert("RGB").quantize(palette=base, dither=Image.Dither.NONE)
+            error = np.minimum(error, ((spread - spread[best]) ** 2).sum(axis=1))
+    palette = palette.round().clip(0, 255).astype(np.uint8)
+    # Each texel to the palette's nearest, told apart the same way.
+    wanted = apart(palette)
+    flat = pixels.reshape(-1, 3)
+    index = np.empty(len(flat), np.uint8)
+    for first in range(0, len(flat), 1 << 14):
+        chunk = apart(flat[first:first + (1 << 14)])
+        index[first:first + (1 << 14)] = ((chunk[:, None, :] - wanted[None]) ** 2).sum(axis=2) \
+            .argmin(axis=1)
+    reduced = Image.fromarray(index.reshape(pixels.shape[:2]), "P")
+    # Exactly these colours: a 16-colour texture keeps a 16-entry palette.
+    reduced.putpalette(palette.ravel().tolist())
+    return reduced
 
 
 #: With a head budget, the head is everything above the neck: below the face's
 #: centre by this many times the reach of its detail (eyes, brows, lips) - on
 #: the test sculpt, through the neck under the chin, clear of the shoulders.
 NECK_REACH = 2.0
+#: With the face framed from its eyes, the head's texture ends this much of the
+#: eyes' distance apart below the frame (under the jaw), if that is lower.
+NECK_BELOW_CHIN = 0.6
 #: The reduction to the head budget starts from this many times the budget,
 #: reduced evenly: few enough triangles that the cut round the neck crosses a
 #: few dozen vertices (32 on the test sculpt), each kept on both sides.
@@ -2089,7 +2430,7 @@ def _assemble(parts, low_positions, low_faces, nearest, xatlas, texture: int, pa
             order = np.arange(len(group))
         else:
             mapping, uv_faces, uvs, order = _unwrap(
-                xatlas, low_positions, low_faces[group], texture, padding,
+                xatlas, low_positions, low_faces[group], texture, part.get("padding", padding),
                 priority[group] if priority is not None else None, boost)
         mappings.append(mapping)
         part_faces.append(uv_faces + offset)
@@ -2105,10 +2446,38 @@ def _assemble(parts, low_positions, low_faces, nearest, xatlas, texture: int, pa
     # Shading normals per corner, hard across sharp folds; corners that disagree
     # get a vertex each. Neighbours are found through the reduced mesh's own
     # vertices, so a UV seam does not cut the shading.
-    corner_normals = _corner_normals(low_positions, mapping[all_faces])
+    soft = np.concatenate([np.full(len(faces), part.get("view") is not None)
+                           for part, faces in zip(parts, part_faces)])
+    corner_normals = _corner_normals(low_positions, mapping[all_faces], soft=soft)
     positions, uvs, normals, all_faces = _split_by_normal(
         low_positions[mapping], uvs, all_faces, corner_normals)
     sizes = np.cumsum([len(part) for part in part_faces])[:-1]
+    # A part seen from the front (a face) is shaded as facing the viewer at
+    # least a little everywhere: the inside of a lip, a socket's wall, turned
+    # away and shaded dark, showed as dark triangles in the mouth and eyes.
+    for part, faces_of in zip(parts, np.split(all_faces, sizes)):
+        if part.get("view") is None or not len(faces_of):
+            continue
+        towards = np.asarray(part["view"][2], np.float64)
+        used = np.unique(faces_of)
+        facing = normals[used] @ towards
+        turned = facing < SOFT_FACING
+        if turned.any():
+            ids = used[turned]
+            before = normals[ids].copy()
+            push = (SOFT_FACING - facing[turned])[:, None] * towards
+            corners = positions[faces_of]
+            flat = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+            # ... as far as it goes without shading one of its triangles from behind.
+            todo = np.ones(len(ids), bool)
+            for share in (1.0, 0.75, 0.5, 0.25, 0.0):
+                fixed = before[todo] + share * push[todo]
+                normals[ids[todo]] = fixed / np.maximum(
+                    np.linalg.norm(fixed, axis=1, keepdims=True), 1e-30)
+                behind = _dot(normals[faces_of], flat[:, None, :]) <= 0.0
+                todo &= np.isin(ids, np.unique(faces_of[behind]))
+                if not todo.any():
+                    break
     return {"positions": positions, "uvs": uvs, "normals": normals, "faces": all_faces,
             "part_faces": np.split(all_faces, sizes),
             "tangents": _tangents(positions, uvs, all_faces, normals),
@@ -2116,11 +2485,12 @@ def _assemble(parts, low_positions, low_faces, nearest, xatlas, texture: int, pa
 
 
 def _bake_part(sculpt, sculpt_vertices, built: dict, index: int, shape, want_normal: bool,
-               colours: int = 0):
+               colours: int = 0, view=None):
     """One part's textures (_assemble): (BaseColor image, normal image or None,
     covered texels (h, w) bool, rows top first). A strip is baked square at its
     longer side, then averaged down to its ``shape`` (width, height): the same
-    samples per texel along both."""
+    samples per texel along both. ``view``: the part is the model seen along
+    it (_bake_maps)."""
     import numpy as np
     from PIL import Image
     part_faces = built["part_faces"]
@@ -2132,7 +2502,21 @@ def _bake_part(sculpt, sculpt_vertices, built: dict, index: int, shape, want_nor
     colour, normal_pixels, inside = _bake_maps(sculpt, sculpt_vertices, local, built["positions"],
                                                  built["normals"], built["tangents"], built["uvs"],
                                                  part_faces[index], edge, want_normal,
-                                                 samples_per_texel(edge))
+                                                 samples_per_texel(edge), view=view)
+    narrow = tuple(shape) != (edge, edge) and edge % shape[0] == 0 and edge % shape[1] == 0
+    if narrow:
+        # Averaged down to the strip's shape over the texels the islands cover
+        # only: the gaps hold their neighbours' colours (filled in), and
+        # averaged in plainly they tinted the last row of each island - skin
+        # on the edge of the hair.
+        across, down = edge // shape[0], edge // shape[1]
+        weight = inside.reshape(shape[1], down, shape[0], across).astype(np.float32)
+        total = (colour.reshape(shape[1], down, shape[0], across, 3)
+                 * weight[..., None]).sum(axis=(1, 3))
+        count = weight.sum(axis=(1, 3))
+        covered = count > 0
+        total[covered] /= count[covered, None]
+        colour, inside = _fill_background(total, covered), covered
     # Rows were filled with v going up; an image's first row is its top.
     image = Image.fromarray((np.flipud(colour) * 255).clip(0, 255).round().astype(np.uint8))
     inside = np.flipud(inside)
@@ -2141,14 +2525,430 @@ def _bake_part(sculpt, sculpt_vertices, built: dict, index: int, shape, want_nor
         normal_image = Image.fromarray(
             (np.flipud(normal_pixels) * 255).clip(0, 255).round().astype(np.uint8))
     if tuple(shape) != (edge, edge):
-        image = image.resize(tuple(shape), Image.BOX)
+        if not narrow:
+            image = image.resize(tuple(shape), Image.BOX)
+            inside = np.asarray(Image.fromarray(inside.astype(np.uint8) * 255).resize(
+                tuple(shape), Image.BOX)) > 0
         if normal_image is not None:
             normal_image = normal_image.resize(tuple(shape), Image.BOX)
-        inside = np.asarray(Image.fromarray(inside.astype(np.uint8) * 255).resize(
-            tuple(shape), Image.BOX)) > 0
     if colours:
         image = _reduce_colours(image, colours, inside)
     return image, normal_image, inside
+
+
+#: A cut no nearer a corner than this share of the region's typical edge: a
+#: nearer one would shave a sliver off, so the corner counts as on the line.
+CUT_SNAP = 0.04
+#: Triangles kept back from the budget for the cuts: at most this many, and
+#: this share of the budget.
+CUT_RESERVE = (240, 0.08)
+
+
+def _cut_mesh(positions, faces, direction, value: float, region):
+    """The mesh cut along the plane ``direction`` . x = ``value`` where it
+    crosses the triangles of ``region`` (bool per triangle): each edge of
+    theirs that crosses gets a vertex there, and every triangle using such an
+    edge (in the region or beside it) is split, so no edge is left with a
+    vertex in its middle. Returns (positions, faces, parent of each triangle).
+
+    So a texture can end on a straight line: a box round an eye, the middle
+    of a face that is mirrored."""
+    import numpy as np
+    parent = np.arange(len(faces))
+    if not region.any():
+        return positions, faces, parent
+    height = positions @ direction - value
+    edges = positions[faces[region][:, [1, 2, 0]]] - positions[faces[region]]
+    snap = CUT_SNAP * float(np.median(np.linalg.norm(edges, axis=2)))
+    # A corner of the region that close to the line is moved onto it.
+    close = np.zeros(len(positions), bool)
+    close[np.unique(faces[region])] = True
+    close &= (np.abs(height) < snap) & (height != 0.0)
+    if close.any():
+        positions = positions.copy()
+        positions[close] -= height[close, None] * np.asarray(direction, np.float64)
+    height = np.where(np.abs(height) < snap, 0.0, height)
+    count = len(positions)
+    pairs = np.stack([faces, faces[:, [1, 2, 0]]], axis=2)              # (f, 3, 2): edge k
+    crossing = height[pairs[..., 0]] * height[pairs[..., 1]] < 0
+    keys = np.minimum(pairs[..., 0], pairs[..., 1]) * count + np.maximum(pairs[..., 0], pairs[..., 1])
+    wanted = np.unique(keys[region][crossing[region]])
+    if not len(wanted):
+        return positions, faces, parent
+    first, second = wanted // count, wanted % count
+    along = height[first] / (height[first] - height[second])
+    made = positions[first] + along[:, None] * (positions[second] - positions[first])
+    where = np.searchsorted(wanted, keys)
+    where = np.minimum(where, len(wanted) - 1)
+    split = np.where(crossing & (wanted[where] == keys), count + where, -1)   # (f, 3)
+    cuts = (split >= 0).sum(axis=1)
+    out_faces, out_parent = [faces[cuts == 0]], [parent[cuts == 0]]
+    for lone in range(3):                                   # the corner both cut edges share
+        after, before = lone, (lone + 2) % 3                # edges lone->next, previous->lone
+        rows = np.nonzero((cuts == 2) & (split[:, after] >= 0) & (split[:, before] >= 0))[0]
+        if len(rows):
+            a, b, c = (faces[rows, (lone + k) % 3] for k in range(3))
+            p, q = split[rows, after], split[rows, before]
+            out_faces += [np.stack([a, p, q], axis=1), np.stack([p, b, c], axis=1),
+                          np.stack([p, c, q], axis=1)]
+            out_parent += [parent[rows]] * 3
+    for edge in range(3):                                   # one cut edge: its far corner is on the line
+        rows = np.nonzero((cuts == 1) & (split[:, edge] >= 0))[0]
+        if len(rows):
+            a, b, c = (faces[rows, (edge + k) % 3] for k in range(3))
+            p = split[rows, edge]
+            out_faces += [np.stack([a, p, c], axis=1), np.stack([p, b, c], axis=1)]
+            out_parent += [parent[rows]] * 2
+    return (np.concatenate([positions, made]), np.concatenate(out_faces),
+            np.concatenate(out_parent))
+
+
+def _folded_uvs(positions, faces, ids, right, up, shape, padding: int, axis: float):
+    """UVs for triangles ``ids`` seen from the front (_projected_uvs), folded
+    about the line x = ``axis``: both halves of the face on the same texels,
+    by distance from the line. No triangle may cross the line (_cut_mesh). The
+    part fills its texture both ways. Returns (vertex mapping, faces, uvs).
+
+    A texture mirrored by its sampler (MIRRORED_REPEAT) draws the same, but
+    the setting has to survive every exporter and editor on the way to the
+    console; folded UVs are plain UVs."""
+    import numpy as np
+    used, local = np.unique(faces[ids], return_inverse=True)
+    points = positions[used]
+    xy = np.stack([np.abs(points @ right - axis), points @ up], axis=1)
+    size = np.asarray(shape, np.float64)
+    pad = padding / size
+    low = xy.min(axis=0)
+    extent = np.maximum(xy.max(axis=0) - low, 1e-12)
+    return used, local.reshape(-1, 3), (xy - low) / extent * (1.0 - 2 * pad) + pad
+
+
+def _close_gap(x, middle: float, inner: float):
+    """Distances across (``x``) with the gap between the two eye boxes - within
+    ``inner`` of ``middle`` - closed: the two boxes side by side."""
+    import numpy as np
+    x = np.asarray(x, np.float64) - middle
+    return np.sign(x) * np.maximum(np.abs(x) - inner, 0.0)
+
+
+def _paired_uvs(positions, faces, ids, right, up, shape, padding: int, middle: float,
+                inner: float):
+    """UVs for the two boxes round the eyes of a face that is not mirrored
+    (triangles ``ids``, seen from the front): side by side in one texture, the
+    stretch of face between them (within ``inner`` of ``middle``) left out, so
+    each eye has half the texture rather than the fifth of a strip from ear to
+    ear. Returns (vertex mapping, faces, uvs)."""
+    import numpy as np
+    used, local = np.unique(faces[ids], return_inverse=True)
+    points = positions[used]
+    xy = np.stack([_close_gap(points @ right, middle, inner), points @ up], axis=1)
+    size = np.asarray(shape, np.float64)
+    pad = padding / size
+    low = xy.min(axis=0)
+    extent = np.maximum(xy.max(axis=0) - low, 1e-12)
+    return used, local.reshape(-1, 3), (xy - low) / extent * (1.0 - 2 * pad) + pad
+
+
+#: Framing the face from its eyes (_find_eyes): the face is looked for within
+#: FACE_SEARCH_REACH times the detail's reach; the eyes are the best pair of
+#: dark patches there (EYE_DARK_SHARE of the texels) - alike in size (within
+#: EYE_PAIR_SIZE times), level (no more than EYE_PAIR_TILT of their distance
+#: apart in height) and EYE_PAIR_APART of the view's width apart. The frame
+#: is FACE_FRAME times their distance apart: to each side of their middle,
+#: below them (the chin) and above (the brow).
+FACE_SEARCH_REACH = 2.6
+EYE_PAIR_SIZE = 3.0
+EYE_PAIR_TILT = 0.35
+EYE_PAIR_APART = (0.12, 0.7)
+EYE_PAIR_SPECK = 0.3
+#: A pair's cost: its distance from the detail's middle (in texture widths)
+#: plus these times its tilt and how unlike mirror images the two patches'
+#: surroundings (EYE_PAIR_WINDOW of their distance apart each way) are.
+EYE_PAIR_WEIGHTS = (2.0, 2.0)
+EYE_PAIR_WINDOW = 0.3
+#: The box round an eye is its dark patch (lashes, pupil) and this much of the
+#: eyes' distance apart more, across and up-and-down.
+EYE_BOX_PAD = (0.1, 0.1)
+FACE_FRAME = (1.1, 1.45, 0.75)
+#: With the chin found, the frame reaches at least this much of the chin's
+#: distance above the eyes.
+FACE_BROW_OF_CHIN = 0.6
+#: A busy brow - colour stepping by more than FACE_BUSY_STEP from texel to
+#: texel, between FACE_BUSY_BROW of the eyes' distance above them (a fringe's
+#: strands across the forehead) - is framed with the face, up to the higher.
+FACE_BUSY_BROW = (0.75, 1.25)
+FACE_BUSY_STEP = 0.04
+FACE_CHIN_SLACK = 0.35
+FACE_EYE_REACH = 3.0
+FACE_LOOSE_BELOW = 0.9
+
+
+#: Triangles the front view left out (they face sideways: an eye socket's
+#: walls) join the face when they sit inside its outline and no further behind
+#: it than FACE_HOLLOW times the eyes' distance apart.
+FACE_HOLLOW = 0.5
+FACE_HOLLOW_GRID = 128
+
+
+def _face_hollows(positions, faces, keep, right, up, behind: float):
+    """The triangles not in ``keep`` (the face, seen along right and up) that
+    lie in its hollows: every corner inside the face's outline as the view
+    shows it, and at most ``behind`` deeper than the face there. With the
+    eyeballs painted on, a socket's walls were left to the body's texture,
+    and the eye with them (13 Nov 2026)."""
+    import numpy as np
+    from scipy import ndimage
+    towards = np.cross(right, up)
+    used, local = np.unique(faces[keep], return_inverse=True)
+    points = positions[used]
+    xy = np.stack([points @ right, points @ up], axis=1)
+    low = xy.min(axis=0)
+    extent = max(float((xy.max(axis=0) - low).max()), 1e-12)
+    grid = FACE_HOLLOW_GRID
+
+    def texels(where):
+        return (np.stack([where @ right, where @ up], axis=1) - low) / extent * (grid - 1) + 0.5
+
+    depth = (points @ towards).astype(np.float32)
+    local = local.reshape(-1, 3)
+    owner, bary = _rasterise(texels(points), local, grid, depth=depth)
+    owner, bary = owner.reshape(grid, grid), bary.reshape(grid, grid, 3)
+    covered = owner >= 0
+    if not covered.any():
+        return keep[:0]
+    surface = np.where(covered, (depth[local[np.maximum(owner, 0)]] * bary).sum(axis=2), 0.0)
+    outline = ndimage.binary_fill_holes(covered)
+    # The face's depth inside a hollow: that of the nearest texel it covers.
+    _, nearest = ndimage.distance_transform_edt(~covered, return_indices=True)
+    surface = surface[nearest[0], nearest[1]]
+    others = np.setdiff1d(np.arange(len(faces)), keep)
+    corners = positions[faces[others]]                                  # (n, 3, 3)
+    at = np.floor(texels(corners.reshape(-1, 3))).astype(np.int64).reshape(-1, 3, 2)
+    inside = ((at >= 0) & (at < grid)).all(axis=2)
+    col, row = np.clip(at[..., 0], 0, grid - 1), np.clip(at[..., 1], 0, grid - 1)
+    inside &= outline[row, col]
+    inside &= (corners @ towards) >= surface[row, col] - behind
+    return others[inside.all(axis=1)]
+
+
+#: The chin (_find_chin): going down the middle of the face from the mouth, the
+#: surface stays about as near the viewer as the lips (CHIN_LIPS below the eyes) until the chin ends and
+#: it falls back to the neck - by more than CHIN_DROP of the eyes' distance
+#: apart. Looked for between CHIN_RANGE of that distance below the eyes; the
+#: frame ends CHIN_PAD below it.
+CHIN_DROP = 0.4
+CHIN_RANGE = (1.2, 2.2)
+CHIN_PAD = 0.05
+CHIN_LIPS = (1.0, 1.3)
+CHIN_GRID = 160
+
+
+def _find_chin(positions, faces, keep, right, up, middle: float, height: float, apart: float):
+    """How far below the eyes the chin ends, in eyes' distances apart, from the
+    triangles ``keep`` seen from the front; None when it cannot be told. A
+    frame of fixed proportions (FACE_FRAME) cut a longer face off above its
+    chin, and the chin's triangles went to the body's texture (13 Nov 2026)."""
+    import numpy as np
+    towards = np.cross(right, up)
+    used, local = np.unique(faces[keep], return_inverse=True)
+    points = positions[used]
+    x = (points @ right - middle) / apart
+    y = (height - points @ up) / apart                # down from the eyes
+    depth = (points @ towards / apart).astype(np.float32)
+    grid = CHIN_GRID
+    span_x, span_y = 0.3, 2.6
+    texels = np.stack([(x + span_x) / (2 * span_x) * grid, y / span_y * grid], axis=1)
+    local = local.reshape(-1, 3)
+    near = (np.abs(x[local]) < 1.0).any(axis=1) & (y[local] > -0.5).all(axis=1) \
+        & (y[local] < span_y + 0.5).all(axis=1)
+    if near.sum() < 4:
+        return None
+    owner, bary = _rasterise(texels, local[near], grid, depth=depth)
+    owner, bary = owner.reshape(grid, grid), bary.reshape(grid, grid, 3)
+    surface = np.where(owner >= 0, (depth[local[near][np.maximum(owner, 0)]] * bary).sum(axis=2),
+                       -np.inf)
+    front = surface.max(axis=1)                       # per row: the nearest point
+    rows = (np.arange(grid) + 0.5) / grid * span_y
+    lips = front[(rows > CHIN_LIPS[0]) & (rows < CHIN_LIPS[1])]       # below the nose's tip
+    lips = lips[np.isfinite(lips)]
+    if not len(lips):
+        return None
+    level = float(lips.max())
+    for row in np.nonzero(rows >= CHIN_RANGE[0])[0]:
+        if front[row] < level - CHIN_DROP:
+            return float(min(max(rows[row], CHIN_RANGE[0]), CHIN_RANGE[1]))
+    return None
+
+
+#: An edge of the box round an eye is moved, by up to EYE_EDGE_REACH of the
+#: eyes' distance apart (in, out), to where the face is plainest along it: a
+#: brow cut through the middle showed the box's outline, sharp inside it and
+#: coarse outside.
+EYE_EDGE_REACH = (0.04, 0.14)
+EYE_EDGE_STEPS = 19
+EYE_EDGE_FAR = 0.25
+EYE_EDGE_TEXTURE = 256
+
+
+def _calm_edges(front: dict, positions, right, up, texture: int, padding: int, eyes: dict) -> dict:
+    """``eyes`` (_find_eyes) with each edge of the boxes moved to the line
+    nearby that the face (``front``: _front_image, finer than the one the eyes
+    were found in) varies least along, both eyes together."""
+    import numpy as np
+    colour, inside = front["colour"], front["inside"]
+    used = front["used"]
+    scale = 1.0 - 2 * padding / texture
+    spans = []
+    for axis in (right, up):
+        spread = positions[used] @ axis
+        spans.append((float(spread.min()), max(float(spread.max() - spread.min()), 1e-12)))
+
+    def texel_of(k: int, value):
+        return ((np.asarray(value, np.float64) - spans[k][0]) / spans[k][1] * scale
+                + padding / texture) * texture - 0.5
+
+    def sample(xs, ys):
+        cols = np.clip(np.rint(texel_of(0, xs)).astype(np.int64), 0, texture - 1)
+        rows = np.clip(np.rint(texel_of(1, ys)).astype(np.int64), 0, texture - 1)
+        return colour[rows, cols], inside[rows, cols]
+
+    middle, apart = eyes["middle"], eyes["apart"]
+    out = dict(eyes)
+
+    def unrest(name: str, value: float) -> float:
+        box = dict(out)
+        box[name] = value
+        total, count = 0.0, 0
+        for sign in (-1.0, 1.0):
+            if name in ("low", "high"):
+                xs = middle + sign * np.linspace(box["inner"], box["outer"], 48)
+                ys = np.full(48, value)
+            else:
+                xs = np.full(48, middle + sign * value)
+                ys = np.linspace(box["low"], box["high"], 48)
+            got, ok = sample(xs, ys)
+            if ok.sum() >= 8:
+                total += float(got[ok].std(axis=0).sum())
+                count += 1
+        return total / count if count else np.inf
+
+    for name, outward in (("high", 1.0), ("low", -1.0), ("outer", 1.0), ("inner", -1.0)):
+        if name == "inner" and eyes["inner"] <= 0.0:
+            continue
+        offsets = np.linspace(-EYE_EDGE_REACH[0], EYE_EDGE_REACH[1], EYE_EDGE_STEPS) * apart
+        choices = []
+        for offset in offsets:
+            value = eyes[name] + outward * offset
+            if name == "inner" and value < 0.02 * apart:
+                continue
+            # A little for the distance moved, so a plain face keeps its box.
+            choices.append((unrest(name, value) + EYE_EDGE_FAR * abs(offset) / apart, value))
+        if choices:
+            out[name] = min(choices)[1]
+    return out
+
+
+def _find_eyes(front: dict, positions, right, up, texture: int, padding: int, centre):
+    """The two eyes in a face seen from the front (_front_image): their middle
+    along ``right``, height along ``up`` and distance apart, and the box round
+    each (inner and outer edge from the middle, low and high), or None if no
+    pair of dark patches there looks like eyes. Of the pairs that do, the one that
+    costs least (EYE_PAIR_WEIGHTS): near ``centre`` (the facial detail's middle),
+    level, and alike - a dark collar's two halves made a larger pair than the eyes."""
+    import numpy as np
+    from scipy import ndimage
+    colour, inside = front["colour"], front["inside"]
+    if inside.sum() < 16:
+        return None
+    light = colour @ np.array([0.299, 0.587, 0.114], np.float32)
+    dark = inside & (light <= np.quantile(light[inside], EYE_DARK_SHARE))
+    patches, count = ndimage.label(dark, structure=np.ones((3, 3), bool))
+    if count < 2:
+        return None
+    ids = np.arange(1, count + 1)
+    size = ndimage.sum(dark, patches, ids)
+    where = np.asarray(ndimage.center_of_mass(dark, patches, ids))      # (row, col)
+    # Texels and the model, as _projected_uvs (fill) laid it out.
+    used = front["used"]
+    scale = 1.0 - 2 * padding / texture
+    spans = []
+    for axis in (right, up):
+        spread = positions[used] @ axis
+        spans.append((float(spread.min()), max(float(spread.max() - spread.min()), 1e-12)))
+
+    def along(k: int, texel: float) -> float:
+        return spans[k][0] + ((texel + 0.5) / texture - padding / texture) / scale * spans[k][1]
+
+    def texel_of(k: int, value: float) -> float:
+        return ((value - spans[k][0]) / spans[k][1] * scale + padding / texture) * texture - 0.5
+
+    middle = np.array([texel_of(1, float(np.asarray(centre) @ up)),
+                       texel_of(0, float(np.asarray(centre) @ right))])   # (row, col)
+    def window(at, half: int):
+        rows = np.clip(np.arange(int(round(at[0])) - half, int(round(at[0])) + half + 1),
+                       0, colour.shape[0] - 1)
+        cols = np.clip(np.arange(int(round(at[1])) - half, int(round(at[1])) + half + 1),
+                       0, colour.shape[1] - 1)
+        return colour[np.ix_(rows, cols)]
+
+    pairs = []
+    for a in range(count):
+        for b in range(a + 1, count):
+            apart = abs(where[a, 1] - where[b, 1])
+            if not EYE_PAIR_APART[0] * texture <= apart <= EYE_PAIR_APART[1] * texture:
+                continue
+            if abs(where[a, 0] - where[b, 0]) > EYE_PAIR_TILT * apart:
+                continue
+            if max(size[a], size[b]) > EYE_PAIR_SIZE * min(size[a], size[b]):
+                continue
+            # How far from the detail's middle, how tilted, and how unlike its
+            # mirror image one patch's surroundings are to the other's: an eye
+            # and the shadow under a lock of hair were level and alike in size.
+            half = max(2, int(round(EYE_PAIR_WINDOW * apart)))
+            first, second = (a, b) if where[a, 1] < where[b, 1] else (b, a)
+            unlike = float(np.abs(window(where[first], half)
+                                  - window(where[second], half)[:, ::-1]).mean())
+            cost = (float(np.linalg.norm((where[a] + where[b]) / 2.0 - middle)) / texture
+                    + EYE_PAIR_WEIGHTS[0] * abs(where[a, 0] - where[b, 0]) / apart
+                    + EYE_PAIR_WEIGHTS[1] * unlike)
+            pairs.append((float(min(size[a], size[b])), cost, a, b))
+    if not pairs:
+        return None
+    # Not specks (a pair of nostrils): at least EYE_PAIR_SPECK of the largest pair.
+    largest = max(pair[0] for pair in pairs)
+    _, _, a, b = min((pair for pair in pairs if pair[0] >= EYE_PAIR_SPECK * largest),
+                     key=lambda pair: pair[1])
+    left, right_eye = along(0, where[a, 1]), along(0, where[b, 1])
+    height = along(1, (where[a, 0] + where[b, 0]) / 2.0)
+    middle_x, apart = (left + right_eye) / 2.0, abs(right_eye - left)
+    # The box round each eye: its patch's edges, from the middle outwards.
+    boxes = ndimage.find_objects(patches)
+    near, far, low, high = [], [], [], []
+    for index in (a, b):
+        rows, cols = boxes[index]
+        edges = sorted(abs(along(0, edge) - middle_x) for edge in (cols.start - 0.5, cols.stop - 0.5))
+        near.append(edges[0])
+        far.append(edges[1])
+        low.append(along(1, rows.start - 0.5))
+        high.append(along(1, rows.stop - 0.5))
+    # How busy the brow above the eyes is (hair combed across it): the mean
+    # step in colour from texel to texel, FACE_BUSY_BROW above the eyes.
+    eye_row, mid_col = (where[a, 0] + where[b, 0]) / 2.0, (where[a, 1] + where[b, 1]) / 2.0
+    wide = abs(where[a, 1] - where[b, 1])
+    tall = wide * spans[0][1] / spans[1][1]              # the eyes' distance, in rows
+    rows = slice(int(np.clip(eye_row + FACE_BUSY_BROW[0] * tall, 0, texture - 2)),
+                 int(np.clip(eye_row + FACE_BUSY_BROW[1] * tall, 1, texture - 1)) + 1)
+    cols = slice(int(np.clip(mid_col - wide, 0, texture - 2)),
+                 int(np.clip(mid_col + wide, 1, texture - 1)) + 1)
+    band, covered = colour[rows, cols], inside[rows, cols]
+    busy = 0.0
+    if band.shape[0] > 1 and band.shape[1] > 1 and covered.mean() > 0.5:
+        busy = float(np.abs(np.diff(band, axis=1)).sum(axis=2).mean()
+                     + np.abs(np.diff(band, axis=0)).sum(axis=2).mean()) / 2.0
+    return {"middle": middle_x, "height": height, "apart": apart, "brow": busy,
+            "inner": max(0.0, min(near) - EYE_BOX_PAD[0] * apart),
+            "outer": max(far) + EYE_BOX_PAD[0] * apart,
+            "low": min(low) - EYE_BOX_PAD[1] * apart, "high": max(high) + EYE_BOX_PAD[1] * apart}
 
 
 #: The eye strip (face layouts eyes, eyes-mirror) runs across the face where
@@ -2188,15 +2988,163 @@ def _eye_band(front: dict, positions, up, texture: int, padding: int):
     return height_of(low_row), height_of(high_row)
 
 
-def _strip_shape(width: float, height: float, texture: int) -> tuple:
+def _strip_shape(width: float, height: float, texture: int, max_edge: int = 0) -> tuple:
     """(width, height) in texels of a strip ``width`` x ``height`` (model units)
     holding the texels of one ``texture`` x ``texture`` texture (so it fits the
     same texture memory), whichever of 4:1, 1:1 and 1:4 leaves its texels
-    nearest square."""
+    nearest square - and no edge over ``max_edge`` (a folder's rules), if given."""
     import math
     choices = [(texture * 2, texture // 2), (texture, texture), (texture // 2, texture * 2)]
+    if max_edge:
+        choices = [shape for shape in choices if max(shape) <= max_edge] or [(texture, texture)]
     ratio = max(width, 1e-12) / max(height, 1e-12)
     return min(choices, key=lambda shape: abs(math.log((shape[0] / shape[1]) / ratio)))
+
+
+#: Small parts painted on (``painted_parts``): a sculpt's eyeballs, lashes,
+#: teeth and tongue, a game model's lash and brow cards and hair strands, are
+#: pieces of their own lying in or on the head. Reduced with it they turn to
+#: spikes (four 113,000-triangle eyeballs to a dozen triangles each) and take
+#: the triangles the face needs. An N64 face is one surface with the eyes
+#: drawn on it, so those pieces are left out of the reduced mesh and their
+#: colours baked onto the surface behind them. A piece is painted on when it
+#: is above the neck, has under PAINT_MAJOR_SHARE of the model's surface, is
+#: no larger across than PAINT_MAX_SIZE of the model's largest extent (hair
+#: cards are larger: painted on the scalp they left it in patches, skin
+#: showing between the strands), and at least PAINT_HUG_SHARE of its points
+#: lie inside a larger piece or within PAINT_HUG_REACH (of the model's largest
+#: extent) of its surface.
+PAINT_MAJOR_SHARE = 0.01
+PAINT_MAX_SIZE = 0.05
+PAINT_HUG_SHARE = 0.7
+PAINT_HUG_REACH = 0.0075
+#: Points per piece tested, and triangles of the larger pieces sampled, at most.
+PAINT_POINTS = 4000
+PAINT_SAMPLE_FACES = 200_000
+
+
+def _pieces(vertex_count: int, faces):
+    """(count, piece of each face): the connected pieces of a welded mesh."""
+    import numpy as np
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import connected_components
+    a = np.concatenate([faces[:, 0], faces[:, 1], faces[:, 2]])
+    b = np.concatenate([faces[:, 1], faces[:, 2], faces[:, 0]])
+    graph = coo_matrix((np.ones(len(a), np.int8), (a, b)), shape=(vertex_count, vertex_count))
+    count, label = connected_components(graph, directed=False)
+    return count, label[faces[:, 0]]
+
+
+#: Hidden triangles (dropped with ``painted_parts``): the head, above the
+#: neck, is looked at from HIDDEN_VIEWS directions all round, HIDDEN_GRID
+#: pixels across (a triangle of an N64 head is several of them wide); a triangle that is in front at no pixel of any view is
+#: hidden. Only the head: it does not bend, so what is hidden stays hidden
+#: (an armpit shut in the modelled pose opens when the arm lifts).
+HIDDEN_VIEWS = 32
+HIDDEN_GRID = 192
+#: ... with what stands below it, down to this share of the head's height.
+HIDDEN_BELOW = 1.0
+#: In front at fewer pixels than this, all views together, counts as not seen.
+#: (4 was tried, for what is glimpsed between closed lips: it took the lips'
+#: own small triangles too, and left holes.)
+HIDDEN_PIXELS = 1
+
+
+def _hidden_faces(positions, faces, above: float):
+    """Which triangles above the height ``above`` nothing can see from outside
+    (bool per triangle): the inside of a shell of hair, the back of a mouth."""
+    import numpy as np
+    hidden = np.zeros(len(faces), bool)
+    head = np.nonzero(positions[faces].mean(axis=1)[:, 1] > above)[0]
+    if len(head) < 8:
+        return hidden
+    # What stands just below (shoulders, a collar) is drawn too and hides what
+    # it hides: through the head's open neck every view from below saw up
+    # into the mouth, and the reducer spent the chin's triangles there.
+    middle = positions[faces].mean(axis=1)[:, 1]
+    tall = float(positions[faces[head]][..., 1].max()) - above
+    below = np.nonzero((middle <= above) & (middle > above - HIDDEN_BELOW * tall))[0]
+    drawn = np.concatenate([head, below])
+    used, local = np.unique(faces[drawn], return_inverse=True)
+    local = local.reshape(-1, 3)
+    points = positions[used]
+    framed = np.unique(local[:len(head)])                # the views are framed on the head
+    seen = np.zeros(len(drawn), np.int64)                # pixels in front, over all the views
+    # Directions spread evenly over the sphere (a Fibonacci spiral).
+    index = np.arange(HIDDEN_VIEWS) + 0.5
+    polar = np.arccos(1.0 - 2.0 * index / HIDDEN_VIEWS)
+    turn = np.pi * (1.0 + 5.0 ** 0.5) * index
+    directions = np.stack([np.sin(polar) * np.cos(turn), np.cos(polar),
+                           np.sin(polar) * np.sin(turn)], axis=1)
+    for towards in directions:
+        aside = np.cross([0.0, 1.0, 0.0] if abs(towards[1]) < 0.9 else [1.0, 0.0, 0.0], towards)
+        aside /= np.linalg.norm(aside)
+        upward = np.cross(towards, aside)
+        flat = np.stack([points @ aside, points @ upward], axis=1)
+        low = flat[framed].min(axis=0)
+        span = max(float((flat[framed].max(axis=0) - low).max()), 1e-12)
+        owner, _ = _rasterise((flat - low) / span * (HIDDEN_GRID - 1) + 0.5, local, HIDDEN_GRID,
+                              depth=(points @ towards).astype(np.float32))
+        seen += np.bincount(owner[owner >= 0], minlength=len(drawn))
+    hidden[head[seen[:len(head)] < HIDDEN_PIXELS]] = True
+    return hidden
+
+
+def _painted_parts(positions, faces, neck: float, spatial):
+    """Which faces of a welded mesh belong to small parts to paint on (see
+    PAINT_MAJOR_SHARE): (mask over faces, number of parts)."""
+    import numpy as np
+    none = np.zeros(len(faces), bool), 0
+    if not len(faces):
+        return none
+    count, piece = _pieces(len(positions), faces)
+    if count < 2:
+        return none
+    corners = positions[faces]
+    normal = np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0])
+    doubled = np.linalg.norm(normal, axis=1)
+    normal = normal / np.maximum(doubled, 1e-30)[:, None]
+    piece_area = np.bincount(piece, doubled, minlength=count)
+    major = piece_area >= PAINT_MAJOR_SHARE * piece_area.sum()
+    if major.all() or not major.any():
+        return none
+    # Which way is out: a piece modelled inside out (its triangles wound the
+    # other way) has its normals turned, so "behind its surface" is inside it.
+    middles = corners.mean(axis=1)
+    piece_middle = np.stack([np.bincount(piece, middles[:, k] * doubled, minlength=count)
+                             for k in range(3)], axis=1) / np.maximum(piece_area, 1e-30)[:, None]
+    outwards = np.bincount(piece, ((middles - piece_middle[piece]) * normal).sum(axis=1) * doubled,
+                           minlength=count)
+    normal = np.where((outwards < 0)[piece][:, None], -normal, normal)
+    # The larger pieces as points with normals: four per triangle (a game
+    # model's triangles are large), a dense sculpt's thinned out.
+    chosen = np.nonzero(major[piece])[0]
+    if len(chosen) > PAINT_SAMPLE_FACES:
+        chosen = chosen[::len(chosen) // PAINT_SAMPLE_FACES]
+    weights = np.array([[1, 1, 1], [3, 1, 1], [1, 3, 1], [1, 1, 3]], np.float64)
+    weights /= weights.sum(axis=1, keepdims=True)
+    samples = np.einsum("sk,fkd->fsd", weights, corners[chosen]).reshape(-1, 3)
+    sample_normals = np.repeat(normal[chosen], len(weights), axis=0)
+    tree = spatial.cKDTree(samples)
+    extent = float(np.ptp(positions, axis=0).max())
+    reach = PAINT_HUG_REACH * extent
+    middle_height = np.bincount(piece, corners[:, :, 1].mean(axis=1) * doubled, minlength=count) \
+        / np.maximum(piece_area, 1e-30)
+    painted = np.zeros(count, bool)
+    order = np.argsort(piece, kind="stable")
+    starts = np.searchsorted(piece[order], np.arange(count + 1))
+    for index in np.nonzero(~major & (middle_height > neck))[0]:
+        points = positions[np.unique(faces[order[starts[index]:starts[index + 1]]])]
+        if float(np.linalg.norm(np.ptp(points, axis=0))) > PAINT_MAX_SIZE * extent:
+            continue
+        if len(points) > PAINT_POINTS:
+            points = points[::len(points) // PAINT_POINTS]
+        distance, nearest = tree.query(points)
+        height = ((points - samples[nearest]) * sample_normals[nearest]).sum(axis=1)
+        # Inside the larger piece (behind its surface, close by), or lying on it.
+        hugging = ((height <= reach) & (distance <= 4 * reach)) | ((height < 0) & (distance <= 4 * reach))
+        painted[index] = hugging.mean() >= PAINT_HUG_SHARE
+    return painted[piece], int(painted.sum())
 
 
 def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_TRIANGLES,
@@ -2205,7 +3153,7 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
          normal_map: bool = True, colours: int = 0, preset: str = "",
          detail_boost: float = DETAIL_BOOST, face_texture: bool = False,
          head_share: float = 0.0, skip_materials=(), face_layout: str = "single",
-         body_textures: int = 1) -> dict:
+         body_textures: int = 1, painted_parts: bool = False, max_edge: int = 0) -> dict:
     """Reduce, unwrap and bake ``source`` into a game asset. Returns what it wrote.
 
     ``normal_map`` adds T_<name>_Normal.png (and puts it in the .glb);
@@ -2253,94 +3201,297 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     # a pole fan, pieces exported separately) are open edges to the reducer,
     # which keeps them, and a 1,200-triangle bake came out at 4,628.
     weld_positions, weld_faces = _weld(obj.vertices, obj.faces)
+    # The sculpt's pieces, a label per vertex (_closest_by_piece).
+    sculpt_piece = None
+    if len(obj.faces):
+        _, piece_of_face = _pieces(len(obj.vertices), obj.faces)
+        sculpt_piece = np.zeros(len(obj.vertices), np.int64)
+        sculpt_piece[obj.faces] = piece_of_face[:, None]
     neck = None
     head_note = ""
-    if head_share:
-        if not 0.0 < head_share <= 0.9:
-            raise PolypaintError(f"the head's share of the triangles must be 0-0.9 (got {head_share})")
+    painted_note = ""
+    head_floor = None
+    if head_share and not 0.0 < head_share <= 0.9:
+        raise PolypaintError(f"the head's share of the triangles must be 0-0.9 (got {head_share})")
+    if head_share or painted_parts:
         found = _face_centre(obj.vertices, obj.faces, obj.colours, with_radius=True)
         if found is None:
-            head_note = "no head budget: the model has too little colour detail to find a face"
+            if head_share:
+                head_note = "no head budget: the model has too little colour detail to find a face"
         else:
             neck = float(found[0][1] - NECK_REACH * found[1])
-    if neck is not None and len(weld_faces) > triangles:
-        low_positions, low_faces, head_note = _reduce_with_head(
-            simplify, weld_positions, weld_faces, triangles, neck, head_share)
-        if head_note:
-            neck = None
-    elif len(weld_faces) > triangles:
-        low_positions, low_faces = simplify.simplify(
-            weld_positions.astype(np.float32), weld_faces.astype(np.int32),
-            target_reduction=1.0 - triangles / len(weld_faces))
-    else:
-        low_positions, low_faces = weld_positions.astype(np.float32), weld_faces.astype(np.int32)
-    del weld_positions, weld_faces
-    if len(low_faces) > triangles:          # a few over: a budget is a ceiling
-        low_positions, low_faces = simplify.simplify(
-            np.asarray(low_positions, np.float32), np.asarray(low_faces, np.int32),
-            target_reduction=1.0 - (triangles - 2) / len(low_faces))
-    low_positions = np.asarray(low_positions, dtype=np.float64)
-    low_faces = np.asarray(low_faces, dtype=np.int64)
-    # Reduction keeps flat or collapsed triangles it is given (a ZBrush pole, a
-    # fan of slivers); the gate fails a mesh for them, so the bake drops them.
-    corners = low_positions[low_faces]
-    flat = agk.degenerate_mask(corners[:, 0], corners[:, 1], corners[:, 2])
-    if flat.any():
-        low_faces = low_faces[~flat]
-    low_faces = _drop_stacked(low_positions, low_faces)
-    step("unwrapping UVs", 2)
-    sculpt = (TexturedSculpt(obj, spatial) if textured
-              else Sculpt(obj.vertices, obj.faces, obj.colours, spatial))
-    nearest = _closest_low_triangles(obj.vertices, low_positions, low_faces, spatial)
-    corners = low_positions[low_faces]
-    area = 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0],
-                                         corners[:, 2] - corners[:, 0]), axis=1)
-    face_region = None
-    face_note = ""
-    if face_texture:
-        found = _face_centre(obj.vertices, obj.faces, obj.colours, with_radius=True)
-        if found is None:
-            face_note = "no separate face texture: the sculpt has too little colour detail to find one"
+            if painted_parts:
+                head_floor = neck
+                # Eyeballs, lashes, teeth: off the mesh, painted on what is behind them.
+                small, parts = _painted_parts(weld_positions, weld_faces, neck, spatial)
+                if parts:
+                    painted_note = (f"{parts} small parts in the head (eyes, lashes, teeth: "
+                                    f"{int(small.sum()):,} triangles) are painted on "
+                                    "the surface behind them")
+                    weld_faces = weld_faces[~small]
+            if not head_share:
+                neck = None
+    # Cutting the face where its textures end (_cut_mesh) adds triangles: room
+    # is left for them, so the budget still holds.
+    target = triangles
+    if face_texture and face_layout != "single":
+        target -= min(CUT_RESERVE[0], int(triangles * CUT_RESERVE[1]))
+    sculpt = None
+    first_neck = neck
+    # ``target`` is what the mesh may have before the cuts; ``ask`` what the
+    # reducer is asked for, more than that when part of what it makes is
+    # dropped again (the head's hidden triangles). A few rounds at most: the
+    # first shows how much is hidden, and one more follows if the cuts took
+    # more triangles than were kept back for them.
+    ask, ask_share = target, head_share
+    hidden_dropped = 0
+    for attempt in range(4):
+        neck = first_neck
+        if neck is not None and len(weld_faces) > ask:
+            # A body that cannot keep its shape on what the head leaves it:
+            # the head's share is eased before it is given up.
+            for eased in (1.0, 0.85, 0.7):
+                low_positions, low_faces, head_note = _reduce_with_head(
+                    simplify, weld_positions, weld_faces, ask, neck, ask_share * eased)
+                if not head_note:
+                    break
+            if head_note:
+                neck = None
+        elif len(weld_faces) > ask:
+            low_positions, low_faces = simplify.simplify(
+                weld_positions.astype(np.float32), weld_faces.astype(np.int32),
+                target_reduction=1.0 - ask / len(weld_faces))
         else:
-            centre, reach = found
-            face_region = _face_region(centre, low_positions, low_faces)
-            if face_region.all() or not face_region.any():
-                face_region = None
-                face_note = "no separate face texture: the mesh is too small to split"
-    priority, boost = None, 1.0
-    # Below 512 px a face triangle is a texel or two: splitting the detail off
-    # into islands of its own only adds edges to bleed across. With a face
-    # texture the face has its own already.
-    if detail_boost > 1.0 and texture >= DETAIL_MIN_TEXTURE and face_region is None:
-        priority = _detail(obj.colours, nearest, low_faces, low_positions)
-        share = float(area[priority].sum() / max(area.sum(), 1e-30))
-        if 0.0 < share < 1.0:
-            # boost^2 * share / (boost^2 * share + 1 - share) <= DETAIL_SHARE
-            limit = DETAIL_SHARE * (1.0 - share) / ((1.0 - DETAIL_SHARE) * share)
-            boost = max(1.0, min(detail_boost, limit ** 0.5))
-    # Gaps between UV islands: a few texels at 512 px and up, one at 64-128 px
-    # where every texel counts (the background is filled anyway, see below).
-    padding = 1 if texture <= 128 else 2 if texture <= 256 else 4
-    # One part per material, each a texture of its own: the body (one or two:
-    # upper, lower), then (if any) the face and the eye strip. A part holds its
-    # reduced triangles, its UVs (None: xatlas unwraps it) and its texture's
-    # shape. The face is seen from the front, one island; xatlas unwraps it
-    # only when the region has no front to map from.
-    view = None
-    layout_note = ""
-    mirror_own = 0
-    if face_region is not None:
-        # Hairline to chin: FACE_REACH times the reach of the eyes, brows and
-        # lips from the centre (on the test sculpt, 3% of the surface rather than the 10%
-        # an unwrapped face takes, where hair and collar filled the texture).
-        middle = low_positions[low_faces].mean(axis=1)
-        close = np.linalg.norm(middle - centre, axis=1) <= FACE_REACH * reach
-        view = _front_view(low_positions, low_faces, close, centre)
-        if view is not None:
-            face_region = np.zeros(len(low_faces), bool)
-            face_region[view[0]] = True
-        elif face_layout != "single":
-            layout_note = f"face layout {face_layout} not used: the face has no front to map from"
+            low_positions, low_faces = weld_positions.astype(np.float32), weld_faces.astype(np.int32)
+        if len(low_faces) > ask:                # a few over: a budget is a ceiling
+            low_positions, low_faces = simplify.simplify(
+                np.asarray(low_positions, np.float32), np.asarray(low_faces, np.int32),
+                target_reduction=1.0 - (ask - 2) / len(low_faces))
+        low_positions = np.asarray(low_positions, dtype=np.float64)
+        low_faces = np.asarray(low_faces, dtype=np.int64)
+        # Reduction keeps flat or collapsed triangles it is given (a ZBrush pole, a
+        # fan of slivers); the gate fails a mesh for them, so the bake drops them.
+        corners = low_positions[low_faces]
+        flat = agk.degenerate_mask(corners[:, 0], corners[:, 1], corners[:, 2])
+        if flat.any():
+            low_faces = low_faces[~flat]
+        low_faces = _drop_stacked(low_positions, low_faces)
+        if head_floor is not None:
+            # The head's triangles nothing can see (the inside of a shell of
+            # hair, a mouth's back): gone, and the budget spent on what shows.
+            hidden = _hidden_faces(low_positions, low_faces, head_floor)
+            hidden_dropped = int(hidden.sum())
+            if hidden_dropped:
+                heights = low_positions[low_faces].mean(axis=1)[:, 1]
+                head_before = int((heights > head_floor).sum())
+                low_faces = low_faces[~hidden]
+                if attempt == 0 and hidden_dropped > 0.03 * target and len(weld_faces) > ask:
+                    head_shown = head_before - hidden_dropped
+                    if neck is not None and head_shown > 0:
+                        # So that the head still shows its share of the budget.
+                        head_ask = head_share * target * head_before / head_shown
+                        ask = int(head_ask + (1.0 - head_share) * target)
+                        ask_share = min(0.9, head_ask / ask)
+                    else:
+                        ask = int(target * (len(low_faces) + hidden_dropped) / len(low_faces))
+                    continue
+            if len(low_faces) > target:
+                low_positions, low_faces = simplify.simplify(
+                    np.asarray(low_positions, np.float32), np.asarray(low_faces, np.int32),
+                    target_reduction=1.0 - (target - 2) / len(low_faces))
+                low_positions = np.asarray(low_positions, dtype=np.float64)
+                low_faces = np.asarray(low_faces, dtype=np.int64)
+                corners = low_positions[low_faces]
+                flat = agk.degenerate_mask(corners[:, 0], corners[:, 1], corners[:, 2])
+                low_faces = _drop_stacked(low_positions, low_faces[~flat])
+        if sculpt is None:
+            step("unwrapping UVs", 2)
+        if sculpt is None:
+            sculpt = (TexturedSculpt(obj, spatial) if textured
+                      else Sculpt(obj.vertices, obj.faces, obj.colours, spatial))
+        low_origin = None
+        if sculpt_piece is not None:
+            low_origin = piece_of_face[sculpt.closest(np.asarray(low_positions, np.float64))[0]]
+        nearest = _closest_by_piece(obj.vertices, sculpt_piece, low_positions, low_faces, spatial,
+                                    low_origin)
+        corners = low_positions[low_faces]
+        area = 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0],
+                                             corners[:, 2] - corners[:, 0]), axis=1)
+        face_region = None
+        face_note = ""
+        split_neck = None
+        split_skin = None           # lower: down to here, what is the face's colour is the head's
+        if face_texture:
+            found = _face_centre(obj.vertices, obj.faces, obj.colours, with_radius=True)
+            if found is None:
+                face_note = "no separate face texture: the sculpt has too little colour detail to find one"
+            else:
+                centre, reach = found
+                split_neck = float(centre[1] - NECK_REACH * reach)
+                face_region = _face_region(centre, low_positions, low_faces)
+                if face_region.all() or not face_region.any():
+                    face_region = None
+                    face_note = "no separate face texture: the mesh is too small to split"
+        priority, boost = None, 1.0
+        # Below 512 px a face triangle is a texel or two: splitting the detail off
+        # into islands of its own only adds edges to bleed across. With a face
+        # texture the face has its own already.
+        if detail_boost > 1.0 and texture >= DETAIL_MIN_TEXTURE and face_region is None:
+            priority = _detail(obj.colours, nearest, low_faces, low_positions)
+            share = float(area[priority].sum() / max(area.sum(), 1e-30))
+            if 0.0 < share < 1.0:
+                # boost^2 * share / (boost^2 * share + 1 - share) <= DETAIL_SHARE
+                limit = DETAIL_SHARE * (1.0 - share) / ((1.0 - DETAIL_SHARE) * share)
+                boost = max(1.0, min(detail_boost, limit ** 0.5))
+        # Gaps between UV islands: a few texels at 512 px and up, one at 64-128 px
+        # where every texel counts (the background is filled anyway, see below).
+        padding = 1 if texture <= 128 else 2 if texture <= 256 else 4
+        # One part per material, each a texture of its own: the body (one or two:
+        # upper, lower), then (if any) the face and the eye strip. A part holds its
+        # reduced triangles, its UVs (None: xatlas unwraps it) and its texture's
+        # shape. The face is seen from the front, one island; xatlas unwraps it
+        # only when the region has no front to map from.
+        view = None
+        framed = None
+        layout_note = ""
+        mirror_own = 0
+        if face_region is not None:
+            # Hairline to chin: FACE_REACH times the reach of the eyes, brows and
+            # lips from the centre (on the test sculpt, 3% of the surface rather than the 10%
+            # an unwrapped face takes, where hair and collar filled the texture).
+            middle = low_positions[low_faces].mean(axis=1)
+            distance = np.linalg.norm(middle - centre, axis=1)
+            # Looked for wider than that first: with the two eyes found, the face
+            # is framed from them (brow to chin, cheek to cheek) and not from where
+            # the colour detail happens to be - on a game model the fringe's
+            # strands pulled the frame up over the hair and cut the mouth off.
+            view = _front_view(low_positions, low_faces, distance <= FACE_SEARCH_REACH * reach, centre)
+            framed = None
+            if view is not None:
+                keep, right, up = view
+                looked = _front_image(sculpt, obj.vertices, low_positions, low_faces, nearest, keep,
+                                      right, up, texture, padding, xatlas)
+                framed = _find_eyes(looked, low_positions, right, up, texture, padding, centre)
+                if framed is not None:
+                    across_eyes, eye_height, apart = framed["middle"], framed["height"], framed["apart"]
+                    # Looked at again from between the eyes, FACE_EYE_REACH of
+                    # their distance apart all round: the detail's middle sits
+                    # high on a face with a fringe, and its reach left the
+                    # chin out.
+                    middle_c = np.asarray(centre, np.float64)
+                    eye_point = (middle_c + (across_eyes - float(middle_c @ right)) * right
+                                 + (eye_height - float(middle_c @ up)) * up)
+                    again = _front_view(low_positions, low_faces,
+                                        np.linalg.norm(middle - eye_point, axis=1)
+                                        <= FACE_EYE_REACH * apart, eye_point,
+                                        direction=np.cross(right, up))
+                    if again is not None and np.allclose(again[1], right, atol=1e-6):
+                        keep = again[0]
+                    # Every corner inside: a long triangle of a hair lock that only
+                    # starts in the frame is not where the view shows the lock.
+                    corners = low_positions[low_faces[keep]]
+                    x, y = corners @ right, corners @ up
+                    # Down to the chin, where the face shows one; FACE_FRAME's
+                    # proportion otherwise.
+                    chin = _find_chin(low_positions, low_faces, keep, right, up, across_eyes,
+                                      eye_height, apart)
+                    below = FACE_FRAME[1] if chin is None else chin + CHIN_PAD
+                    # The head's texture reaches under the jaw: the neck's skin is
+                    # the head's, not the body's (16 colours, most of them the suit's).
+                    eye_y = float(centre[1] + (eye_height - float(np.asarray(centre) @ up)) * up[1])
+                    split_skin = min(split_neck, eye_y - (below + NECK_BELOW_CHIN) * apart)
+                    # A longer face has a higher brow too.
+                    above = max(FACE_FRAME[2], FACE_BROW_OF_CHIN * below)
+                    if framed["brow"] > FACE_BUSY_STEP:
+                        # Hair combed across the brow: drawn as the view shows it,
+                        # not a texel or two a triangle on the head's texture.
+                        above = max(above, FACE_BUSY_BROW[1])
+                    # At the chin a triangle may hang FACE_CHIN_SLACK below the
+                    # frame if its middle is inside: left to the head's texture,
+                    # a triangle from the chin's tip to under the jaw is one
+                    # texel, the colour of the shadow under the chin.
+                    inside_frame = ((np.abs(x - across_eyes) <= FACE_FRAME[0] * apart)
+                                    & (y >= eye_height - (below + FACE_CHIN_SLACK) * apart)
+                                    & (y <= eye_height + above * apart)).all(axis=1)
+                    inside_frame &= y.mean(axis=1) >= eye_height - below * apart
+                    if inside_frame.sum() >= 8:
+                        keep = keep[inside_frame]
+                        # Pieces of the frame apart from the face itself (the one
+                        # nearest the eyes) stay only above the mouth - a fringe,
+                        # brows; below it they are a collar's rim, a hanging lock.
+                        _, piece = _pieces(len(low_positions), low_faces[keep])
+                        at = low_positions[low_faces[keep]].mean(axis=1)
+                        main = piece[int(np.argmin(np.linalg.norm(at - eye_point, axis=1)))]
+                        largest = int(np.argmax(np.bincount(piece, area[keep])))
+                        loose = ((piece != main) & (piece != largest)
+                                 & (at @ up < eye_height - FACE_LOOSE_BELOW * apart))
+                        if (~loose).sum() >= 8:
+                            keep = keep[~loose]
+                        keep = np.union1d(keep, _face_hollows(low_positions, low_faces, keep, right, up,
+                                                              FACE_HOLLOW * apart))
+                        if face_layout.startswith("eyes"):
+                            # The boxes' edges where the face is plainest, from a
+                            # finer look at the face than the eyes were found in.
+                            fine = _front_image(sculpt, obj.vertices, low_positions, low_faces,
+                                                nearest, keep, right, up, EYE_EDGE_TEXTURE, padding,
+                                                xatlas)
+                            framed = _calm_edges(fine, low_positions, right, up, EYE_EDGE_TEXTURE,
+                                                 padding, framed)
+                            del fine
+                        if face_layout != "single":
+                            # Cut where its textures will end: down the middle (a
+                            # mirrored face) and round the eyes (their own texture).
+                            in_face = np.zeros(len(low_faces), bool)
+                            in_face[keep] = True
+                            before = len(low_faces)
+                            lines = []
+                            if face_layout in ("mirror", "eyes-mirror"):
+                                lines.append((right, across_eyes, None))
+                            if face_layout.startswith("eyes"):
+                                band = (framed["low"], framed["high"])
+                                lines += [(up, framed["low"], None), (up, framed["high"], None)]
+                                offsets = [framed["outer"]] + ([framed["inner"]] if framed["inner"] > 0
+                                                               else [])
+                                lines += [(right, across_eyes + sign * offset, band)
+                                          for offset in offsets for sign in (-1.0, 1.0)]
+                            for direction, value, between in lines:
+                                region = in_face
+                                if between is not None:      # only across the eyes' band
+                                    heights = low_positions[low_faces].mean(axis=1) @ up
+                                    region = in_face & (heights > between[0]) & (heights < between[1])
+                                low_positions, low_faces, parent = _cut_mesh(
+                                    low_positions, low_faces, direction, value, region)
+                                in_face = in_face[parent]
+                            if len(low_faces) != before:
+                                keep = np.nonzero(in_face)[0]
+                                if sculpt_piece is not None:
+                                    low_origin = piece_of_face[sculpt.closest(
+                                        np.asarray(low_positions, np.float64))[0]]
+                                nearest = _closest_by_piece(obj.vertices, sculpt_piece, low_positions,
+                                                            low_faces, spatial, low_origin)
+                                corners = low_positions[low_faces]
+                                area = 0.5 * np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0],
+                                                                     corners[:, 2] - corners[:, 0]), axis=1)
+                                middle = corners.mean(axis=1)
+                                distance = np.linalg.norm(middle - centre, axis=1)
+                                if face_region is not None:
+                                    face_region = np.zeros(len(low_faces), bool)
+                        view = (keep, right, up)
+                    else:
+                        framed = None
+            if view is not None and framed is None:
+                view = _front_view(low_positions, low_faces, distance <= FACE_REACH * reach, centre)
+            if view is not None:
+                face_region = np.zeros(len(low_faces), bool)
+                face_region[view[0]] = True
+            elif face_layout != "single":
+                layout_note = f"face layout {face_layout} not used: the face has no front to map from"
+        if len(low_faces) <= triangles or attempt == 3 or target < 100:
+            break
+        over = len(low_faces) - triangles + 8 + int(0.02 * target)
+        ask = max(100, int(ask * (target - over) / target))
+        target -= over
+    del weld_faces, weld_positions
     face_parts = []
     if face_region is not None and view is None:
         face_parts.append({"ids": np.nonzero(face_region)[0], "suffix": PART_SUFFIXES[1]})
@@ -2354,14 +3505,20 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
             # colours; the half more in view is kept, and on the other half a
             # triangle that does not match its mirror image (hair across one
             # eye) keeps texels of its own on the body texture.
-            in_face = np.zeros(len(low_faces), bool)
-            in_face[keep] = True
-            on_face = np.nonzero(in_face[nearest])[0]
-            tint = np.asarray(obj.colours, np.float32)
-            if tint.max(initial=0.0) > 1.0:
-                tint = tint / 255.0
-            across, axis, unmatched = _symmetry_plane(obj.vertices[on_face], tint[on_face],
-                                                      obj.vertices, tint, right, up, reach, spatial)
+            if framed is not None:
+                # Between the eyes; what does not match across it is found
+                # triangle by triangle below.
+                across, axis, unmatched = right, framed["middle"], 0.0
+            else:
+                in_face = np.zeros(len(low_faces), bool)
+                in_face[keep] = True
+                on_face = np.nonzero(in_face[nearest])[0]
+                tint = np.asarray(obj.colours, np.float32)
+                if tint.max(initial=0.0) > 1.0:
+                    tint = tint / 255.0
+                across, axis, unmatched = _symmetry_plane(
+                    obj.vertices[on_face], tint[on_face], obj.vertices, tint, right, up, reach,
+                    spatial)
             if unmatched > MIRROR_MAX_MISMATCH:
                 layout_note = (layout_note + "; " if layout_note else "") + (
                     f"face not mirrored: {unmatched:.0%} of it differs from its mirror image "
@@ -2373,39 +3530,83 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
                                      across, up, texture, padding, xatlas)
                 own = _mirror_misfits(front, low_positions, low_faces, keep, across, axis, side,
                                       texture, padding)
-                if len(own):
-                    keep = np.setdiff1d(keep, own)
-                    mirror_own = len(own)
+                other_half = keep[side * (middle[keep] @ across - axis) < 0]
+                share = float(area[own].sum() / max(float(area[other_half].sum()), 1e-30))
+                if share > MIRROR_MAX_MISFITS:
+                    layout_note = (layout_note + "; " if layout_note else "") + (
+                        f"face not mirrored: {share:.0%} of the half that would be mirrored "
+                        "differs from the other (hair across one side?)")
+                    mirrored, across, axis, side, front = False, right, None, 1.0, None
+                else:
+                    if len(own) and framed is not None and face_layout.startswith("eyes"):
+                        # Not in the boxes round the eyes: an eye is drawn once,
+                        # for both sides, whatever the look in it.
+                        x = np.abs(middle[own] @ across - framed["middle"])
+                        y = middle[own] @ up
+                        own = own[~((y > framed["low"]) & (y < framed["high"])
+                                    & (x < framed["outer"]) & (x > framed["inner"]))]
+                    if len(own):
+                        keep = np.setdiff1d(keep, own)
+                        mirror_own = len(own)
         eyes = None
+        folded = mirrored and framed is not None        # cut down the middle: plain UVs
+        # Not mirrored: a box round each eye all the same, side by side.
+        paired = (not mirrored and framed is not None and framed["inner"] > 0
+                  and face_layout.startswith("eyes"))
         if face_layout.startswith("eyes"):
-            if front is None:
-                front = _front_image(sculpt, obj.vertices, low_positions, low_faces, nearest,
-                                     keep, across, up, texture, padding, xatlas)
-            band = _eye_band(front, low_positions, up, texture, padding)
-            height = low_positions[low_faces[keep]].mean(axis=1) @ up
-            inside_band = ((height >= band[0]) & (height <= band[1]) if band is not None
-                           else np.zeros(len(keep), bool))
-            if inside_band.sum() >= 8 and (~inside_band).sum() >= 8:
+            if framed is not None:
+                # The triangles in the boxes cut round the eyes (one box across
+                # both when the face is not mirrored).
+                x = np.abs(middle[keep] @ across - framed["middle"])
+                y = middle[keep] @ up
+                inside_band = ((y > framed["low"]) & (y < framed["high"]) & (x < framed["outer"])
+                               & ((x > framed["inner"]) | (framed["inner"] <= 0)))
+            else:
+                if front is None:
+                    front = _front_image(sculpt, obj.vertices, low_positions, low_faces, nearest,
+                                         keep, across, up, texture, padding, xatlas)
+                band = _eye_band(front, low_positions, up, texture, padding)
+                height = middle[keep] @ up
+                inside_band = ((height >= band[0]) & (height <= band[1]) if band is not None
+                               else np.zeros(len(keep), bool))
+            if inside_band.sum() >= 4 and (~inside_band).sum() >= 8:
                 eyes = keep[inside_band]
                 keep = keep[~inside_band]
             else:
                 layout_note = (layout_note + "; " if layout_note else "") + \
                     "no eye strip: too few triangles across the eyes"
+        seen = (across, up, np.cross(across, up), (axis, side) if folded else None)
         face_parts.append({"ids": keep, "suffix": PART_SUFFIXES[1], "mirror": mirrored,
-                           "uvs": _projected_uvs(low_positions, low_faces, keep, across, up,
-                                                 (texture, texture), padding, axis=axis, side=side)})
+                           "fold": folded, "view": seen,
+                           "uvs": (_folded_uvs(low_positions, low_faces, keep, across, up,
+                                               (texture, texture), padding, axis) if folded
+                                   else _projected_uvs(low_positions, low_faces, keep, across, up,
+                                                       (texture, texture), padding, axis=axis,
+                                                       side=side))})
         if eyes is not None:
             # The strip's shape (same texels as a square texture) keeps its
             # texels nearest square: 128 x 32 at 64 px for a long, low strip.
             corners = low_positions[low_faces[eyes]].reshape(-1, 3)
-            wide = (float(np.abs(corners @ across - axis).max()) if mirrored
-                    else float(np.ptp(corners @ across)))
-            shape = _strip_shape(wide, float(np.ptp(corners @ up)), texture)
+            gap = (framed["middle"], framed["inner"]) if paired else None
+            if folded:
+                wide = float(np.ptp(np.abs(corners @ across - axis)))
+            elif paired:
+                wide = float(np.ptp(_close_gap(corners @ across, *gap)))
+            elif mirrored:
+                wide = float(np.abs(corners @ across - axis).max())
+            else:
+                wide = float(np.ptp(corners @ across))
+            shape = _strip_shape(wide, float(np.ptp(corners @ up)), texture, max_edge)
             face_parts.append({"ids": eyes, "suffix": PART_SUFFIXES[2], "mirror": mirrored,
-                               "shape": shape,
-                               "uvs": _projected_uvs(low_positions, low_faces, eyes, across, up,
-                                                     shape, padding, fill=not mirrored, axis=axis,
-                                                     side=side)})
+                               "fold": folded, "shape": shape,
+                               "view": seen + (gap,) if paired else seen,
+                               "uvs": (_folded_uvs(low_positions, low_faces, eyes, across, up,
+                                                   shape, padding, axis) if folded
+                                       else _paired_uvs(low_positions, low_faces, eyes, across, up,
+                                                        shape, padding, *gap) if paired
+                                       else _projected_uvs(low_positions, low_faces, eyes, across,
+                                                           up, shape, padding, fill=not mirrored,
+                                                           axis=axis, side=side))})
     face_region = None
     if face_parts:
         face_region = np.zeros(len(low_faces), bool)
@@ -2414,21 +3615,68 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     body = np.nonzero(~face_region)[0] if face_region is not None else np.arange(len(low_faces))
     parts = []
     if body_textures == 2:
-        # Upper and lower body, cut across at the height that halves its area.
         height = low_positions[low_faces[body]].mean(axis=1)[:, 1]
-        order = np.argsort(height, kind="stable")
-        halfway = height[order[min(np.searchsorted(np.cumsum(area[body][order]),
-                                                   0.5 * float(area[body].sum())), len(order) - 1)]]
-        upper = height >= halfway
+        if split_neck is not None:
+            # The head (hair, ears, the back of it) and the body: the head has
+            # most of the triangles, and in one texture with the body its
+            # islands are a texel or two each.
+            upper, suffix = height > split_neck, PART_SUFFIXES[3]
+            if split_skin is not None and split_skin < split_neck and face_parts:
+                # Under the jaw the neck's skin is the head's too, but not a
+                # collar that stands as high: between the two heights a
+                # triangle goes by its colour - nearer the face's or the body's.
+                tint = np.asarray(obj.colours, np.float64)
+                on = nearest >= 0
+                count = np.bincount(nearest[on], minlength=len(low_faces))
+                shade = np.stack([np.bincount(nearest[on], tint[on, channel],
+                                              minlength=len(low_faces))
+                                  for channel in range(3)], axis=1) / np.maximum(count, 1)[:, None]
+                face_ids = np.concatenate([part["ids"] for part in face_parts])
+                below_ids = body[height <= split_skin]
+                face_ids, below_ids = face_ids[count[face_ids] > 0], below_ids[count[below_ids] > 0]
+                band = (height > split_skin) & (height <= split_neck)
+                bare = body[band & (count[body] == 0)]
+                if len(bare):
+                    # No sculpt point is nearest it (a coarse game model): the
+                    # colour of the point nearest its middle.
+                    _, at = spatial.cKDTree(obj.vertices).query(
+                        low_positions[low_faces[bare]].mean(axis=1))
+                    shade[bare] = tint[at]
+                if len(face_ids) and len(below_ids) and band.any():
+                    skin = np.median(shade[face_ids], axis=0)
+                    cloth = np.median(shade[below_ids], axis=0)
+                    like_skin = (np.linalg.norm(shade[body] - skin, axis=1)
+                                 < np.linalg.norm(shade[body] - cloth, axis=1))
+                    upper = upper | (band & like_skin)
+        else:
+            # No head found: upper and lower, at the height that halves the area.
+            order = np.argsort(height, kind="stable")
+            halfway = height[order[min(np.searchsorted(np.cumsum(area[body][order]),
+                                                       0.5 * float(area[body].sum())),
+                                       len(order) - 1)]]
+            upper, suffix = height >= halfway, PART_SUFFIXES[0]
         if upper.all() or not upper.any():
             layout_note = (layout_note + "; " if layout_note else "") + \
                 "one body texture: the body is too small to split"
             parts.append({"ids": body, "suffix": ""})
+        elif suffix == PART_SUFFIXES[3]:
+            parts.append({"ids": body[~upper], "suffix": ""})
+            parts.append({"ids": body[upper], "suffix": suffix})
         else:
             parts.append({"ids": body[upper], "suffix": ""})
-            parts.append({"ids": body[~upper], "suffix": PART_SUFFIXES[0]})
+            parts.append({"ids": body[~upper], "suffix": suffix})
     else:
         parts.append({"ids": body, "suffix": ""})
+    if str(preset).startswith("n64") and colours == 16 and 32 <= texture <= NEAREST_TEXTURE:
+        # The N64 presets' body textures (and the head's): 16 colours left a suit's or a
+        # head of hair's shading in blocks - a few tones for a smooth gradient,
+        # one to an island. 256 colours at half the texels take the same
+        # texture memory on an N64 (CI8 for CI4), and these islands are a texel
+        # or two a triangle either way. The face and eyes, one island each,
+        # keep their texels and 16 colours.
+        for part in parts:
+            part.update(shape=(texture, texture // 2), colours=SMOOTH_COLOURS,
+                        padding=2 * padding)
     parts.extend(face_parts)
     built = _assemble(parts, low_positions, low_faces, nearest, xatlas, texture, padding,
                       priority, boost)
@@ -2437,13 +3685,47 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     step("baking the textures", 3)
     baked = []
     mirror_normal = False
+    # The face and its eye strip meet on the face: reduced to colours each on
+    # its own, the same skin came out two tones and the strip showed as a band
+    # across the eyes. They are reduced together, to one palette.
+    together = [index for index, part in enumerate(parts)
+                if part["suffix"] in PART_SUFFIXES[1:3]] if colours else []
+    together = together if len(together) > 1 else []
     for index, part in enumerate(parts):
         # A normal map mirrored would point the other half's bumps the wrong
         # way across (its sideways component flips); a mirrored part has none.
         mirror_normal |= normal_map and bool(part.get("mirror"))
         baked.append(_bake_part(sculpt, obj.vertices, built, index,
                                 part.get("shape", (texture, texture)),
-                                normal_map and not part.get("mirror"), colours))
+                                normal_map and not part.get("mirror"),
+                                0 if index in together else part.get("colours", colours),
+                                view=part.get("view")))
+    if together:
+        # The face first, in colours of its own; the eyes then keep the face's
+        # colours their edge is made of (the skin meets in one tone) and take
+        # the rest for themselves - iris, lash, the white of the eye. In one
+        # palette of 16 the eyes' colours left the skin too few, and it banded.
+        face_index, eye_index = together[0], together[1]
+        face_image = _reduce_colours(baked[face_index][0].convert("RGB"), colours,
+                                     baked[face_index][2])
+        baked[face_index] = (face_image,) + baked[face_index][1:]
+        used = sorted(set(np.asarray(face_image).ravel().tolist()))
+        face_palette = np.asarray(face_image.getpalette(), np.float64).reshape(-1, 3)[used]
+        eye_pixels = np.asarray(baked[eye_index][0].convert("RGB"), np.float64)
+        covered = baked[eye_index][2]
+        edge = np.zeros(covered.shape, bool)
+        ring = EYE_PALETTE_RING
+        edge[:ring], edge[-ring:], edge[:, :ring], edge[:, -ring:] = True, True, True, True
+        edge &= covered
+        fixed = None
+        if edge.any():
+            nearest_colour = ((eye_pixels[edge][:, None, :] - face_palette[None]) ** 2).sum(axis=2) \
+                .argmin(axis=1)
+            counts = np.bincount(nearest_colour, minlength=len(face_palette))
+            order = np.argsort(-counts, kind="stable")[:max(1, int(colours * EYE_PALETTE_SHARED))]
+            fixed = face_palette[order[counts[order] > 0]]
+        baked[eye_index] = (_reduce_colours(baked[eye_index][0].convert("RGB"), colours, covered,
+                                            fixed=fixed),) + baked[eye_index][1:]
     del sculpt, nearest
 
     out_dir = Path(out_dir) if out_dir is not None else Path(source).parent
@@ -2463,7 +3745,8 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
     mesh_path = out_dir / mesh_name
     material = texture_name[:-len("_BaseColor.png")]
     extra = [{"faces": faces, "base_png": base_png, "normal_png": normal_png,
-              "name": base_name[:-len("_BaseColor.png")], "mirror": bool(part.get("mirror")),
+              "name": base_name[:-len("_BaseColor.png")],
+              "mirror": bool(part.get("mirror")) and not part.get("fold"),
               "image_names": (base_name[:-4], normal_name[:-4] if normal_name else "")}
              for part, faces, (base_name, base_png, normal_name, normal_png)
              in zip(parts[1:], part_faces[1:], written[1:])]
@@ -2477,7 +3760,11 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
         note = "BaseColor and a tangent-space normal map (glTF/OpenGL, green up)"
     else:
         note = "colour only (no normal map)"
-    if colours:
+    if colours and parts[0].get("colours"):
+        wide, tall = baked[0][0].size
+        note += (f"; BaseColor {wide}x{tall} in {parts[0]['colours']} colours (the texture memory of "
+                 f"{texture}x{texture} in {colours}: smoother shading); a face's textures in {colours}")
+    elif colours:
         note += f"; BaseColor reduced to {colours} colours"
     if len(all_faces) > triangles:
         note += (f"; WARNING: reduced to {len(all_faces):,} triangles, not {triangles:,} "
@@ -2489,16 +3776,23 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
         share = float(area[part["ids"]].sum() / max(area.sum(), 1e-30))
         part["share"] = share
         part["size"] = list(image.size)
-        if part["suffix"] in PART_SUFFIXES[1:]:
+        if part["suffix"] in PART_SUFFIXES[1:3]:
             face_share += share
         if part["suffix"]:
             what = {"_Lower": "the lower body", "_Face": "the face",
-                    "_Eyes": "the eyes and brows"}[part["suffix"]]
+                    "_Eyes": "the eyes and brows",
+                    "_Head": "the rest of the head"}[part["suffix"]]
             described.append(f"{what} {image.size[0]}x{image.size[1]}"
+                             + (f" in {part['colours']} colours" if part.get("colours") else "")
                              + (" mirrored" if part.get("mirror") else "")
                              + f" ({share:.0%} of the surface)")
     if described:
         note += f"; textures of their own: {', '.join(described)}"
+    if painted_note:
+        note += f"; {painted_note}"
+    if hidden_dropped:
+        note += (f"; {hidden_dropped:,} triangles of the head that nothing can see were dropped "
+                 "and the budget spent on the rest")
     if face_note:
         note += f"; {face_note}"
     if layout_note:
@@ -2529,7 +3823,7 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
                    "size": part["size"], "mirror": bool(part.get("mirror")),
                    "share": round(part["share"], 3)} for part, item in zip(parts, written)],
         "face_layout": face_layout if face_index >= 0 else "",
-        "body_textures": 2 if "_Lower" in suffixes else 1,
+        "body_textures": 2 if "_Lower" in suffixes or "_Head" in suffixes else 1,
         "source_triangles": int(len(obj.faces)), "triangles": int(len(all_faces)),
         "texture_size": texture, "colours": colours, "preset": preset,
         "samples_per_texel": samples_per_texel(texture) ** 2,
@@ -2537,6 +3831,8 @@ def bake(source: Path, out_dir: Optional[Path] = None, triangles: int = DEFAULT_
         "detail_boost": round(boost, 2),
         "head_share": round(kept_share, 3),
         "seconds": round(time.time() - started, 1), "note": note,
+        # The same, one point a line: what was made, left out or fell back, and why.
+        "notes": [part.strip() for part in note.split("; ") if part.strip()],
     }
 
 

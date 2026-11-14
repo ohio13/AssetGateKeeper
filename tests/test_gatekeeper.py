@@ -213,6 +213,12 @@ expect("... and the problem says what would fit",
        _tmem_png("ci8_64.png", 64, 64, 200).problems)
 expect("the n64 platform preset turns it on",
        agk.PLATFORM_PRESETS["n64"]["document"]["texture"].get("n64_tmem") is True)
+_pak_rules = agk.PLATFORM_PRESETS["n64-pak"]["document"]
+expect("the n64-pak rules preset: a cutscene character - 3,000 triangles, 4 materials, a 128 px "
+       "edge for strips, the TMEM rule on",
+       (_pak_rules["mesh"]["max_triangles"], _pak_rules["mesh"]["max_material_slots"],
+        _pak_rules["texture"]["max_edge"], _pak_rules["texture"].get("n64_tmem"))
+       == (3000, 4, 128, True), str(_pak_rules))
 
 # A negative cap is a typo, not a tighter budget: it used to be accepted and then
 # failed every mesh in the repository, blaming the art.

@@ -227,9 +227,21 @@ with sync_playwright() as playwright:
 
     def pick(asset_id):
         # Wait for *this* asset: the status bar names it once it has settled.
-        name = page.locator(f'#asset-list .asset[data-id="{asset_id}"] .name').inner_text()
-        name = name.replace("FAILED", "").replace("PASSED", "").strip()
-        page.locator(f'#asset-list .asset[data-id="{asset_id}"]').click()
+        # The list is redrawn when the library refreshes: an asset found a
+        # moment before a redraw is gone when the click arrives (the job timed
+        # out here once in CI, 11 Nov 2026), so wait for it and try once more.
+        card = f'#asset-list .asset[data-id="{asset_id}"]'
+        for attempt in (0, 1):
+            try:
+                page.wait_for_selector(card, state="attached", timeout=20000)
+                name = page.locator(f"{card} .name").inner_text(timeout=5000)
+                name = name.replace("FAILED", "").replace("PASSED", "").strip()
+                page.locator(card).click(timeout=5000)
+                break
+            except Exception:
+                if attempt:
+                    raise
+                page.wait_for_timeout(500)
         page.wait_for_function(
             "(name) => { const s = document.getElementById('status').textContent;"
             " return s.includes(name) && !s.startsWith('loading'); }",
@@ -836,15 +848,17 @@ with sync_playwright() as playwright:
             tris: document.getElementById("bake-triangles").value,
             head: document.getElementById("bake-head").value,
             layout: document.getElementById("bake-face-layout").value,
+            paint: document.getElementById("bake-paint").checked,
             pakTris: Array.from(document.querySelectorAll("#bake-triangles .pak-only"))
                           .filter((o) => !o.hidden && !o.disabled).length })""")
     bake_set("#bake-preset", "")
-    expect("no Expansion Pak box for a modern game asset",
-           not bake_state()["pak"] and not bake_state()["row"], bake_state())
+    expect("no Expansion Pak box for a modern game asset, and its eyes stay geometry",
+           not bake_state()["pak"] and not bake_state()["row"] and not bake_state()["paint"],
+           bake_state())
     bake_set("#bake-preset", "n64")
     expect("N64 style shows the Expansion Pak box, its choices still closed",
            bake_state()["pak"] and not bake_state()["row"] and bake_state()["pakTris"] == 0
-           and bake_state()["tris"] == "1200", bake_state())
+           and bake_state()["tris"] == "1200" and bake_state()["paint"], bake_state())
     bake_set("#bake-pak", True)
     expect("ticked: 3,000 tris, the head 60%, the face layouts and 3,000-4,000 tris open",
            bake_state()["row"] and bake_state()["tris"] == "3000" and bake_state()["head"] == "0.6"

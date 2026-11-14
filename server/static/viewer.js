@@ -1042,12 +1042,14 @@ function renderLodList() {
  * a normal map. "N64 style" fills in ~1,200 tris, 64 px, 16 colours, no normal
  * map; any of them can still be changed before baking. */
 const BAKE_PRESETS = {
-  "": { triangles: "30000", texture: "2048", normal: true, colours: "0", face: false, head: "0" },
-  n64: { triangles: "1200", texture: "64", normal: false, colours: "16", face: true, head: "0" },
+  "": { triangles: "30000", texture: "2048", normal: true, colours: "0", face: false, head: "0",
+        paint: false },
+  n64: { triangles: "1200", texture: "64", normal: false, colours: "16", face: true, head: "0",
+         paint: true },
   // 12 Nov 2026: the Expansion Pak - more textures in memory, for a character
   // with little else on screen. Unlocks 3,000-4,000 tris and the face layouts.
   "n64-pak": { triangles: "3000", texture: "64", normal: false, colours: "16", face: true,
-               head: "0.6", layout: "eyes-mirror", body: "1" },
+               head: "0.6", layout: "eyes-mirror", body: "1", paint: true },
 };
 
 /* The preset sent: N64 style with the Expansion Pak ticked is n64-pak. */
@@ -1081,6 +1083,7 @@ function applyBakePreset() {
   $("bake-colours").value = chosen.colours;
   $("bake-face").checked = chosen.face;
   $("bake-head").value = chosen.head;
+  $("bake-paint").checked = chosen.paint;
   if (chosen.layout) $("bake-face-layout").value = chosen.layout;
   if (chosen.body) $("bake-body").value = chosen.body;
 }
@@ -1096,6 +1099,7 @@ async function bakePolypaint() {
                        normal_map: $("bake-normal").checked,
                        colours: Number($("bake-colours").value),
                        face_texture: $("bake-face").checked,
+                       painted_parts: $("bake-paint").checked,
                        head_share: Number($("bake-head").value),
                        skip_materials: Array.from(
                          document.querySelectorAll("#bake-skip input:checked"),
@@ -1127,10 +1131,11 @@ async function bakePolypaint() {
       + `${result.colours ? ` in ${result.colours} colours` : ""}`
       + `${result.face_texture ? " + a face texture" : ""}`
       + `${result.face_layout && result.face_layout !== "single" ? ` (${result.face_layout})` : ""}`
-      + `${result.body_textures > 1 ? " + a lower-body texture" : ""}`
+      + `${result.body_textures > 1 ? " + a second body texture" : ""}`
       + `${result.head_share ? `, head ${Math.round(result.head_share * 100)}% of tris` : ""}, `
-      + `${result.seconds} s - ${result.note || ""}`);
-    $("bake-progress").textContent = "";
+      + `${result.seconds} s`);
+    // What the bake made, left out or fell back on, one point a line.
+    $("bake-progress").textContent = (result.notes || []).map((line) => `- ${line}`).join("\n");
   } catch (error) {
     $("bake-progress").textContent = `error: ${error.message}`;
   } finally {

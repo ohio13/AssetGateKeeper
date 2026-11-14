@@ -1,5 +1,55 @@
 # Unreleased (on `main`)
 
+* **Bake: eyes painted on, and a face framed from its eyes (13 Nov).** A
+  sculpt's eyeballs, lashes and teeth are pieces of their own; reduced with
+  the head to N64 size they became dark spikes and took the face's
+  triangles (one sculpt's four eyeballs were 450,000 of its 1.08 million).
+  With the `n64` presets (`--bake-paint-parts`, **Paint eyes on** on the
+  review page) such small parts in the head are left off the mesh and
+  painted on the surface behind them. The face texture is now the model as
+  it looks from the front - before, an eye in its socket landed bent round
+  the socket's walls - and is framed from the two eyes, brow to chin; on a
+  game model the fringe's strands had pulled the frame up over the hair and
+  cut the mouth off. A mirrored face mirrors about the middle of the eyes.
+  Two body textures now split at the neck (`_Head`: hair, ears) when a face
+  is found. See-through textures: a face texture that also holds the lashes
+  no longer makes the whole face see-through, and a strand's edge keeps its
+  colour (blonde hair cards baked olive).
+  Then, the same day: the mesh is cut where the face's textures end, so an
+  eye fills its own texture (it had filled about 30 x 10 of 64 x 64 texels)
+  and a mirrored face needs no mirroring sampler - its halves share texels
+  through plain UVs, which survive a fast64 / tiny3d export. The head's
+  triangles that nothing can see (the inside of a shell of hair: a third of
+  one sculpt's 3,000) are dropped and the budget spent on what shows. Bake
+  results are listed one point a line, on the command line and the review
+  page. New rules preset `--preset n64-pak` (3,000 triangles, 4 materials,
+  the TMEM rule) for a cutscene character. CI lints every Python file with
+  ruff instead of a typed list for pyflakes.
+  And that evening, from a second model (a game model, hair combed across
+  one eye): the two eyes are told from other dark patches by being level
+  and mirror images of each other (an eye and a lock's shadow had been
+  taken for the pair, and the frame set from them); the frame reaches down
+  to the chin, found where the face falls back to the neck, and up over a
+  brow with hair across it; a face that is not mirrored still gets a box
+  round each eye, side by side in the eyes' texture; an edge of a box moves
+  to where the face is plainest, so it no longer cuts a brow in two; the
+  face has a palette of its own and the eyes keep only its colours where
+  they meet (in one palette of 16 the skin banded); a face is shaded
+  smoothly across its folds; and under the jaw the neck goes with the
+  head's texture, a collar as high with the body's, told apart by colour.
+  Later still: with the N64 presets the body's and the head's textures
+  are 256 colours at 64x32, the face's and eyes' 16 at 64x64 - CI8 for
+  CI4, the same texture memory on an N64 - because 16 colours left a suit's
+  and a head of hair's shading in blocks; each piece of the sculpt is painted on its own reduced triangles
+  (a collar's points were nearest the neck under its rim, and the neck came
+  out the collar's colour); UV islands on a small texture are packed smaller
+  until they fit (with wide gaps they had been squeezed in on top of each
+  other); a strip texture is averaged down over its islands only (the gaps'
+  fill tinted their edges); and a face is shaded as one surface across a
+  sliver left by a cut, never turned away from the viewer; and colours are
+  told apart by hue as well as brightness when a texture is reduced (a
+  lip's red had gone to a dark hair's olive).
+
 * **Bake: the Expansion Pak (12 Nov).** For a character with little else
   on screen - an ending cutscene, a title screen - the review page's N64
   style has an **Expansion Pak** box. Ticked, it starts at 3,000 triangles

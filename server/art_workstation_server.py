@@ -796,7 +796,8 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
                          normal_map: bool | None = None, colours: int | None = None,
                          preset: str = "", face_texture: bool | None = None,
                          head_share: float | None = None, skip_materials: tuple = (),
-                         face_layout: str = "", body_textures: int = 0) -> dict:
+                         face_layout: str = "", body_textures: int = 0,
+                         painted_parts: bool | None = None) -> dict:
     """Make a game asset from an .obj with Polypaint: a new library asset holding
     a reduced .glb with UVs, the colours baked into its BaseColor texture and
     (unless switched off, or with the n64 presets) a normal map. ``head_share``,
@@ -812,7 +813,8 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
         settings = polypaint.resolve_settings(preset, triangles, texture, normal_map, colours,
                                               face_texture=face_texture, head_share=head_share,
                                               face_layout=face_layout,
-                                              body_textures=body_textures)
+                                              body_textures=body_textures,
+                                              painted_parts=painted_parts)
     except polypaint.PolypaintError as exc:
         raise WorkstationError(str(exc), 400) from exc
     with tempfile.TemporaryDirectory(prefix="agk_bake_") as scratch:
@@ -827,6 +829,7 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
                                     face_layout=settings["face_layout"]
                                     if settings["face_texture"] else "single",
                                     body_textures=settings["body_textures"],
+                                    painted_parts=settings["painted_parts"],
                                     progress=progress)
         except polypaint.PolypaintError as exc:
             raise WorkstationError(str(exc), 400) from exc
@@ -844,6 +847,7 @@ def bake_polypaint_asset(db_path: str | Path, data_dir: Path, asset_id: int,
             "normal_map": bool(result["normal"]), "colours": result["colours"],
             "preset": result["preset"], "face_texture": bool(result.get("face_texture")),
             "materials": result.get("materials", 1), "note": result["note"],
+            "notes": result.get("notes", []),
             "head_share": result.get("head_share", 0.0),
             "face_layout": result.get("face_layout", ""),
             "body_textures": result.get("body_textures", 1),
@@ -3418,12 +3422,13 @@ class Handler(BaseHTTPRequestHandler):
                 unknown = sorted(set(payload) - {"triangles", "texture", "normal_map",
                                                  "colours", "preset", "face_texture",
                                                  "head_share", "skip_materials",
-                                                 "face_layout", "body_textures"})
+                                                 "face_layout", "body_textures",
+                                                 "painted_parts"})
                 if unknown:
                     raise WorkstationError(
                         f"unknown field(s) {', '.join(unknown)}; expected triangles, texture, "
                         "normal_map, colours, face_texture, head_share, skip_materials, "
-                        "face_layout, body_textures and/or preset", 400)
+                        "face_layout, body_textures, painted_parts and/or preset", 400)
                 head_share = payload.get("head_share")
                 if head_share is not None and (
                         not isinstance(head_share, (int, float)) or isinstance(head_share, bool)
@@ -3452,6 +3457,9 @@ class Handler(BaseHTTPRequestHandler):
                 face_texture = payload.get("face_texture")
                 if face_texture is not None and not isinstance(face_texture, bool):
                     raise WorkstationError("face_texture must be true or false", 400)
+                painted_parts = payload.get("painted_parts")
+                if painted_parts is not None and not isinstance(painted_parts, bool):
+                    raise WorkstationError("painted_parts must be true or false", 400)
                 colours = payload.get("colours")
                 if colours is not None and (not isinstance(colours, int)
                                             or isinstance(colours, bool)
@@ -3479,13 +3487,13 @@ class Handler(BaseHTTPRequestHandler):
                               _face=face_texture,
                               _head=None if head_share is None else float(head_share),
                               _skip=tuple(skip_materials), _layout=face_layout,
-                              _body=body_textures):
+                              _body=body_textures, _paint=painted_parts):
                     result = bake_polypaint_asset(
                         db_path, data_dir, _asset, _tris, _tex,
                         progress=lambda name, i, n: progress(name, i, n),
                         normal_map=_normal, colours=_colours, preset=_preset,
                         face_texture=_face, head_share=_head, skip_materials=_skip,
-                        face_layout=_layout, body_textures=_body)
+                        face_layout=_layout, body_textures=_body, painted_parts=_paint)
                     publish("asset", result["asset"]["id"])
                     return result
                 job = server.jobs.submit(asset_id, bake_work, kind="bake")
