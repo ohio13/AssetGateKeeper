@@ -228,6 +228,36 @@ ahs.store_verdict(host_db, {"filename": "rock.obj", "path": "rock.obj", "passed"
                             "status": "FAILED", "problems": ["too many triangles"],
                             "hostname": "DESKTOP-AB12CD3", "username": ""})
 host_page = ahs.render_dashboard(host_db)
+
+# 14 Nov 2026: textures are listed apart from models, and still checked.
+kind_db = fresh_db("kinds.db")
+for _name, _passed in (("SM_Crate.fbx", False), ("T_Crate_BaseColor.png", False),
+                       ("T_Crate_Normal.jpg", True), ("SM_Barrel.glb", True)):
+    ahs.store_verdict(kind_db, {"filename": _name, "path": _name, "passed": _passed,
+                                "status": "PASSED" if _passed else "FAILED",
+                                "problems": [] if _passed else ["over budget"],
+                                "hostname": "PC", "username": ""})
+kind_page = ahs.render_dashboard(kind_db)
+_models_panel, _, _textures_panel = kind_page.partition("Textures that failed")
+expect("the dashboard lists a failed texture in a panel of its own, under the failed models",
+       "SM_Crate.fbx" in _models_panel and "T_Crate_BaseColor.png" not in _models_panel.split("Why it failed")[-1]
+       and "T_Crate_BaseColor.png" in _textures_panel and "(1)" in _textures_panel[:80],
+       kind_page[kind_page.find("Why it failed") - 200:][:900])
+expect("... and 'recently passed' is models only",
+       "SM_Barrel.glb" in kind_page and "T_Crate_Normal.jpg" not in kind_page)
+_models = ahs.audit_page(kind_db, ".", [], (), [], 1, kind="models")
+_textures = ahs.audit_page(kind_db, ".", [], (), [], 1, kind="textures")
+_both = ahs.audit_page(kind_db, ".", [], (), [], 1)
+expect("the history lists models, textures or both, and counts the textures held back",
+       sorted(row["filename"] for row in _models["rows"]) == ["SM_Barrel.glb", "SM_Crate.fbx"]
+       and sorted(row["filename"] for row in _textures["rows"]) == ["T_Crate_BaseColor.png", "T_Crate_Normal.jpg"]
+       and _both["total"] == 4 and _models["textures"] == {"total": 2, "failed": 1},
+       (_models["total"], _textures["total"], _both["total"], _models["textures"]))
+_audit_html = ahs.render_audit_page(_models, title="All verdicts", status_filter="all", tag_names=[],
+                                    selected=[], base_path="/audit/full", kind="models")
+expect("... with a link to the textures that says one failed",
+       "Textures: 2, 1 failed" in _audit_html and "kind=textures" in _audit_html
+       and "<option value='models' selected>" in _audit_html, _audit_html[-1500:-900])
 expect("a row with only a machine name shows the machine, not 'unknown'",
        "DESKTOP-AB12CD3" in host_page and "unknown (" not in host_page
        and "identity = &quot;full&quot;" in host_page, host_page[host_page.find("rock.obj"):][:300])
