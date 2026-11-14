@@ -206,6 +206,7 @@ function disposeObject(object) {
  * when a load fails, so nothing of the previous asset - model, collision box,
  * material sliders - can be left on screen under another asset's name. */
 function clearModel() {
+  $("detail-toggle").hidden = true;
   clearGhost();
   clearInspection();
   disposeObject(state.sceneObjects.model);
@@ -406,6 +407,14 @@ async function loadModel(assetId, level, light = false) {
       ? (state.asset.preview.warning || "Converted preview, not the original file.") : "");
   }
   $("full-detail").hidden = !useLight;
+  // The same choice in the toolbar, both ways: a big model opens as its lighter
+  // copy, and the full one (every triangle) is one click away - and back.
+  const toggle = $("detail-toggle");
+  toggle.hidden = !(level === "source" && hasLight(state.asset));
+  toggle.textContent = useLight ? "Show full detail" : "Back to lighter preview";
+  toggle.title = useLight
+    ? `Load all ${Number(state.asset.preview.light.source_triangles).toLocaleString()} triangles (can take a while)`
+    : "Show the lighter copy again: quicker to turn and zoom";
   const lodRow = (state.asset.lods || []).find((lod) => lod.level === level);
   const keepsMaterials = level === "source" || (lodRow && lodRow.origin !== "uploaded"
                                                 && lodRow.engine === "shippable");
@@ -1914,6 +1923,24 @@ async function uploadFiles(files) {
 $("lod-generate").addEventListener("click", () => { generateLods(); });
 $("bake-run").addEventListener("click", () => { bakePolypaint(); });
 $("lod-cancel").addEventListener("click", () => { cancelLodJob(); });
+$("detail-toggle").addEventListener("click", async () => {
+  if (!state.asset) return;
+  if (state.showingLight) {
+    $("full-detail").click();
+    return;
+  }
+  const id = state.asset.id;
+  state.fullDetail.delete(id);
+  $("status").textContent = `loading the lighter preview of ${state.asset.filename}`;
+  try {
+    await loadModel(id, "source", true);
+    if (state.asset && state.asset.id === id) $("status").textContent = state.asset.filename;
+  } catch (error) {
+    if (state.asset && state.asset.id === id) {
+      showPreviewWarning(`The lighter preview could not be displayed: ${error.message}`, "error");
+    }
+  }
+});
 $("full-detail").addEventListener("click", async () => {
   if (!state.asset) return;
   const id = state.asset.id;
@@ -2705,4 +2732,59 @@ animate();
   } catch (error) {
     $("status").textContent = `cannot reach the server: ${error.message}`;
   }
+})();
+
+/* - resizable side panels: drag an edge; the sizes are kept in this browser.
+ * The right panel was a fixed 250 px, cramped once the bake options grew. */
+(() => {
+  const root = document.documentElement;
+  const layout = document.querySelector("main.layout");
+  if (!layout) return;
+  const KEY = "agk.viewer.panels";
+  const limits = { "--rail": [170, 560], "--side": [220, 720], "--notes-height": [120, 700] };
+  let sizes = {};
+  try { sizes = JSON.parse(localStorage.getItem(KEY) || "{}") || {}; } catch (_error) { sizes = {}; }
+  const apply = () => {
+    for (const name of Object.keys(limits)) {
+      const value = Number(sizes[name]);
+      if (Number.isFinite(value) && value > 0) root.style.setProperty(name, `${value}px`);
+      else root.style.removeProperty(name);
+    }
+    window.dispatchEvent(new Event("resize"));     // the 3D view follows its box
+  };
+  const save = () => { try { localStorage.setItem(KEY, JSON.stringify(sizes)); } catch (_error) { /* private mode */ } };
+  const wire = (id, name, measure) => {
+    const handle = $(id);
+    if (!handle) return;
+    handle.addEventListener("pointerdown", (event) => {
+      event.preventDefault();
+      handle.setPointerCapture(event.pointerId);
+      handle.classList.add("dragging");
+      document.body.classList.add("resizing");
+      const move = (moved) => {
+        const box = layout.getBoundingClientRect();
+        const [low, high] = limits[name];
+        // Leave the 3D view at least 320 px.
+        const most = name === "--notes-height" ? box.height - 160 : box.width - 320 - 200;
+        sizes[name] = Math.round(Math.max(low, Math.min(high, most, measure(moved, box))));
+        apply();
+      };
+      const done = () => {
+        handle.classList.remove("dragging");
+        document.body.classList.remove("resizing");
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", done);
+        handle.removeEventListener("pointercancel", done);
+        save();
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", done);
+      handle.addEventListener("pointercancel", done);
+    });
+    handle.addEventListener("dblclick", () => { delete sizes[name]; apply(); save(); });
+  };
+  wire("split-left", "--rail", (event, box) => event.clientX - box.left);
+  wire("split-right", "--side", (event, box) => box.right - event.clientX);
+  wire("split-notes", "--notes-height", (event, box) => box.bottom - event.clientY);
+  apply();
 })();

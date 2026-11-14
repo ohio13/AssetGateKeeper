@@ -1,5 +1,16 @@
 # Unreleased (on `main`)
 
+* **Workstation panels resize; full detail both ways; a cleaner face (14 Nov).**
+  The Art Workstation's library, side panel and review notes are resized by
+  dragging their edges (double-click to reset; kept in the browser), and
+  the side panel starts wider. A big model's lighter preview has a toolbar
+  button to load the full model and to go back. `Start AssetGatekeeper.bat`
+  run again no longer lists the two pages twice. Bake: a face is shaded
+  with the sculpt's own normals (the cuts along its textures leave slivers,
+  and the bridge of the nose shaded in facets), and a fringe that stands
+  off the forehead stays out of the face's texture - its lower edge there
+  read as hair colour painted round the eyebrows.
+
 * **Textures listed apart from models (14 Nov).** A model's textures
   buried it in the lists. The Art Workstation's library has a **Textures**
   tab for texture files uploaded on their own (it counts them, and how many

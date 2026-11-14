@@ -925,6 +925,31 @@ with sync_playwright() as playwright:
         page.wait_for_timeout(500)
         expect("... and Source stays at full detail once asked for",
                page.locator("#full-detail").is_hidden(), "")
+        # 14 Nov 2026: the same choice in the toolbar, and a way back.
+        _toggle = page.locator("#detail-toggle")
+        expect("the toolbar offers the way back to the lighter preview",
+               _toggle.is_visible() and "lighter" in _toggle.inner_text().lower(), _toggle.inner_text())
+        _toggle.click()
+        page.wait_for_function("() => document.getElementById('preview-warning').dataset.kind === 'light'",
+                               timeout=30000)
+        expect("... which shows it again, and offers the full model once more",
+               "full detail" in _toggle.inner_text().lower() and page.locator("#full-detail").is_visible(),
+               _toggle.inner_text())
+        # The side panels are resized by dragging their edges.
+        _before = page.evaluate("() => document.querySelector('.inspector').getBoundingClientRect().width")
+        _edge = page.locator("#split-right").bounding_box()
+        page.mouse.move(_edge["x"] + 3, _edge["y"] + 200)
+        page.mouse.down()
+        page.mouse.move(_edge["x"] - 117, _edge["y"] + 200, steps=4)
+        page.mouse.up()
+        _after = page.evaluate("() => document.querySelector('.inspector').getBoundingClientRect().width")
+        _kept = page.evaluate("() => JSON.parse(localStorage.getItem('agk.viewer.panels') || '{}')['--side']")
+        expect("dragging the right panel's edge widens it, and the width is kept for next time",
+               110 <= _after - _before <= 130 and abs(_kept - _after) <= 2, (_before, _after, _kept))
+        page.locator("#split-right").dblclick()
+        expect("... and a double-click puts it back",
+               abs(page.evaluate("() => document.querySelector('.inspector').getBoundingClientRect().width")
+                   - _before) <= 2, "")
     else:
         print("  skip: pip install fast-simplification")
 

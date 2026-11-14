@@ -48,6 +48,9 @@
 </div>
 
 <main class="layout">
+  <div class="splitter left" id="split-left" title="Drag to resize the library. Double-click to reset." role="separator" aria-orientation="vertical"></div>
+  <div class="splitter right" id="split-right" title="Drag to resize the side panel. Double-click to reset." role="separator" aria-orientation="vertical"></div>
+  <div class="splitter notes-edge" id="split-notes" title="Drag to resize the review notes. Double-click to reset." role="separator" aria-orientation="horizontal"></div>
 
   <!-- ------------------------------------------------- library + rules tabs -->
   <aside class="panel library">
@@ -106,6 +109,7 @@
         <output id="brightness-out">1.00</output>
       </div>
       <div class="group">
+        <button class="chip" id="detail-toggle" type="button" hidden></button>
         <span class="label">LOD</span>
         <span id="lod-buttons" class="lod-buttons">
           <button class="chip active" data-level="source">Source</button>
