@@ -193,7 +193,7 @@ nothing is squeezed off the edge.
 
 | Area | What it does |
 |---|---|
-| **Library** (left, *Assets* tab) | every asset, filtered by **All**, **Needs attention** (a FAILED verdict, or a broken file) and **Passed**; each card shows the geometry summary, LOD count, note count and verdict badge |
+| **Library** (left, *Assets* tab) | models and source files, filtered by **All**, **Needs attention** (a FAILED verdict, or a broken file - a failed texture too) and **Passed**; texture files uploaded on their own are under **Textures**, which counts them; each card shows the geometry summary, LOD count, note count and verdict badge |
 | **Rules & Budgets** (left, second tab) | the project's `rules.toml` as a table: the default budget and each tag's overrides. Read-only - change it in `rules.toml` or the AssetHealth budget planner. A broken `rules.toml` is shown as an error, not an empty table |
 | **Toolbar** | **Textured** / **Geometry** (flat normals) / **Wireframe** / **Collision** (show the proxy), an **Exposure** slider, and one button per LOD level |
 | **Viewport** | orbit (drag), pan (right-drag), zoom (wheel). Textures show as an image with their size; an asset that cannot be drawn says why and never leaves the previous model on screen |

@@ -766,19 +766,30 @@ async function refreshAssets() {
     return;
   }
   list.innerHTML = "";
-  const wanted = state.filter || "all";
-  const visible = state.assets.filter((asset) => wanted === "all"
-    ? true
-    : wanted === "attention" ? (verdictOf(asset) === "failed" || asset.kind === "broken")
-      : wanted === "to-review" ? ["", "in_review"].includes(asset.review_status || "")
-        : wanted === "approved" ? asset.review_status === "approved"
-          : verdictOf(asset) === "passed");
+  // Textures uploaded on their own have a tab to themselves: they are checked
+  // like everything else, but nobody reviews one apart from its model, and a
+  // bake's four of them buried the model in the list. A failed one still shows
+  // under "Needs attention", so it cannot be missed.
+  const isTexture = (asset) => asset.kind === "texture";
+  // Every row is drawn; the filter hides rows (applyVerdictFilter), so a click
+  // on another filter needs no fetch.
+  const visible = state.assets;
+  const textures = state.assets.filter(isTexture);
+  const failedTextures = textures.filter((asset) => verdictOf(asset) === "failed").length;
+  const tab = $("filter-textures");
+  if (tab) {
+    tab.textContent = textures.length
+      ? `Textures ${textures.length}${failedTextures ? ` (${failedTextures} failed)` : ""}`
+      : "Textures";
+    tab.classList.toggle("has-failed", failedTextures > 0);
+  }
   visible.forEach((asset) => {
     const element = document.createElement("div");
     element.className = "asset" + (state.asset && state.asset.id === asset.id ? " active" : "");
     element.dataset.id = asset.id;
     element.dataset.verdict = asset.kind === "broken" && !verdictOf(asset) ? "failed" : verdictOf(asset);
     element.dataset.review = asset.review_status || "";
+    element.dataset.kind = asset.kind || "";
     // An unverified format (.blend, .max, .ma) has no triangle count at all.
     // Printing "0 tris" would read as a cheap mesh rather than an unmeasured
     // one, so it is named as unmeasured and its reason moved into the tooltip.
@@ -2289,11 +2300,32 @@ function applyVerdictFilter() {
   for (const row of $("asset-list").querySelectorAll(".asset")) {
     const verdict = row.dataset.verdict || "";
     const review = row.dataset.review || "";
-    row.hidden = !(wanted === "all"
-      || (wanted === "attention" && verdict === "failed")
-      || (wanted === "passed" && verdict === "passed")
-      || (wanted === "to-review" && (review === "" || review === "in_review"))
-      || (wanted === "approved" && review === "approved"));
+    const texture = row.dataset.kind === "texture";
+    row.hidden = !(wanted === "textures" ? texture
+      : wanted === "attention" ? verdict === "failed"
+        : !texture && (wanted === "all"
+          || (wanted === "passed" && verdict === "passed")
+          || (wanted === "to-review" && (review === "" || review === "in_review"))
+          || (wanted === "approved" && review === "approved")));
+  }
+  // Say why the list is empty, where it is.
+  const list = $("asset-list");
+  let note = list.querySelector(".empty.filtered");
+  const rows = [...list.querySelectorAll(".asset")];
+  const shown = rows.some((row) => !row.hidden);
+  if (rows.length && !shown) {
+    if (!note) {
+      note = document.createElement("div");
+      note.className = "empty filtered";
+      list.appendChild(note);
+    }
+    const anyTexture = rows.some((row) => row.dataset.kind === "texture");
+    note.innerHTML = wanted === "textures"
+      ? "No textures uploaded on their own.<br>A texture a model names is kept with that model."
+      : wanted === "all" && anyTexture ? "No models yet.<br>The textures are under the Textures tab."
+        : "Nothing here.";
+  } else if (note) {
+    note.remove();
   }
 }
 

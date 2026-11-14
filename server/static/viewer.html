@@ -61,11 +61,13 @@
     <div class="tabpane" id="pane-assets" role="tabpanel" aria-labelledby="tab-assets">
       <h2>Asset library</h2>
       <div class="filters" role="group" aria-label="Filter by gate verdict">
-        <button type="button" class="filter is-active" data-filter="all">All</button>
+        <button type="button" class="filter is-active" data-filter="all" title="Models and source files. Textures have a tab of their own.">All</button>
         <button type="button" class="filter" data-filter="attention">Needs attention</button>
         <button type="button" class="filter" data-filter="passed">Passed</button>
         <button type="button" class="filter" data-filter="to-review">To review</button>
         <button type="button" class="filter" data-filter="approved">Approved</button>
+        <button type="button" class="filter" data-filter="textures" id="filter-textures"
+                title="Texture files uploaded on their own. They are checked like everything else, and a failed one also shows under Needs attention.">Textures</button>
       </div>
       <div id="asset-list" class="list">
         <div class="empty">Nothing uploaded yet.<br>Drop meshes, textures or source files anywhere.</div>

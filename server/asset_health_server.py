@@ -1469,6 +1469,7 @@ nav { display: flex; gap: 18px; margin-top: 14px; font-size: 13px; flex-wrap: wr
 nav a { color: var(--accent); text-decoration: none; font-weight: 600; }
 nav a:hover { text-decoration: underline; }
 nav .chips { color: var(--muted); font-size: 12px; letter-spacing: 0.02em; }
+details.textures { margin-top: 12px; } details.textures > summary { cursor: pointer; font-weight: 600; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
 """
 
@@ -1574,10 +1575,27 @@ def audit_query(db_path: str | Path, statuses: tuple[str, ...],
     return rows, counts
 
 
+def is_texture_name(filename: str) -> bool:
+    """A texture file by its name (.png, .jpg, .tga ...). The lists keep these
+    apart from models: they are checked all the same, but nobody reviews a
+    texture on its own, and a model's handful of them buried it."""
+    return Path(str(filename or "")).suffix.lower() in agk.TEXTURE_SUFFIXES
+
+
+KIND_CHOICES = (("models", "Models"), ("textures", "Textures"), ("all", "Models and textures"))
+
+
 def audit_page(db_path: str | Path, scan_root: str | Path, tag_names: list[str],
                statuses: tuple[str, ...], wanted_tags: list[str],
-               page: int, project_id: int | None = None) -> dict:
+               page: int, project_id: int | None = None, kind: str = "all") -> dict:
     rows, counts = audit_query(db_path, statuses, project_id)
+    texture_rows = [row for row in rows if is_texture_name(row.get("filename"))]
+    textures = {"total": len(texture_rows),
+                "failed": sum(1 for row in texture_rows if not row.get("passed"))}
+    if kind == "models":
+        rows = [row for row in rows if not is_texture_name(row.get("filename"))]
+    elif kind == "textures":
+        rows = texture_rows
     for row in rows:
         row["tags"] = resolve_tags(row.get("filepath") or "", scan_root, tag_names)
     if wanted_tags:
@@ -1592,7 +1610,8 @@ def audit_page(db_path: str | Path, scan_root: str | Path, tag_names: list[str],
     for row in rows[start:start + AUDIT_PAGE_SIZE]:
         groups.setdefault(row["tags"][0] if row["tags"] else "Uncategorised", []).append(row)
     return {"rows": rows[start:start + AUDIT_PAGE_SIZE], "groups": groups,
-            "total": total, "pages": pages, "page": page, "counts": counts}
+            "total": total, "pages": pages, "page": page, "counts": counts,
+            "textures": textures}
 
 REVIEW_WORDS = {"in_review": "In review", "changes_requested": "Changes requested",
                 "approved": "Approved"}
@@ -1600,10 +1619,12 @@ REVIEW_WORDS = {"in_review": "In review", "changes_requested": "Changes requeste
 
 def render_audit_page(data: dict, *, title: str, status_filter: str,
                       tag_names: list[str], selected: list[str],
-                      base_path: str, reviews: dict | None = None) -> str:
+                      base_path: str, reviews: dict | None = None,
+                      kind: str = "all") -> str:
     """The full audit: every verdict, paginated, grouped by category."""
-    def href(page: int, status: str = status_filter) -> str:
-        params = [f"status={urllib.parse.quote(status)}", f"page={page}"]
+    def href(page: int, status: str = status_filter, which: str = kind) -> str:
+        params = [f"status={urllib.parse.quote(status)}", f"kind={urllib.parse.quote(which)}",
+                  f"page={page}"]
         params += [f"tag={urllib.parse.quote(item)}" for item in selected]
         return f"{base_path}?{'&'.join(params)}"
 
@@ -1638,6 +1659,16 @@ def render_audit_page(data: dict, *, title: str, status_filter: str,
         f"<option value='{value}'{' selected' if value == status_filter else ''}>{label}</option>"
         for value, label in (("all", "All verdicts"), ("fail", "Failures only"),
                              ("pass", "Passes only")))
+
+    kind_options = "".join(
+        f"<option value='{value}'{' selected' if value == kind else ''}>{label}</option>"
+        for value, label in KIND_CHOICES)
+    held = data.get("textures") or {"total": 0, "failed": 0}
+    texture_note = ""
+    if kind == "models" and held["total"]:
+        failed = f", {held['failed']} failed" if held["failed"] else ""
+        texture_note = (f"<a class='texnote{' bad' if held['failed'] else ''}' "
+                        f"href='{href(1, which='textures')}'>Textures: {held['total']}{failed}</a>")
 
     pages = []
     for page in range(1, data["pages"] + 1):
@@ -1682,6 +1713,7 @@ td.when{{color:#8b94a7;white-space:nowrap;width:150px}}
 button.send{{font-size:11px;padding:3px 8px}}
 .page{{display:inline-block;padding:3px 9px;border:1px solid #262f3d;border-radius:6px;margin-right:3px}}
 .page.active{{background:#1d2431;border-color:#7aa2f7}}
+.texnote{{padding:6px 2px}} .texnote.bad{{color:#ff6b6b}}
 .empty,.sub{{color:#8b94a7}} .panel{{background:#161b24;border:1px solid #262f3d;border-radius:10px;padding:14px}}
 </style></head><body>
 <header><h1>{_e(title)}</h1>
@@ -1693,6 +1725,8 @@ button.send{{font-size:11px;padding:3px 8px}}
 <main>
 <form class="filters" method="get" action="{base_path}">
   <select name="status">{status_options}</select>
+  <select name="kind" title="Textures are checked like everything else; they are listed apart from models">{kind_options}</select>
+  {texture_note}
   <details class="picker"><summary>Categories ({len(selected)} selected)</summary>
     <div class="menu">{tag_boxes}</div></details>
   <input type="submit" value="Apply filters">
@@ -2002,9 +2036,14 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
     rate = stats["pass_rate"]
     rate_class = "good" if rate >= 90 else ("accent" if rate >= 70 else "bad")
 
-    if shame:
+    # Textures apart from models: a model's failed textures sat above it in the
+    # list. They are still here, in a panel of their own under the models.
+    texture_shame = [entry for entry in shame if is_texture_name(entry.get("filename"))]
+    shame = [entry for entry in shame if not is_texture_name(entry.get("filename"))]
+
+    def shame_table(entries) -> str:
         shame_rows = []
-        for entry in shame:
+        for entry in entries:
             reasons = "".join(f"<div>{_e(reason)}</div>" for reason in entry["reasons"]) or "<div>no reason recorded</div>"
             # With the default identity = "host" the gate sends the machine name
             # but not the user name, on purpose. "unknown (DESKTOP-1)" on every row
@@ -2028,21 +2067,34 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
                    f"<td class=\"act\">{_send_button(entry)}</td>"
                 "</tr>"
             )
-        shame_html = (
-            "<div class=\"panel\"><table><thead><tr>"
+        return (
+            "<table><thead><tr>"
             "<th style=\"width:150px\">When</th><th style=\"width:290px\">Asset</th>"
             "<th>Why it failed</th><th style=\"width:170px\">Action</th></tr></thead><tbody>"
             + "".join(shame_rows)
-            + "</tbody></table></div>"
+            + "</tbody></table>"
         )
+
+    if shame:
+        shame_html = f"<div class=\"panel\">{shame_table(shame)}</div>"
+    elif texture_shame:
+        shame_html = "<div class=\"panel\"><div class=\"empty\">No model has failed. The failed textures are below.</div></div>"
     else:
         shame_html = "<div class=\"panel\"><div class=\"empty\">Nothing has failed yet. Enjoy it.</div></div>"
+    if texture_shame:
+        shame_html += (
+            f"<details class=\"panel textures\"><summary>Textures that failed "
+            f"<span class=\"chips\">({len(texture_shame)})</span> &middot; "
+            f"<a href=\"/audit/full?kind=textures\">all textures</a></summary>"
+            f"{shame_table(texture_shame)}</details>")
 
     # Passed assets get the same hand-off: a clean gate is not the same thing as a
     # model that looks right, and reviewers keep asking to see the ones that
     # "passed" suspiciously cheaply.
     passed_rows = []
-    for entry in recent_passed(db_path, 12, project_id):
+    recent = [entry for entry in recent_passed(db_path, 60, project_id)
+              if not is_texture_name(entry.get("filename"))][:12]
+    for entry in recent:
         passed_rows.append(
             "<tr>"
             f"<td>{_e((entry.get('received_at') or '')[:16])}</td>"
@@ -3500,12 +3552,17 @@ class Handler(BaseHTTPRequestHandler):
         except (TypeError, ValueError):
             page = 1
         tag_names = self._configured_tags()
+        # Models by default: textures have a list of their own (kind=textures).
+        kind = (query.get("kind", ["models"])[0] or "models").lower()
+        if kind not in ("models", "textures", "all"):
+            kind = "models"
         data = audit_page(self.server.db_path, self.server.scan_root, tag_names,
-                          () if status == "all" else (status,), selected, page)
+                          () if status == "all" else (status,), selected, page, kind=kind)
         title = "Passes" if path == "/audit/passes" else "All verdicts"
         body = render_audit_page(data, title=title, status_filter=status,
                                  tag_names=tag_names, selected=selected,
-                                 base_path=path, reviews=self._workstation_reviews())
+                                 base_path=path, reviews=self._workstation_reviews(),
+                                 kind=kind)
         self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
     # - workstation bridge
     def _workstation_reviews(self) -> dict:

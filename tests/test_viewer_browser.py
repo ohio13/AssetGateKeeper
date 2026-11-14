@@ -248,7 +248,7 @@ with sync_playwright() as playwright:
             arg=name, timeout=15000)
 
     page.goto(f"{BASE}/viewer?live=0")
-    page.wait_for_selector("#asset-list .asset")
+    page.wait_for_selector("#asset-list .asset:not([hidden])")
 
     print("1. every previewable format loads")
     pick(ids["cube"])
@@ -311,6 +311,15 @@ with sync_playwright() as playwright:
     page.click("button.filter[data-filter='all']")
 
     print("4. textures are shown")
+    # 14 Nov 2026: a texture uploaded on its own is under the Textures tab, not in the main list.
+    texture_row = page.locator(f'#asset-list .asset[data-id="{ids["png"]}"]')
+    expect("a texture is not in the main list ...", not texture_row.is_visible())
+    page.click("button.filter[data-filter='textures']")
+    expect("... it is under the Textures tab, which counts them",
+           texture_row.is_visible() and "Textures" in page.locator("#filter-textures").inner_text()
+           and any(ch.isdigit() for ch in page.locator("#filter-textures").inner_text())
+           and not page.locator('#asset-list .asset:not([data-kind="texture"])').first.is_visible(),
+           page.locator("#filter-textures").inner_text())
     pick(ids["png"])
     image = page.locator("#texture-img")
     page.wait_for_function("() => document.getElementById('texture-img').naturalWidth > 0", timeout=10000)
@@ -326,6 +335,7 @@ with sync_playwright() as playwright:
     expect("a TGA is converted to PNG for preview, and says so",
            "converted to PNG" in page.locator("#texture-caption").inner_text(),
            page.locator("#texture-caption").inner_text())
+    page.click("button.filter[data-filter='all']")
     pick(ids["cube"])
     expect("the texture view is cleared for a mesh", not page.locator("#texture-view").is_visible())
 
@@ -363,7 +373,7 @@ with sync_playwright() as playwright:
     page.wait_for_function("() => !document.getElementById('status').textContent.startsWith('uploading')",
                            timeout=15000)
     page.wait_for_timeout(500)
-    names = page.locator("#asset-list").inner_text()
+    names = page.locator("#asset-list").text_content()  # hidden rows too: textures have their own tab
     expect("several files upload in one go; the unchanged one is not duplicated (W1)",
            "second.glb" in names and names.count("rock_Albedo.png") == 1, status())
     page.set_input_files("#upload", str(WORK / "rock_Albedo.png"))

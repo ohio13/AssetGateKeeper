@@ -1,5 +1,16 @@
 # Unreleased (on `main`)
 
+* **Textures listed apart from models (14 Nov).** A model's textures
+  buried it in the lists. The Art Workstation's library has a **Textures**
+  tab for texture files uploaded on their own (it counts them, and how many
+  failed); the other filters show models and source files. The dashboard
+  lists failed textures in a panel of their own under the failed models,
+  "recently passed" is models only, and the history pages (`/audit/full`)
+  have a Models / Textures / Models and textures choice, models by default,
+  with a link that says how many textures there are and how many failed.
+  Textures are checked exactly as before, and a failed one still shows
+  under **Needs attention**.
+
 * **Bake: eyes painted on, and a face framed from its eyes (13 Nov).** A
   sculpt's eyeballs, lashes and teeth are pieces of their own; reduced with
   the head to N64 size they became dark spikes and took the face's

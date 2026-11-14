@@ -208,6 +208,7 @@ body.rules-open { --rail: 430px; }
 }
 .filter:hover { color: var(--text); }
 .filter.is-active { color: var(--text); border-color: var(--accent); background: var(--panel-2); }
+.filter.has-failed { border-color: #ff6b6b; }
 .verdict {
   display: inline-block; margin-right: 6px; padding: 0 5px; border-radius: 4px;
   font-size: 9px; font-weight: 700; letter-spacing: .04em; vertical-align: 1px;
