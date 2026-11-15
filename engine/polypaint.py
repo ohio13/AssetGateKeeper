@@ -2614,17 +2614,17 @@ def _open_vertices(faces) -> int:
     return int(len(np.unique(unique[counts == 1])))
 
 
-#: Hands (15 Nov 2026): the reducer keeps what changes the shape least, and a
-#: finger changes it very little - at 3,000 triangles a hand had 85 and its
-#: fingers were spikes. The two hands are found as the ends of the body that
-#: are not the feet: the points furthest over the surface from the middle of
-#: the trunk (and from each other), four of them, the lowest two being the
-#: feet. A hand is the surface within HAND_REACH of the model's height of its
-#: tip, and the two share HAND_SHARE of the body's triangles. Each must be a
-#: limb: the surface within two hand's lengths of its tip under HAND_THIN of
-#: the disc of that radius.
+#: The shape detector, for a body (15 Nov 2026): the reducer keeps what changes
+#: the shape least, and a finger changes it very little - at 3,000 triangles a
+#: hand had 85 and its fingers were spikes. The two hands are found as the ends
+#: of the body that are not the feet: the points furthest over the surface from
+#: the middle of the trunk (and from each other), four of them, the lowest two
+#: being the feet. A hand is the surface within HAND_REACH of the model's height
+#: of its tip, and its error counts 1 + HAND_GAIN times on top of the
+#: analyser's. Each must be a limb: the surface within two hand's lengths of
+#: its tip under HAND_THIN of the disc of that radius.
 HAND_REACH = 0.105
-HAND_SHARE = 0.2
+HAND_GAIN = 3.0
 HAND_LEAST = 0.25
 HAND_THIN = 0.5
 
@@ -2682,6 +2682,194 @@ def _hand_faces(positions, faces):
     return mask if mask.any() and not mask.all() else None
 
 
+def _reduce_weighted(positions, faces, target: int, weight=None, locked=None):
+    """``faces`` reduced to ``target`` triangles by edge collapse (quadric error),
+    each vertex's error counted ``weight`` times: where the weight is 4 the
+    surface is kept as if it were twice the size. ``locked`` vertices do not move
+    and are never removed (a cut that must still meet its other side).
+
+    The library reducer takes no weights; this one is slower (a second or two
+    per 10,000 triangles removed), so it is given a mesh already brought near
+    its budget. A collapse that would fold a triangle over or pinch the surface
+    is passed over. Returns (positions, faces)."""
+    import heapq
+    import numpy as np
+    points = np.asarray(positions, np.float64).copy()
+    tris = [list(map(int, face)) for face in np.asarray(faces)]
+    count = len(points)
+    if len(tris) <= target:
+        return points, np.asarray(faces, np.int64)
+    weight = np.ones(count) if weight is None else np.asarray(weight, np.float64)
+    locked = np.zeros(count, bool) if locked is None else np.array(locked, bool)
+    corner = points[np.asarray(tris)]
+    normal = np.cross(corner[:, 1] - corner[:, 0], corner[:, 2] - corner[:, 0])
+    area = np.linalg.norm(normal, axis=1) / 2
+    unit = normal / np.maximum(2 * area, 1e-30)[:, None]
+    plane = np.concatenate([unit, -(unit * corner[:, 0]).sum(axis=1)[:, None]], axis=1)
+    face_weight = weight[np.asarray(tris)].mean(axis=1) * area
+    quadric = np.zeros((count, 4, 4))
+    outer = plane[:, :, None] * plane[:, None, :] * face_weight[:, None, None]
+    for k in range(3):
+        np.add.at(quadric, np.asarray(tris)[:, k], outer)
+    around = [set() for _ in range(count)]            # vertex -> its triangles
+    for index, face in enumerate(tris):
+        for vertex in face:
+            around[vertex].add(index)
+    # An open edge is held by a plane through it, square to its triangle.
+    seen = {}
+    for index, face in enumerate(tris):
+        for k in range(3):
+            a, b = face[k], face[(k + 1) % 3]
+            seen.setdefault((min(a, b), max(a, b)), []).append(index)
+    for (a, b), users in seen.items():
+        if len(users) != 1:
+            continue
+        along = points[b] - points[a]
+        side = np.cross(along, unit[users[0]])
+        length = float(np.linalg.norm(side))
+        if length < 1e-30:
+            continue
+        side /= length
+        held = np.concatenate([side, [-float(side @ points[a])]])
+        held = np.outer(held, held) * float(along @ along) * 10.0 * max(weight[a], weight[b])
+        quadric[a] += held
+        quadric[b] += held
+    alive = [True] * len(tris)
+    gone = [False] * count
+    stamp = [0] * count
+
+    def cost(a: int, b: int):
+        if locked[a] and locked[b]:
+            return None
+        both = quadric[a] + quadric[b]
+        if locked[a]:
+            choices = [points[a]]
+        elif locked[b]:
+            choices = [points[b]]
+        else:
+            choices = [points[a], points[b], 0.5 * (points[a] + points[b])]
+            try:
+                best = np.linalg.solve(both[:3, :3], -both[:3, 3])
+                # Only if it stays near the edge: a flat patch solves to anywhere.
+                span = float(np.linalg.norm(points[a] - points[b]))
+                if np.linalg.norm(best - choices[2]) <= 2.0 * span:
+                    choices.append(best)
+            except np.linalg.LinAlgError:
+                pass
+        best_cost, best_at = None, None
+        for at in choices:
+            full = np.array([at[0], at[1], at[2], 1.0])
+            value = float(full @ both @ full)
+            if best_cost is None or value < best_cost:
+                best_cost, best_at = value, at
+        return best_cost, best_at
+
+    heap = []
+
+    def push(a: int, b: int):
+        found = cost(a, b)
+        if found is not None:
+            heapq.heappush(heap, (found[0], a, b, stamp[a], stamp[b], tuple(found[1])))
+
+    for a, b in seen:
+        push(a, b)
+    left = len(tris)
+    while left > target and heap:
+        _, a, b, stamp_a, stamp_b, at = heapq.heappop(heap)
+        if gone[a] or gone[b] or stamp[a] != stamp_a or stamp[b] != stamp_b:
+            continue
+        shared = around[a] & around[b]
+        if not shared:
+            continue
+        # The surface must stay a surface: the two ends may share no neighbour
+        # but the ones across their common triangles.
+        near_a = {v for f in around[a] for v in tris[f]} - {a, b}
+        near_b = {v for f in around[b] for v in tris[f]} - {a, b}
+        across = {v for f in shared for v in tris[f]} - {a, b}
+        if (near_a & near_b) != across:
+            continue
+        at = np.asarray(at)
+        folded = False
+        for f in (around[a] | around[b]) - shared:
+            face = tris[f]
+            before = points[face]
+            after = np.array([at if v in (a, b) else points[v] for v in face])
+            old = np.cross(before[1] - before[0], before[2] - before[0])
+            new = np.cross(after[1] - after[0], after[2] - after[0])
+            if float(old @ new) <= 0.1 * float(np.linalg.norm(old) * np.linalg.norm(new)):
+                folded = True
+                break
+        if folded:
+            continue
+        for f in shared:
+            alive[f] = False
+            for v in tris[f]:
+                around[v].discard(f)
+        left -= len(shared)
+        for f in around[b]:
+            tris[f] = [a if v == b else v for v in tris[f]]
+            around[a].add(f)
+        around[b] = set()
+        gone[b] = True
+        points[a] = at
+        quadric[a] += quadric[b]
+        locked[a] = locked[a] or locked[b]
+        ring = {v for f in around[a] for v in tris[f]} - {a}
+        stamp[a] += 1
+        for v in ring:
+            push(a, v)
+    kept = np.asarray([face for face, ok in zip(tris, alive) if ok], np.int64).reshape(-1, 3)
+    used, kept = np.unique(kept, return_inverse=True)
+    return points[used], kept.reshape(-1, 3)
+
+
+#: The analyser (15 Nov 2026): before reducing, the model is looked at in cubes
+#: COMPLEX_CELL of its height on a side. A cube's surface is scored by how many
+#: ways it faces: 0 for a flat patch, 1 for a part that closes on itself inside
+#: the cube (a finger, an ear's rim). Vertices take their cubes' scores, blended
+#: between cubes, and a vertex's error counts 1 + COMPLEX_GAIN x score times.
+#: Used on the body, below the neck (on the head it moved triangles from the
+#: ears to no gain). Measured on a 33,000-triangle character at 3,000, as mean
+#: distance from the original in mm at 1.8 m tall, hands / rest of body:
+#: the library reducer 2.62 / 3.38; hands cut out with a fifth of the
+#: triangles 2.23 / 3.87; cubes of 20 cm 2.84 / 2.88, 10 cm 2.64 / 2.95,
+#: 5 cm 2.37 / 3.01 (3.5 cm and 7 cm no better); 5 cm with the hands counted
+#: 4 times 2.17 / 3.06. Gains past 16 gave the hands little and cost the body.
+COMPLEX_CELL = 0.028
+COMPLEX_GAIN = 16.0
+COMPLEX_POWER = 1.0
+COMPLEX_FROM = 3
+
+
+def _complexity(positions, faces, cell: float):
+    """How complex the surface is round each vertex, 0-1, read from cubes
+    ``cell`` on a side (two grids, half a cube apart, averaged; taking the
+    higher of the two measured no better)."""
+    import numpy as np
+    corner = positions[faces]
+    normal = np.cross(corner[:, 1] - corner[:, 0], corner[:, 2] - corner[:, 0]) / 2
+    area = np.linalg.norm(normal, axis=1)
+    middle = corner.mean(axis=1)
+    low = positions.min(axis=0)
+    score = np.zeros(len(positions))
+    for shift in (0.0, 0.5):
+        cells = np.floor((middle - low) / cell + shift).astype(np.int64)
+        keys, index = np.unique(cells, axis=0, return_inverse=True)
+        index = index.ravel()
+        total = np.zeros((len(keys), 3))
+        np.add.at(total, index, normal)
+        surface = np.bincount(index, area, minlength=len(keys))
+        spread = 1.0 - np.linalg.norm(total, axis=1) / np.maximum(surface, 1e-30)
+        # Each vertex: the mean of its triangles' cubes, by area.
+        share = np.zeros(len(positions))
+        weight = np.zeros(len(positions))
+        for k in range(3):
+            np.add.at(share, faces[:, k], spread[index] * area)
+            np.add.at(weight, faces[:, k], area)
+        score += 0.5 * share / np.maximum(weight, 1e-30)
+    return np.clip(score, 0.0, 1.0)
+
+
 def _reduce_with_head(simplify, positions, faces, triangles: int, neck_height: float,
                       share: float):
     """``faces`` reduced to ``triangles`` with ``share`` of them for the head
@@ -2702,15 +2890,7 @@ def _reduce_with_head(simplify, positions, faces, triangles: int, neck_height: f
         return (*_reduce(simplify, middle, middle_faces, triangles),
                 "no head budget: nothing above the neck to give it to")
     pieces = []
-    hands = None
-    if HAND_SHARE > 0:
-        used, local = np.unique(middle_faces[~above], return_inverse=True)
-        found = _hand_faces(middle[used], local.reshape(-1, 3))
-        if found is not None:
-            hands = np.zeros(len(middle_faces), bool)
-            hands[np.nonzero(~above)[0][found]] = True
-    masks = (above, ~above) if hands is None else (above, ~above & ~hands, hands)
-    for mask in masks:
+    for mask in (above, ~above):
         used, local = np.unique(middle_faces[mask], return_inverse=True)
         pieces.append((middle[used], local.reshape(-1, 3)))
     # Every open edge of a piece is kept (the cut's must be), and a game rip
@@ -2722,12 +2902,39 @@ def _reduce_with_head(simplify, positions, faces, triangles: int, neck_height: f
     head_target = min(int(round(triangles * share)), len(pieces[0][1]))
     head_target = max(min(head_target, triangles - floors[1]), min(floors[0], head_target))
     targets = [head_target, triangles - head_target]
-    if hands is not None:
-        hand_target = min(int(round(targets[1] * HAND_SHARE)), len(pieces[2][1]))
-        targets = [head_target, targets[1] - hand_target, hand_target]
     parts = []
-    for (piece, piece_faces), target in zip(pieces, targets):
-        reduced = _reduce(simplify, piece, piece_faces, max(target, 1), preserve_border=True)
+    scored = None
+    for number, ((piece, piece_faces), target) in enumerate(zip(pieces, targets)):
+        if COMPLEX_GAIN > 0 and number > 0:
+            # By the analyser: brought near the budget evenly, then reduced with
+            # each vertex's error counted by how complex its cubes are.
+            near, near_faces = _reduce(simplify, piece, piece_faces,
+                                       max(target, 1) * COMPLEX_FROM, preserve_border=True)
+            # Read from the model as it came, before any of it was reduced
+            # (its triangles are small beside a cube), and carried to the
+            # nearest vertices of the mesh being reduced.
+            if scored is None:
+                from scipy import spatial
+                source = np.asarray(positions, np.float64)
+                scored = (spatial.cKDTree(source), _complexity(
+                    source, np.asarray(faces), COMPLEX_CELL * float(np.ptp(source[:, 1]))))
+            score = scored[1][scored[0].query(near, workers=-1)[1]]
+            open_ = np.zeros(len(near), bool)
+            edges = np.sort(np.concatenate([near_faces[:, [0, 1]], near_faces[:, [1, 2]],
+                                            near_faces[:, [2, 0]]]), axis=1)
+            unique, uses = np.unique(edges, axis=0, return_counts=True)
+            open_[unique[uses == 1].ravel()] = True
+            counted = 1.0 + COMPLEX_GAIN * score ** COMPLEX_POWER
+            if number > 0 and HAND_GAIN > 0:
+                # The shape detector: a body's hands count for more again.
+                found = _hand_faces(near, near_faces)
+                if found is not None:
+                    in_hand = np.zeros(len(near), bool)
+                    in_hand[near_faces[found]] = True
+                    counted[in_hand] *= 1.0 + HAND_GAIN
+            reduced = _reduce_weighted(near, near_faces, max(target, 1), counted, open_)
+        else:
+            reduced = _reduce(simplify, piece, piece_faces, max(target, 1), preserve_border=True)
         # A piece that lost its shape (its size shrank) means the budget could
         # not hold it: reduce the whole model evenly instead.
         if np.any(np.ptp(reduced[0], axis=0) < 0.9 * np.ptp(piece, axis=0)):

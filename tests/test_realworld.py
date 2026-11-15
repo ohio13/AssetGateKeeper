@@ -1502,6 +1502,37 @@ try:
                None if _hands is None else int(_hands.sum()))
         expect("... and nothing on a shape with no limbs",
                polypaint._hand_faces(_dirs, _np.asarray(_blob.faces)) is None)
+        # 15 Nov 2026: a reducer that counts some places for more, and an analyser
+        # that says where.
+        _globe = _trimesh.creation.icosphere(subdivisions=4, radius=1.0)
+        _globe_p, _globe_f = _np.asarray(_globe.vertices, float), _np.asarray(_globe.faces)
+        _even_p, _even_f = polypaint._reduce_weighted(_globe_p, _globe_f, 600)
+        _even_edges = _np.sort(_np.concatenate([_even_f[:, [0, 1]], _even_f[:, [1, 2]], _even_f[:, [2, 0]]]), axis=1)
+        expect("_reduce_weighted reduces to the budget, keeps the shape and leaves the surface closed",
+               len(_even_f) <= 600 and float(_np.abs(_np.linalg.norm(_even_p, axis=1) - 1).max()) < 0.02
+               and bool((_np.unique(_even_edges, axis=0, return_counts=True)[1] == 2).all()),
+               (len(_even_f), float(_np.abs(_np.linalg.norm(_even_p, axis=1) - 1).max())))
+        _lean_p, _lean_f = polypaint._reduce_weighted(_globe_p, _globe_f, 600,
+                                                      _np.where(_globe_p[:, 0] > 0, 16.0, 1.0))
+        _lean_share = float((_lean_p[_lean_f].mean(axis=1)[:, 0] > 0).mean())
+        expect("... a side counted 16 times keeps most of the triangles", _lean_share > 0.65, _lean_share)
+        _pinned = _globe_p[:, 1] > 0.9
+        _pin_p, _pin_f = polypaint._reduce_weighted(_globe_p, _globe_f, 600, locked=_pinned)
+        _pin_tree = _spatial.cKDTree(_pin_p)
+        expect("... and locked vertices are all still there, where they were",
+               float(_pin_tree.query(_globe_p[_pinned])[0].max()) < 1e-9)
+        _rod = _trimesh.creation.capsule(height=1.0, radius=0.02).subdivide().subdivide()
+        _slab = _trimesh.creation.box(extents=(1.0, 1.0, 0.001)).subdivide().subdivide().subdivide()
+        _sheet = _np.asarray(_slab.faces)[_np.asarray(_slab.face_normals)[:, 2] > 0.5]     # one side: open
+        _both_p = _np.concatenate([_np.asarray(_rod.vertices) + [3.03, 0.03, 0.0], _np.asarray(_slab.vertices)])
+        _both_f = _np.concatenate([_np.asarray(_rod.faces), _sheet + len(_rod.vertices)])
+        _scores = polypaint._complexity(_both_p, _both_f, 0.1)
+        _on_sheet = _np.unique(_sheet) + len(_rod.vertices)
+        _mid_rod = _np.abs(_both_p[:len(_rod.vertices), 2]) < 0.3
+        expect("_complexity: a thin rod scores high in its cubes, a flat sheet nothing",
+               float(_scores[:len(_rod.vertices)][_mid_rod].min()) > 0.9
+               and float(_scores[_on_sheet].max()) < 0.01,
+               (float(_scores[:len(_rod.vertices)][_mid_rod].min()), float(_scores[_on_sheet].max())))
         # 15 Nov 2026: 16 colours stepped from tone to tone along jagged lines.
         _ramp = Image.fromarray(_np.tile(_np.linspace(60, 200, 64).astype(_np.uint8)[None, :, None],
                                          (16, 1, 3)))
