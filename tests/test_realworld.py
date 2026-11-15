@@ -1546,6 +1546,22 @@ try:
                and abs(_woven.mean() - 130) <= abs(_plain.mean() - 130) + 2,
                (len(_np.unique(_woven)), _woven.mean(), _plain.mean()))
         expect("... one of more colours is not", not (_np.diff(_smooth, axis=0) != 0).any())
+        # 15 Nov 2026: a 128 px N64 bake made textures no N64 can load.
+        import tempfile as _tmem_tmp
+        _tmem_dir = Path(_tmem_tmp.mkdtemp(prefix="agk_tmem_"))
+        _tmem_ball = _trimesh.creation.icosphere(subdivisions=3)
+        (_tmem_dir / "ball.obj").write_text(
+            "".join(f"v {x:.5f} {y:.5f} {z:.5f} {abs(x):.3f} {abs(y):.3f} {abs(z):.3f}\n"
+                    for x, y, z in _tmem_ball.vertices)
+            + "".join(f"f {a + 1} {b + 1} {c + 1}\n" for a, b, c in _tmem_ball.faces), encoding="utf-8")
+        _tmem = polypaint.bake(_tmem_dir / "ball.obj", _tmem_dir, triangles=200, texture=128,
+                               colours=16, preset="n64-pak", normal_map=False)
+        _tmem_sizes = [Image.open(name).size for name in _tmem["textures"]]
+        _tmem_free = polypaint.bake(_tmem_dir / "ball.obj", _tmem_dir / "free", triangles=200, texture=128,
+                                    normal_map=False)
+        expect("an N64 preset never bakes a texture the console cannot load, whatever size is asked",
+               all(w * h <= 2048 for w, h in _tmem_sizes) and "an N64 cannot load" in _tmem["note"]
+               and Image.open(_tmem_free["textures"][0]).size == (128, 128), _tmem_sizes)
         # Hidden triangles: a shell inside a shell, both above the line.
         def _shell(radius):
             ball = _trimesh.creation.icosphere(subdivisions=2, radius=radius)
