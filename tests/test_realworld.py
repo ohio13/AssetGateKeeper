@@ -1484,6 +1484,37 @@ try:
                _mended == 1 and _at == (0, 0, 255) and _np.allclose(_quad_uv[4], _quad_uv[6])
                and _np.allclose(_quad_uv[:4], [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
                (_mended, _quad_uv[4:].tolist(), _at))
+        # 15 Nov 2026: hands get a share of the body's triangles; they are the two
+        # ends of the body that are not the feet.
+        _blob = _trimesh.creation.icosphere(subdivisions=4, radius=1.0)
+        _dirs = _np.asarray(_blob.vertices, float)
+        _limbs = _np.array([[1.0, 0.2, 0.0], [-1.0, 0.2, 0.0], [0.35, -1.0, 0.0], [-0.35, -1.0, 0.0]])
+        _limbs /= _np.linalg.norm(_limbs, axis=1)[:, None]
+        _lengths = _np.array([3.0, 3.0, 4.5, 4.5])
+        _stretch = 1.0 + (_lengths[None] * _np.exp(-((1.0 - _dirs @ _limbs.T) / 0.03))).sum(axis=1)
+        _figure = _dirs * _stretch[:, None]
+        _hands = polypaint._hand_faces(_figure, _np.asarray(_blob.faces))
+        _hand_mid = _figure[_np.asarray(_blob.faces)[_hands]].mean(axis=1) if _hands is not None else _figure[:0]
+        expect("_hand_faces finds the two ends of a body that are not its feet",
+               _hands is not None and 0 < _hands.sum() < 0.3 * len(_hands)
+               and bool((_np.abs(_hand_mid[:, 0]) > 2.0).all())
+               and (_hand_mid[:, 0] > 0).any() and (_hand_mid[:, 0] < 0).any(),
+               None if _hands is None else int(_hands.sum()))
+        expect("... and nothing on a shape with no limbs",
+               polypaint._hand_faces(_dirs, _np.asarray(_blob.faces)) is None)
+        # 15 Nov 2026: 16 colours stepped from tone to tone along jagged lines.
+        _ramp = Image.fromarray(_np.tile(_np.linspace(60, 200, 64).astype(_np.uint8)[None, :, None],
+                                         (16, 1, 3)))
+        _plain = _np.asarray(polypaint._reduce_colours(_ramp, 4, dither=0).convert("RGB"))[:, :, 0].astype(int)
+        _woven = _np.asarray(polypaint._reduce_colours(_ramp, 4).convert("RGB"))[:, :, 0].astype(int)
+        _smooth = _np.asarray(polypaint._reduce_colours(_ramp, 256).convert("RGB"))[:, :, 0].astype(int)
+        expect("a texture of 16 colours or fewer is lightly dithered: tones meet in a weave, and the "
+               "colours stay the palette's",
+               len(_np.unique(_woven)) <= 4 and (_np.diff(_woven, axis=0) != 0).any()
+               and not (_np.diff(_plain, axis=0) != 0).any()
+               and abs(_woven.mean() - 130) <= abs(_plain.mean() - 130) + 2,
+               (len(_np.unique(_woven)), _woven.mean(), _plain.mean()))
+        expect("... one of more colours is not", not (_np.diff(_smooth, axis=0) != 0).any())
         # Hidden triangles: a shell inside a shell, both above the line.
         def _shell(radius):
             ball = _trimesh.creation.icosphere(subdivisions=2, radius=radius)

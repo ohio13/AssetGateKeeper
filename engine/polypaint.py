@@ -2476,9 +2476,18 @@ EYE_PALETTE_SHARED = 0.5
 EYE_PALETTE_RING = 3
 
 
-def _reduce_colours(image, colours: int, inside=None, fixed=None):
-    """The texture in ``colours`` colours, no dithering: a palette texture like the
-    N64's 4-bit (16) and 8-bit (256) colour-index formats.
+#: A texture of 16 colours or fewer is dithered by this much (0-255 a channel,
+#: 15 Nov 2026): skin in 16 colours stepped from tone to tone along jagged
+#: lines; a light weave of the two reads as the tone between once the texels
+#: are blended. Stronger showed as a pattern.
+DITHER_STRENGTH = 24.0
+
+
+def _reduce_colours(image, colours: int, inside=None, fixed=None, dither: float = -1.0):
+    """The texture in ``colours`` colours: a palette texture like the N64's 4-bit
+    (16) and 8-bit (256) colour-index formats. ``dither`` is the strength of an
+    ordered dither (0 for none; left unset, DITHER_STRENGTH at 16 colours or
+    fewer and none above).
 
     Most of the palette is a median cut of the colours on the UV islands
     (``inside``), each counted by the square root of how often it appears: a
@@ -2492,6 +2501,8 @@ def _reduce_colours(image, colours: int, inside=None, fixed=None):
     those of the texture this one meets - and all the rest are added that way."""
     import numpy as np
     from PIL import Image
+    if dither < 0:
+        dither = DITHER_STRENGTH if colours <= 16 else 0.0
     pixels = np.asarray(image.convert("RGB"))
     chosen = pixels[inside] if inside is not None and inside.any() else pixels.reshape(-1, 3)
     coarse = (chosen >> 2).astype(np.int64)
@@ -2552,6 +2563,23 @@ def _reduce_colours(image, colours: int, inside=None, fixed=None):
     reduced = Image.fromarray(index.reshape(pixels.shape[:2]), "P")
     # Exactly these colours: a 16-colour texture keeps a 16-entry palette.
     reduced.putpalette(palette.ravel().tolist())
+    if dither > 0:
+        # Ordered dither (a 4x4 Bayer pattern): each texel nudged lighter or
+        # darker by its place before it takes its nearest colour, so two tones
+        # meet in a weave and not along a stepped line.
+        strength = dither
+        bayer = (np.array([[0, 8, 2, 10], [12, 4, 14, 6], [3, 11, 1, 9], [15, 7, 13, 5]])
+                 + 0.5) / 16 - 0.5
+        high, wide = pixels.shape[:2]
+        noise = np.tile(bayer, (high // 4 + 1, wide // 4 + 1))[:high, :wide]
+        shifted = np.clip(pixels.astype(np.float64) + noise[..., None] * strength, 0, 255)
+        flat = shifted.reshape(-1, 3)
+        for first in range(0, len(flat), 1 << 14):
+            chunk = apart(flat[first:first + (1 << 14)])
+            index[first:first + (1 << 14)] = ((chunk[:, None, :] - wanted[None]) ** 2).sum(axis=2) \
+                .argmin(axis=1)
+        reduced = Image.fromarray(index.reshape(pixels.shape[:2]), "P")
+        reduced.putpalette(palette.ravel().tolist())
     return reduced
 
 
@@ -2586,6 +2614,74 @@ def _open_vertices(faces) -> int:
     return int(len(np.unique(unique[counts == 1])))
 
 
+#: Hands (15 Nov 2026): the reducer keeps what changes the shape least, and a
+#: finger changes it very little - at 3,000 triangles a hand had 85 and its
+#: fingers were spikes. The two hands are found as the ends of the body that
+#: are not the feet: the points furthest over the surface from the middle of
+#: the trunk (and from each other), four of them, the lowest two being the
+#: feet. A hand is the surface within HAND_REACH of the model's height of its
+#: tip, and the two share HAND_SHARE of the body's triangles. Each must be a
+#: limb: the surface within two hand's lengths of its tip under HAND_THIN of
+#: the disc of that radius.
+HAND_REACH = 0.105
+HAND_SHARE = 0.2
+HAND_LEAST = 0.25
+HAND_THIN = 0.5
+
+
+def _hand_faces(positions, faces):
+    """Mask over ``faces``: the two hands of a body (the head already cut off),
+    or None when it has no four ends to speak of."""
+    import numpy as np
+    from scipy.sparse import coo_matrix
+    from scipy.sparse.csgraph import dijkstra
+    count, piece = _pieces(len(positions), faces)
+    sizes = np.bincount(piece, minlength=count)
+    main = faces[piece == int(np.argmax(sizes))]
+    if len(main) < 200:
+        return None
+    edges = np.unique(np.sort(np.concatenate([main[:, [0, 1]], main[:, [1, 2]], main[:, [2, 0]]]),
+                              axis=1), axis=0)
+    length = np.linalg.norm(positions[edges[:, 0]] - positions[edges[:, 1]], axis=1)
+    graph = coo_matrix((length, (edges[:, 0], edges[:, 1])), shape=(len(positions),) * 2).tocsr()
+    used = np.unique(main)
+    height = float(np.ptp(positions[used, 1]))
+    if height <= 0:
+        return None
+    middle = positions[used].mean(axis=0)
+    start = int(used[np.argmin(np.linalg.norm(positions[used] - middle, axis=1))])
+    reach = dijkstra(graph, directed=False, indices=[start])[0]
+    reach[~np.isfinite(reach)] = -1.0
+    ends = []
+    nearest = reach.copy()
+    for _ in range(4):
+        end = int(np.argmax(nearest))
+        if nearest[end] < HAND_LEAST * height:
+            return None                       # not a body with four limbs
+        ends.append(end)
+        other = dijkstra(graph, directed=False, indices=[end])[0]
+        other[~np.isfinite(other)] = -1.0
+        nearest = np.minimum(nearest, other)
+    hands = sorted(ends, key=lambda index: positions[index, 1])[2:]
+    near = np.full(len(positions), np.inf)
+    corners = positions[main]
+    area = np.linalg.norm(np.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0]),
+                          axis=1) / 2
+    for hand in hands:
+        # A limb, not a bulge: the surface within twice a hand's length of the
+        # tip is a fraction of the disc a round shape has there.
+        wide = 2 * HAND_REACH * height
+        around = np.isfinite(dijkstra(graph, directed=False, indices=[hand], limit=wide)[0])
+        if float(area[around[main].all(axis=1)].sum()) > HAND_THIN * np.pi * wide * wide:
+            return None
+        distance = dijkstra(graph, directed=False, indices=[hand], limit=HAND_REACH * height)[0]
+        near = np.minimum(near, distance)
+    inside = np.isfinite(near)
+    # Pieces of their own that lie in a hand (a glove's plate) go with it.
+    mask = inside[faces].all(axis=1)
+    return mask if mask.any() and not mask.all() else None
+
+
 def _reduce_with_head(simplify, positions, faces, triangles: int, neck_height: float,
                       share: float):
     """``faces`` reduced to ``triangles`` with ``share`` of them for the head
@@ -2606,7 +2702,15 @@ def _reduce_with_head(simplify, positions, faces, triangles: int, neck_height: f
         return (*_reduce(simplify, middle, middle_faces, triangles),
                 "no head budget: nothing above the neck to give it to")
     pieces = []
-    for mask in (above, ~above):
+    hands = None
+    if HAND_SHARE > 0:
+        used, local = np.unique(middle_faces[~above], return_inverse=True)
+        found = _hand_faces(middle[used], local.reshape(-1, 3))
+        if found is not None:
+            hands = np.zeros(len(middle_faces), bool)
+            hands[np.nonzero(~above)[0][found]] = True
+    masks = (above, ~above) if hands is None else (above, ~above & ~hands, hands)
+    for mask in masks:
         used, local = np.unique(middle_faces[mask], return_inverse=True)
         pieces.append((middle[used], local.reshape(-1, 3)))
     # Every open edge of a piece is kept (the cut's must be), and a game rip
@@ -2617,8 +2721,12 @@ def _reduce_with_head(simplify, positions, faces, triangles: int, neck_height: f
     floors = [2 * _open_vertices(piece_faces) for _, piece_faces in pieces]
     head_target = min(int(round(triangles * share)), len(pieces[0][1]))
     head_target = max(min(head_target, triangles - floors[1]), min(floors[0], head_target))
+    targets = [head_target, triangles - head_target]
+    if hands is not None:
+        hand_target = min(int(round(targets[1] * HAND_SHARE)), len(pieces[2][1]))
+        targets = [head_target, targets[1] - hand_target, hand_target]
     parts = []
-    for (piece, piece_faces), target in zip(pieces, (head_target, triangles - head_target)):
+    for (piece, piece_faces), target in zip(pieces, targets):
         reduced = _reduce(simplify, piece, piece_faces, max(target, 1), preserve_border=True)
         # A piece that lost its shape (its size shrank) means the budget could
         # not hold it: reduce the whole model evenly instead.
@@ -2627,8 +2735,10 @@ def _reduce_with_head(simplify, positions, faces, triangles: int, neck_height: f
                     "no head budget: the body could not keep its shape with what was left "
                     "(it has many open edges - an outline shell or decals? leave them out)")
         parts.append(reduced)
-    joined = np.concatenate([parts[0][0], parts[1][0]])
-    joined_faces = np.concatenate([parts[0][1], parts[1][1] + len(parts[0][0])])
+    joined, joined_faces = parts[0]
+    for more, more_faces in parts[1:]:
+        joined_faces = np.concatenate([joined_faces, more_faces + len(joined)])
+        joined = np.concatenate([joined, more])
     joined, joined_faces = _weld(joined, joined_faces)    # the cut, closed again
     # Kept cut vertices can leave a few over: a budget is a ceiling.
     return (*_reduce(simplify, joined, joined_faces, triangles), "")
