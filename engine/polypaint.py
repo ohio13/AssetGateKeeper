@@ -130,8 +130,9 @@ DETAIL_SPREAD = 0.2
 DETAIL_BOOST = 2.0
 DETAIL_SHARE = 0.4
 DETAIL_MIN_TEXTURE = 512
-#: At this size and below the .glb asks for nearest-texel filtering: islands are
-#: a texel or two wide and smooth filtering would blend in the next island.
+#: At this size and below the texture is packed by the texel (_pack_texels) and
+#: the .glb asks for no mip levels: islands are a texel or two wide and a
+#: smaller copy would blend in the next island.
 NEAREST_TEXTURE = 128
 #: _pack_texels halves in on the largest scale that fits this many times.
 TEXEL_PACK_STEPS = 28
@@ -2403,7 +2404,12 @@ def write_glb(path: Path, positions, normals, uvs, faces, base_png: bytes, name:
 
     def sampler(mirror: bool) -> int:
         # MIRRORED_REPEAT across (33648) for a texture that holds half a face.
-        wanted = {"magFilter": 9728 if nearest else 9729, "minFilter": 9984 if nearest else 9987,
+        # Smooth between texels at every size (15 Nov 2026): drawn texel by
+        # texel, a small texture squared off every pattern on it. Islands packed
+        # by the texel are drawn between the centres of their own texels, so
+        # the blend never reaches the next island. A small texture (``nearest``)
+        # still asks for no mip levels: smaller copies would mix its islands.
+        wanted = {"magFilter": 9729, "minFilter": 9729 if nearest else 9987,
                   "wrapS": 33648 if mirror else 10497, "wrapT": 10497}
         if wanted not in samplers:
             samplers.append(wanted)

@@ -834,12 +834,13 @@ try:
         # 13 Nov 2026: the body's texture is 64x32 in 256 colours - the N64 texture memory
         # of 64x64 in 16 (CI8 for CI4) - because 16 colours left its shading in blocks.
         expect("... 64x32 in at most 256 colours (the texture memory of 64x64 in 16), at most "
-               "1,200 triangles, nearest filtering",
+               "1,200 triangles, smooth between texels with no mip levels",
                palette.size == (64, 32) and len(palette.convert("RGB").getcolors(4096)) <= 256
                and palette.size[0] * palette.size[1] <= 2048
                and len(made.faces) <= 1200 and len(images) == 1
                and "normalTexture" not in document["materials"][0]
-               and document["samplers"][0]["magFilter"] == 9728,
+               and document["samplers"][0]["magFilter"] == 9729
+               and document["samplers"][0]["minFilter"] == 9729,
                f"{palette.size} {len(made.faces)} {document['samplers']}")
         done = run_gate(paint / "SM_Ball_HP.obj", "--bake-polypaint", "--bake-triangles", "600",
                         "--bake-texture", "256", "--bake-no-normal", "--bake-colours", "16")
