@@ -834,12 +834,13 @@ try:
         # 13 Nov 2026: the body's texture is 64x32 in 256 colours - the N64 texture memory
         # of 64x64 in 16 (CI8 for CI4) - because 16 colours left its shading in blocks.
         expect("... 64x32 in at most 256 colours (the texture memory of 64x64 in 16), at most "
-               "1,200 triangles, nearest filtering",
+               "1,200 triangles, smooth between texels with no mip levels",
                palette.size == (64, 32) and len(palette.convert("RGB").getcolors(4096)) <= 256
                and palette.size[0] * palette.size[1] <= 2048
                and len(made.faces) <= 1200 and len(images) == 1
                and "normalTexture" not in document["materials"][0]
-               and document["samplers"][0]["magFilter"] == 9728,
+               and document["samplers"][0]["magFilter"] == 9729
+               and document["samplers"][0]["minFilter"] == 9729,
                f"{palette.size} {len(made.faces)} {document['samplers']}")
         done = run_gate(paint / "SM_Ball_HP.obj", "--bake-polypaint", "--bake-triangles", "600",
                         "--bake-texture", "256", "--bake-no-normal", "--bake-colours", "16")
@@ -1483,6 +1484,68 @@ try:
                _mended == 1 and _at == (0, 0, 255) and _np.allclose(_quad_uv[4], _quad_uv[6])
                and _np.allclose(_quad_uv[:4], [[0.0, 0.0], [1.0, 0.0], [1.0, 1.0], [0.0, 1.0]]),
                (_mended, _quad_uv[4:].tolist(), _at))
+        # 15 Nov 2026: hands get a share of the body's triangles; they are the two
+        # ends of the body that are not the feet.
+        _blob = _trimesh.creation.icosphere(subdivisions=4, radius=1.0)
+        _dirs = _np.asarray(_blob.vertices, float)
+        _limbs = _np.array([[1.0, 0.2, 0.0], [-1.0, 0.2, 0.0], [0.35, -1.0, 0.0], [-0.35, -1.0, 0.0]])
+        _limbs /= _np.linalg.norm(_limbs, axis=1)[:, None]
+        _lengths = _np.array([3.0, 3.0, 4.5, 4.5])
+        _stretch = 1.0 + (_lengths[None] * _np.exp(-((1.0 - _dirs @ _limbs.T) / 0.03))).sum(axis=1)
+        _figure = _dirs * _stretch[:, None]
+        _hands = polypaint._hand_faces(_figure, _np.asarray(_blob.faces))
+        _hand_mid = _figure[_np.asarray(_blob.faces)[_hands]].mean(axis=1) if _hands is not None else _figure[:0]
+        expect("_hand_faces finds the two ends of a body that are not its feet",
+               _hands is not None and 0 < _hands.sum() < 0.3 * len(_hands)
+               and bool((_np.abs(_hand_mid[:, 0]) > 2.0).all())
+               and (_hand_mid[:, 0] > 0).any() and (_hand_mid[:, 0] < 0).any(),
+               None if _hands is None else int(_hands.sum()))
+        expect("... and nothing on a shape with no limbs",
+               polypaint._hand_faces(_dirs, _np.asarray(_blob.faces)) is None)
+        # 15 Nov 2026: a reducer that counts some places for more, and an analyser
+        # that says where.
+        _globe = _trimesh.creation.icosphere(subdivisions=4, radius=1.0)
+        _globe_p, _globe_f = _np.asarray(_globe.vertices, float), _np.asarray(_globe.faces)
+        _even_p, _even_f = polypaint._reduce_weighted(_globe_p, _globe_f, 600)
+        _even_edges = _np.sort(_np.concatenate([_even_f[:, [0, 1]], _even_f[:, [1, 2]], _even_f[:, [2, 0]]]), axis=1)
+        expect("_reduce_weighted reduces to the budget, keeps the shape and leaves the surface closed",
+               len(_even_f) <= 600 and float(_np.abs(_np.linalg.norm(_even_p, axis=1) - 1).max()) < 0.02
+               and bool((_np.unique(_even_edges, axis=0, return_counts=True)[1] == 2).all()),
+               (len(_even_f), float(_np.abs(_np.linalg.norm(_even_p, axis=1) - 1).max())))
+        _lean_p, _lean_f = polypaint._reduce_weighted(_globe_p, _globe_f, 600,
+                                                      _np.where(_globe_p[:, 0] > 0, 16.0, 1.0))
+        _lean_share = float((_lean_p[_lean_f].mean(axis=1)[:, 0] > 0).mean())
+        expect("... a side counted 16 times keeps most of the triangles", _lean_share > 0.65, _lean_share)
+        _pinned = _globe_p[:, 1] > 0.9
+        _pin_p, _pin_f = polypaint._reduce_weighted(_globe_p, _globe_f, 600, locked=_pinned)
+        _pin_tree = _spatial.cKDTree(_pin_p)
+        expect("... and locked vertices are all still there, where they were",
+               float(_pin_tree.query(_globe_p[_pinned])[0].max()) < 1e-9)
+        _rod = _trimesh.creation.capsule(height=1.0, radius=0.02).subdivide().subdivide()
+        _slab = _trimesh.creation.box(extents=(1.0, 1.0, 0.001)).subdivide().subdivide().subdivide()
+        _sheet = _np.asarray(_slab.faces)[_np.asarray(_slab.face_normals)[:, 2] > 0.5]     # one side: open
+        _both_p = _np.concatenate([_np.asarray(_rod.vertices) + [3.03, 0.03, 0.0], _np.asarray(_slab.vertices)])
+        _both_f = _np.concatenate([_np.asarray(_rod.faces), _sheet + len(_rod.vertices)])
+        _scores = polypaint._complexity(_both_p, _both_f, 0.1)
+        _on_sheet = _np.unique(_sheet) + len(_rod.vertices)
+        _mid_rod = _np.abs(_both_p[:len(_rod.vertices), 2]) < 0.3
+        expect("_complexity: a thin rod scores high in its cubes, a flat sheet nothing",
+               float(_scores[:len(_rod.vertices)][_mid_rod].min()) > 0.9
+               and float(_scores[_on_sheet].max()) < 0.01,
+               (float(_scores[:len(_rod.vertices)][_mid_rod].min()), float(_scores[_on_sheet].max())))
+        # 15 Nov 2026: 16 colours stepped from tone to tone along jagged lines.
+        _ramp = Image.fromarray(_np.tile(_np.linspace(60, 200, 64).astype(_np.uint8)[None, :, None],
+                                         (16, 1, 3)))
+        _plain = _np.asarray(polypaint._reduce_colours(_ramp, 4, dither=0).convert("RGB"))[:, :, 0].astype(int)
+        _woven = _np.asarray(polypaint._reduce_colours(_ramp, 4).convert("RGB"))[:, :, 0].astype(int)
+        _smooth = _np.asarray(polypaint._reduce_colours(_ramp, 256).convert("RGB"))[:, :, 0].astype(int)
+        expect("a texture of 16 colours or fewer is lightly dithered: tones meet in a weave, and the "
+               "colours stay the palette's",
+               len(_np.unique(_woven)) <= 4 and (_np.diff(_woven, axis=0) != 0).any()
+               and not (_np.diff(_plain, axis=0) != 0).any()
+               and abs(_woven.mean() - 130) <= abs(_plain.mean() - 130) + 2,
+               (len(_np.unique(_woven)), _woven.mean(), _plain.mean()))
+        expect("... one of more colours is not", not (_np.diff(_smooth, axis=0) != 0).any())
         # Hidden triangles: a shell inside a shell, both above the line.
         def _shell(radius):
             ball = _trimesh.creation.icosphere(subdivisions=2, radius=radius)
