@@ -77,6 +77,8 @@ PACKAGES: tuple = (
             min_python=BAKE_MIN_PYTHON),
     Package("scipy>=1.7", "scipy.spatial", "Polypaint bake: samples the sculpt colours",
             False, min_python=BAKE_MIN_PYTHON),
+    Package("usd-core>=24.0", "pxr.Usd", "reads USD (.usd, .usda, .usdc, .usdz)", False),
+    Package("pycollada>=0.8", "collada", "reads Collada (.dae)", False),
 )
 
 

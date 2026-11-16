@@ -93,13 +93,22 @@ USER_AGENT = "AssetGatekeeper/1.0 (+https://github.com/ohio13/asset-gatekeeper)"
 
 LOG = logging.getLogger("assetgatekeeper")
 
-MESH_SUFFIXES = frozenset({".obj", ".gltf", ".glb", ".fbx"})
+#: Open formats only (16 Nov 2026): PLY, STL, OFF, 3MF and Collada are read by
+#: trimesh (Collada with the optional pycollada), USD by Pixar's open-source
+#: usd-core (optional). Closed formats that need the vendor's software or
+#: licence - Maya .mb, 3ds Max .max, ZBrush .ztl, Substance .spp - stay out and
+#: are named with an export hint instead.
+MESH_SUFFIXES = frozenset({".obj", ".gltf", ".glb", ".fbx",
+                           ".ply", ".stl", ".off", ".3mf", ".dae",
+                           ".usd", ".usda", ".usdc", ".usdz"})
 GLTF_SUFFIXES = frozenset({".gltf", ".glb"})
-# .tif/.webp/.dds are read by Pillow; .exr and .ktx2 by their headers. All six
-# used to be skipped outright (KTX2 and WebP are standard glTF texture formats).
-TEXTURE_SUFFIXES = frozenset({".png", ".tga", ".jpg", ".jpeg", ".tif", ".tiff", ".webp",
-                              ".dds", ".exr", ".ktx2"})
-HEADER_ONLY_TEXTURES = frozenset({".exr", ".ktx2"})
+# .tif/.webp/.dds/.bmp/.gif/.psd are read by Pillow (a .psd as its flattened
+# image, as Unreal and Unity import it); .exr, .ktx2, .ktx and .hdr by their
+# headers. KTX2 and WebP are standard glTF texture formats.
+TEXTURE_SUFFIXES = frozenset({".png", ".tga", ".jpg", ".jpeg", ".jfif", ".jpe", ".tif", ".tiff",
+                              ".webp", ".dds", ".bmp", ".gif", ".psd",
+                              ".exr", ".ktx2", ".ktx", ".hdr"})
+HEADER_ONLY_TEXTURES = frozenset({".exr", ".ktx2", ".ktx", ".hdr"})
 DEFAULT_TEXTURE_SUFFIXES: tuple[str, ...] = (
     "_Albedo", "_BaseColor", "_Diffuse", "_Color",
     "_Normal", "_Roughness", "_Metallic", "_Metalness",
@@ -140,7 +149,8 @@ NAMING_PRESETS: dict[str, dict[str, tuple[str, ...]]] = {
 }
 #: The decoder format each texture extension must actually contain.
 TEXTURE_FORMATS = {".png": "PNG", ".tga": "TGA", ".jpg": "JPEG", ".jpeg": "JPEG",
-                   ".tif": "TIFF", ".tiff": "TIFF", ".webp": "WEBP", ".dds": "DDS"}
+                   ".jfif": "JPEG", ".jpe": "JPEG", ".tif": "TIFF", ".tiff": "TIFF",
+                   ".webp": "WEBP", ".dds": "DDS", ".bmp": "BMP", ".gif": "GIF", ".psd": "PSD"}
 TRACKED_SUFFIXES = MESH_SUFFIXES | TEXTURE_SUFFIXES
 
 # Partial writes and DCC scratch files that must never be inspected.

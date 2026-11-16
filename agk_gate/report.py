@@ -399,21 +399,20 @@ def describe_skipped(skipped: dict, limit: int = 5) -> str:
 
 #: A word of advice for the unsupported types people most often drop in.
 SKIPPED_HINTS = {
-    ".jfif": "a JPEG: rename it to .jpg to check it",
-    ".jpe": "a JPEG: rename it to .jpg to check it",
-    ".bmp": "engines want PNG or TGA",
-    ".gif": "engines want PNG or TGA",
-    ".psd": "a Photoshop file: export a PNG or TGA",
     ".kra": "a Krita file: export a PNG",
+    ".heic": "an HEIF photo (a patented format): save it as PNG or JPEG",
+    ".heif": "an HEIF photo (a patented format): save it as PNG or JPEG",
     ".blend": "a Blender scene: export FBX, glTF or OBJ",
     ".ztl": "a ZBrush tool: export an OBJ",
     ".zpr": "a ZBrush project: export an OBJ",
     ".ma": "a Maya scene: export FBX", ".mb": "a Maya scene: export FBX",
     ".max": "a 3ds Max scene: export FBX",
+    ".c4d": "a Cinema 4D scene: export FBX or glTF", ".hip": "a Houdini scene: export FBX or glTF",
+    ".abc": "Alembic animation cache: export FBX or glTF for a game mesh",
+    ".sbsar": "a Substance material: export the textures", ".sbs": "a Substance graph: export the textures",
+    ".tbscene": "a Marmoset scene: export the textures", ".tbmat": "a Marmoset material",
+    ".mview": "a Marmoset viewer file",
     ".spp": "a Substance Painter project: export the textures",
-    ".stl": "a print mesh: export OBJ or glTF for a game",
-    ".dae": "Collada: export FBX or glTF",
-    ".usd": "USD is not read yet", ".usda": "USD is not read yet", ".usdz": "USD is not read yet",
 }
 
 
