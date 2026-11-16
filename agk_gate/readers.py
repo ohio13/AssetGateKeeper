@@ -51,6 +51,10 @@ def _mesh_read_error(exc: BaseException) -> str:
     if isinstance(exc, ModuleNotFoundError) and getattr(exc, "name", "") == "charset_normalizer":
         return ("could not read mesh: it is not UTF-8 text, and reading it needs "
                 "charset-normalizer (python -m pip install charset-normalizer)")
+    if isinstance(exc, KeyError):
+        # trimesh's PLY/STL readers index the header's properties by name.
+        return (f"could not read mesh: it is damaged or incomplete (no {exc} in its "
+                "header or data); re-export it")
     if isinstance(exc, (IndexError, AssertionError)):
         return ("could not read mesh: it is damaged (an index points past the end of its "
                 f"data - {_describe_unexpected(exc)}); re-export it")
@@ -66,7 +70,20 @@ def usd_summary(path: Path, epsilon: float = 0.0, ratio: float = 1e-6):
     except OSError as exc:
         raise AssetError(f"could not read USD ({exc})") from exc
     except Exception as exc:              # pxr raises its own error types
-        raise AssetError(f"could not read USD ({_describe_unexpected(exc)}); re-export it") from exc
+        raise AssetError(f"could not read USD: {_usd_reason(exc, path)}; re-export it") from exc
+
+
+def _usd_reason(exc: BaseException, path: Path) -> str:
+    """USD's own error, without its C++ source locations: for a text .usda, the
+    line and what the parser expected ("line 3: Expected )")."""
+    text = str(exc)
+    found = re.search(re.escape(Path(path).name) + r":(\d+):(\d+): ([^'\n]+?)(?: at '|'|$)", text)
+    if found:
+        return f"line {found.group(1)}: {found.group(3).strip()}"
+    pieces = re.findall(r"' : '([^'\n]+)'", text)
+    if pieces:
+        return pieces[0].replace(str(path), Path(path).name)[:200]
+    return _describe_unexpected(exc)
 
 
 def obj_colour_source(path: Path) -> str:

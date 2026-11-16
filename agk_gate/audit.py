@@ -132,14 +132,16 @@ def suggest_naming(root: Path, recursive: bool = True) -> str:
 # --- #
 
 
-def run_audit(root: Path) -> int:
+def run_audit(root: Path, scope=None) -> int:
     """Report broken references and orphaned textures across a repository.
 
     Exit 0 when the repository is clean, 1 when anything is wrong - a folder that
     looks shut but is missing its textures is exactly the failure this catches.
     """
-    assets = sorted(p for p in walk_files(root)
-                    if p.suffix.lower() in MESH_SUFFIXES)
+    # The project's .agkignore and --include decide which meshes are reported,
+    # as they decide which a scan checks.
+    assets = sorted(p for p in walk_files(root, enter=scope.walk_folder if scope else None)
+                    if p.suffix.lower() in MESH_SUFFIXES and not (scope and scope.reason(p)))
     broken_total = 0
     for asset in assets:
         broken = missing_references(asset)
@@ -150,7 +152,7 @@ def run_audit(root: Path) -> int:
         for written, target in broken:
             print(f"          -> {written}   (expected {target})")
 
-    orphans = orphaned_files(root)
+    orphans = orphaned_files(root, scope)
     for orphan in orphans:
         try:
             relative = orphan.relative_to(root)

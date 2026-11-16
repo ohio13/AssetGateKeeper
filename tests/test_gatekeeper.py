@@ -2427,9 +2427,41 @@ else:
                  git_dir, {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
     expect("an asset in a subfolder is judged by the repository's rules.toml above it, as CI's "
            "--once run there judges it", nested.returncode == 1
-           and "exceeds the 1 budget (+1)  SM_two.obj" in nested.stderr,
+           and "exceeds the 1 budget (+1)" in nested.stderr and "SM_two.obj" in nested.stderr,
            (nested.returncode, nested.stderr[-300:]))
-    run(["git", "reset", "-q", "Props/SM_two.obj"], git_dir)
+    # 16 Nov 2026: one gate run per rules file, not one Python start per asset,
+    # and the project's .agkignore is followed, as a scan of the folder follows it.
+    for index in range(4):
+        (git_dir / "Props" / f"SM_one{index}.obj").write_text(
+            "v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n", encoding="utf-8")
+    (git_dir / "Props" / "WIP").mkdir()
+    (git_dir / "Props" / "WIP" / "SM_big.obj").write_text(
+        "v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n", encoding="utf-8")
+    (git_dir / ".agkignore").write_text("WIP/\n", encoding="utf-8")
+    run(["git", "add", "Props", ".agkignore"], git_dir)
+    started = time.perf_counter()
+    batched = run([sys.executable, str(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py"),
+                   "--verbose"], git_dir,
+                  {"AGK_GATEKEEPER": str(ROOT_MODULE_DIR / "asset_gatekeeper.py")})
+    took = time.perf_counter() - started
+    expect("six staged assets: each judged on its own, in one gate run",
+           batched.returncode == 1 and batched.stdout.count("PASSED") == 4
+           and "SM_two.obj\n    FAILED: 2 triangles exceeds the 1 budget" in batched.stderr,
+           batched.stdout + batched.stderr)
+    expect("... and a file the project's .agkignore leaves out is not checked, as in a scan",
+           "not checked (left out by the project)" in batched.stdout
+           and "SM_big.obj" in batched.stdout and "SM_big" not in batched.stderr,
+           batched.stdout[-400:])
+    expect("... in about one Python start, not six", took < 8, f"{took:.1f} s")
+    crash = Path(__import__("tempfile").mkdtemp(prefix="agk-crash-")) / "crash.py"
+    crash.write_text("raise SystemExit('boom: the gate fell over')\n", encoding="utf-8")
+    crashed = run([sys.executable, str(ROOT_MODULE_DIR / "vcs_hooks" / "git_pre_commit.py")],
+                  git_dir, {"AGK_GATEKEEPER": str(crash)})
+    expect("a gate that stops without verdicts blocks the commit (fails closed)",
+           crashed.returncode == 1 and "the gate stopped" in crashed.stderr
+           and "boom" in crashed.stderr, crashed.stderr[-300:])
+    run(["git", "reset", "-q", "Props", ".agkignore"], git_dir)
+    (git_dir / ".agkignore").unlink()
     shutil.rmtree(git_dir / "Props")
     (git_dir / "rules.toml").unlink()
 
@@ -3491,7 +3523,7 @@ empty.mkdir(exist_ok=True)
 original_walk_files = agk.walk_files
 
 
-def walk_with_a_skip(root, recursive=True, follow_symlinks=False, on_skip=None):
+def walk_with_a_skip(root, recursive=True, follow_symlinks=False, on_skip=None, enter=None):
     """Pretend the OS refused one entry, which is what a locked file looks like."""
     if on_skip is not None:
         on_skip(str(locked / "big_mesh.obj"))
@@ -3782,6 +3814,79 @@ expect("the bake's install hint names the exact pip command",
 if os.name == "nt":
     expect("... and on Windows, the double-click file", "Install_Extras.bat" in _pp.install_hint())
 
+
+print("Which folders are checked: [filters] include and .agkignore (16 Nov 2026)")
+from agk_gate import scope as _scope  # noqa: E402
+_sc_dir = Path(__import__("tempfile").mkdtemp(prefix="agk-scope-"))
+for _rel in ("MM_Assets/MM_Enemies/T_Bug_BaseColor.png", "MM_Assets/Enemies/T_Old_BaseColor.png",
+             "MM_Assets/MM_Boss/T_Boss_BaseColor.png", "MM_Assets/MM_Enemies/WIP/T_Wip_BaseColor.png",
+             "MM_Assets/MM_Enemies/wip/T_Wip2_BaseColor.png", "Reference/T_Ref_BaseColor.png",
+             "T_Root_BaseColor.png", "MM_Assets/mm_props/T_Prop_BaseColor.png"):
+    (_sc_dir / _rel).parent.mkdir(parents=True, exist_ok=True)
+    make_png(_sc_dir / _rel, (64, 64))
+(_sc_dir / "MM_Assets" / ".agkignore").write_text(
+    "# only MM_ folders are ours\n/*/\n!/MM_*/\nWIP/\n", encoding="utf-8")
+_sc = _scope.Scope(_sc_dir, ("MM_Assets/**",))
+_walked = agk.walk_files(_sc_dir, enter=_sc.walk_folder)
+_kept = sorted(p.relative_to(_sc_dir).as_posix() for p in _walked
+               if agk.is_candidate(p) and not _sc.reason(p))
+expect(".agkignore: '/*/' then '!/MM_*/' keeps only the MM_ folders (any case), and WIP/ at any depth",
+       _kept == ["MM_Assets/MM_Boss/T_Boss_BaseColor.png", "MM_Assets/MM_Enemies/T_Bug_BaseColor.png",
+                 "MM_Assets/mm_props/T_Prop_BaseColor.png"], _kept)
+expect("... ignored folders are not read at all",
+       sorted(p.relative_to(_sc_dir).as_posix() for p in _sc.pruned_folders)
+       == ["MM_Assets/Enemies", "MM_Assets/MM_Enemies/WIP", "MM_Assets/MM_Enemies/wip"],
+       _sc.pruned_folders)
+expect("include: a file outside the patterns is 'outside', one under them is checked",
+       _sc.reason(_sc_dir / "Reference" / "T_Ref_BaseColor.png") == "outside"
+       and _sc.reason(_sc_dir / "T_Root_BaseColor.png") == "outside"
+       and _scope.Scope(_sc_dir, ("MM_*",)).reason(_sc_dir / "MM_Assets" / "MM_Boss" / "T_Boss_BaseColor.png") == "")
+expect("a pattern with no slash matches at any depth; one with a slash is anchored",
+       _scope.glob_matches("MM_*", "Art/Chars/MM_Hero/a.png")
+       and not _scope.glob_matches("Art/MM_*", "Other/Art/MM_Hero/a.png")
+       and _scope.glob_matches("Art/**/T_*.png", "Art/a/b/T_x.png")
+       and _scope.glob_matches("Art/**/T_*.png", "Art/T_x.png"))
+expect("gitignore details: comments, escaped #, folders-only, a deeper file wins",
+       [r.text for r in _scope.parse_ignore("# c\n\n\\#keep\nbuild/  \n")] == ["#keep", "build/"]
+       and not _scope.Scope(_sc_dir).ignored(_sc_dir / "build", is_folder=False) )
+(_sc_dir / "MM_Assets" / "MM_Boss" / ".agkignore").write_text("*.png\n!T_Boss_*\n", encoding="utf-8")
+_deep = _scope.Scope(_sc_dir)
+expect("... a deeper .agkignore is read after the one above, last match wins",
+       not _deep.ignored(_sc_dir / "MM_Assets" / "MM_Boss" / "T_Boss_BaseColor.png")
+       and _deep.ignored(_sc_dir / "MM_Assets" / "MM_Boss" / "other.png"))
+(_sc_dir / "MM_Assets" / "MM_Boss" / ".agkignore").unlink()
+_code, _out = gate_run(str(_sc_dir), "--once", "--recursive", "--include", "MM_Assets/**")
+expect("a scan checks the three, and says what it left out and why",
+       "T_Bug_BaseColor.png" in _out and "T_Prop_BaseColor.png" in _out and "T_Old_BaseColor" not in _out
+       and "T_Wip" not in _out and "2 outside [filters] include" in _out
+       and "3 folders ignored by .agkignore, not read" in _out, _out[-500:])
+(_sc_dir / "rules.toml").write_text('[filters]\ninclude = ["MM_Assets/**"]\n', encoding="utf-8")
+_code, _out = gate_run(str(_sc_dir), "--once", "--recursive", "--json")
+_sum = json.loads([line for line in _out.splitlines() if line.startswith('{"summary"')][-1])["summary"]
+expect("[filters] include in rules.toml does the same; --json counts it",
+       _sum["skipped"]["outside"] == 2 and _sum["skipped"]["ignored_folders"] == 3, _sum.get("skipped"))
+_code, _out = gate_run(str(_sc_dir / "MM_Assets" / "Enemies" / "T_Old_BaseColor.png"))
+expect("one file on its own (a hook, a DCC button) follows the project's .agkignore",
+       _code == 0 and "an .agkignore leaves it out" in _out, _out[-300:])
+_code, _out = gate_run(str(_sc_dir / "Reference" / "T_Ref_BaseColor.png"), "--rules", str(_sc_dir / "rules.toml"))
+expect("... and the include of the --rules it is checked against",
+       _code == 0 and "outside [filters] include" in _out, _out[-300:])
+_code, _out = gate_run(str(_sc_dir / "MM_Assets" / "MM_Boss" / "T_Boss_BaseColor.png"))
+expect("... while a file in scope is checked as usual", "T_Boss_BaseColor.png" in _out
+       and "not checked" not in _out, _out[-300:])
+make_png(_sc_dir / "MM_Assets" / "T_Top_BaseColor.png", (64, 64))
+_code, _out = gate_run(str(_sc_dir / "MM_Assets"), "--once")
+expect("without --recursive, the summary says how many files in subfolders were not checked",
+       "3 more asset file(s) in subfolders were not checked: add --recursive" in _out, _out[-300:])
+(_sc_dir / "MM_Assets" / "T_Top_BaseColor.png").unlink()
+_code, _out = gate_run(str(_sc_dir / "MM_Assets"), "--once")
+expect("... and a folder whose assets are all in subfolders says so, not 'check the path'",
+       _code == 1 and "its subfolders hold some: add --recursive" in _out, _out[-300:])
+(_sc_dir / "rules.toml").unlink()
+_code, _out = gate_run(str(_sc_dir), "--audit")
+expect("--audit follows .agkignore too: no orphans reported from left-out folders",
+       "T_Old_BaseColor" not in _out and "T_Wip" not in _out and "T_Bug_BaseColor" in _out, _out[-600:])
+shutil.rmtree(_sc_dir, ignore_errors=True)
 
 print("Say what was skipped (10 Nov 2026)")
 # The developer's test folder held six .jfif reference images; the gate ignored them

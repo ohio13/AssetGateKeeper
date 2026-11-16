@@ -187,11 +187,13 @@ def escaping_references(path: Path, root: Optional[Path]) -> list[tuple[str, Pat
     return escaping
 
 
-def orphaned_files(root: Path) -> list[Path]:
+def orphaned_files(root: Path, scope=None) -> list[Path]:
     """Texture files in the repository that no mesh references.
 
     Repository-level, not per-asset: an orphan is only visible when you compare
-    every asset against every texture on disk.
+    every asset against every texture on disk. With a ``scope`` (agk_gate.scope),
+    only textures it keeps are reported; meshes everywhere still count as
+    references, so a texture used from a left-out folder is not an orphan.
     """
     root = Path(root)
     on_disk = walk_files(root)
@@ -207,6 +209,8 @@ def orphaned_files(root: Path) -> list[Path]:
     orphans = []
     for candidate in on_disk:
         if candidate.suffix.lower() not in TEXTURE_DISK_SUFFIXES:
+            continue
+        if scope is not None and scope.reason(candidate):
             continue
         try:
             if candidate.resolve() not in referenced:

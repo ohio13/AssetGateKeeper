@@ -1930,6 +1930,19 @@ try:
            agk.count_triangles(_open_dir / "SM_Ball.dae") == 320)
 except ImportError:
     print("  skip  .dae: pycollada not installed")
+(_open_dir / "SM_Cut.ply").write_bytes(b"ply\nformat ascii 1.0\nelement vertex 3\nend_header\n0 0\n")
+_said = gate_says(_open_dir / "SM_Cut.ply", _open_budget)
+expect("a cut-off .ply says it is damaged in words, not a KeyError",
+       any("damaged or incomplete" in line for line in _said[0]) and "KeyError" not in str(_said), _said)
+try:
+    import pxr  # noqa: F401
+    (_open_dir / "SM_Cut.usda").write_text("#usda 1.0\n(\n", encoding="utf-8")
+    _said = gate_says(_open_dir / "SM_Cut.usda", _open_budget)
+    expect("a broken .usda names the line, without USD's C++ file names",
+           any("line 3" in line for line in _said[0]) and ".cpp" not in str(_said)
+           and ".h :" not in str(_said), _said)
+except ImportError:
+    print("  skip  broken .usda: usd-core not installed")
 expect("a Collada file with no reader says how to get one",
        "pycollada" in agk_readers._mesh_read_error(ModuleNotFoundError("x", name="collada")))
 # Textures: BMP and GIF through Pillow, PSD as Unreal imports it (the flattened image).

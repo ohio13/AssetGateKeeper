@@ -172,6 +172,52 @@ Two rules:
   silently ignored. (Ignoring it was a real bug in this project; the test that
   caught it is in `tests/test_gatekeeper.py`.)
 
+## Which folders are checked: [filters] and .agkignore
+
+A scan covers the folder you point it at and every folder under it. Three things
+narrow that, in the way version control does:
+
+```toml
+[filters]
+include = ["MM_*"]                      # only files in a folder (or named) MM_..., at any depth
+exclude = ["preview_*", "*_src4x.png"]  # never these files, wherever they are
+```
+
+* **`include`**: patterns relative to the scanned folder. When there are any, a
+  file is checked only if it or a folder it sits in matches one. `MM_*` matches
+  at any depth; `Art/MM_*/**` is anchored to the scanned folder. Empty (the
+  default) means everything. `--include GLOB` on the command line does the same.
+* **`.agkignore`**: a file in any folder, in the same syntax as `.gitignore`.
+  It covers its own folder and everything below. `#` at the start of a line is a comment (not after a pattern), `!` brings
+  something back, a trailing `/` means folders only, a leading `/` anchors to
+  the file's folder, `**` matches any depth. A deeper file is read after the
+  ones above it and the last matching line wins. An ignored folder is not read
+  at all, so a project with thousands of folders stays fast.
+* **`exclude`**: file-name patterns, as before.
+
+Matching ignores letter case, as Git for Windows does.
+
+Check only the folders that start with your game's initials, inside `MM_Assets`:
+
+```gitignore
+# MM_Assets/.agkignore
+# every folder here...
+/*/
+# ...except the MM_ ones
+!/MM_*/
+# and never a WIP folder, at any depth
+WIP/
+```
+
+`MM_Assets/MM_Enemies` is checked; `MM_Assets/Enemies` and every `WIP` folder are
+not read. Each scan says how many files and folders were left out and why.
+A single file checked on its own (a version-control hook, a DCC button) follows
+the same `.agkignore` files and `include`, read from the nearest folder above it
+that holds `rules.toml` or a repository.
+
+Per-folder **budgets** (a boss gets more triangles than a crate) are categories:
+see `[tags.<name>]` below.
+
 ## [tags.<name>]
 
 Per-category budgets. A tag is a **folder name or a filename prefix** - never a
