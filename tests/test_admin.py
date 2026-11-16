@@ -883,6 +883,134 @@ expect("then the second person can be added", added.returncode == 0, added.stder
 solo_server.shutdown()
 solo_server.server_close()
 
+# --------------------------------------------------------------------------- #
+print("15. Browse... and the Folders panel (16 Nov 2026)")
+# Allow_Folder.bat meant leaving the page and a restart. Browse opens the
+# computer's own folder window; only a person choosing there widens the list.
+browse_root = WORK / "browse-root"
+(browse_root / "MM_Assets" / "MM_Enemies").mkdir(parents=True)
+(browse_root / "MM_Assets" / "Enemies").mkdir(parents=True)
+(browse_root / "MM_Assets" / "MM_Boss" / "Phase2").mkdir(parents=True)
+(browse_root / "MM_Assets" / ".agkignore").write_text("/*/\n!/MM_*/\n", encoding="utf-8")
+(browse_root / "MM_Assets" / "MM_Enemies" / "grunt.obj").write_text("v 0 0 0\n", encoding="utf-8")
+(browse_root / "MM_Assets" / "MM_Enemies" / "notes.txt").write_text("x", encoding="utf-8")
+(browse_root / "Reference").mkdir()
+(browse_root / ".git").mkdir()
+picked = WORK / "picked"
+(picked / "Art").mkdir(parents=True)
+picker = WORK / "fake_picker.py"
+picker.write_text(
+    "import os, sys\n"
+    "mode = os.environ.get('FAKE_PICK', '')\n"
+    "if mode == 'fail':\n"
+    "    print('no folder dialog on this computer (TclError)', file=sys.stderr)\n"
+    "    sys.exit(3)\n"
+    "print(mode)\n", encoding="utf-8")
+allow_file = WORK / "allowed_folders.txt"
+browse_db = WORK / "browse.db"
+ahs.init_db(browse_db)
+browse_server = ahs.build_server("127.0.0.1", 0, browse_db, quiet=True,
+                                 rules_path=str(browse_root / "rules.toml"),
+                                 rules_root=str(browse_root), scan_root=str(browse_root),
+                                 allow_roots=(str(browse_root),), allow_file=allow_file)
+threading.Thread(target=browse_server.serve_forever, daemon=True).start()
+browse_base = f"http://127.0.0.1:{browse_server.server_address[1]}"
+me = Session(browse_base)
+me.form("/admin/api/solo", {})
+_state = me.state()
+_csrf = _state["csrf"]
+expect("the page offers Browse to a browser on this computer", _state.get("can_browse") is True)
+os.environ["AGK_FOLDER_PICKER"] = str(picker)
+os.environ["FAKE_PICK"] = str(picked)
+status, body = me.post("/admin/api/browse", {})
+expect("Browse needs the CSRF token", status == 403, body[:120])
+status, body = me.post("/admin/api/browse", {}, csrf=_csrf)
+result = json.loads(body)
+expect("Browse: the folder chosen in the window is allowed at once",
+       status == 200 and result["ok"] and result["added"]
+       and Path(result["path"]) == picked.resolve()
+       and str(picked.resolve()) in result["allowed_roots"], body[:300])
+expect("... and kept in the allow file for the next start",
+       str(picked.resolve()) in allow_file.read_text(encoding="utf-8")
+       and allow_file.read_text(encoding="utf-8").startswith("#"))
+expect("... and the change history says so",
+       any(row["target"] == "allowed_folder" for row in me.state()["audit"]))
+status, body = me.post("/admin/api/project", {"path": str(picked)}, csrf=_csrf)
+expect("... so it can be used as the project, no restart", status == 200, body[:200])
+status, body = me.post("/admin/api/browse", {}, csrf=_csrf)
+expect("choosing it again adds nothing", json.loads(body).get("added") is False
+       and allow_file.read_text(encoding="utf-8").count(str(picked.resolve())) == 1, body[:200])
+os.environ["FAKE_PICK"] = ""
+status, body = me.post("/admin/api/browse", {}, csrf=_csrf)
+expect("Cancel in the window changes nothing", status == 200
+       and json.loads(body).get("cancelled") is True, body[:200])
+os.environ["FAKE_PICK"] = "fail"
+status, body = me.post("/admin/api/browse", {}, csrf=_csrf)
+expect("no window on this computer (a server with no screen) says what to use instead",
+       status == 501 and b"no folder dialog" in body and b"Allow_Folder.bat" in body, body[:300])
+os.environ["FAKE_PICK"] = str(WORK / "not-there")
+status, body = me.post("/admin/api/browse", {}, csrf=_csrf)
+expect("a path that is not a folder is refused", status == 400, body[:200])
+expect("Browse is only for a browser on the same computer",
+       ahs._is_loopback("127.0.0.1") and ahs._is_loopback("::1")
+       and not ahs._is_loopback("192.168.1.20") and not ahs._is_loopback("garbage"))
+browse_server.browse_enabled = False
+status, body = me.post("/admin/api/browse", {}, csrf=_csrf)
+expect("--no-browse turns it off, and the page hides the button",
+       status == 403 and me.state().get("can_browse") is False, body[:200])
+browse_server.browse_enabled = True
+os.environ.pop("AGK_FOLDER_PICKER", None)
+os.environ.pop("FAKE_PICK", None)
+
+status, body = me.post("/admin/api/project", {"path": str(browse_root)}, csrf=_csrf)
+status, body = me.get("/admin/api/folders")
+listing = json.loads(body)
+expect("Folders: with no path, the allowed folders",
+       status == 200 and {Path(row["path"]) for row in listing["folders"]}
+       == {browse_root.resolve(), picked.resolve()}, body[:300])
+status, body = me.get("/admin/api/folders?path=" + urllib.parse.quote(str(browse_root / "MM_Assets")))
+listing = json.loads(body)
+rows = {row["name"]: row for row in listing.get("folders", [])}
+expect("... a folder's subfolders, with what a scan does with each",
+       rows.get("MM_Enemies", {}).get("status") == "checked"
+       and rows.get("MM_Boss", {}).get("status") == "checked"
+       and rows.get("Enemies", {}).get("status") == "ignored", body[:400])
+expect("... how many asset files each holds, and whether it has folders inside",
+       rows["MM_Enemies"]["assets"] == 1 and rows["MM_Boss"]["has_folders"] is True
+       and rows["Enemies"]["has_folders"] is False)
+status, body = me.get("/admin/api/folders?path=" + urllib.parse.quote(str(browse_root)))
+names = [row["name"] for row in json.loads(body)["folders"]]
+expect("... never .git, .agk or other dot folders", ".git" not in names and "MM_Assets" in names, names)
+status, _ = me.get("/admin/api/folders?path=" + urllib.parse.quote(str(browse_root / ".." / "..")))
+expect("... and nothing outside the allowed folders (.. included)", status == 403, status)
+status, body = me.post("/admin/api/apply", {"document": {
+    "filters": {"include": ["MM_Assets/MM_Boss/**"]}}, "action": "save"}, csrf=_csrf)
+expect("Check only is saved as [filters] include", status == 200 and agk.parse_rules(
+    browse_root / "rules.toml")["filters"]["include"] == ["MM_Assets/MM_Boss/**"], body[:200])
+status, body = me.get("/admin/api/folders?path=" + urllib.parse.quote(str(browse_root / "MM_Assets")))
+rows = {row["name"]: row for row in json.loads(body)["folders"]}
+status_root = json.loads(me.get("/admin/api/folders?path=" + urllib.parse.quote(str(browse_root)))[1])
+root_rows = {row["name"]: row for row in status_root["folders"]}
+expect("... and the panel follows it: in, out, and partly",
+       rows["MM_Boss"]["status"] == "checked" and rows["MM_Enemies"]["status"] == "outside"
+       and root_rows["MM_Assets"]["status"] == "some" and root_rows["Reference"]["status"] == "outside",
+       {name: row["status"] for name, row in {**rows, **root_rows}.items()})
+(browse_root / "rules.toml").write_text(
+    '[filters]\nexclude = ["*_wip.*"]\ninclude = ["MM_Assets/**"]\n', encoding="utf-8")
+status, body = me.post("/admin/api/apply", {"document": {"filters": {"include": []}},
+                                            "action": "save"}, csrf=_csrf)
+saved = agk.parse_rules(browse_root / "rules.toml")
+expect("an empty Check only box removes include and keeps exclude",
+       status == 200 and "include" not in saved.get("filters", {})
+       and saved["filters"]["exclude"] == ["*_wip.*"], saved)
+page = (ahs.STATIC_DIR / "admin.html").read_text(encoding="utf-8")
+script = (ahs.STATIC_DIR / "admin.js").read_text(encoding="utf-8")
+expect("the page has Browse, the Folders panel and Check only, and the script uses them",
+       all(f'id="{name}"' in page and f'"{name}"' in script for name in
+           ("project-browse", "wiz-browse", "folder-rows", "folder-crumbs", "scope-include")))
+browse_server.shutdown()
+browse_server.server_close()
+
 server.shutdown()
 server.server_close()
 shutil.rmtree(WORK, ignore_errors=True)

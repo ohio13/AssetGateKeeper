@@ -613,6 +613,8 @@ try:
         expect("--bake-polypaint makes a game asset that passes the folder's rules",
                done.returncode == 0 and "PASSED  SM_Ball_LP.glb" in done.stdout
                and "PASSED  T_Ball_LP_BaseColor.png" in done.stdout, done.stdout[-600:] + done.stderr[-300:])
+        expect("... and says first that the result is a starting point an artist reviews and repairs",
+               "starting point, not a finished asset" in done.stdout + done.stderr)
         from PIL import Image as _Image
         baked = _Image.open(paint / "T_Ball_LP_BaseColor.png").convert("RGB")
         import numpy as _np

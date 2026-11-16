@@ -122,7 +122,7 @@ keep running.
 |---|---|
 | re-open the page later | double-click `Start AssetGatekeeper.bat` again (it reuses the running services) |
 | stop everything | double-click `Stop.bat` |
-| let the page open another folder | double-click `Allow_Folder.bat` |
+| let the page open another folder | **Browse…** on the Rules page (or double-click `Allow_Folder.bat`) |
 | install or repair the libraries | double-click `Install_Extras.bat` |
 | see if they are running | double-click `tools\agk-serve.bat` (or `tools\agk-serve.bat status`) |
 | read the server output | `tools\agk-serve.bat logs --tail 60` |
@@ -132,8 +132,8 @@ keep running.
 
 After that choice, the Rules & Presets page opens with **Get started** on top:
 
-1. **Your project folder** — pick one of the allowed folders (add one with
-   `Allow_Folder.bat`).
+1. **Your project folder** — pick one of the allowed folders, or press
+   **Browse…** and choose it in your computer's folder window.
 2. **Your engine** — Unreal, Unity, Godot or Other. This sets how names are
    checked (`[naming] preset` in the project's `rules.toml`).
 3. **What it has to run on** — one of the hardware budgets (N64 to PC). If the
@@ -180,13 +180,19 @@ The password is printed once. `--admin-role artist` gives a read-only account.
 ## 4. Point it at your project
 
 The admin page can write `rules.toml` into a project folder — so it can only
-open folders on its allow-list, and the browser cannot add to it. The install
-folder is always allowed. To add another:
+open folders on its allow-list, and a web page cannot add to it by itself. The
+install folder is always allowed. To add another:
 
-1. double-click **`Allow_Folder.bat`** in the install folder;
-2. choose the folder in the window that opens (or drag the folder onto
-   `Allow_Folder.bat` instead);
-3. the page restarts by itself and the folder is in the **Allowed folder** list.
+1. in the **Project** panel press **Browse…**;
+2. your computer's own folder window opens (it may be behind the browser):
+   choose the folder;
+3. it is allowed at once and becomes the project. No restart.
+
+Browse only works in a browser on the computer that runs AssetGatekeeper, because
+that is where the window opens. From another computer, or to add several at once,
+double-click **`Allow_Folder.bat`** on the AssetGatekeeper computer (or drag a
+folder onto it). Both keep the same list. A studio that wants no folder window at
+all starts with `--no-browse`.
 
 `Allow_Folder.bat --list` shows the list and `Allow_Folder.bat --remove "<folder>"`
 takes one off. The list lives in `.agk\allowed_folders.txt` in the install folder,
@@ -210,7 +216,7 @@ What you get:
 - the choice is remembered in the recent chips and recorded in the audit trail.
 
 If you get **"that folder is outside the allowed roots"**, the page is telling
-you the truth: add the folder (or one of its parents) with `Allow_Folder.bat`.
+you the truth: add the folder (or one of its parents) with **Browse…** or `Allow_Folder.bat`.
 A `..` in a path is not a way around it — paths are resolved before they are
 compared.
 
@@ -441,7 +447,7 @@ total across four suites).
 |---|---|
 | start / re-open | `Start AssetGatekeeper.bat` |
 | stop | `Stop.bat` (or `tools\agk-serve.bat down`) |
-| allow another project folder | `Allow_Folder.bat` |
+| allow another project folder | **Browse…** on the Rules page, or `Allow_Folder.bat` |
 | restart with the same options | `tools\agk-serve.bat restart` |
 | status | `tools\agk-serve.bat status` |
 | URLs + gate command | `tools\agk-serve.bat urls` |
@@ -476,7 +482,7 @@ Back up by copying the `.db` files while the services are stopped. Deleting
 | "baking needs fast-simplification, xatlas, scipy" | double-click `Install_Extras.bat` (the bake needs Python 3.10 or newer) |
 | browser opens a dead page | the services took longer than the browser; wait 2 s and refresh, or run `tools\agk-serve.bat status` |
 | `cannot bind … in use` | another process owns the port; the message prints the find/stop commands. `--port-auto` moves instead of failing |
-| "that folder is outside the allowed roots" | double-click `Allow_Folder.bat` and choose it |
+| "that folder is outside the allowed roots" | press **Browse…** and choose it (or double-click `Allow_Folder.bat`) |
 | "… is 600 MB; the Art Workstation takes files up to 512 MB" | upload a decimated copy, or start with `"Start AssetGatekeeper.bat" --max-upload-mb 700` |
 | Windows will not delete the install folder ("in use") | double-click `Stop.bat`, close every window open on that folder, then delete. Still locked: Task Manager → end the Python entries |
 | page says "sign in" and I have no password | the account exists but the password is lost. Stop the services and create another: `.venv\Scripts\python.exe server\asset_health_server.py --add-admin <name> --admin-role director` (or `asset-health …` if the wheel is installed) |

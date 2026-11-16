@@ -288,6 +288,11 @@ def command_up(args: argparse.Namespace) -> int:
     # or the environment - never from the browser.
     for root in project_roots(args):
         dashboard_args += ["--allow-root", str(root)]
+    # Browse... on the Rules page adds to the same list Allow_Folder.bat keeps, so
+    # a folder chosen there is still allowed after a restart.
+    dashboard_args += ["--allow-file", str(ALLOWED_FILE)]
+    if getattr(args, "no_browse", False):
+        dashboard_args.append("--no-browse")
     if args.demo:
         dashboard_args.append("--demo")
     if args.host not in ("127.0.0.1", "localhost"):
@@ -704,6 +709,9 @@ def build_parser() -> argparse.ArgumentParser:
     up.add_argument("--allow-root", action="append", default=[], metavar="PATH",
                     help="folder the project picker may open (repeatable; also "
                          "$AGK_PROJECT_ROOTS and .agk/allowed_folders.txt; default: this repo)")
+    up.add_argument("--no-browse", action="store_true",
+                    help="hide Browse... on the Rules page; folders are then added only "
+                         "with --allow-root, $AGK_PROJECT_ROOTS or Allow_Folder.bat")
     up.add_argument("--max-upload-mb", type=int, default=0, metavar="MB",
                     help="largest file the review screen accepts (default 512)")
 

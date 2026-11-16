@@ -182,7 +182,7 @@ Inside it:
 | `workstation_data/` | Art Workstation | uploaded files, by asset id |
 | `.agk/ports.json` | `agk-serve` | which port each server actually took |
 | `.agk/logs/*.log` | `agk-serve` | one log per server |
-| `.agk/allowed_folders.txt` | `Allow_Folder.bat` / `agk-serve allow` | extra project folders the picker may open |
+| `.agk/allowed_folders.txt` | **Browse…** on the Rules page, `Allow_Folder.bat` / `agk-serve allow` | extra project folders the picker may open |
 
 Started by hand (`asset-health`, `art-workstation`), a server writes its
 database to the folder it is run from instead. The gate's verdict cache is in

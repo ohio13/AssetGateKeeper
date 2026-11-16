@@ -145,6 +145,122 @@ ART_WORKSTATION_PORT = 8100
 # launcher sets this so a studio can widen the project allow-list without a CLI.
 ALLOW_ROOTS_ENV = "AGK_PROJECT_ROOTS"
 
+#: Set to a .py file (run with this Python) or a command line to replace the
+#: folder dialog: tests use it, and a studio can point it at its own picker. It is
+#: given the starting folder and must print one folder, or nothing for Cancel.
+FOLDER_PICKER_ENV = "AGK_FOLDER_PICKER"
+#: How long a Browse... dialog may stay open before the request gives up.
+FOLDER_PICKER_TIMEOUT = 600.0
+
+_PICKER_SCRIPT = r"""
+import sys
+try:
+    import tkinter
+    from tkinter import filedialog
+    window = tkinter.Tk()
+except Exception as exc:  # no tkinter, or no screen to draw on
+    print(f"no folder dialog on this computer ({exc.__class__.__name__})", file=sys.stderr)
+    sys.exit(3)
+window.withdraw()
+window.attributes("-topmost", True)
+chosen = filedialog.askdirectory(title="Choose a folder for AssetGatekeeper to check",
+                                 mustexist=True, initialdir=sys.argv[1] or None)
+window.destroy()
+print(chosen or "")
+"""
+
+
+def pick_folder_dialog(initial: str = "", timeout: float = FOLDER_PICKER_TIMEOUT) -> tuple[str, str]:
+    """Open the computer's own folder dialog and wait for a person to choose.
+
+    Returns (folder, "") on a choice, ("", "") on Cancel, ("", reason) when no
+    dialog can be shown. A separate process, so a dialog never runs on (or
+    hangs) a server thread, and tkinter's one-thread rule cannot bite.
+    """
+    override = os.environ.get(FOLDER_PICKER_ENV, "").strip().strip('"')
+    if not override:
+        command = [sys.executable, "-c", _PICKER_SCRIPT]
+    elif override.lower().endswith(".py"):
+        command = [sys.executable, override]
+    else:
+        import shlex  # noqa: PLC0415
+        command = shlex.split(override, posix=os.name != "nt")
+    try:
+        completed = subprocess.run([*command, str(initial or "")], capture_output=True,
+                                   text=True, timeout=timeout, encoding="utf-8",
+                                   errors="replace")
+    except subprocess.TimeoutExpired:
+        return "", "the folder dialog was left open too long; press Browse again"
+    except OSError as exc:
+        return "", f"the folder dialog could not start: {exc}"
+    if completed.returncode != 0:
+        reason = (completed.stderr or "").strip().splitlines()
+        return "", (reason[-1] if reason else "the folder dialog failed")
+    return (completed.stdout or "").strip().strip('"'), ""
+
+
+#: Folders the folder list never shows: tool state, caches, version control.
+_HIDDEN_FOLDERS = frozenset({"__pycache__", "node_modules", "intermediate", "deriveddatacache",
+                             "saved", "library", "temp", "obj"})
+
+
+def _is_loopback(address: str) -> bool:
+    import ipaddress  # noqa: PLC0415
+    try:
+        return ipaddress.ip_address(str(address).split("%")[0]).is_loopback
+    except ValueError:
+        return False
+
+
+def _peek_folder(folder: Path, limit: int = 2000) -> tuple:
+    """(asset files directly inside, capped; does it hold folders) - one listing."""
+    assets = 0
+    has_folders = False
+    try:
+        with os.scandir(folder) as entries:
+            for index, entry in enumerate(entries):
+                if index >= limit:
+                    break
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        has_folders = has_folders or not entry.name.startswith(".")
+                    elif agk.is_candidate(Path(entry.name)):
+                        assets += 1
+                except OSError:
+                    continue
+    except OSError:
+        return None, False
+    return assets, has_folders
+
+
+def _folder_status(scope, folder: Path) -> str:
+    """'checked', 'ignored' (.agkignore), 'outside' ([filters] include) or 'some'
+    (include names folders further down)."""
+    import fnmatch  # noqa: PLC0415
+    from agk_gate.scope import glob_matches  # noqa: PLC0415
+    if scope.ignored(folder, is_folder=True):
+        return "ignored"
+    if not scope.include:
+        return "checked"
+    try:
+        relative = folder.relative_to(scope.root).as_posix()
+    except ValueError:
+        return "checked"
+    if relative in ("", "."):
+        return "some"
+    if any(glob_matches(pattern, relative + "/x") for pattern in scope.include):
+        return "checked"
+    parts = relative.lower().split("/")
+    for pattern in scope.include:
+        segments = pattern.strip("/").lower().split("/")
+        if len(segments) == 1 or "**" in segments[:len(parts)]:
+            return "some"              # can match deeper down
+        if len(segments) > len(parts) and all(
+                fnmatch.fnmatchcase(part, segment) for part, segment in zip(parts, segments)):
+            return "some"
+    return "outside"
+
+
 MAX_BODY_BYTES = 64 * 1024       # one verdict is ~1 KB; 64 KB is already generous
 #: What a workstation older than 0.1.0a2 accepted; used when it does not say.
 WORKSTATION_LEGACY_UPLOAD_LIMIT = 64 * 1024 * 1024
@@ -3109,6 +3225,7 @@ class Handler(BaseHTTPRequestHandler):
                 "rules_error": error,
                 "project": str(project) if project else "",
                 "allowed_roots": [str(root) for root in server.allow_roots],
+                "can_browse": server.browse_enabled and _is_loopback(self._client_ip()),
                 "recent_projects": recent_projects(server.db_path),
                 "scan_root": str(self._scan_target() or ""),
                 "scan_blocked": "" if self._scan_target() else NO_PROJECT_MESSAGE,
@@ -3122,6 +3239,11 @@ class Handler(BaseHTTPRequestHandler):
             if self._require_admin() is None:
                 return
             self._json(200, {"audit": list_audit(self.server.db_path, 200)})
+            return
+        if path == "/admin/api/folders":
+            if self._require_admin() is None:
+                return
+            self._admin_folders(urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query))
             return
         if path == "/admin/api/projects":
             if self._require_admin() is None:
@@ -3386,6 +3508,13 @@ class Handler(BaseHTTPRequestHandler):
                                        "overwrite a file it cannot read"})
             return
         merged = merge_rules_document(existing, submitted)
+        # An empty "Check only" box means everything: no `include = []` line.
+        filters = merged.get("filters")
+        if isinstance(filters, dict):
+            if not filters.get("include"):
+                filters.pop("include", None)
+            if not filters:
+                merged.pop("filters", None)
         # A `platform` name with no matching [platforms.<name>] table makes the gate
         # refuse the whole file, so such a reference can never be "kept for later".
         # Dropping it is a repair, and repairs are reported, never silent.
@@ -3454,6 +3583,135 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._json(200, {"ok": True, "scan": self.server.scanner.snapshot()})
 
+    def _admin_browse(self) -> None:
+        """Browse...: the computer's own folder dialog, then the folder is allowed.
+
+        The allow-list stays the guard rail: the page cannot name a folder, only
+        ask for the dialog, and only a person clicking in it adds one. So it is
+        offered only to a browser on the same computer (the dialog opens there),
+        to an admin who may change rules, with the CSRF token, one at a time.
+        """
+        user = self._require_admin(writer=True)
+        if user is None:
+            return
+        if not self._same_origin() or not self._csrf_ok(user):
+            self._json(403, {"error": "missing or stale CSRF token; reload the page"})
+            return
+        server = self.server
+        if not server.browse_enabled:
+            self._json(403, {"error": "Browse is turned off on this dashboard (--no-browse)",
+                             "detail": "ask whoever runs it to add the folder with "
+                                       "--allow-root or Allow_Folder.bat"})
+            return
+        if not _is_loopback(self._client_ip()):
+            self._json(403, {"error": "Browse opens a folder dialog on the computer that runs "
+                                      "the dashboard, so it only works from a browser on that "
+                                      "computer",
+                             "detail": "on that computer, use Browse or Allow_Folder.bat; "
+                                       "studios: --allow-root or AGK_PROJECT_ROOTS"})
+            return
+        if not server.picker_lock.acquire(blocking=False):
+            self._json(409, {"error": "a folder dialog is already open on this computer; "
+                                      "finish or cancel it first"})
+            return
+        try:
+            start = self._active_project() or (server.allow_roots[0] if server.allow_roots else "")
+            chosen, problem = pick_folder_dialog(str(start or ""))
+        finally:
+            server.picker_lock.release()
+        if problem:
+            self._json(501, {"error": problem,
+                             "detail": "add the folder with Allow_Folder.bat, --allow-root "
+                                       "or AGK_PROJECT_ROOTS instead"})
+            return
+        if not chosen:
+            self._json(200, {"ok": False, "cancelled": True,
+                             "allowed_roots": [str(root) for root in server.allow_roots]})
+            return
+        try:
+            folder = Path(os.path.normpath(chosen)).expanduser().resolve()
+        except (OSError, RuntimeError):
+            folder = None
+        if folder is None or not folder.is_dir():
+            self._json(400, {"error": f"not a folder: {chosen}"})
+            return
+        added, saved = server.add_allowed_root(folder)
+        if added:
+            record_audit(server.db_path, user, "allowed_folder", "", str(folder),
+                         self._client_ip(), summary="folder allowed with Browse")
+        self._json(200, {"ok": True, "path": str(folder), "added": added, "saved": saved,
+                         "allowed_roots": [str(root) for root in server.allow_roots]})
+
+    def _admin_folders(self, query: dict) -> None:
+        """The folders inside an allowed one, and whether a scan checks each.
+
+        Only inside the allow-list, names only (no file contents), at most 500
+        entries: this is a map for choosing what to check, not a file browser.
+        """
+        server = self.server
+        raw = (query.get("path", [""])[0] or "").strip()
+        roots = [str(root) for root in server.allow_roots]
+        if not raw:
+            self._json(200, {"path": "", "parent": "", "roots": roots, "folders": [
+                {"name": str(root), "path": str(root), "status": "", "assets": None,
+                 "has_folders": True} for root in server.allow_roots]})
+            return
+        folder = self._allowed_path(raw)
+        if folder is None:
+            self._json(403, {"error": "that folder is outside the allowed folders",
+                             "roots": roots})
+            return
+        if not folder.is_dir():
+            self._json(404, {"error": f"not a folder: {folder}"})
+            return
+        project = self._active_project()
+        if project is not None and not (folder == project or project in folder.parents):
+            project = None
+        base = project or next(root for root in server.allow_roots
+                               if folder == root or root in folder.parents)
+        include: tuple = ()
+        rules_error = ""
+        try:
+            rules = base / agk.RULES_FILENAME
+            document = agk.parse_rules(rules) if rules.is_file() else {}
+            include = tuple((document.get("filters") or {}).get("include") or ())
+        except agk.ConfigError as exc:
+            rules_error = str(exc)
+        from agk_gate.scope import Scope  # noqa: PLC0415 - only this view needs it
+        scope = Scope(base, include)
+        rows = []
+        truncated = False
+        try:
+            entries = sorted(os.scandir(folder), key=lambda entry: entry.name.lower())
+        except OSError as exc:
+            self._json(403, {"error": f"cannot read {folder}: {exc.strerror or exc}"})
+            return
+        for entry in entries:
+            try:
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+            except OSError:
+                continue
+            if entry.name.startswith(".") or entry.name.lower() in _HIDDEN_FOLDERS:
+                continue
+            if len(rows) >= 500:
+                truncated = True
+                break
+            child = Path(entry.path)
+            assets, has_folders = _peek_folder(child)
+            rows.append({"name": entry.name, "path": str(child),
+                         "status": _folder_status(scope, child),
+                         "assets": assets, "has_folders": has_folders})
+        here_assets, _ = _peek_folder(folder)
+        parent = folder.parent if any(folder != root and (folder.parent == root or
+                                                          root in folder.parent.parents)
+                                      for root in server.allow_roots) else None
+        self._json(200, {"path": str(folder), "parent": str(parent) if parent else "",
+                         "project": str(base), "include": list(include),
+                         "rules_error": rules_error, "status": _folder_status(scope, folder),
+                         "assets": here_assets, "folders": rows, "truncated": truncated,
+                         "roots": roots})
+
     def _admin_project(self) -> None:
         """Point this dashboard at a project folder (the whole zero-CLI picker)."""
         user = self._require_admin(writer=True)
@@ -3474,8 +3732,8 @@ class Handler(BaseHTTPRequestHandler):
             self._json(403, {
                 "error": "that folder is outside the allowed roots",
                 "detail": f"allowed: {', '.join(str(root) for root in self.server.allow_roots)}. "
-                          "To add it, double-click Allow_Folder.bat in the AssetGatekeeper "
-                          "folder and choose it.",
+                          "To add it, press Browse... and choose it (or double-click "
+                          "Allow_Folder.bat in the AssetGatekeeper folder).",
                 "path": raw,
             })
             return
@@ -3513,6 +3771,8 @@ class Handler(BaseHTTPRequestHandler):
     def _admin_post(self, path: str) -> None:
         if path == "/admin/api/project":
             self._admin_project()
+        elif path == "/admin/api/browse":
+            self._admin_browse()
         elif path == "/admin/api/bootstrap":
             self._admin_bootstrap()
         elif path == "/admin/api/solo":
@@ -4736,8 +4996,14 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
                  scan_root: str | Path = "", allow_roots: tuple[str, ...] = (),
                  workstation_url: str = "", workstation_token: str = "",
                  allow_hosts: tuple[str, ...] = (), people: "list[Person] | tuple" = (),
-                 digest_at: "tuple[int, int] | None" = None):
+                 digest_at: "tuple[int, int] | None" = None,
+                 allow_file: str | Path = "", browse_enabled: bool = True):
         self.db_path = str(db_path)
+        #: Browse... adds folders here too, so they are still allowed next start.
+        self.allow_file = str(allow_file or "")
+        self.browse_enabled = bool(browse_enabled)
+        self.picker_lock = threading.Lock()
+        self._roots_lock = threading.Lock()
         self.solo_csrf = secrets.token_urlsafe(24)   # solo mode: per run, never stored
         self.people = tuple(people)
         self.digest_at = digest_at       # (hour, minute) local, or None for live alerts
@@ -4790,6 +5056,31 @@ class AssetHealthServer(socketserver.ThreadingTCPServer):
         self._login_failures: dict[str, list[float]] = {}
         super().__init__(address, Handler)
 
+    def add_allowed_root(self, folder: Path) -> tuple[bool, bool]:
+        """Allow one more folder now, and in the allow file if there is one.
+        Returns (added, saved): (False, False) when it was already allowed."""
+        folder = Path(folder).resolve()
+        key = (lambda path: str(path).lower() if os.name == "nt" else str(path))
+        with self._roots_lock:
+            if any(key(root) == key(folder) for root in self.allow_roots):
+                return False, False
+            self.allow_roots = (*self.allow_roots, folder)
+            if not self.allow_file:
+                return True, False
+            target = Path(self.allow_file)
+            try:
+                existing = target.read_text(encoding="utf-8") if target.is_file() else (
+                    "# Folders the AssetGatekeeper project picker may open, one per line.\n"
+                    "# Added by Allow_Folder.bat or Browse...; delete a line to take a "
+                    "folder off the list.\n")
+                if existing and not existing.endswith("\n"):
+                    existing += "\n"
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_text(existing + f"{folder}\n", encoding="utf-8")
+            except OSError:
+                return True, False
+            return True, True
+
     def shutdown(self) -> None:          # noqa: D401 - stdlib override
         self.stopping = True
         super().shutdown()
@@ -4806,13 +5097,15 @@ def build_server(host: str, port: int, db_path: str | Path,
                  workstation_token: str = "",
                  allow_hosts: tuple[str, ...] = (),
                  audit=None, people: "list[Person] | tuple" = (),
-                 digest_at: "tuple[int, int] | None" = None) -> AssetHealthServer:
+                 digest_at: "tuple[int, int] | None" = None,
+                 allow_file: str | Path = "", browse_enabled: bool = True) -> AssetHealthServer:
     if audit is not None:
         set_audit_log(audit)
     server = AssetHealthServer((host, port), db_path, token, quiet, notifier, alert_cooldown,
                                rules_path, rules_root, scan_root, allow_roots,
                                workstation_url, workstation_token, allow_hosts,
-                               people=people, digest_at=digest_at)
+                               people=people, digest_at=digest_at,
+                               allow_file=allow_file, browse_enabled=browse_enabled)
     if digest_at and notifier is not None:
         threading.Thread(target=_digest_loop, args=(server,), name="ah-digest",
                          daemon=True).start()
@@ -4989,6 +5282,12 @@ def build_parser() -> argparse.ArgumentParser:
                         help="folder the admin page may open as a project (repeatable; "
                              "default: the working directory). Also settable with "
                              f"${ALLOW_ROOTS_ENV}, separated by '{os.pathsep}'")
+    parser.add_argument("--allow-file", metavar="PATH", default="",
+                        help="text file of allowed folders (one per line) that Browse... on "
+                             "the Rules page adds to; agk-serve passes .agk/allowed_folders.txt")
+    parser.add_argument("--no-browse", action="store_true",
+                        help="hide Browse... on the Rules page (the folder dialog); folders "
+                             "are then added only with --allow-root or the allow file")
     parser.add_argument("--allow-host", metavar="NAME", action="append", default=[],
                         help="accept this Host header as well as the bind address and "
                              "localhost (repeatable). Requests whose Host names something "
@@ -5250,7 +5549,9 @@ def main(argv: list[str] | None = None) -> int:
                                             # worked via agk-serve's .agk/ports.json.
                                             workstation_url=args.workstation_url,
                                             workstation_token=args.workstation_token,
-                                            people=people, digest_at=digest_at),
+                                            people=people, digest_at=digest_at,
+                                            allow_file=args.allow_file,
+                                            browse_enabled=not args.no_browse),
             args.host, args.port, auto=args.port_auto, tries=args.port_tries,
             reserved=(ART_WORKSTATION_PORT,), report=_moved)
     except OSError as exc:
