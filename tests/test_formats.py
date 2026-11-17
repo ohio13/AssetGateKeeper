@@ -2200,7 +2200,7 @@ expect("--audit finds one image stored three times: the same bytes, and the same
 _audit = subprocess.run([sys.executable, str(ROOT / "asset_gatekeeper.py"), str(_dup), "--audit"],
                         capture_output=True, text=True)
 expect("... prints it with what it costs, and duplicates alone do not fail the audit's exit code",
-       "DUPLICATE  A/T_Rock_BaseColor.png" in _audit.stdout and "(same pixels)" in _audit.stdout
+       f"DUPLICATE  {Path('A') / 'T_Rock_BaseColor.png'}" in _audit.stdout and "(same pixels)" in _audit.stdout
        and "2 duplicate texture(s)" in _audit.stdout, _audit.stdout[-500:])
 shutil.rmtree(_dup, ignore_errors=True)
 shutil.rmtree(_px_dir, ignore_errors=True)
