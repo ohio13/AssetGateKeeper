@@ -1557,12 +1557,16 @@ function renderNotes() {
       + `<div class="body">${renderMarkdown(note.note_text)}</div>`
       + (note.screenshot ? `<img class="shot" alt="the view this note was pinned in" `
          + `src="${note.screenshot}${token}" title="Show this view">` : "")
+      + noteStatusHtml(note)
       + `<div class="head" style="margin-top:6px"><span>`
       + `${escapeHtml(note.created_at.replace("T", " "))}</span><span class="note-actions">`
       + (note.pin ? `<button class="chip" data-view style="padding:2px 8px">view</button>`
          + `<button class="chip" data-link style="padding:2px 8px" title="Copy a link that opens this view">link</button>` : "")
       + `<button class="chip" data-note="${note.id}" style="padding:2px 8px">`
       + `delete</button></span></div>`;
+    for (const button of element.querySelectorAll("[data-note-action]")) {
+      button.addEventListener("click", () => moveNote(note, button.dataset.noteAction));
+    }
     element.querySelector("[data-note]").addEventListener("click", async () => {
       try {
         await api(`/api/notes/${note.id}`, { method: "DELETE" });
@@ -1583,6 +1587,64 @@ function renderNotes() {
     }
     container.appendChild(element);
   });
+}
+
+/* - note status (17 Nov 2026): Open -> Fixed (the artist) -> Accepted (a
+ * reviewer), or Reopened. Each step is kept with who and when. */
+
+const NOTE_STATUS_WORDS = { open: "Open", fixed: "Fixed", accepted: "Accepted" };
+const NOTE_ACTION_WORDS = { fixed: "marked fixed", accepted: "accepted", reopened: "reopened" };
+
+function noteStatusHtml(note) {
+  const status = note.status || "open";
+  const last = (note.events || []).slice(-1)[0];
+  const by = last ? ` · ${escapeHtml(NOTE_ACTION_WORDS[last.action] || last.action)} by `
+    + `${escapeHtml(last.who)}${last.verified ? "" : " (name typed)"}, `
+    + `${escapeHtml(shortTime(last.created_at))}` : "";
+  const buttons = [];
+  if (status === "open" && can("note")) buttons.push(["fixed", "Mark fixed"]);
+  if (status !== "accepted" && can("review")) buttons.push(["accepted", "Accept"]);
+  if (status !== "open" && can("review")) buttons.push(["reopened", "Reopen"]);
+  const history = (note.events || []).length > 1
+    ? `<details class="note-history"><summary>${note.events.length} steps</summary>`
+      + note.events.map((event) => `<div>${escapeHtml(shortTime(event.created_at))} · `
+        + `${escapeHtml(NOTE_ACTION_WORDS[event.action] || event.action)} by ${escapeHtml(event.who)}`
+        + (event.comment ? `: ${escapeHtml(event.comment)}` : "") + "</div>").join("")
+      + "</details>" : "";
+  return `<div class="note-status"><span class="note-state ${escapeHtml(status)}">`
+    + `${escapeHtml(NOTE_STATUS_WORDS[status] || status)}</span>${by}`
+    + (last && last.comment ? `<div class="note-comment">${escapeHtml(last.comment)}</div>` : "")
+    + (buttons.length ? `<div class="note-status-actions">${buttons.map(([action, label]) =>
+      `<button class="chip" data-note-action="${action}">${label}</button>`).join("")}</div>` : "")
+    + history + "</div>";
+}
+
+async function moveNote(note, action) {
+  const body = { action };
+  if (!(state.me && state.me.signed_in)) {
+    body.who = $("note-author").value.trim() || $("review-name").value.trim();
+    if (!body.who) {
+      $("status").textContent = "type your name (beside Add note) first";
+      $("note-author").focus();
+      return;
+    }
+  }
+  if (action !== "accepted") {
+    const comment = window.prompt(action === "fixed" ? "What did you change? (optional)"
+      : "Why is it reopened? (optional)", "");
+    if (comment === null) return;
+    body.comment = comment;
+  }
+  try {
+    await json(`/api/notes/${note.id}/status`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    await refreshSelected();
+    $("status").textContent = `note ${note.pin ? `#${note.pin.number} ` : ""}${NOTE_ACTION_WORDS[action]}`;
+  } catch (error) {
+    $("status").textContent = `could not change the note: ${error.message}`;
+  }
 }
 
 /* - pinned notes (W5): a point on the model, the camera it was seen from, and

@@ -66,11 +66,39 @@ asset-gatekeeper <folder> --telemetry-url "http://health:8080/api/telemetry?toke
 | `/budget-planner` | turn a platform target into numbers you can paste into rules |
 | `/audit/full` | every verdict, paged (50 per page) |
 | `/audit/passes` | only the passes - "show me what is working" |
+| `/asset?path=...` | one asset: every row's file name links here (below) |
 | `/admin` | accounts, projects, the rules console |
 
 Everything has a JSON twin under `/api/` (`/api/summary`, `/api/rules`,
 `/api/events`, `/api/analytics`) so a wallboard or another tool can read the same
 numbers without scraping.
+
+### `/asset` - one asset, everything about it (17 Nov 2026)
+
+Every file name in the dashboard's lists and the audit pages links to the asset's
+own page:
+
+* **Numbers**: triangles, vertices, material slots and version, measured by the
+  Art Workstation on the stored file, and the gate's own line.
+* **Review notes**: every version's notes with the picture of the view each was
+  pinned in (not the 3D model), its status (Open, Fixed - waiting for a check,
+  Accepted) and every step with who and when. A picture opens that exact view in
+  the Workstation. Pictures come through the dashboard (`/asset/shot?note=`), so
+  the Workstation's token stays on the server.
+* **Textures and maps**: the files that came with the model, which map each one
+  is (from its name: base colour, normal map, ORM...) and what the gate says about
+  each, notes included, against the project's rules.
+* **Gate history**: every run on that file, newest first: when, PASSED or FAILED,
+  the numbers, why, and the machine.
+* **Sign-off**: every decision in the Workstation, by whom and when, per version.
+
+The page changes nothing. Pass and fail are the gate's measurements; approval is a
+person's judgement of the whole model, made in the Workstation where the model can
+be turned round, so the page links there (**Open in the Workstation to inspect and
+approve**), or offers **Send to Workstation** for a file that is not there yet. A
+Workstation that is down leaves the gate history and says why the rest is
+missing. Budget exceptions (the Budget planner) stay: each has an owner, a reason
+and an end date, and the gate still measures the file.
 
 ### `/analytics` - the three questions
 

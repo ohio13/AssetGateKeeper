@@ -36,6 +36,14 @@
   Off, and the green your engine reads. The workstation now takes GIF, PSD
   and JFIF as textures.
 
+* **An asset page, and notes as tickets (17 Nov).** Every file name on the
+  AssetHealth dashboard links to the asset's own page: its numbers, the review
+  notes with the picture of each pinned view, the textures and which map each is,
+  every gate run and why it failed, and every sign-off - read-only, with a link
+  to the Art Workstation to inspect and approve. In the Workstation a note is now
+  Open, Fixed (the artist) or Accepted (a reviewer), or Reopened, each step kept
+  with who and when; a new **artist** role can mark notes fixed but not sign off.
+
 * **Duplicate textures in `--audit` (17 Nov).** The same image stored more
   than once (same bytes, or different files with the same pixels), with what
   the copies cost. Reported, not failed.

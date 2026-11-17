@@ -409,6 +409,26 @@ view on any machine. The printable report carries each pin's number and picture,
 so it still makes sense on paper. Deleting a note deletes its picture. A click
 beside the model places nothing; press **Pin to model** again to cancel.
 
+### A note is a small ticket: Open, Fixed, Accepted (17 Nov 2026)
+
+Every note has a status, shown on its card:
+
+| Status | Who moves it there | Button |
+|---|---|---|
+| **Open** | a new note; or a reviewer sends it back | **Reopen** |
+| **Fixed** | the artist, once the change is made (asked: "What did you change?") | **Mark fixed** |
+| **Accepted** | a reviewer or lead, after looking at the model again | **Accept** |
+
+Each step is kept with who made it, when, and the comment, and listed under the
+card. Signed in, the account's name is used; without accounts, the name typed
+beside **Add note**, marked "(name typed)". An artist can mark a note fixed but
+not accept it; accepting or reopening is sign-off, so it needs the reviewer or lead
+role. The library counts each asset's open notes and the fixed ones waiting for a
+check, across all its versions, and AssetHealth's asset page lists them with their
+pictures. API: `POST /api/notes/<id>/status` with `{"action": "fixed"|"accepted"|
+"reopened", "comment": "..."}`; a step that does not apply to the note's status
+(fixing a fixed note) is a 409.
+
 ## Versions, sign-off and where a file came from
 
 ### Versions
@@ -483,6 +503,7 @@ art-workstation --remove-user rita           # the last one turns accounts off
 | Role | Can |
 |---|---|
 | viewer | see everything, write notes |
+| artist | + upload, LODs, collision, fixes, mark notes fixed - never sign off or delete |
 | reviewer | + upload, LODs, collision, fixes, sign-off |
 | lead | + delete assets |
 | the `--token` (scripts) | read, upload, LODs, collision, fixes - never sign off or delete |
@@ -589,6 +610,8 @@ tab shows), `--allow-host NAME`, `--quiet`.
 | `GET` · `POST /api/assets/<id>/collision` · `GET .../collision.obj` | read · set · export the proxy |
 | `GET /api/assets/<id>/references` · `/report` | reference check · printable report |
 | `GET` · `POST /api/assets/<id>/heal` | what a fix would change (nothing stored) · make the fixed copy as a new asset |
+| `GET /api/assets/<id>/check` | the gate's verdict and notes on the stored file and its textures, with the project's rules |
+| `POST /api/notes/<id>/status` | move a note: `{"action": "fixed"\|"accepted"\|"reopened", "comment"}` |
 | `POST /api/assets/<id>/bake-polypaint` | bake a Polypaint `.obj` into a new game asset (JSON `triangles`, `texture`; a job, `GET /api/jobs/<id>`) |
 | `GET /api/assets/<id>/notes` · `POST /api/notes` · `DELETE /api/notes/<id>` | notes; `POST` takes an optional `pin` (`point`, `normal`, `camera` {`position`, `target`, `fov`}, `level`) and `screenshot` (a PNG or JPEG `data:` URL, 600 KB max) |
 | `GET /api/notes/<id>/screenshot` | the view a pinned note was written in |
