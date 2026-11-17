@@ -3508,6 +3508,15 @@ class Handler(BaseHTTPRequestHandler):
                                        "overwrite a file it cannot read"})
             return
         merged = merge_rules_document(existing, submitted)
+        # The texture checks' defaults ("warn", and green from the naming preset)
+        # are left out of the file, so it stays readable by an older gate.
+        texture = merged.get("texture")
+        if isinstance(texture, dict):
+            for key in ("normal_check", "mask_check"):
+                if str(texture.get(key, "")).lower() in ("warn", "true"):
+                    texture.pop(key, None)
+            if not texture.get("normal_convention"):
+                texture.pop("normal_convention", None)
         # An empty "Check only" box means everything: no `include = []` line.
         filters = merged.get("filters")
         if isinstance(filters, dict):

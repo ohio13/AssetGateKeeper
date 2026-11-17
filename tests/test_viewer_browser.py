@@ -569,6 +569,21 @@ with sync_playwright() as playwright:
     page.wait_for_function("() => document.getElementById('status').textContent === 'bark.png'",
                            timeout=15000)
     expect("the link goes back to the original", "bark.png" == status())
+    # 17 Nov 2026: the panel runs the gate here too, so its notes show.
+    _gif = io.BytesIO()
+    _gframes = [Image.new("RGB", (64, 64), (index * 60, 80, 80)) for index in range(3)]
+    _gframes[0].save(_gif, format="GIF", save_all=True, append_images=_gframes[1:])
+    ids["gif"] = aws.create_asset(db, data, "T_Fire_BaseColor.gif", _gif.getvalue())["id"]
+    page.goto(f"{BASE}/viewer?live=0&asset={ids['gif']}")
+    page.wait_for_function("() => document.querySelector('#verdict-check .verdict-notes')",
+                           timeout=20000)
+    _check_text = page.locator("#verdict-body").inner_text()
+    expect("the gate verdict panel checks the file here and shows its notes (an animated GIF)",
+           "CHECKED HERE" in _check_text.upper() and "Notes" in _check_text
+           and "animated (3 frames)" in _check_text and "PASSED" in _check_text, _check_text)
+    expect("... in the warning colour, apart from failures",
+           page.locator("#verdict-check .verdict-notes li").count() == 1
+           and page.locator("#verdict-check .verdict-problems li").count() == 0)
     pick(ids["cube"])
     expect("a .glb does not offer it (the healer cannot fix glTF)",
            not page.locator("#asset-heal").is_visible())

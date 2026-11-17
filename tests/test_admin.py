@@ -1003,11 +1003,35 @@ saved = agk.parse_rules(browse_root / "rules.toml")
 expect("an empty Check only box removes include and keeps exclude",
        status == 200 and "include" not in saved.get("filters", {})
        and saved["filters"]["exclude"] == ["*_wip.*"], saved)
+# 17 Nov 2026: the texture checks are set on the page too.
+status, body = me.post("/admin/api/apply", {"document": {"texture": {
+    "normal_check": "fail", "mask_check": "off", "normal_convention": "directx"}},
+    "action": "save"}, csrf=_csrf)
+saved = agk.parse_rules(browse_root / "rules.toml")
+expect("Texture checks: Fail / Off / DirectX are saved in [texture]",
+       status == 200 and saved["texture"].get("normal_check") == "fail"
+       and saved["texture"].get("mask_check") == "off"
+       and saved["texture"].get("normal_convention") == "directx", saved)
+_budget = agk.Budget.from_mapping(saved)
+expect("... and the gate reads them back", _budget.normal_check == "fail"
+       and _budget.mask_check == "off" and _budget.normal_convention == "directx")
+status, body = me.post("/admin/api/apply", {"document": {"texture": {
+    "normal_check": "warn", "mask_check": "warn", "normal_convention": ""}},
+    "action": "save"}, csrf=_csrf)
+saved = agk.parse_rules(browse_root / "rules.toml")
+expect("... the defaults (Warn, green from the naming preset) leave the keys out of the file",
+       status == 200 and not {"normal_check", "mask_check", "normal_convention"}
+       & set(saved.get("texture", {})), saved)
+status, body = me.post("/admin/api/apply", {"document": {"texture": {"normal_check": "maybe"}},
+                                            "action": "save"}, csrf=_csrf)
+expect("... and a value the gate would refuse is refused before it is written",
+       status == 400 and b"normal_check" in body, body[:200])
 page = (ahs.STATIC_DIR / "admin.html").read_text(encoding="utf-8")
 script = (ahs.STATIC_DIR / "admin.js").read_text(encoding="utf-8")
 expect("the page has Browse, the Folders panel and Check only, and the script uses them",
        all(f'id="{name}"' in page and f'"{name}"' in script for name in
-           ("project-browse", "wiz-browse", "folder-rows", "folder-crumbs", "scope-include")))
+           ("project-browse", "wiz-browse", "folder-rows", "folder-crumbs", "scope-include",
+            "normal-check", "mask-check", "normal-convention")))
 browse_server.shutdown()
 browse_server.server_close()
 

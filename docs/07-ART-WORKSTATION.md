@@ -252,6 +252,31 @@ sent from cli
 API: `POST /api/assets?filename=rock.fbx&verdict=failed&problems=...&tags=...&source=ci`
 with the file as the body.
 
+### Checked here, with its notes (17 Nov 2026)
+
+A verdict sent with an asset carries its failures only. So the panel also runs the
+gate on the stored file, with the project's `rules.toml` (the one the **Rules &
+Budgets** tab shows; the gate's defaults when there is none), and shows what it
+says, notes included:
+
+```
+SENT WITH IT                      (only when one was sent)
+PASSED ...
+CHECKED HERE AGAINST RULES.TOML
+PASSED  2 tris / 1 mat / 1 uv
+T_Crate_N.png  PASSED
+  • green reads as OpenGL (green up) ... but this project's engine reads DirectX
+    (green down): lighting on it will look inverted; flip the green channel
+1 other texture with it: nothing to say.
+```
+
+Each texture that came with a mesh is checked as a file of its own, since a
+normal map or a packed mask usually arrives as a mesh's texture. Notes (warnings)
+are amber and never change PASSED; failures are listed as before. The check reads
+the stored files where they are and writes nothing; it is kept per asset until a
+file or the rules change. A format the gate does not measure (`.blend`, `.ma`)
+says so instead. API: `GET /api/assets/<id>/check`.
+
 ## LODs
 
 The **LODs** section lists each level with its triangles, its share of the source,
@@ -580,7 +605,7 @@ tab shows), `--allow-host NAME`, `--quiet`.
 | "waiting for its files" | the `.gltf`/`.obj` was uploaded without what it references | select it and drop the named files onto the page |
 | Model loads, textures black | the textures it references were not uploaded | drop them onto the page with the asset selected |
 | "broken" | the file cannot be read in a format that should be measurable | re-export it; the reason is in the tooltip and the report |
-| Verdict panel says "No gate verdict" | the asset was uploaded directly, not sent with one | run the gate with `--telemetry-url`, or use "Send to workstation" |
+| Verdict panel shows only "Checked here" | the asset was uploaded directly, not sent with a verdict; the check here is the gate's own | nothing to do; to keep the verdict it was sent with, use `--telemetry-url` or "Send to workstation" |
 | Red banner "Open to the network with no token" | started with `--host 0.0.0.0` and no token | restart with `--token`, or bind `127.0.0.1` |
 | LOD generation very slow | numpy is not installed | `pip install numpy` |
 | "over its N-triangle target" on a LOD | the mesh is too small to reach that level | use a gentler preset, or upload that level |

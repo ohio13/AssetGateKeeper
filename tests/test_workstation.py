@@ -2292,6 +2292,84 @@ aws.agk.available_memory = _real_free
 jb_server.shutdown()
 jb_server.server_close()
 
+print("32. the review screen checks the file itself, notes included (17 Nov 2026)")
+# A verdict sent with an asset carries its failures only. The workstation runs
+# the gate itself, with the project's rules, so the notes show too.
+import numpy as _np  # noqa: E402
+ck_db, ck_data = fresh("check")
+_rng = _np.random.default_rng(3)
+_yy, _xx = _np.mgrid[0:256, 0:256] / 256.0
+_h = sum(_np.exp(-((_xx - cx) ** 2 + (_yy - cy) ** 2) / (2 * r ** 2)) * a
+         for cx, cy, r, a in zip(_rng.random(30), _rng.random(30), _rng.uniform(0.03, 0.08, 30),
+                                  _rng.uniform(-1, 1, 30)))
+_gy, _gx = _np.gradient(_h * 30)
+_n = _np.stack([-_gx, _gy, _np.ones_like(_h)], -1)
+_n /= _np.linalg.norm(_n, axis=-1, keepdims=True)
+_buffer = _io.BytesIO()
+Image.fromarray(((_n + 1) / 2 * 255).astype(_np.uint8)).save(_buffer, format="PNG")
+_normal_png = _buffer.getvalue()
+_crate = aws.create_asset(ck_db, ck_data, "SM_Crate.obj",
+                          ("mtllib SM_Crate.mtl\nusemtl wood\n" + OBJ).encode())
+aws.add_sidecar(ck_db, ck_data, _crate["id"], "SM_Crate.mtl",
+                b"newmtl wood\nmap_Kd T_Crate_BaseColor.png\nmap_Bump T_Crate_N.png\n")
+aws.add_sidecar(ck_db, ck_data, _crate["id"], "T_Crate_BaseColor.png", png_bytes((120, 100, 90)))
+aws.add_sidecar(ck_db, ck_data, _crate["id"], "T_Crate_N.png", _normal_png)
+_ck_rules = WORK / "check_rules"
+_ck_rules.mkdir(exist_ok=True)
+(_ck_rules / "rules.toml").write_text('[naming]\npreset = ["unreal"]\n', encoding="utf-8")
+_checked = aws.check_asset(ck_db, ck_data, _crate["id"], rules_root=str(_ck_rules))
+_files = {item["name"]: item for item in _checked["files"]}
+expect("the mesh is checked here, against the project's rules.toml, and says so",
+       _checked["checked"] and "rules.toml" in _checked["budget"] and _checked["status"], _checked)
+expect("... each texture that came with it is checked too: the OpenGL normal map in an Unreal "
+       "project has its note", set(_files) == {"T_Crate_BaseColor.png", "T_Crate_N.png"}
+       and any("engine reads DirectX" in note for note in _files["T_Crate_N.png"]["warnings"])
+       and not _files["T_Crate_BaseColor.png"]["warnings"], _files)
+expect("... nothing is written to the stored asset",
+       aws.asset_files(ck_data, aws.get_asset(ck_db, _crate["id"]))
+       == ["SM_Crate.mtl", "SM_Crate.obj", "T_Crate_BaseColor.png", "T_Crate_N.png"])
+expect("... and a second look is answered from memory until a file or the rules change",
+       aws.check_asset(ck_db, ck_data, _crate["id"], rules_root=str(_ck_rules)) is _checked)
+(_ck_rules / "rules.toml").write_text('[naming]\npreset = ["unity"]\n', encoding="utf-8")
+_os_time = time.time() + 5
+os.utime(_ck_rules / "rules.toml", (_os_time, _os_time))
+_unity = aws.check_asset(ck_db, ck_data, _crate["id"], rules_root=str(_ck_rules))
+expect("... the rules changed to a Unity project: the normal map is fine, re-checked",
+       _unity is not _checked and not {item["name"]: item for item in _unity["files"]}
+       ["T_Crate_N.png"]["warnings"], _unity["files"])
+_frames = [Image.new("RGB", (64, 64), (i * 50, 80, 80)) for i in range(3)]
+_gif = _io.BytesIO()
+_frames[0].save(_gif, format="GIF", save_all=True, append_images=_frames[1:])
+_fire = aws.create_asset(ck_db, ck_data, "T_Fire_BaseColor.gif", _gif.getvalue())
+_fire_check = aws.check_asset(ck_db, ck_data, _fire["id"])
+expect("a texture on its own: its notes are the asset's own (an animated GIF)",
+       _fire_check["checked"] and any("animated (3 frames)" in note for note in _fire_check["warnings"])
+       and "default budget" in _fire_check["budget"], _fire_check)
+_blend = aws.create_asset(ck_db, ck_data, "scene.blend", b"BLENDER-v300 not really")
+_blend_check = aws.check_asset(ck_db, ck_data, _blend["id"])
+expect("a file the gate cannot measure says why instead of a verdict",
+       not _blend_check["checked"] and _blend_check["reason"], _blend_check)
+(_ck_rules / "rules.toml").write_text('[naming]\npreset = ["unreal"]\n', encoding="utf-8")
+os.utime(_ck_rules / "rules.toml", (_os_time + 5, _os_time + 5))
+_ck_report = aws.render_report(ck_db, ck_data, _crate["id"], rules_root=str(_ck_rules))
+expect("the HTML report checks against the same rules, and lists the texture's note",
+       "Validation (rules.toml" in _ck_report and "T_Crate_N.png, note: green reads as OpenGL" in _ck_report,
+       _ck_report[_ck_report.find("Validation"):][:600])
+ck_server, ck_client = None, None
+try:
+    ck_server = aws.build_server("127.0.0.1", 0, ck_db, ck_data, quiet=True,
+                                 rules_root=str(_ck_rules))
+    threading.Thread(target=ck_server.serve_forever, daemon=True).start()
+    with urllib.request.urlopen(f"http://127.0.0.1:{ck_server.server_address[1]}"
+                                f"/api/assets/{_crate['id']}/check") as _response:
+        _over_http = json.loads(_response.read())
+    expect("GET /api/assets/<id>/check answers the same over HTTP",
+           _over_http["checked"] and len(_over_http["files"]) == 2, _over_http)
+finally:
+    if ck_server is not None:
+        ck_server.shutdown()
+        ck_server.server_close()
+
 print()
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

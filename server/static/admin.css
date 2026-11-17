@@ -151,3 +151,4 @@ label.wide { margin-top: 12px; }
 /* The audit table keeps its columns and scrolls inside its own panel. */
 .audit-scroll { overflow-x: auto; }
 .audit td { overflow-wrap: anywhere; }
+#normal-convention-note { margin-top: 10px; }

@@ -27,6 +27,15 @@
   BMP, GIF, PSD, KTX, HDR. The git hook checks a commit in one run. The bake
   says before every bake that the result is a starting point for an artist.
 
+* **Notes on the review screen; texture checks on the Rules page (17 Nov).**
+  The Art Workstation's Gate verdict panel runs the gate on the stored file
+  with the project's rules and shows what it says, notes included, for the
+  asset and for each texture that came with it (a mesh's normal map, its ORM).
+  The verdict an asset was sent with is still shown above it. The Rules page
+  has a **Texture checks** panel: normal maps and packed masks Warn / Fail /
+  Off, and the green your engine reads. The workstation now takes GIF, PSD
+  and JFIF as textures.
+
 * **Duplicate textures in `--audit` (17 Nov).** The same image stored more
   than once (same bytes, or different files with the same pixels), with what
   the copies cost. Reported, not failed.

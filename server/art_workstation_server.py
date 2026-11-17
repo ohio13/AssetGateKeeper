@@ -38,6 +38,7 @@ Routes
     POST /api/assets/<id>/files?filename=...       -> add a file the asset references
     GET  /api/assets/<id>/files/<path>             -> serve it
     GET  /api/assets/<id>/preview   -> converted preview (FBX .glb, texture .png)
+    GET  /api/assets/<id>/check     -> the gate's verdict and notes here, with the project's rules
     GET  /api/assets/<id>/heal      -> what "Fix" would change (dry run, nothing stored)
     POST /api/assets/<id>/heal      -> make the fixed copy as a new asset (original kept)
     GET  /api/assets/<id>/collision
@@ -139,8 +140,8 @@ MESH_SUFFIXES = {".obj", ".gltf", ".glb", ".ply", ".stl", ".off", ".dae", ".3mf"
                  ".xaml", ".xyz", ".pts"}
 #: Textures are assets too: a reviewer needs to look at the 2048px skybox that
 #: failed the budget, not be told the format is unsupported.
-TEXTURE_SUFFIXES = {".png", ".tga", ".dds", ".jpg", ".jpeg", ".bmp", ".tif",
-                    ".tiff", ".exr", ".hdr", ".ktx", ".ktx2", ".webp"}
+TEXTURE_SUFFIXES = {".png", ".tga", ".dds", ".jpg", ".jpeg", ".jfif", ".jpe", ".bmp", ".gif",
+                    ".psd", ".tif", ".tiff", ".exr", ".hdr", ".ktx", ".ktx2", ".webp"}
 #: FBX is measured by the gate's own reader and previewed through a converted
 #: .glb (engine/fbx_preview.py); the viewer says plainly that it is a conversion.
 FBX_SUFFIXES = {".fbx"}
@@ -1538,6 +1539,70 @@ def heal_rules(rules_path: str = "", rules_root: str = "") -> tuple:
     return agk.Budget(), agk.HealSettings(), "the gate's default budget (no rules.toml)"
 
 
+_CHECK_CACHE: dict = {}
+
+
+def check_asset(db_path: str | Path, data_dir: Path, asset_id: int,
+                rules_path: str = "", rules_root: str = "") -> dict:
+    """The gate's verdict on a stored asset, with its notes (warnings), against
+    the project's rules - and the same for each texture that came with it.
+
+    The verdict an asset arrived with (from AssetHealth, a hook, the uploader)
+    has its failures only; the notes - a normal map whose green points the wrong
+    way, a packed mask never packed, an animated GIF - are only known by checking
+    the file. Read-only: the stored files are checked where they are, nothing is
+    written. Kept per asset until a file or the rules change.
+    """
+    data_dir = Path(data_dir)
+    asset = get_asset(db_path, asset_id)
+    budget, _settings, label = heal_rules(rules_path, rules_root)
+    answer: dict = {"asset_id": asset_id, "budget": label, "checked": False, "reason": "",
+                    "status": "", "problems": [], "warnings": [], "metric": "", "files": []}
+    # What the gate measures is the gate's call, not the preview's: a .usd with
+    # the USD reader installed has no 3D preview here but is checked.
+    if not agk.is_candidate(Path(asset["filename"])):
+        answer["reason"] = (asset.get("analyse_note") or
+                            "the gate does not measure this format; export it to a mesh format")
+        return answer
+    folder = asset_folder(data_dir, asset)
+    if folder is None or not (folder / asset["filename"]).is_file():
+        answer["reason"] = "the stored file is missing"
+        return answer
+    relatives = asset_files(data_dir, asset)
+    rules_file = Path(rules_path) if rules_path else Path(rules_root or ".") / agk.RULES_FILENAME
+    key_parts = [str(asset_id), label]
+    for relative in relatives:
+        try:
+            stat = (folder / relative).stat()
+            key_parts.append(f"{relative}:{stat.st_size}:{stat.st_mtime_ns}")
+        except OSError:
+            continue
+    try:
+        key_parts.append(str(rules_file.stat().st_mtime_ns))
+    except OSError:
+        pass
+    key = "|".join(key_parts)
+    if key in _CHECK_CACHE:
+        return _CHECK_CACHE[key]
+    gatekeeper = agk.Gatekeeper(budget)
+    verdict = gatekeeper.check(folder / asset["filename"])
+    answer.update(checked=True, status=verdict.status, problems=list(verdict.problems),
+                  warnings=[note for note in verdict.warnings if not note.startswith(HEAL_PREFIX)],
+                  metric=verdict.metric)
+    # Each texture that came with a mesh is a file of its own to the engine.
+    for relative in relatives:
+        if relative == asset["filename"] or Path(relative).suffix.lower() not in agk.TEXTURE_SUFFIXES:
+            continue
+        texture = gatekeeper.check(folder / relative)
+        answer["files"].append({"name": relative, "status": texture.status,
+                                "problems": list(texture.problems),
+                                "warnings": list(texture.warnings), "metric": texture.metric})
+    if len(_CHECK_CACHE) > 128:
+        _CHECK_CACHE.clear()
+    _CHECK_CACHE[key] = answer
+    return answer
+
+
 def heal_asset(db_path: str | Path, data_dir: Path, asset_id: int, apply: bool,
                rules_path: str = "", rules_root: str = "") -> dict:
     """Preview (``apply=False``) or make a healed copy of an asset.
@@ -2553,6 +2618,7 @@ td { padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:top;
      font-variant-numeric:tabular-nums; }
 ul { margin:6px 0 0 18px; padding:0; }
 li { margin:2px 0; }
+li.gate-note { color:#9a6b14; }
 .note { border:1px solid var(--line); border-radius:8px; padding:10px 12px; margin-top:8px; }
 .note .meta { color:var(--muted); font-size:11px; margin-bottom:4px; }
 .note .pin { display:inline-block; min-width:18px; padding:0 5px; border-radius:9px; background:#e0af68; color:#111; font-weight:700; text-align:center; }
@@ -2563,15 +2629,17 @@ footer { margin-top:36px; color:var(--muted); font-size:11px; }
 """
 
 
-def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
+def render_report(db_path: str | Path, data_dir: Path, asset_id: int,
+                  rules_path: str = "", rules_root: str = "") -> str:
     """One standalone HTML file: facts, verdict, LODs, collision, notes.
 
     Everything is inline - no CSS file, no script, no image - so the file can be
     attached to a ticket or printed and still look the same in five years.
 
     The verdict comes from running the *gate* over the stored file with the
-    default budget. That is stated in the report: the workstation does not own
-    budgets, and pretending otherwise would invent numbers.
+    project's rules.toml (the one the Rules & Budgets tab shows), or the gate's
+    default budget when there is none - and the report says which. Notes
+    (warnings) are listed too, and those of each texture that came with it.
     """
     asset = get_asset(db_path, asset_id)
     lods = list_lods(db_path, asset_id)
@@ -2584,6 +2652,7 @@ def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
     # zero triangle count is an absence of measurement, not a measurement of
     # zero, so the report must not dress it up as a pass or as a cheap mesh.
     unmeasured = (asset.get("kind") or "") == "unverified"
+    budget_label = heal_rules(rules_path, rules_root)[2]
     verdict_html = "<li>the stored file is missing</li>"
     status_class, status_label = "fail", "UNREADABLE"
     problems: list[str] = []
@@ -2595,13 +2664,23 @@ def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
         status_class, status_label = "sub", "UNVERIFIED"
     elif stored is not None and stored.is_file():
         try:
-            verdict = agk.Gatekeeper(agk.Budget()).check(stored)
-            problems = list(verdict.problems)
-            status_label = verdict.status
-            status_class = "pass" if verdict.passed else "fail"
-            verdict_html = "".join(f"<li>{html_escape(problem)}</li>" for problem in problems)
-            if not problems:
-                verdict_html = "<li>no violations under the default budget</li>"
+            checked = check_asset(db_path, data_dir, asset_id, rules_path, rules_root)
+            budget_label = checked["budget"]
+            if not checked["checked"]:
+                raise ValueError(checked["reason"])
+            problems = list(checked["problems"])
+            status_label = checked["status"]
+            status_class = "fail" if status_label in ("FAILED", "ERROR") else "pass"
+            items = [f"<li>{html_escape(problem)}</li>" for problem in problems]
+            items += [f"<li class='gate-note'>note: {html_escape(note)}</li>" for note in checked["warnings"]]
+            for texture in checked["files"]:
+                for line in texture["problems"]:
+                    items.append(f"<li>{html_escape(texture['name'])}: {html_escape(line)}</li>")
+                for line in texture["warnings"]:
+                    items.append(f"<li class='gate-note'>{html_escape(texture['name'])}, note: "
+                                 f"{html_escape(line)}</li>")
+            verdict_html = "".join(items) or (
+                f"<li>no violations under {html_escape(budget_label)}</li>")
         except Exception as exc:                  # a report must always render
             verdict_html = f"<li>the gate could not read this file: {html_escape(str(exc))}</li>"
             status_class, status_label = "fail", "UNREADABLE"
@@ -2686,7 +2765,7 @@ def render_report(db_path: str | Path, data_dir: Path, asset_id: int) -> str:
   <table><tbody>{rows(geometry_rows)}</tbody></table>
   {geometry_note}
 
-  <h2>Validation (default budget: 50,000 tris  3 slots  2048px)</h2>
+  <h2>Validation ({html_escape(budget_label)})</h2>
   <ul>{verdict_html}</ul>
 
   <h2>Reference integrity</h2>
@@ -2763,6 +2842,7 @@ ASSET_COLLISION_RE = re.compile(r"^/api/assets/(\d+)/collision$")
 ASSET_REFERENCES_RE = re.compile(r"^/api/assets/(\d+)/references$")
 ASSET_REPORT_RE = re.compile(r"^/api/assets/(\d+)/report$")
 ASSET_HEAL_RE = re.compile(r"^/api/assets/(\d+)/heal$")
+ASSET_CHECK_RE = re.compile(r"^/api/assets/(\d+)/check$")
 COLLISION_OBJ_RE = re.compile(r"^/api/assets/(\d+)/collision\.obj$")
 ASSET_REVIEW_RE = re.compile(r"^/api/assets/(\d+)/reviews?$")
 APPROVAL_RE = re.compile(r"^/api/approvals/([0-9a-fA-F]{64})$")
@@ -3185,6 +3265,13 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, approval_for(server.db_path, match.group(1), Path(server.data_dir)))
             return
 
+        match = ASSET_CHECK_RE.match(path)
+        if match:
+            self._json(200, check_asset(server.db_path, Path(server.data_dir),
+                                        int(match.group(1)), rules_path=server.rules_path,
+                                        rules_root=server.rules_root))
+            return
+
         match = ASSET_HEAL_RE.match(path)
         if match:
             self._json(200, heal_asset(server.db_path, Path(server.data_dir),
@@ -3235,7 +3322,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def _report(self, asset_id: int) -> None:
         server = self.server  # type: ignore[attr-defined]
-        body = render_report(server.db_path, Path(server.data_dir), asset_id).encode("utf-8")
+        body = render_report(server.db_path, Path(server.data_dir), asset_id,
+                             server.rules_path, server.rules_root).encode("utf-8")
         headers = {"Content-Disposition": 'attachment; filename="report.html"'} \
             if self._query().get("download", ["0"])[0] in ("1", "true", "yes") else {}
         self._send(200, body, "text/html; charset=utf-8", headers)

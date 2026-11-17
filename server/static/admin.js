@@ -407,12 +407,49 @@ function budgetDocument() {
       power_of_two: $("pot").checked,
       pbr: $("pbr").checked,
       naming: $("naming").checked,
+      // "warn" and "from the naming preset" are the defaults: the server leaves
+      // those keys out of the file, so it stays readable by older gates.
+      normal_check: $("normal-check").value,
+      mask_check: $("mask-check").value,
+      normal_convention: $("normal-convention").value,
     },
     tagging: { mode: $("tag-mode").value },
     tags: collectTags(),
     // Only include: [filters] exclude and anything else there is kept as it is.
     filters: { include: scopePatterns() },
   };
+}
+
+// [texture] normal_check / mask_check take "warn", "fail", "off", or true/false.
+function severity(value) {
+  if (value === false) return "off";
+  const word = String(value === undefined || value === true ? "warn" : value).toLowerCase();
+  return ["warn", "fail", "off"].includes(word) ? word : "warn";
+}
+
+// What "From the naming preset" means for this project, in words.
+const ENGINE_GREEN = { unreal: "directx", unity: "opengl", godot: "opengl", gltf: "opengl" };
+
+function describeConvention() {
+  const note = $("normal-convention-note");
+  if (!note) return;
+  const chosen = $("normal-convention").value;
+  const words = { directx: "down (DirectX)", opengl: "up (OpenGL)" };
+  if (chosen) {
+    note.textContent = `Normal maps are expected with green ${words[chosen]}.`;
+    return;
+  }
+  let presets = ((state.document || {}).naming || {}).preset || [];
+  if (!Array.isArray(presets)) presets = [presets];
+  const found = [...new Set(presets.map((name) => ENGINE_GREEN[String(name).toLowerCase()])
+    .filter(Boolean))];
+  note.textContent = found.length === 1
+    ? `[naming] preset = ${presets.join(", ")}: normal maps are expected with green ${words[found[0]]}.`
+    : found.length > 1
+      ? "[naming] names engines that disagree about green, so only a map whose name says "
+        + "which it is (_nor_gl, _Normal_DX) is compared. Choose your engine here."
+      : "No engine in [naming] preset, so only a map whose name says which it is "
+        + "(_nor_gl, _Normal_DX) is compared. Choose your engine here to check every normal map.";
 }
 
 function scopePatterns() {
@@ -475,6 +512,12 @@ function fillForm(document) {
   $("pot").checked = texture.power_of_two !== false;
   $("pbr").checked = texture.pbr !== false;
   $("naming").checked = texture.naming !== false;
+  $("normal-check").value = severity(texture.normal_check);
+  $("mask-check").value = severity(texture.mask_check);
+  $("normal-convention").value = ["opengl", "directx"].includes(
+    String(texture.normal_convention || "").toLowerCase())
+    ? String(texture.normal_convention).toLowerCase() : "";
+  describeConvention();
   $("refs").checked = mesh.check_references !== false;
   $("degenerate").checked = !!mesh.allow_degenerate;
   $("scope-include").value = ((document.filters || {}).include || []).join("\n");
@@ -706,9 +749,11 @@ async function loadState(firstTime = true) {
                       "influences", "tag-mode"]) {
       $(id).addEventListener("input", markDirty);
     }
-    for (const id of ["pot", "pbr", "naming", "refs", "degenerate"]) {
+    for (const id of ["pot", "pbr", "naming", "refs", "degenerate",
+                      "normal-check", "mask-check", "normal-convention"]) {
       $(id).addEventListener("change", markDirty);
     }
+    $("normal-convention").addEventListener("change", describeConvention);
   }
 
   fillForm(state.document);
