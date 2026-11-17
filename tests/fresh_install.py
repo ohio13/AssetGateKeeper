@@ -102,7 +102,14 @@ def main() -> int:
     started = time.time()
     done = bat("Install_Extras.bat") if WINDOWS else run([sys.executable, "tools/install_extras.py"])
     expect("the installer succeeds", done.returncode == 0, f"exit {done.returncode}")
-    expect("... and says so", "everything is installed and loads" in done.stdout.lower())
+    expect("... and says so", "installed and loads" in done.stdout.lower())
+    # An optional extra with no package for this Python (usd-core on a brand-new
+    # Python, say) is named, and does not fail the install.
+    unavailable = set()
+    if "could not be installed on this python" in done.stdout.lower():
+        tail = done.stdout.lower().split("could not be installed on this python", 1)[1]
+        unavailable = set(re.findall(r"^\s+([a-z0-9_.-]+) - ", tail, re.M))
+        print(f"    optional extras not available here: {', '.join(sorted(unavailable))}")
     print(f"    ({time.time() - started:.0f} s)")
     # The .bat files pick their own Python (.venv, then py -3, then PATH), which
     # need not be the one running this; every later step uses the one they chose,
@@ -113,8 +120,11 @@ def main() -> int:
     print(f"    using {python}")
     again = (bat("Install_Extras.bat", "--check") if WINDOWS
              else run([sys.executable, "tools/install_extras.py", "--check"]))
-    expect("a second run finds nothing missing", again.returncode == 0
-           and "MISSING" not in again.stdout and "not yet" not in again.stdout)
+    not_yet = set(re.findall(r"not yet\s+(\S+)", again.stdout))
+    expect("a second run finds nothing missing (bar extras with no package for this Python)",
+           again.returncode == 0 and "MISSING" not in again.stdout
+           and not_yet <= {name.lower() for name in unavailable} | set(unavailable),
+           f"{sorted(not_yet)} vs {sorted(unavailable)}")
 
     print("2. start the pages")
     up = (bat("Start AssetGatekeeper.bat") if WINDOWS
@@ -177,7 +187,11 @@ def main() -> int:
     print("5. stop everything")
     down = bat("Stop.bat") if WINDOWS else run([sys.executable, "tools/agk_serve.py", "down"])
     expect("Stop.bat stops everything", down.returncode == 0, f"exit {down.returncode}")
-    time.sleep(1)
+    # Windows can take a few seconds to let go of a stopped server's port; wait
+    # for it (up to 20 s) rather than judge after one second.
+    deadline = time.time() + 20
+    while time.time() < deadline and (get(f"{dashboard}/admin") or get(f"{workstation}/viewer")):
+        time.sleep(1)
     expect("the admin page is gone", get(f"{dashboard}/admin") == 0)
     expect("the review page is gone", get(f"{workstation}/viewer") == 0)
 

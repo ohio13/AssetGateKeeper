@@ -444,8 +444,9 @@ namespace AssetGatekeeper.Editor
             var paths = AgkChecker.SelectedAssetPaths();
             int added = AgkChecker.Enqueue(paths, true, true);
             if (added == 0)
-                Debug.Log("AssetGatekeeper: nothing to check in the selection (models: .fbx .obj .gltf .glb; "
-                          + "textures: .png .tga .jpg .tif .webp .dds .exr .ktx2)");
+                Debug.Log("AssetGatekeeper: nothing to check in the selection (models: .fbx .obj .gltf .glb "
+                          + ".ply .stl .off .3mf .dae .usd; textures: .png .tga .jpg .tif .webp .bmp .gif "
+                          + ".psd .dds .exr .hdr .ktx .ktx2)");
         }
 
         [MenuItem(Root + "Check Selected", true)]

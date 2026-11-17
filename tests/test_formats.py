@@ -1918,7 +1918,16 @@ _open_budget = agk.Budget()
 import trimesh as _tm  # noqa: E402
 _open_dir = Path(tempfile.mkdtemp(prefix="agk_open_"))
 _ball = _tm.creation.icosphere(subdivisions=2)
-for _ext in ("ply", "stl", "off", "3mf"):
+try:
+    import lxml.etree  # noqa: F401
+    import networkx  # noqa: F401
+    _three_mf = ("3mf",)
+except ImportError:                       # trimesh reads and writes 3MF with these two
+    _three_mf = ()
+    print("  skip  .3mf: networkx and lxml not installed")
+expect("a .3mf with no reader says how to get one",
+       "networkx and lxml" in agk_readers._mesh_read_error(ModuleNotFoundError("x", name="networkx")))
+for _ext in ("ply", "stl", "off", *_three_mf):
     _ball.export(_open_dir / f"SM_Ball.{_ext}")
     _said = gate_says(_open_dir / f"SM_Ball.{_ext}", _open_budget)
     expect(f".{_ext} is read: triangles counted, passes a plain budget",

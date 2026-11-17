@@ -1319,12 +1319,21 @@ expect("a textured FBX is offered the bake, from the textures its preview shows"
        aws.preview_of(t_data, aws.get_asset(t_db, t_asset["id"]))["bake"] == "texture",
        aws.preview_of(t_data, aws.get_asset(t_db, t_asset["id"])))
 _packed = aws.create_asset(t_db, t_data, "tex_embedded.fbx", (_fx / "tex_embedded.fbx").read_bytes())
-_baked = aws.bake_polypaint_asset(t_db, t_data, _packed["id"], triangles=200, texture=32)
-_linked = aws.bake_polypaint_asset(t_db, t_data, t_asset["id"], triangles=200, texture=32)
-expect("... and bakes: an FBX with its texture packed inside becomes a .glb asset of its own",
-       _baked["asset"]["filename"] == "tex_embedded_LP.glb" and 0 < _baked["triangles"] <= 200
-       and _baked["source_triangles"] == 12 and _linked["asset"]["filename"] == "tex_relative_LP.glb",
-       (_baked["asset"]["filename"], _baked["triangles"], _linked["asset"]["filename"]))
+try:
+    for _name in ("fast_simplification", "xatlas", "scipy.spatial"):
+        __import__("importlib").import_module(_name)
+    _fbx_bake_ready = True
+except Exception:                         # missing, or (3.9) installed but broken
+    _fbx_bake_ready = False
+if _fbx_bake_ready:
+    _baked = aws.bake_polypaint_asset(t_db, t_data, _packed["id"], triangles=200, texture=32)
+    _linked = aws.bake_polypaint_asset(t_db, t_data, t_asset["id"], triangles=200, texture=32)
+    expect("... and bakes: an FBX with its texture packed inside becomes a .glb asset of its own",
+           _baked["asset"]["filename"] == "tex_embedded_LP.glb" and 0 < _baked["triangles"] <= 200
+           and _baked["source_triangles"] == 12 and _linked["asset"]["filename"] == "tex_relative_LP.glb",
+           (_baked["asset"]["filename"], _baked["triangles"], _linked["asset"]["filename"]))
+else:
+    print("  skip baking an FBX: the bake libraries do not load on this Python")
 _plain = aws.create_asset(t_db, t_data, "mats5.fbx", (_fx / "mats5.fbx").read_bytes())
 expect("an FBX with no texture is not offered one",
        aws.preview_of(t_data, aws.get_asset(t_db, _plain["id"]))["bake"] == "")
