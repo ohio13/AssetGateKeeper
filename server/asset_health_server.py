@@ -1594,6 +1594,8 @@ nav { display: flex; gap: 18px; margin-top: 14px; font-size: 13px; flex-wrap: wr
       align-items: baseline; }
 nav a { color: var(--accent); text-decoration: none; font-weight: 600; }
 nav a:hover { text-decoration: underline; }
+a.asset-link { color: var(--text); text-decoration: none; border-bottom: 1px dotted var(--muted); }
+a.asset-link:hover { color: var(--accent); border-bottom-color: var(--accent); }
 nav .chips { color: var(--muted); font-size: 12px; letter-spacing: 0.02em; }
 details.textures { margin-top: 12px; } details.textures > summary { cursor: pointer; font-weight: 600; }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
@@ -1761,7 +1763,8 @@ def render_audit_page(data: dict, *, title: str, status_filter: str,
         when = (entry.get("received_at") or "")[:19]
         return (
             f'<tr><td class="when">{_e(when)}</td>'
-            f'<td class="file">{_e(entry.get("filename") or "")}'
+            f'<td class="file"><a class="asset-link" href="{_e(asset_page_href(entry))}">'
+            f'{_e(entry.get("filename") or "")}</a>'
             f'<div class="path">{_e((entry.get("filepath") or "")[:120])}</div></td>'
             f'<td><span class="badge {state}">{_e(label)}</span>{_review_chip(entry, reviews)}</td>'
             f'<td class="act">{_send_button(entry)}</td></tr>')
@@ -2188,7 +2191,8 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
             shame_rows.append(
                 "<tr>"
                 f"<td class=\"who mono\">{_e(entry['timestamp'][:19].replace('T', ' '))}</td>"
-                f"<td class=\"name\">{_e(entry['filename'])}<div class=\"who\">{who}{host}</div></td>"
+                f"<td class=\"name\"><a class=\"asset-link\" href=\"{_e(asset_page_href(entry))}\">"
+                f"{_e(entry['filename'])}</a><div class=\"who\">{who}{host}</div></td>"
                 f"<td class=\"why\">{reasons}</td>"
                    f"<td class=\"act\">{_send_button(entry)}</td>"
                 "</tr>"
@@ -2224,7 +2228,8 @@ def render_dashboard(db_path: str | Path, project_id: int | None = None,
         passed_rows.append(
             "<tr>"
             f"<td>{_e((entry.get('received_at') or '')[:16])}</td>"
-            f"<td>{_e(entry.get('filename') or '')}</td>"
+            f"<td><a class=\"asset-link\" href=\"{_e(asset_page_href(entry))}\">"
+            f"{_e(entry.get('filename') or '')}</a></td>"
             f"<td class=\"act\">{_send_button(entry)}</td>"
             "</tr>")
     passed_html = (
@@ -2780,6 +2785,10 @@ class Handler(BaseHTTPRequestHandler):
                 # pages do not, so nothing is ever unreachable from the UI.
                 self._audit_view(path, urllib.parse.parse_qs(
                     urllib.parse.urlsplit(self.path).query))
+            elif path == "/asset":
+                self._asset_page(identity)
+            elif path == "/asset/shot":
+                self._asset_shot(identity)
             elif path == "/analytics":
                 self._analytics_page(identity)
             elif path == "/budget-planner":
@@ -2796,6 +2805,124 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "not found", "path": path})
         except Exception as exc:  # a query error must not kill the handler thread
             self._json(500, {"error": "internal error", "detail": str(exc)})
+
+    # - the asset page (17 Nov 2026) - #
+
+    def _asset_page(self, identity: dict) -> None:
+        """/asset?path=... (or ?name=...): one asset, read-only."""
+        if identity["role"] == "denied":
+            self._forbid(401, "Unauthorised", UNAUTHORISED_HELP)
+            return
+        project_id, error = self._scope(identity)
+        if error:
+            self._forbid(error, "Not available", "This token is scoped to a single project.")
+            return
+        query = self._query()
+        filepath = (query.get("path", [""])[0] or "").strip()
+        filename = (query.get("name", [""])[0] or "").strip()
+        if not filepath and not filename:
+            self._forbid(400, "Which asset?", "Open an asset from the dashboard's lists.")
+            return
+        history = asset_history(self.server.db_path, filepath, filename, project_id)
+        name = filename or (history[0]["filename"] if history else Path(filepath).name)
+        workstation = self._workstation_asset(filepath or (history[0]["filepath"] if history else ""),
+                                              name)
+        keep = {key: value for key, value in query.items() if key in ("token", "project_id")}
+        body = render_asset_page(filepath=filepath, filename=name, history=history,
+                                 workstation=workstation,
+                                 base_query=urllib.parse.urlencode(keep, doseq=True))
+        self._send(200, body.encode("utf-8"), "text/html; charset=utf-8")
+
+    def _ws_get(self, base: str, path: str, raw: bool = False, timeout: float = 4.0):
+        request = urllib.request.Request(f"{base}{path}")
+        if self.server.workstation_token:
+            request.add_header("Authorization", f"Bearer {self.server.workstation_token}")
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            body = response.read(16 * 1024 * 1024 + 1)
+            if raw:
+                return body, response.headers.get("Content-Type", "")
+            return json.loads(body or b"{}")
+
+    def _workstation_asset(self, filepath: str, filename: str) -> dict:
+        """What the Art Workstation knows about this file: the newest version, its
+        check, every version's notes, every sign-off. Best effort: a workstation
+        that is down means an empty section, never a broken page."""
+        base = self._workstation_url()
+        found: dict = {"url": base, "asset": None, "notes": [], "reviews": [], "check": {}}
+        if not base:
+            found["error"] = "no Art Workstation found (start it, or pass --workstation-url)"
+            return found
+        try:
+            assets = self._ws_get(base, "/api/assets").get("assets", [])
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            found["error"] = f"not reachable ({getattr(exc, 'reason', exc)})"
+            return found
+        wanted = _norm_path(filepath)
+        match = None
+        if wanted:
+            match = next((item for item in assets if _norm_path(item.get("source_path")) == wanted), None)
+        if match is None:
+            same_name = [item for item in assets
+                         if str(item.get("filename") or "").lower() == filename.lower()
+                         and (not wanted or not item.get("source_path"))]
+            match = same_name[0] if same_name else None
+        if match is None:
+            return found
+        try:
+            detail = self._ws_get(base, f"/api/assets/{int(match['id'])}")
+            found["asset"] = detail
+            found["check"] = self._ws_get(base, f"/api/assets/{int(match['id'])}/check", timeout=30)
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            found["error"] = f"could not read asset #{match['id']} ({getattr(exc, 'reason', exc)})"
+            return found
+        # Notes and sign-offs of every version: a note pinned on v1 is still the
+        # reason v2 exists.
+        versions = sorted(detail.get("versions") or [{"id": detail["id"], "version": detail.get("version", 1)}],
+                          key=lambda item: -int(item.get("version", 1)))[:10]
+        for version in versions:
+            vid = int(version["id"])
+            try:
+                if vid == int(detail["id"]):
+                    notes, reviews = detail.get("notes") or [], detail.get("reviews") or []
+                else:
+                    other = self._ws_get(base, f"/api/assets/{vid}")
+                    notes, reviews = other.get("notes") or [], other.get("reviews") or []
+            except (OSError, ValueError, urllib.error.URLError):
+                continue
+            for note in notes:
+                found["notes"].append({**note, "version": version.get("version", 1)})
+            for review in reviews:
+                found["reviews"].append({**review, "version": version.get("version", 1)})
+        found["notes"].sort(key=lambda note: ({"open": 0, "fixed": 1}.get(note.get("status") or "open", 2),
+                                              note.get("created_at") or ""), reverse=False)
+        found["reviews"].sort(key=lambda item: item.get("created_at") or "", reverse=True)
+        return found
+
+    def _asset_shot(self, identity: dict) -> None:
+        """A note's picture, fetched from the Workstation (which may need a token
+        the browser does not have). Images only."""
+        if identity["role"] == "denied":
+            self._json(401, {"error": "unauthorised"})
+            return
+        try:
+            note_id = int(self._query().get("note", [""])[0])
+        except (TypeError, ValueError):
+            self._json(400, {"error": "note must be a number"})
+            return
+        base = self._workstation_url()
+        if not base:
+            self._json(404, {"error": "no Art Workstation found"})
+            return
+        try:
+            body, kind = self._ws_get(base, f"/api/notes/{note_id}/screenshot", raw=True)
+        except (OSError, ValueError, urllib.error.URLError) as exc:
+            self._json(404, {"error": f"no picture ({getattr(exc, 'reason', exc)})"})
+            return
+        kind = kind.split(";")[0].strip().lower()
+        if kind not in ("image/png", "image/jpeg", "image/webp") or len(body) > 16 * 1024 * 1024:
+            self._json(415, {"error": "not an image"})
+            return
+        self._send(200, body, kind, {"Cache-Control": "private, max-age=300"})
 
     def _analytics_page(self, identity: dict) -> None:
         if identity["role"] == "denied":
@@ -4529,6 +4656,299 @@ def list_audit(db_path: str | Path, limit: int = 100) -> list[dict]:
 #: here (not just in the page) so a stuck button cannot queue the workstation.
 MAX_SEND_BATCH = 10
 PORTS_FILE_ENV = "AGK_PORTS_FILE"
+
+
+def _norm_path(value: object) -> str:
+    return str(value or "").replace("\\", "/").strip().lower()
+
+
+def asset_history(db_path: str | Path, filepath: str = "", filename: str = "",
+                  project_id: int | None = None, limit: int = 200) -> list[dict]:
+    """Every gate verdict on one file, newest first, with its reasons.
+
+    Matched by the file's path (slashes and letter case ignored, as on
+    Windows); a verdict sent with no path is matched by name only when the page
+    was asked for by name."""
+    if filepath:
+        where, params = ("lower(replace(filepath, char(92), '/')) = ?", [_norm_path(filepath)])
+    elif filename:
+        where, params = ("lower(filename) = ? AND filepath = ''", [str(filename).lower()])
+    else:
+        return []
+    if project_id is not None:
+        where += " AND project_id = ?"
+        params.append(int(project_id))
+    try:
+        with open_db(db_path) as connection:
+            rows = [dict(row) for row in connection.execute(
+                "SELECT id, timestamp, received_at, hostname, username, filename, filepath,"
+                f" filesize, passed, metric, status FROM verdicts WHERE {where}"
+                " ORDER BY id DESC LIMIT ?", [*params, int(limit)]).fetchall()]
+            for row in rows:
+                row["problems"] = [item["message"] for item in connection.execute(
+                    "SELECT message FROM problems WHERE verdict_id = ? ORDER BY id",
+                    (row["id"],)).fetchall()]
+    except STORAGE_ERRORS:
+        return []
+    return rows
+
+
+#: Which map a texture is, from its name: the same suffixes the naming check
+#: and the pixel checks read. Longest first, so "_BaseColor" wins over "_Color".
+MAP_WORDS = (
+    ("basecolor", "base colour"), ("albedo", "base colour"), ("diffuse", "base colour"),
+    ("normal", "normal map"), ("nrm", "normal map"), ("nor", "normal map"),
+    ("roughness", "roughness"), ("rough", "roughness"), ("metallic", "metallic"),
+    ("metalness", "metallic"), ("occlusion", "ambient occlusion"), ("ao", "ambient occlusion"),
+    ("emissive", "emissive"), ("emission", "emissive"), ("height", "height"),
+    ("displacement", "height"), ("opacity", "opacity"), ("alpha", "opacity"),
+    ("specular", "specular"), ("gloss", "glossiness"), ("smoothness", "smoothness"),
+    ("orm", "packed mask (occlusion, roughness, metallic)"),
+    ("arm", "packed mask (occlusion, roughness, metallic)"),
+    ("rma", "packed mask (roughness, metallic, occlusion)"),
+    ("mra", "packed mask (metallic, roughness, occlusion)"),
+    ("maskmap", "packed mask (Unity MaskMap)"), ("mask", "mask"),
+    ("d", "base colour"), ("bc", "base colour"), ("n", "normal map"), ("e", "emissive"),
+    ("r", "roughness"), ("m", "metallic"), ("h", "height"),
+)
+
+
+def texture_map_kind(name: str) -> str:
+    stem = Path(str(name)).stem.lower()
+    parts = [part for part in re.split(r"[_\-. ]", stem) if part]
+    for part in reversed(parts[1:] or parts):
+        part = re.sub(r"(gl|dx|ogl|directx|opengl)$", "", part) or part
+        for word, kind in MAP_WORDS:
+            if part == word:
+                return kind
+    return "texture"
+
+
+def _when(value: object) -> str:
+    return str(value or "")[:16].replace("T", " ")
+
+
+def render_asset_page(*, filepath: str, filename: str, history: list[dict],
+                      workstation: dict, base_query: str = "") -> str:
+    """One asset: why it failed, its numbers, its textures, the review notes
+    with their pictures, and who signed what off and when.
+
+    Read-only on purpose. Pass and fail are the gate's measurements and
+    approval is a person's judgement of the whole model, made in the Art
+    Workstation where the model can be turned round; this page changes neither,
+    it links to where each happens."""
+    latest = history[0] if history else None
+    name = filename or (latest or {}).get("filename") or Path(filepath).name or "asset"
+    ws_asset = workstation.get("asset") or {}
+    ws_url = workstation.get("url") or ""
+    shot_query = f"&{base_query}" if base_query else ""
+
+    def badge(entry: dict | None) -> str:
+        if not entry:
+            return '<span class="badge none">NO VERDICT</span>'
+        label = entry.get("status") or ("PASSED" if entry.get("passed") else "FAILED")
+        kind = "passed" if entry.get("passed") else "failed"
+        return f'<span class="badge {kind}">{_e(label)}</span>'
+
+    review = (ws_asset.get("reviews") or [None])[0]
+    review_html = (f'<span class="review {_e(review["status"])}">'
+                   f'{_e(REVIEW_WORDS.get(review["status"], review["status"]))}</span>'
+                   f' <span class="sub">by {_e(review["reviewer"])}'
+                   f'{"" if review.get("verified") else " (name typed)"}, {_e(_when(review["created_at"]))}</span>'
+                   ) if review else '<span class="review none">Not reviewed</span>'
+    if ws_asset:
+        open_link = (f'<a class="button" href="{_e(ws_url)}/viewer?asset={int(ws_asset["id"])}"'
+                     ' target="_blank" rel="noopener">Open in the Workstation to inspect and approve'
+                     ' &rarr;</a>')
+    elif latest and latest.get("filepath"):
+        open_link = _send_button(latest) + ('<span class="sub"> Not in the Workstation yet: send it'
+                                            ' there to review the model.</span>')
+    else:
+        open_link = '<span class="sub">Not in the Workstation.</span>'
+    if workstation.get("error"):
+        open_link += f'<div class="sub">Workstation: {_e(workstation["error"])}</div>'
+
+    # Numbers: the workstation's measurement of the stored file, else the gate's line.
+    numbers = []
+    if ws_asset:
+        numbers = [("Triangles", f"{int(ws_asset.get('triangle_count') or 0):,}"),
+                   ("Vertices", f"{int(ws_asset.get('vertex_count') or 0):,}"),
+                   ("Material slots", str(ws_asset.get("material_slots") or 0)),
+                   ("Version", f"v{ws_asset.get('version', 1)} of {len(ws_asset.get('versions') or [1])}")]
+    if latest:
+        numbers.append(("Gate measured", latest.get("metric") or "-"))
+        if latest.get("filesize", -1) >= 0:
+            numbers.append(("File size", f"{latest['filesize'] / 1048576:.1f} MB"
+                            if latest["filesize"] >= 1048576 else f"{latest['filesize'] / 1024:.0f} KB"))
+    numbers_html = "".join(f"<div class='fact'><div class='k'>{_e(k)}</div><div class='v'>{_e(v)}</div></div>"
+                           for k, v in numbers) or '<div class="sub">No measurement yet.</div>'
+
+    history_rows = "".join(
+        "<tr>"
+        f"<td class='when'>{_e(_when(entry.get('received_at')))}</td>"
+        f"<td>{badge(entry)}</td>"
+        f"<td class='mono'>{_e(entry.get('metric') or '')}</td>"
+        "<td>" + ("<ul>" + "".join(f"<li>{_e(line)}</li>" for line in entry["problems"]) + "</ul>"
+                  if entry["problems"] else "<span class='sub'>no rule broken</span>") + "</td>"
+        f"<td class='sub'>{_e(entry.get('username') or entry.get('hostname') or '')}</td>"
+        "</tr>" for entry in history)
+    history_html = (
+        "<table><thead><tr><th style='width:130px'>When</th><th style='width:90px'>Gate</th>"
+        "<th style='width:200px'>Numbers</th><th>Why</th><th style='width:120px'>Machine</th></tr></thead>"
+        f"<tbody>{history_rows}</tbody></table>") if history else \
+        '<div class="empty">The gate has not reported on this file.</div>'
+
+    check = workstation.get("check") or {}
+    texture_rows = []
+    if check.get("checked"):
+        for item in [{"name": ws_asset.get("filename") or name, "status": check.get("status"),
+                      "problems": check.get("problems") or [], "warnings": check.get("warnings") or [],
+                      "metric": check.get("metric") or "", "main": True}] + list(check.get("files") or []):
+            said = "".join(f"<li class='bad'>{_e(line)}</li>" for line in item["problems"]) + \
+                "".join(f"<li class='note'>{_e(line)}</li>" for line in item["warnings"])
+            kind = "the model" if item.get("main") and not is_texture_name(item["name"]) \
+                else texture_map_kind(item["name"])
+            texture_rows.append(
+                f"<tr><td>{_e(item['name'])}</td><td>{_e(kind)}</td>"
+                f"<td>{badge({'status': item['status'], 'passed': item['status'] in ('PASSED', 'HEALED')})}"
+                f" <span class='sub mono'>{_e(item.get('metric') or '')}</span></td>"
+                f"<td>{'<ul>' + said + '</ul>' if said else '<span class=sub>nothing to say</span>'}</td></tr>")
+        textures_html = (
+            f"<div class='sub'>Checked in the Workstation against {_e(check.get('budget') or '')}.</div>"
+            "<table><thead><tr><th>File</th><th style='width:190px'>Map</th>"
+            "<th style='width:190px'>Gate</th><th>Notes</th></tr></thead>"
+            f"<tbody>{''.join(texture_rows)}</tbody></table>")
+    elif ws_asset:
+        textures_html = f'<div class="empty">Not checked: {_e(check.get("reason") or "the Workstation did not answer")}</div>'
+    else:
+        textures_html = ('<div class="empty">Its textures are known once it is in the Workstation '
+                         '(they travel with the model).</div>')
+
+    note_cards = []
+    for note in workstation.get("notes") or []:
+        status = note.get("status") or "open"
+        steps = "".join(
+            f"<li>{_e(_when(event['created_at']))} &middot; "
+            f"{_e({'fixed': 'marked fixed', 'accepted': 'accepted', 'reopened': 'reopened'}.get(event['action'], event['action']))}"
+            f" by {_e(event['who'])}{'' if event.get('verified') else ' (name typed)'}"
+            f"{': ' + _e(event['comment']) if event.get('comment') else ''}</li>"
+            for event in note.get("events") or [])
+        shot = (f"<a href='{_e(ws_url)}/viewer?asset={int(note['asset_id'])}&amp;note={int(note['id'])}'"
+                " target='_blank' rel='noopener' title='Open this view in the Workstation'>"
+                f"<img class='shot' loading='lazy' alt='the view this note was pinned in'"
+                f" src='/asset/shot?note={int(note['id'])}{_e(shot_query)}'></a>") if note.get("screenshot") else ""
+        pin = f"<span class='pin'>#{int(note['pin']['number'])}</span> " if note.get("pin") else ""
+        note_cards.append(
+            f"<div class='card note-card {_e(status)}'>{shot}<div class='body'>"
+            f"<div class='head'>{pin}<span class='state {_e(status)}'>"
+            f"{_e({'open': 'Open', 'fixed': 'Fixed - waiting for a check', 'accepted': 'Accepted'}.get(status, status))}</span>"
+            f" <span class='sub'>{_e(note.get('category') or '')} &middot; v{_e(note.get('version', ''))}</span></div>"
+            f"<div class='text'>{_e(note.get('note_text') or '')}</div>"
+            f"<div class='sub'>{_e(note.get('author') or 'anonymous')}, {_e(_when(note.get('created_at')))}</div>"
+            + (f"<ul class='steps'>{steps}</ul>" if steps else "")
+            + "</div></div>")
+    open_count = sum(1 for note in workstation.get("notes") or [] if (note.get("status") or "open") == "open")
+    fixed_count = sum(1 for note in workstation.get("notes") or [] if note.get("status") == "fixed")
+    notes_html = "".join(note_cards) or (
+        '<div class="panel"><div class="empty">No review notes. In the Workstation, a director or producer pins a '
+        'note on the part of the model it is about; it shows here with a picture of that view.</div></div>')
+
+    reviews_rows = "".join(
+        f"<tr><td class='when'>{_e(_when(item['created_at']))}</td>"
+        f"<td><span class='review {_e(item['status'])}'>{_e(REVIEW_WORDS.get(item['status'], item['status']))}</span></td>"
+        f"<td>{_e(item['reviewer'])}{'' if item.get('verified') else ' <span class=sub>(name typed)</span>'}</td>"
+        f"<td>v{_e(item.get('version', ''))}</td><td>{_e(item.get('note') or '')}</td></tr>"
+        for item in workstation.get("reviews") or [])
+    reviews_html = (
+        "<table><thead><tr><th style='width:130px'>When</th><th style='width:170px'>Decision</th>"
+        "<th style='width:170px'>By</th><th style='width:60px'>Version</th><th>Note</th></tr></thead>"
+        f"<tbody>{reviews_rows}</tbody></table>") if reviews_rows else \
+        '<div class="empty">Nobody has signed it off yet.</div>'
+
+    back = "/dashboard" + (f"?{base_query}" if base_query else "")
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{_e(name)} - AssetHealth</title>
+<style>{CSS}{ASSET_PAGE_CSS}</style>
+</head>
+<body>
+<div class="wrap">
+  <nav><a href="{_e(back)}">&larr; Dashboard</a></nav>
+  <header>
+    <h1>{_e(name)}</h1> {badge(latest)} {review_html}
+  </header>
+  <div class="sub mono path">{_e(filepath or (latest or {}).get('filepath') or '')}</div>
+  <div class="actions-row">{open_link}</div>
+  <p class="readonly">Pass and fail are the gate's measurements; approval is a person's
+    judgement of the whole model, made in the Workstation. This page shows both and changes
+    neither.</p>
+
+  <h2>Numbers</h2><div class="facts">{numbers_html}</div>
+  <h2>Review notes <span class="chips">{open_count} open &middot; {fixed_count} fixed, waiting for a check</span></h2>
+  <div class="notes-grid">{notes_html}</div>
+  <h2>Textures and maps</h2><div class="panel">{textures_html}</div>
+  <h2>Gate history <span class="chips">{len(history)} run(s)</span></h2><div class="panel">{history_html}</div>
+  <h2>Sign-off</h2><div class="panel">{reviews_html}</div>
+</div>
+<script src="/static/dashboard.js" defer></script>
+</body>
+</html>"""
+
+
+ASSET_PAGE_CSS = """
+nav { margin: 0 0 12px; }
+.badge { padding: 2px 9px; border-radius: 999px; font-size: 11px; font-weight: 700; letter-spacing: .05em; }
+.badge.failed { background: rgba(255,107,107,.16); color: var(--bad); }
+.badge.passed { background: rgba(62,207,142,.16); color: var(--good); }
+h2 .chips { text-transform: none; letter-spacing: 0; font-weight: 400; margin-left: 6px; }
+.empty { color: var(--muted); }
+.panel > .sub { padding: 10px 14px 0; }
+.path { margin: 2px 0 14px; overflow-wrap: anywhere; }
+.badge.none { color: var(--muted); }
+.review { display: inline-block; padding: 1px 9px; border-radius: 999px; font-size: 12px;
+  border: 1px solid currentColor; font-weight: 600; }
+.review.approved { color: var(--good); } .review.changes_requested { color: var(--bad); }
+.review.in_review { color: #e0af68; } .review.none { color: var(--muted); }
+.actions-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+a.button { display: inline-block; padding: 7px 12px; border-radius: 8px; background: #1d2431;
+  border: 1px solid var(--line); color: var(--accent); }
+.readonly { font-size: 13px; color: var(--muted); margin: 10px 0 0; }
+.facts { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 10px; }
+.fact { background: #12161e; border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; }
+.fact .k { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.fact .v { font-size: 15px; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.notes-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 12px; }
+.note-card { border: 1px solid var(--line); border-radius: 10px; overflow: hidden; background: #12161e; }
+.note-card.open { border-left: 3px solid #e0af68; } .note-card.fixed { border-left: 3px solid var(--accent); }
+.note-card.accepted { border-left: 3px solid var(--good); }
+.note-card .shot { display: block; width: 100%; max-height: 240px; object-fit: cover;
+  border-bottom: 1px solid var(--line); background: #0b0e13; }
+.note-card .body { padding: 10px 12px; }
+.note-card .head { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; margin-bottom: 4px; }
+.note-card .text { margin: 4px 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.pin { font-weight: 700; color: #111; background: #e0af68; border-radius: 9px; padding: 0 6px; font-size: 12px; }
+.state { font-size: 11px; font-weight: 600; padding: 1px 8px; border-radius: 999px; border: 1px solid currentColor; }
+.state.open { color: #e0af68; } .state.fixed { color: var(--accent); } .state.accepted { color: var(--good); }
+.steps { margin: 6px 0 0 16px; padding: 0; font-size: 12px; color: var(--muted); }
+li.bad { color: var(--bad); } li.note { color: #e0af68; }
+td ul { margin: 0; padding-left: 16px; }
+.mono { font-family: ui-monospace, Consolas, monospace; font-size: 12px; }
+@media (max-width: 640px) {
+  table thead { display: none; }
+  table tr { display: block; padding: 8px 0; border-bottom: 1px solid var(--line); }
+  table td { display: block; border: none; padding: 2px 14px; width: auto !important; }
+}
+"""
+
+
+def asset_page_href(entry: dict) -> str:
+    """Where a dashboard row links: the asset's own page."""
+    params = {"path": entry.get("filepath") or ""} if entry.get("filepath") else \
+        {"name": entry.get("filename") or ""}
+    return "/asset?" + urllib.parse.urlencode(params)
 
 
 def recent_passed(db_path: str | Path, limit: int = 12,

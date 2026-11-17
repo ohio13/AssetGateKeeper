@@ -47,6 +47,7 @@ Routes
     POST /api/notes                 -> {"asset_id", "category", "note_text",
                                         optional "pin": {"point", "camera"}, "screenshot"}
     GET  /api/notes/<id>/screenshot -> the view the note was pinned in
+    POST /api/notes/<id>/status     -> {"action": "fixed"|"accepted"|"reopened", "comment"}
     DEL  /api/notes/<id>
     GET  /api/stats                 -> repository totals
 """
@@ -313,7 +314,20 @@ CREATE TABLE IF NOT EXISTS sessions (
     expires_at TEXT    NOT NULL
 );
 
+-- What happened to a note (17 Nov 2026): an artist marks it fixed, a reviewer
+-- accepts it or reopens it. One row per step, never edited.
+CREATE TABLE IF NOT EXISTS note_events (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    note_id    INTEGER NOT NULL REFERENCES reviews_and_notes(id) ON DELETE CASCADE,
+    action     TEXT    NOT NULL,
+    who        TEXT    NOT NULL DEFAULT '',
+    verified   INTEGER NOT NULL DEFAULT 0,
+    comment    TEXT    NOT NULL DEFAULT '',
+    created_at TEXT    NOT NULL
+);
+
 CREATE INDEX IF NOT EXISTS idx_reviews_asset ON reviews(asset_id, id DESC);
+CREATE INDEX IF NOT EXISTS idx_note_events ON note_events(note_id, id);
 CREATE INDEX IF NOT EXISTS idx_lod_asset   ON lod_versions(asset_id);
 CREATE INDEX IF NOT EXISTS idx_notes_asset ON reviews_and_notes(asset_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_coll_asset  ON collisions(asset_id);
@@ -421,6 +435,11 @@ def init_db(db_path: str | Path) -> None:
             if column not in note_columns:
                 connection.execute(
                     f"ALTER TABLE reviews_and_notes ADD COLUMN {column} TEXT NOT NULL DEFAULT ''")
+        # Note status (17 Nov 2026): open -> fixed -> accepted, or reopened.
+        for column, default in (("status", "'open'"), ("status_by", "''"), ("status_at", "''")):
+            if column not in note_columns:
+                connection.execute(f"ALTER TABLE reviews_and_notes ADD COLUMN {column} "
+                                   f"TEXT NOT NULL DEFAULT {default}")
         lod_columns = {row["name"] for row in connection.execute("PRAGMA table_info(lod_versions)")}
         if "origin" not in lod_columns:
             # "generated" by the decimator, or "uploaded": an artist's own LOD file.
@@ -942,6 +961,12 @@ def list_assets(db_path: str | Path, all_versions: bool = False) -> list[dict]:
             "SELECT a.*,"
             "       (SELECT COUNT(*) FROM lod_versions l WHERE l.asset_id = a.id) AS lod_count,"
             "       (SELECT COUNT(*) FROM reviews_and_notes n WHERE n.asset_id = a.id) AS note_count,"
+            # Notes still to do, and notes marked fixed waiting for a reviewer,
+            # across every version of the asset (a note pinned on v1 still counts).
+            "       (SELECT COUNT(*) FROM reviews_and_notes n JOIN assets f ON f.id = n.asset_id"
+            "         WHERE f.family_id = a.family_id AND n.status = 'open') AS open_notes,"
+            "       (SELECT COUNT(*) FROM reviews_and_notes n JOIN assets f ON f.id = n.asset_id"
+            "         WHERE f.family_id = a.family_id AND n.status = 'fixed') AS fixed_notes,"
             "       (SELECT COUNT(*) FROM assets v WHERE v.family_id = a.family_id) AS version_count,"
             f"       COALESCE({LATEST_REVIEW}, '') AS review_status"
             f" FROM assets a{where} ORDER BY a.uploaded_at DESC, a.id DESC").fetchall()
@@ -1023,7 +1048,17 @@ def list_notes(db_path: str | Path, asset_id: int) -> list[dict]:
         rows = connection.execute(
             "SELECT * FROM reviews_and_notes WHERE asset_id = ?"
             " ORDER BY created_at DESC, id DESC", (asset_id,)).fetchall()
+        events = connection.execute(
+            "SELECT e.* FROM note_events e JOIN reviews_and_notes n ON n.id = e.note_id"
+            " WHERE n.asset_id = ? ORDER BY e.id", (asset_id,)).fetchall()
     notes = [_note_out(row) for row in rows]
+    by_note: dict = {}
+    for event in events:
+        by_note.setdefault(event["note_id"], []).append(
+            dict(event, verified=bool(event["verified"])))
+    for note in notes:
+        note["events"] = by_note.get(note["id"], [])
+        note["status"] = note.get("status") or "open"
     # Pins are numbered oldest first, so #1 stays #1 as the list grows.
     for number, note in enumerate(sorted((n for n in notes if n["pin"]),
                                          key=lambda n: (n["created_at"], n["id"])), 1):
@@ -1826,14 +1861,70 @@ def approval_for(db_path: str | Path, sha256: str, data_dir: Path | None = None)
 
 
 # --- #
+# Note status (17 Nov 2026): a pinned note is a small ticket
+# --- #
+
+NOTE_STATUSES = ("open", "fixed", "accepted")
+#: action -> (the status it leaves the note in, the statuses it may start from,
+#: the permission it needs). An artist marks a note fixed; only someone who may
+#: sign off accepts it or sends it back.
+NOTE_ACTIONS = {
+    "fixed": ("fixed", ("open",), "note"),
+    "accepted": ("accepted", ("open", "fixed"), "review"),
+    "reopened": ("open", ("fixed", "accepted"), "review"),
+}
+NOTE_ACTION_WORDS = {"fixed": "Marked fixed", "accepted": "Accepted", "reopened": "Reopened"}
+
+
+def get_note(db_path: str | Path, note_id: int) -> dict:
+    with open_db(db_path) as connection:
+        row = connection.execute("SELECT asset_id FROM reviews_and_notes WHERE id = ?",
+                                 (note_id,)).fetchone()
+    if row is None:
+        raise WorkstationError(f"no note {note_id}", 404)
+    return next(note for note in list_notes(db_path, row["asset_id"]) if note["id"] == note_id)
+
+
+def set_note_status(db_path: str | Path, note_id: int, action: str, who: str,
+                    verified: bool = False, comment: str = "") -> dict:
+    """Move a note along: fixed, accepted or reopened. Every step is kept."""
+    if action not in NOTE_ACTIONS:
+        raise WorkstationError(f"action must be one of {', '.join(NOTE_ACTIONS)}", 400)
+    status, allowed_from, _permission = NOTE_ACTIONS[action]
+    who = str(who or "").strip()[:80]
+    if not who:
+        raise WorkstationError("a name is required when nobody is signed in", 400)
+    comment = str(comment or "").strip()[:2000]
+    now = utc_now()
+    with _WRITE_LOCK, open_db(db_path) as connection:
+        row = connection.execute("SELECT status FROM reviews_and_notes WHERE id = ?",
+                                 (note_id,)).fetchone()
+        if row is None:
+            raise WorkstationError(f"no note {note_id}", 404)
+        current = row["status"] or "open"
+        if current not in allowed_from:
+            raise WorkstationError(f"this note is {current}; it cannot be {action} now", 409,
+                                   {"status": current})
+        connection.execute("UPDATE reviews_and_notes SET status = ?, status_by = ?, status_at = ?"
+                           " WHERE id = ?", (status, who, now, note_id))
+        connection.execute("INSERT INTO note_events (note_id, action, who, verified, comment,"
+                           " created_at) VALUES (?, ?, ?, ?, ?, ?)",
+                           (note_id, action, who, 1 if verified else 0, comment, now))
+    return get_note(db_path, note_id)
+
+
+# --- #
 # Named reviewers (W3): local accounts, the same PBKDF2 format AssetHealth uses
 # --- #
 
-ROLES = ("viewer", "reviewer", "lead")
+ROLES = ("viewer", "artist", "reviewer", "lead")
 PERMISSIONS = {
     # what each kind of caller may do; "service" is the shared token once
     # accounts exist (the bulk uploader, AssetHealth's bridge, the P4 trigger)
     "viewer": {"read", "note"},
+    # An artist uploads fixes and marks notes fixed, but never signs off
+    # (accepting a note or approving a version is a reviewer's or a lead's).
+    "artist": {"read", "note", "upload", "edit"},
     "reviewer": {"read", "note", "upload", "edit", "review"},
     "lead": {"read", "note", "upload", "edit", "review", "delete"},
     "service": {"read", "upload", "edit"},
@@ -2850,6 +2941,7 @@ LOGIN_WINDOW = 300          # seconds
 LOGIN_FAILURES = 10         # per address per window, then 429
 NOTE_RE = re.compile(r"^/api/notes/(\d+)$")
 NOTE_SHOT_RE = re.compile(r"^/api/notes/(\d+)/screenshot$")
+NOTE_STATUS_RE = re.compile(r"^/api/notes/(\d+)/status$")
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -2979,8 +3071,8 @@ class Handler(BaseHTTPRequestHandler):
             return "delete" if ASSET_RE.match(path) else "edit"
         if path in ("/api/assets",) or ASSET_SIDECARS_RE.match(path) or ASSET_BAKE_RE.match(path):
             return "upload"                  # a bake adds a new asset to the library
-        if path == "/api/notes":
-            return "note"
+        if path == "/api/notes" or NOTE_STATUS_RE.match(path):
+            return "note"                    # accepting or reopening is checked again inside
         if ASSET_REVIEW_RE.match(path):
             return "review"
         return "edit"
@@ -3536,6 +3628,24 @@ class Handler(BaseHTTPRequestHandler):
                                 data_dir=server.data_dir)
                 self._publish("notes", asset_id)
                 self._json(201, note)
+                return
+
+            match = NOTE_STATUS_RE.match(path)
+            if match:
+                payload = self._json_body()
+                if payload is None:
+                    return
+                action = str(payload.get("action", ""))
+                needed = NOTE_ACTIONS.get(action, (None, None, "note"))[2]
+                if self._forbidden(who, needed):
+                    return
+                signed_in = who["kind"] == "account"
+                note = set_note_status(
+                    server.db_path, int(match.group(1)), action,
+                    (who["display"] or who["name"]) if signed_in else str(payload.get("who", "")),
+                    verified=signed_in, comment=str(payload.get("comment", "")))
+                self._publish("notes", note["asset_id"])
+                self._json(200, note)
                 return
 
             match = ASSET_BAKE_RE.match(path)

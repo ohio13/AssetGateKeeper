@@ -584,6 +584,31 @@ with sync_playwright() as playwright:
     expect("... in the warning colour, apart from failures",
            page.locator("#verdict-check .verdict-notes li").count() == 1
            and page.locator("#verdict-check .verdict-problems li").count() == 0)
+    # 17 Nov 2026: a note is a small ticket - Open, Fixed, Accepted.
+    _ticket = aws.add_note(db, ids["gif"], "Texture", "flames loop with a pop",
+                           author="Dana Director")
+    page.goto(f"{BASE}/viewer?live=0&asset={ids['gif']}")
+    page.wait_for_selector(f".note[data-note-id='{_ticket['id']}'] .note-state")
+    expect("a new note shows as Open, with Mark fixed and Accept",
+           page.locator(f".note[data-note-id='{_ticket['id']}'] .note-state").inner_text() == "Open"
+           and page.locator(f".note[data-note-id='{_ticket['id']}'] [data-note-action='fixed']").count() == 1)
+    page.fill("#note-author", "Andy Artist")
+    page.once("dialog", lambda dialog: dialog.accept("smoothed the loop"))
+    page.click(f".note[data-note-id='{_ticket['id']}'] [data-note-action='fixed']")
+    page.wait_for_function(
+        f"() => (document.querySelector(\".note[data-note-id='{_ticket['id']}'] .note-state\") || {{}})"
+        ".textContent === 'Fixed'", timeout=10000)
+    _card = page.locator(f".note[data-note-id='{_ticket['id']}']").inner_text()
+    expect("... Mark fixed asks what changed, and the card says who fixed it and how",
+           "Fixed" in _card and "marked fixed by Andy Artist" in _card and "smoothed the loop" in _card,
+           _card)
+    page.click(f".note[data-note-id='{_ticket['id']}'] [data-note-action='accepted']")
+    page.wait_for_function(
+        f"() => (document.querySelector(\".note[data-note-id='{_ticket['id']}'] .note-state\") || {{}})"
+        ".textContent === 'Accepted'", timeout=10000)
+    expect("... then Accept closes it, and only Reopen is left",
+           page.locator(f".note[data-note-id='{_ticket['id']}'] [data-note-action]").count() == 1
+           and page.locator(f".note[data-note-id='{_ticket['id']}'] [data-note-action='reopened']").count() == 1)
     pick(ids["cube"])
     expect("a .glb does not offer it (the healer cannot fix glTF)",
            not page.locator("#asset-heal").is_visible())

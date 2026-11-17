@@ -78,6 +78,21 @@
     }
   }
 
+  // Rows link to the asset's own page (17 Nov 2026). The page needs the same
+  // token and project as this one; carry them over.
+  function carryScope() {
+    const here = new URLSearchParams(location.search);
+    for (const link of document.querySelectorAll("a.asset-link")) {
+      const target = new URL(link.getAttribute("href"), location.origin);
+      for (const key of ["token", "project_id"]) {
+        if (here.get(key) && !target.searchParams.get(key)) target.searchParams.set(key, here.get(key));
+      }
+      link.setAttribute("href", target.pathname + target.search);
+    }
+  }
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", carryScope);
+  else carryScope();
+
   document.addEventListener("click", (event) => {
     const button = event.target.closest && event.target.closest("button.send");
     if (!button) return;

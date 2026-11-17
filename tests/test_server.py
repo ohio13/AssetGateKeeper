@@ -11,6 +11,7 @@ import sys
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 from unittest.mock import patch
@@ -1186,6 +1187,104 @@ expect("it records how many rows it added",
 expect("the dashboard labels those rows",
        "are demo data" in ahs.render_dashboard(optin_db))
 expect("and names the way out", "--db myproject.db" in ahs.render_dashboard(optin_db))
+
+print("17. the asset page: every row links to one asset, read-only (17 Nov 2026)")
+import base64 as _b64  # noqa: E402
+import io as _io  # noqa: E402
+import shutil as _shutil  # noqa: E402
+import art_workstation_server as aws  # noqa: E402
+from PIL import Image as _Image  # noqa: E402
+ap_db = fresh_db("asset_page.db")
+_obj = ("mtllib SM_Crate.mtl\nusemtl wood\nv 0 0 0\nv 1 0 0\nv 1 1 0\nv 0 1 0\n"
+        "vt 0 0\nvt 1 0\nvt 1 1\nvt 0 1\nf 1/1 2/2 3/3\nf 1/1 3/3 4/4\n")
+for _passed, _metric, _problems in ((False, "72,500 tris / 4 mat / 2 uv",
+                                     ["72,500 triangles exceeds the 50,000 budget (+22,500)"]),
+                                    (True, "2 tris / 1 mat / 1 uv", [])):
+    ahs.store_verdict(ap_db, {"file": "SM_Crate.obj", "filepath": "D:\\Game\\Props\\SM_Crate.obj",
+                              "passed": _passed, "status": "PASSED" if _passed else "FAILED",
+                              "metric": _metric, "problems": _problems, "hostname": "ART-PC-07"})
+ahs.store_verdict(ap_db, {"file": "SM_Other.obj", "filepath": "D:\\Game\\Props\\SM_Other.obj",
+                          "passed": False, "status": "FAILED", "metric": "9 tris",
+                          "problems": ["nope"]})
+_history = ahs.asset_history(ap_db, "d:/game/props/sm_crate.OBJ")
+expect("asset_history: every run of one file, newest first, slashes and case ignored",
+       [row["status"] for row in _history] == ["PASSED", "FAILED"]
+       and _history[1]["problems"] == ["72,500 triangles exceeds the 50,000 budget (+22,500)"], _history)
+expect("map kinds come from the texture's name",
+       [ahs.texture_map_kind(name) for name in ("T_Rock_BaseColor.png", "T_Rock_N.png",
+                                                 "T_Rock_ORM.png", "T_Rock_nor_gl.png",
+                                                 "T_Rock_Roughness.tga", "rock.png")]
+       == ["base colour", "normal map", "packed mask (occlusion, roughness, metallic)",
+           "normal map", "roughness", "texture"])
+_ws_db, _ws_data = WORK / "asset_page_ws.db", WORK / "asset_page_ws"
+for _suffix in ("", "-wal", "-shm"):
+    Path(str(_ws_db) + _suffix).unlink(missing_ok=True)
+_shutil.rmtree(_ws_data, ignore_errors=True)
+aws.init_db(_ws_db)
+_crate = aws.create_asset(_ws_db, _ws_data, "SM_Crate.obj", _obj.encode(),
+                          source={"source_path": "D:/Game/Props/SM_Crate.obj"})
+aws.add_sidecar(_ws_db, _ws_data, _crate["id"], "SM_Crate.mtl",
+                b"newmtl wood\nmap_Kd T_Crate_BaseColor.png\n")
+_png = _io.BytesIO()
+_Image.new("RGB", (64, 64), (120, 100, 90)).save(_png, "PNG")
+aws.add_sidecar(_ws_db, _ws_data, _crate["id"], "T_Crate_BaseColor.png", _png.getvalue())
+_shot = "data:image/png;base64," + _b64.b64encode(_png.getvalue()).decode()
+_pin = {"point": [0.5, 0.5, 0], "camera": {"position": [2, 2, 2], "target": [0, 0, 0]}}
+_n1 = aws.add_note(_ws_db, _crate["id"], "Geometry", "Hinge too thin", author="Dana Director",
+                   pin=_pin, screenshot=_shot, data_dir=_ws_data)
+aws.set_note_status(_ws_db, _n1["id"], "fixed", "Andy Artist", True, "thickened")
+_v2 = aws.create_asset(_ws_db, _ws_data, "SM_Crate.obj", (_obj + "\n# v2\n").encode(),
+                       source={"source_path": "D:/Game/Props/SM_Crate.obj"})
+aws.add_sidecar(_ws_db, _ws_data, _v2["id"], "SM_Crate.mtl", b"newmtl wood\nmap_Kd T_Crate_BaseColor.png\n")
+aws.add_sidecar(_ws_db, _ws_data, _v2["id"], "T_Crate_BaseColor.png", _png.getvalue())
+aws.add_note(_ws_db, _v2["id"], "Texture", "Rust reads as dirt", author="Pat Producer",
+             data_dir=_ws_data)
+aws.set_review(_ws_db, _v2["id"], "changes_requested", "see notes", "Dana Director", True)
+_ws = aws.build_server("127.0.0.1", 0, _ws_db, _ws_data, token="ws-secret", quiet=True)
+threading.Thread(target=_ws.serve_forever, daemon=True).start()
+_ws_url = f"http://127.0.0.1:{_ws.server_address[1]}"
+_dash = ahs.build_server("127.0.0.1", 0, ap_db, quiet=True, workstation_url=_ws_url,
+                         workstation_token="ws-secret")
+threading.Thread(target=_dash.serve_forever, daemon=True).start()
+_port = _dash.server_address[1]
+_status, _page, _ = request(_port, "/dashboard")
+expect("the dashboard's rows link to the asset page",
+       _status == 200 and b'class="asset-link" href="/asset?path=D%3A%5CGame%5CProps%5CSM_Crate.obj"'
+       in _page, _page[:200])
+_status, _page, _ = request(_port, "/asset?path=" + urllib.parse.quote("D:\\Game\\Props\\SM_Crate.obj"))
+_text = _page.decode("utf-8")
+expect("the asset page: why it failed, run by run", _status == 200 and "Gate history" in _text
+       and "72,500 triangles exceeds the 50,000 budget" in _text and "ART-PC-07" in _text, _text[:300])
+expect("... its numbers from the Workstation (triangles, vertices, version)",
+       "Vertices" in _text and "v2 of 2" in _text)
+expect("... the textures that came with it, and which map each is",
+       "T_Crate_BaseColor.png" in _text and "base colour" in _text)
+expect("... every version's notes with their status and steps, and the note's picture",
+       "Hinge too thin" in _text and "Rust reads as dirt" in _text
+       and "Fixed - waiting for a check" in _text and "marked fixed by Andy Artist" in _text
+       and f"/asset/shot?note={_n1['id']}" in _text and "1 open" in _text, _text[-2500:])
+expect("... who signed it off, and a link to the Workstation to inspect and approve",
+       "Changes requested" in _text and "Dana Director" in _text
+       and f"{_ws_url}/viewer?asset={_v2['id']}" in _text)
+expect("... and no pass, fail or approve control of its own",
+       "<form" not in _text and "data-status" not in _text and "This page shows both" in _text)
+_status, _img, _headers = request(_port, f"/asset/shot?note={_n1['id']}")
+expect("the note's picture comes through the dashboard (the Workstation's token stays on the server)",
+       _status == 200 and _img[:8] == b"\x89PNG\r\n\x1a\n"
+       and _headers.get("Content-Type") == "image/png", (_status, _headers))
+expect("... a bad note number is refused", request(_port, "/asset/shot?note=x")[0] == 400)
+_status, _page, _ = request(_port, "/asset?path=" + urllib.parse.quote("D:/Game/Props/SM_Other.obj"))
+expect("an asset not in the Workstation offers Send to Workstation instead",
+       _status == 200 and b"Not in the Workstation yet" in _page and b'class="send"' in _page)
+_ws.shutdown()
+_ws.server_close()
+_status, _page, _ = request(_port, "/asset?path=" + urllib.parse.quote("D:\\Game\\Props\\SM_Crate.obj"))
+expect("with the Workstation down, the page still shows the gate history and says why the rest is missing",
+       _status == 200 and b"72,500 triangles" in _page and b"not reachable" in _page)
+expect("... and the page without a path or name says which asset is needed",
+       request(_port, "/asset")[0] == 400)
+_dash.shutdown()
+_dash.server_close()
 
 print("FAILURES:", failures if failures else "none")
 raise SystemExit(1 if failures else 0)

@@ -1832,6 +1832,51 @@ status, review = rita.json(f"/api/assets/{a_asset['id']}/review", "POST",
                            {"status": "approved", "reviewer": "Somebody Else"})
 expect("a signed-in sign-off is verified and carries the account's name",
        status == 201 and review["verified"] and review["reviewer"] == "Rita Reviewer", review)
+# 17 Nov 2026: a note is a small ticket. An artist marks it fixed; a reviewer
+# accepts it or reopens it. Every step is kept with who and when.
+aws.add_account(a_db, "art1", "artist", "art-password-1", display_name="Andy Artist")
+andy = Browser(a_port)
+andy.call("/api/session", "POST", {"username": "art1", "password": "art-password-1"})
+status, me = andy.json("/api/me")
+expect("an artist account can note, upload and edit, but not sign off or delete",
+       status == 200 and {"note", "upload", "edit"} <= set(me["can"])
+       and "review" not in me["can"] and "delete" not in me["can"], me)
+status, pinned = rita.json("/api/notes", "POST", {
+    "asset_id": a_asset["id"], "category": "Geometry", "note_text": "the hinge is too thin",
+    "pin": {"point": [0, 1, 0], "camera": {"position": [2, 2, 2], "target": [0, 0, 0]}}})
+expect("a new note starts open, with no steps yet",
+       status == 201 and pinned.get("status", "open") == "open", pinned)
+status, body = andy.json(f"/api/notes/{pinned['id']}/status", "POST", {"action": "accepted"})
+expect("an artist cannot accept a note", status == 403 and "sign off" in body.get("error", ""), body)
+status, fixed = andy.json(f"/api/notes/{pinned['id']}/status", "POST",
+                          {"action": "fixed", "comment": "thickened to 4 cm", "who": "Someone Else"})
+expect("the artist marks it fixed: signed-in name, verified, with the comment",
+       status == 200 and fixed["status"] == "fixed" and fixed["status_by"] == "Andy Artist"
+       and fixed["events"][-1]["action"] == "fixed" and fixed["events"][-1]["verified"]
+       and fixed["events"][-1]["comment"] == "thickened to 4 cm", fixed)
+status, body = andy.json(f"/api/notes/{pinned['id']}/status", "POST", {"action": "fixed"})
+expect("... it cannot be marked fixed twice", status == 409 and body.get("status") == "fixed", body)
+status, reopened = rita.json(f"/api/notes/{pinned['id']}/status", "POST",
+                             {"action": "reopened", "comment": "still thin from the side"})
+expect("a reviewer reopens it: open again, both steps kept in order",
+       status == 200 and reopened["status"] == "open"
+       and [event["action"] for event in reopened["events"]] == ["fixed", "reopened"], reopened)
+andy.json(f"/api/notes/{pinned['id']}/status", "POST", {"action": "fixed"})
+status, accepted = rita.json(f"/api/notes/{pinned['id']}/status", "POST", {"action": "accepted"})
+expect("... fixed again, then accepted by the reviewer, by name and time",
+       status == 200 and accepted["status"] == "accepted" and accepted["status_by"] == "Rita Reviewer"
+       and accepted["status_at"] and len(accepted["events"]) == 4, accepted)
+status, body = rita.json("/api/notes/999999/status", "POST", {"action": "fixed"})
+expect("... a note that does not exist is a 404, a made-up action a 400",
+       status == 404 and rita.json(f"/api/notes/{pinned['id']}/status", "POST",
+                                   {"action": "approved"})[0] == 400)
+status, viewer_body = Browser(a_port).json(f"/api/notes/{pinned['id']}/status", "POST",
+                                            {"action": "fixed"})
+expect("... and nobody signed in cannot move a note", status == 401, viewer_body)
+status, library = rita.json("/api/assets")
+_row = next(item for item in library["assets"] if item["id"] == a_asset["id"])
+expect("the library counts open and fixed notes per asset (for AssetHealth's page)",
+       "open_notes" in _row and "fixed_notes" in _row and _row["fixed_notes"] == 0, _row)
 status, body = rita.json(f"/api/assets/{a_asset['id']}", "DELETE")
 expect("a reviewer cannot delete assets", status == 403 and "reviewer" in body["error"], body)
 vera = Browser(a_port)
