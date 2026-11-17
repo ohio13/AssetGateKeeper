@@ -152,6 +152,15 @@ def run_audit(root: Path, scope=None) -> int:
         for written, target in broken:
             print(f"          -> {written}   (expected {target})")
 
+    duplicates = duplicate_textures(root, scope)
+    for kinds, group, size in duplicates:
+        names = [str(_relative(path, root)) for path in group]
+        print(f"DUPLICATE  {names[0]}")
+        for name, kind in zip(names[1:], kinds):
+            print(f"        =  {name}   ({kind})")
+        print(f"           {len(group) - 1} extra cop{'y' if len(group) == 2 else 'ies'}, "
+              f"{_size(size * (len(group) - 1))} on disk; keep one and point the others at it")
+
     orphans = orphaned_files(root, scope)
     for orphan in orphans:
         try:
@@ -163,8 +172,110 @@ def run_audit(root: Path, scope=None) -> int:
     referenced = sum(len(resolve_references(asset)) for asset in assets)
     print()
     print(f"{len(assets):,} mesh file(s), {referenced:,} reference(s), "
-          f"{broken_total:,} broken, {len(orphans):,} orphaned texture(s)")
+          f"{broken_total:,} broken, {len(orphans):,} orphaned texture(s), "
+          f"{sum(len(group) - 1 for _, group, _ in duplicates):,} duplicate texture(s)")
+    # Duplicates are waste, not damage (two packs may ship the same image on
+    # purpose), so they are reported but do not fail the audit.
     return 1 if (broken_total or orphans) else 0
+
+
+def _relative(path: Path, root: Path) -> Path:
+    try:
+        return path.relative_to(root)
+    except ValueError:           # pragma: no cover - outside the root
+        return path
+
+
+def _size(count: int) -> str:
+    return f"{count / (1024 * 1024):.1f} MB" if count >= 1024 * 1024 else f"{count / 1024:.0f} KB"
+
+
+def duplicate_textures(root: Path, scope=None) -> list:
+    """Textures stored more than once: [(how they match, [paths], bytes each)].
+
+    "same file": identical bytes (found by size, then a hash). "same pixels":
+    different files - another format, other metadata - that decode to the same
+    image; only images of the same size are decoded, so a large project stays
+    quick. No near matches: two images that merely look alike are not reported.
+    """
+    import hashlib
+    from agk_gate.readers import measure_texture
+    textures = [path for path in walk_files(root, enter=scope.walk_folder if scope else None)
+                if path.suffix.lower() in TEXTURE_SUFFIXES and not (scope and scope.reason(path))]
+
+    def digest(path: Path) -> str:
+        sha = hashlib.sha256()
+        with open(path, "rb") as handle:
+            for block in iter(lambda: handle.read(1 << 20), b""):
+                sha.update(block)
+        return sha.hexdigest()
+
+    # Same bytes: found by size first, so most files are never read twice.
+    by_size: dict[int, list[Path]] = {}
+    for path in textures:
+        try:
+            by_size.setdefault(path.stat().st_size, []).append(path)
+        except OSError:
+            continue
+    file_key: dict[Path, str] = {}
+    for paths in by_size.values():
+        if len(paths) < 2:
+            continue
+        for path in paths:
+            try:
+                file_key[path] = digest(path)
+            except OSError:
+                continue
+    # Same pixels: one copy of each file is decoded, and only when another image
+    # has the same width and height.
+    try:
+        from PIL import Image
+    except ImportError:          # pragma: no cover
+        Image = None
+    by_shape: dict[tuple, list[Path]] = {}
+    firsts: dict[str, Path] = {}
+    for path in textures:
+        key = file_key.get(path)
+        if key is not None:
+            if key in firsts:
+                continue
+            firsts[key] = path
+        try:
+            by_shape.setdefault(measure_texture(path), []).append(path)
+        except Exception:
+            continue
+    pixel_key: dict[Path, str] = {}
+    if Image is not None:
+        for paths in by_shape.values():
+            if len(paths) < 2:
+                continue
+            for path in paths:
+                try:
+                    with Image.open(path) as image:
+                        image.seek(0)
+                        pixel_key[path] = hashlib.sha256(image.convert("RGBA").tobytes()).hexdigest()
+                except Exception:
+                    continue
+    # One group per image: every file with the same bytes as a decoded copy, or
+    # the same pixels.
+    groups_by: dict[str, list[Path]] = {}
+    for path in textures:
+        key = file_key.get(path)
+        first = firsts.get(key, path) if key is not None else path
+        image_key = pixel_key.get(first) or (f"file:{key}" if key is not None else None)
+        if image_key is not None:
+            groups_by.setdefault(image_key, []).append(path)
+    groups = []
+    for members in groups_by.values():
+        if len(members) < 2:
+            continue
+        members = sorted(members)
+        head_key = file_key.get(members[0])
+        kinds = ["same file" if head_key is not None and file_key.get(path) == head_key
+                 else "same pixels" for path in members[1:]]
+        size = max(path.stat().st_size for path in members)
+        groups.append((kinds, members, size))
+    return groups
 
 
 # --- #

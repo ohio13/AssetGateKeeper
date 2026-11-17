@@ -365,7 +365,7 @@ For CI, VCS hooks, or when you want to see exactly what a button does.
 ### One scan, read-only
 
 ```bat
-.venv\Scripts\asset-gatekeeper "D:\Projects\MyGame\assets" --recursive --once
+.venv\Scripts\asset-gatekeeper "D:\Projects\MyGame\assets" --once
 ```
 
 One line per asset, every violation on it, exit code `0` pass / `1` fail / `2` bad
@@ -388,7 +388,7 @@ and writes one commented `rules.toml` for all of them.
 ### Watch mode while people work
 
 ```bat
-.venv\Scripts\asset-gatekeeper "…\Assets" --recursive --notify
+.venv\Scripts\asset-gatekeeper "…\Assets" --notify
 ```
 
 New and changed files are inspected after they settle; failures raise a toast.
@@ -396,7 +396,7 @@ New and changed files are inspected after they settle; failures raise a toast.
 ### Feed the dashboard
 
 ```bat
-.venv\Scripts\asset-gatekeeper "…\Assets" --recursive --once ^
+.venv\Scripts\asset-gatekeeper "…\Assets" --once ^
     --telemetry-url http://127.0.0.1:8080/api/telemetry
 ```
 

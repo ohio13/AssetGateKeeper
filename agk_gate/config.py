@@ -109,6 +109,14 @@ class Budget:
     # load as CI4 (4,096 texels), 256 or fewer as CI8 (2,048), more as RGBA16
     # (2,048). The Expansion Pak adds RAM, not texture memory: the same limit.
     n64_tmem: bool = False
+    # [texture] normal_check / mask_check (17 Nov 2026): what the pixels of a
+    # normal map or a packed mask (_ORM, _MaskMap...) say - "warn" (the
+    # default), "fail" or "off". normal_convention: the green the engine reads,
+    # "opengl" or "directx"; empty = from [naming] preset when it names one
+    # engine family (Unreal: DirectX; Unity, Godot, glTF: OpenGL).
+    normal_check: str = "warn"
+    mask_check: str = "warn"
+    normal_convention: str = ""
     texture_format: str = "bc7"           # colour textures
     normal_format: str = "bc5"            # textures named _Normal/_nrm/_n
     # What the engine adds to every static mesh on import. Unreal's defaults:
@@ -295,7 +303,8 @@ class Budget:
                                "depth_index_buffer"), "[mesh]")
         _reject_unknown(texture, ("max_edge", "power_of_two", "naming", "suffixes",
                                   "pbr", "pbr_floor", "pbr_ceiling", "pbr_suffixes",
-                                  "max_mb", "format", "normal_format", "n64_tmem"), "[texture]")
+                                  "max_mb", "format", "normal_format", "n64_tmem",
+                                  "normal_check", "mask_check", "normal_convention"), "[texture]")
         memory = _read_memory(mesh, texture)
         structure = _read_structure(document)
         rigging = _read_skeleton_lightmap(document)
@@ -326,6 +335,14 @@ class Budget:
         pbr_ceiling = _read_float(texture, "pbr_ceiling", "[texture]")
         pbr_suffixes = _read_strings(texture, "pbr_suffixes", "[texture]")
         n64_tmem = _read_bool(texture, "n64_tmem", "[texture]")
+        normal_check = _read_severity(texture, "normal_check")
+        mask_check = _read_severity(texture, "mask_check")
+        normal_convention = _read_str(texture, "normal_convention", "[texture]")
+        if normal_convention is not None:
+            normal_convention = normal_convention.lower()
+            if normal_convention not in ("opengl", "directx"):
+                raise ConfigError('[texture].normal_convention must be "opengl" (Unity, Godot, '
+                                  f'Blender, glTF) or "directx" (Unreal), got {normal_convention!r}')
 
         # Geometric boundary profiling
         audit_transforms = _read_bool(mesh, "audit_transforms", "[mesh]")
@@ -373,6 +390,10 @@ class Budget:
             include=defaults.include if include is None else include,
             pbr_check=defaults.pbr_check if pbr_check is None else pbr_check,
             n64_tmem=defaults.n64_tmem if n64_tmem is None else n64_tmem,
+            normal_check=defaults.normal_check if normal_check is None else normal_check,
+            mask_check=defaults.mask_check if mask_check is None else mask_check,
+            normal_convention=(defaults.normal_convention if normal_convention is None
+                               else normal_convention),
             pbr_floor=defaults.pbr_floor if pbr_floor is None else pbr_floor,
             pbr_ceiling=defaults.pbr_ceiling if pbr_ceiling is None else pbr_ceiling,
             pbr_suffixes=defaults.pbr_suffixes if pbr_suffixes is None else pbr_suffixes,
@@ -561,7 +582,10 @@ def _read_skeleton_lightmap(document: dict) -> dict:
 def is_normal_name(path: Path) -> bool:
     """Named as a normal map: these compress as BC5 / two-channel formats."""
     stem = path.stem.lower()
-    return stem.endswith(("_normal", "_nrm", "_n")) or "_normal_" in stem
+    if stem.endswith(("_normal", "_nrm", "_n")) or "_normal_" in stem:
+        return True
+    # A name that says which green it holds: _nor_gl, _Normal_DX, _nrmGL...
+    return bool(re.search(r"_(?:normal|nrm|nor|n)_?(?:gl|ogl|opengl|dx|directx)$", stem))
 
 
 def texture_memory_bytes(width: int, height: int, format_name: str, mips: bool = True) -> int:
@@ -752,6 +776,19 @@ def _read_naming(table, texture_suffixes, mesh_prefixes) -> tuple:
         conventions.append(("rules", (), tuple(texture_suffixes or ()), "",
                             tuple(mesh_prefixes or ()), ""))
     return tuple(conventions)
+
+
+def _read_severity(texture: dict, key: str) -> Optional[str]:
+    """[texture] normal_check / mask_check: "warn", "fail" or "off" (true = warn,
+    false = off)."""
+    if key not in texture:
+        return None
+    value = texture[key]
+    if isinstance(value, bool):
+        return "warn" if value else "off"
+    if isinstance(value, str) and value.strip().lower() in ("warn", "fail", "off"):
+        return value.strip().lower()
+    raise ConfigError(f'[texture].{key} must be "warn", "fail" or "off", got {value!r}')
 
 
 def _read_str(table: dict, key: str, where: str) -> Optional[str]:

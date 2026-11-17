@@ -347,8 +347,8 @@ class Reporter:
             LOG.info("%s", describe_skipped(skipped))
         below = (skipped or {}).get("not_recursive", 0)
         if below:
-            LOG.warning("%s more asset file(s) in subfolders were not checked: add --recursive "
-                        "to check them", f"{below:,}+" if below >= 1000 else f"{below:,}")
+            LOG.warning("%s more asset file(s) in subfolders were not checked (--no-recursive); "
+                        "leave it out to check them", f"{below:,}+" if below >= 1000 else f"{below:,}")
 
     def close(self, timeout: Optional[float] = None) -> None:
         """Flush pending telemetry and toasts. Bounded, and a no-op when off."""

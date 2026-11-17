@@ -1900,6 +1900,20 @@ expect("the parser: folder is still the first path, paths has them all",
 print("15. VCS hook integrations")
 
 p4_hook = load_module("agk_p4_hook", Path("vcs_hooks") / "p4_pre_submit.py")
+
+
+def per_file(fake):
+    """A one-file fake gate as the trigger's gate_files(), which checks a whole
+    group of files in one run (17 Nov 2026)."""
+    def run(paths, extra):
+        found = {}
+        for path in paths:
+            done = fake(path, extra)
+            found[path] = (("PASSED", "PASSED") if done.returncode == 0
+                           else ("SETUP", done.stderr) if done.returncode == 2
+                           else ("FAILED", done.stdout.strip()))
+        return found
+    return run
 git_hook = load_module("agk_git_hook", Path("vcs_hooks") / "git_pre_commit.py")
 
 # -- p4: changelist parsing and the reject path --------------------------------
@@ -1942,21 +1956,21 @@ def fake_gate(path, extra):
         stderr="")
 
 
-p4_hook.gate = fake_gate
+p4_hook.gate_files = per_file(fake_gate)
 p4_exit = p4_hook.main(["4711", "jdoe"])
 expect("a failing changelist is rejected", p4_exit == 1, str(p4_exit))
 expect("the p4 hook forces healing off on every file",
        bool(seen_extra) and all("--no-auto-heal" in item for item in seen_extra),
        str(seen_extra[:1]))
 
-p4_hook.gate = lambda path, extra: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+p4_hook.gate_files = per_file(lambda path, extra: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""))
 expect("a clean changelist passes", p4_hook.main(["4711", "jdoe"]) == 0)
 
 p4_hook.p4 = lambda *a, **k: (_ for _ in ()).throw(RuntimeError("p4: server unreachable"))
 expect("an unreadable changelist fails closed", p4_hook.main(["4711", "jdoe"]) == 1)
 
 p4_hook.p4 = lambda *a, **k: DESCRIBE
-p4_hook.gate = lambda path, extra: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+p4_hook.gate_files = per_file(lambda path, extra: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""))
 p4_hook.fetch_revision = lambda cl, depot, dest: (_ for _ in ()).throw(RuntimeError("no such rev"))
 expect("a fetch failure fails closed", p4_hook.main(["4711", "jdoe"]) == 1)
 
@@ -1976,7 +1990,7 @@ _P4_BYTES = {"//depot/art/creatures/boss_statue.gltf": b'{"asset":{"version":"2.
              "//depot/art/ui/ui_icon.png": b"\x89PNG-not-really"}
 p4_hook.p4 = lambda *a, **k: DESCRIBE
 p4_hook.fetch_revision = lambda cl, depot, dest: dest.write_bytes(_P4_BYTES[depot])
-p4_hook.gate = lambda path, extra: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+p4_hook.gate_files = per_file(lambda path, extra: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""))
 
 
 def p4_run(*extra):
@@ -2014,7 +2028,7 @@ _sent = [a for a in _ws.list_assets(_ws_dir / "ws.db") if a["source_path"] == "/
 expect("--workstation sends a passing submit for review, with depot path and changelist",
        code == 0 and _sent and _sent[0]["changelist"] == "4711" and "sent to the Art Workstation" in out,
        (out[-300:], _sent))
-p4_hook.gate = fake_gate
+p4_hook.gate_files = per_file(fake_gate)
 _before = len(_ws.list_assets(_ws_dir / "ws.db", all_versions=True))
 _P4_BYTES["//depot/art/creatures/boss_statue.gltf"] = b'{"asset":{"version":"2.0"},"v":3}'
 code, out = p4_run("--workstation", _ws_url, "--workstation-token", "p4tok")
@@ -2112,7 +2126,7 @@ def rules_gate(path, extra):
 
 p4_hook.p4 = fake_p4
 p4_hook.fetch_revision = lambda cl, depot, dest: dest.write_bytes(b"")
-p4_hook.gate = rules_gate
+p4_hook.gate_files = per_file(rules_gate)
 expect("a clean changelist with depot rules passes", p4_hook.main(["4711", "jdoe"]) == 0)
 expect("every asset is gated with the depot's rules.toml, not the defaults",
        len(seen_rules) == 2 and all(item and "120000" in item for item in seen_rules), str(seen_rules))
@@ -2151,7 +2165,7 @@ def fake_run(args, **kwargs):
 
 p4_conn.subprocess = type("S", (), {"run": staticmethod(fake_run),
                                     "CompletedProcess": subprocess.CompletedProcess})
-p4_conn.gate = lambda path, extra: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
+p4_conn.gate_files = per_file(lambda path, extra: subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""))
 p4_conn.fetch_revision = lambda cl, depot, dest: dest.write_bytes(b"")
 tickets_file = str(heal_root / "p4tickets.txt")
 p4_conn.main(["4711", "jdoe", "--port", "ssl:p4:1666", "--p4user", "agk-trigger",
@@ -2253,6 +2267,54 @@ with contextlib.redirect_stdout(_out):
     _exit = p4_ref.main(["22", "artist"])
 expect("... but a texture that exists nowhere is still refused as a missing reference",
        _exit == 1 and "missing reference" in _out.getvalue(), _out.getvalue()[-400:])
+
+# 17 Nov 2026: one gate run per rules file, not one Python start per asset; the
+# depot's .agkignore is read as a scan of the workspace reads it.
+p4_batch = load_module("agk_p4_batch", Path("vcs_hooks") / "p4_pre_submit.py")
+_batch_bytes = {f"//depot/game/props/SM_Box{index}.obj":
+                ("v 0 0 0\nv 1 0 0\nv 0 1 0\nf 1 2 3\n").encode() for index in range(6)}
+_batch_bytes["//depot/game/props/SM_Big.obj"] = b"v 0 0 0\nv 1 0 0\nv 0 1 0\nv 1 1 0\nf 1 2 3\nf 2 4 3\n"
+_batch_bytes["//depot/game/props/WIP/SM_Huge.obj"] = _batch_bytes["//depot/game/props/SM_Big.obj"]
+_head.clear()
+_head["//depot/game/rules.toml"] = b"[mesh]\nmax_triangles = 1\n"
+_head["//depot/game/.agkignore"] = b"WIP/\n"
+_runs = []
+_real_gate_files = p4_batch.gate_files
+
+
+def _counting(paths, extra):
+    _runs.append(len(paths))
+    return _real_gate_files(paths, extra)
+
+
+p4_batch.gate_files = _counting
+p4_batch.fetch_revision = lambda cl, depot, dest: dest.write_bytes(_batch_bytes[depot])
+p4_batch.p4 = _fake_p4_for(sorted(_batch_bytes))
+_out = io.StringIO()
+with contextlib.redirect_stdout(_out), contextlib.redirect_stderr(_out):
+    _exit = p4_batch.main(["30", "artist", "--verbose"])
+_text = _out.getvalue()
+expect("P4: eight assets under one rules.toml are gated in ONE run",
+       _runs == [8], _runs)
+expect("... each judged on its own: the over-budget one refused, by name",
+       _exit == 1 and "SM_Big.obj" in _text.split("Submit rejected")[1]
+       and "SM_Box0" not in _text.split("Submit rejected")[1] and _text.count("PASSED //depot") == 6,
+       _text[-600:])
+expect("... and the depot's .agkignore leaves WIP/ out, as a scan of the workspace does",
+       "not checked (left out by the project) //depot/game/props/WIP/SM_Huge.obj" in _text
+       and "SM_Huge" not in _text.split("Submit rejected")[1], _text[-600:])
+_crash = Path(__import__("tempfile").mkdtemp(prefix="agk-p4crash-")) / "crash.py"
+_crash.write_text("if __name__ == '__main__':\n    raise SystemExit('boom: the gate fell over')\n",
+                  encoding="utf-8")
+p4_batch.gate_files = _real_gate_files
+with patch.dict(os.environ, {"AGK_GATEKEEPER": str(_crash)}):
+    _out = io.StringIO()
+    with contextlib.redirect_stdout(_out), contextlib.redirect_stderr(_out):
+        _exit = p4_batch.main(["31", "artist"])
+expect("... and a gate that stops without verdicts refuses the submit (fails closed)",
+       _exit == 1 and "gate setup error" in _out.getvalue() and "boom" in _out.getvalue(),
+       _out.getvalue()[-400:])
+_head.clear()
 
 # A reference that climbs out of the depot is never fetched from anywhere.
 expect("a reference outside the depot layout maps to no depot path",
@@ -3156,7 +3218,7 @@ expect("it checks the two hard dependencies", "trimesh" in text and "pillow" in 
 expect("it finds the rules file", str(doc_root / "rules.toml") in text, flat(text)[:200])
 expect("it reports the effective budget", "1,200 tris" in text, flat(text))
 expect("it lists the tag budgets", "ruins" in text)
-expect("it suggests the next command", "--recursive --once" in text)
+expect("it suggests the next command", '" --once' in text and "--recursive" not in text)
 
 # A broken rules file must fail the doctor, with the parser's own words.
 (doc_root / "rules.toml").write_text('[mesh]\nmax_triangles = "lots"\n', encoding="utf-8")
@@ -3183,7 +3245,12 @@ expect("the port hint suggests a nearby spare", "--port 8081" in hint, hint.spli
 
 # --help must show a worked example, not just a flag wall.
 help_text = agk.build_parser().format_help()
-expect("--help lists the common first runs", "--recursive --once" in help_text)
+expect("--help lists the common first runs", "<folder> --once" in help_text)
+expect("subfolders are checked by default; --no-recursive and the old --recursive both parse",
+       agk.build_parser().parse_args(["x"]).recursive is True
+       and agk.build_parser().parse_args(["x", "--no-recursive"]).recursive is False
+       and agk.build_parser().parse_args(["x", "--recursive"]).recursive is True
+       and "--no-recursive" in help_text)
 expect("--help documents the exit codes", "0 all passed" in help_text)
 expect("--version is in the parser",
        agk.build_parser().parse_args(["--doctor"]).doctor is True)
@@ -3876,12 +3943,16 @@ expect("... while a file in scope is checked as usual", "T_Boss_BaseColor.png" i
        and "not checked" not in _out, _out[-300:])
 make_png(_sc_dir / "MM_Assets" / "T_Top_BaseColor.png", (64, 64))
 _code, _out = gate_run(str(_sc_dir / "MM_Assets"), "--once")
-expect("without --recursive, the summary says how many files in subfolders were not checked",
-       "3 more asset file(s) in subfolders were not checked: add --recursive" in _out, _out[-300:])
+expect("subfolders are checked by default (17 Nov 2026), .agkignore still applies",
+       "T_Bug_BaseColor.png" in _out and "T_Old_BaseColor" not in _out
+       and "not checked" not in _out, _out[-300:])
+_code, _out = gate_run(str(_sc_dir / "MM_Assets"), "--once", "--no-recursive")
+expect("with --no-recursive, the summary says how many files in subfolders were not checked",
+       "3 more asset file(s) in subfolders were not checked (--no-recursive)" in _out, _out[-300:])
 (_sc_dir / "MM_Assets" / "T_Top_BaseColor.png").unlink()
-_code, _out = gate_run(str(_sc_dir / "MM_Assets"), "--once")
+_code, _out = gate_run(str(_sc_dir / "MM_Assets"), "--once", "--no-recursive")
 expect("... and a folder whose assets are all in subfolders says so, not 'check the path'",
-       _code == 1 and "its subfolders hold some: add --recursive" in _out, _out[-300:])
+       _code == 1 and "its subfolders hold some: leave out --no-recursive" in _out, _out[-300:])
 (_sc_dir / "rules.toml").unlink()
 _code, _out = gate_run(str(_sc_dir), "--audit")
 expect("--audit follows .agkignore too: no orphans reported from left-out folders",

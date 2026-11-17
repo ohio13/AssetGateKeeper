@@ -728,7 +728,7 @@ _BELOW_LIMIT = 1000
 def assets_in_subfolders(root: Path, scope: "Scope", exclude: Sequence[str] = (),
                          limit: int = _BELOW_LIMIT, max_entries: int = 50000) -> int:
     """Asset files in ``root``'s subfolders that a scan would check with
-    --recursive (the same .agkignore, include and exclude), counted up to
+    subfolders (the same .agkignore, include and exclude), counted up to
     ``limit``; a huge tree stops after ``max_entries`` entries."""
     count = 0
     seen = 0
@@ -762,9 +762,8 @@ def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
     candidates = sorted(p for p in walked if is_candidate(p, exclude) and not scope.reason(p))
     skipped = skipped_files(walked, exclude, scope)
     del walked
-    # Without --recursive only the folder's own files are checked. That is the
-    # documented default, but an art folder keeps its assets in subfolders, and
-    # "1 asset(s): 1 passed" over a folder of 4,000 read as a clean project.
+    # With --no-recursive only the folder's own files are checked; say how many
+    # were left below, so "1 asset(s): 1 passed" never reads as a clean project.
     below = 0 if recursive else assets_in_subfolders(root, scope, exclude)
     if below:
         skipped["not_recursive"] = below      # said under the summary line
@@ -783,7 +782,7 @@ def run_once(root: Path, gatekeeper: Gatekeeper, reporter: Reporter,
             return 0
         if below:
             LOG.error("no tracked assets found in %s itself%s - its subfolders hold some: "
-                      "add --recursive", root, found)
+                      "leave out --no-recursive", root, found)
             return 1
         LOG.error("no tracked assets found in %s%s - check the path, or pass "
                   "--allow-empty if this folder is meant to be empty", root, found)
@@ -1130,9 +1129,9 @@ def run_doctor(target: Optional[Path], args: argparse.Namespace,
     else:
         say("No blocking problems. Next:")
         if root is not None and root.is_dir():
-            say(f'  asset-gatekeeper "{root}" --recursive --once')
+            say(f'  asset-gatekeeper "{root}" --once')
         else:
-            say('  asset-gatekeeper "<folder>" --recursive --once')
+            say('  asset-gatekeeper "<folder>" --once')
         say("  asset-health --port 8080        (dashboard)")
         say("  art-workstation --port 8100     (3D review screen)")
     return 1 if problems else 0
@@ -1403,12 +1402,12 @@ def build_parser() -> argparse.ArgumentParser:
         description="Watch a folder of art exports and enforce asset budgets.",
         epilog=(
             "common first runs:\n"
-            "  asset-gatekeeper <folder> --recursive --once     one scan, then exit\n"
+            "  asset-gatekeeper <folder> --once                 one scan, then exit\n"
             "  asset-gatekeeper a.fbx b.png --once --json       several files in one run\n"
             "  asset-gatekeeper <folder> --init                 write a rules.toml\n"
             "  asset-gatekeeper <folder> --wizard               ...from questions about your project\n"
             "  asset-gatekeeper --doctor                        check this machine\n"
-            "  asset-gatekeeper <folder> --recursive            watch and toast\n"
+            "  asset-gatekeeper <folder>                        watch and toast\n"
             "\n"
             "exit codes: 0 all passed, 1 at least one failed, 2 bad setup.\n"
         ),
@@ -1589,7 +1588,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="with --once: exit 0 when the folder holds no tracked assets "
                              "(without it, an empty folder fails the run: a wrong path "
                              "is the usual reason)")
-    parser.add_argument("--recursive", action="store_true", help="include subfolders")
+    # Subfolders are checked unless told otherwise (17 Nov 2026), as linters and
+    # engines do: point the tool at the folder you want checked, and leave parts
+    # out with .agkignore or [filters] include. --recursive is still accepted.
+    parser.add_argument("--recursive", dest="recursive", action="store_true", default=True,
+                        help="check subfolders too (the default; kept so older scripts work)")
+    parser.add_argument("--no-recursive", dest="recursive", action="store_false",
+                        help="check only the folder's own files, not its subfolders")
     parser.add_argument("--cache", metavar="FILE", default=None,
                         help="with --once: where the verdict cache lives, outside the folder "
                              "(default: one file per folder in the user's cache directory, "

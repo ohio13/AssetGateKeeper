@@ -2049,6 +2049,153 @@ else:
     expect("USD's own warnings stay off the console (the gate says it once, readably)",
            "_EnqueueDependency" not in _quiet.stderr + _quiet.stdout, _quiet.stderr[-300:])
 
+print("9d. What a texture's pixels say: normal maps, packed masks, animation (17 Nov 2026)")
+from PIL import Image as _PImg  # noqa: E402
+from agk_gate import texture_checks as _tc  # noqa: E402
+_px_dir = Path(tempfile.mkdtemp(prefix="agk_pixels_"))
+_rng = np.random.default_rng(7)
+_yy, _xx = np.mgrid[0:512, 0:512] / 512.0
+_height = np.zeros_like(_xx)
+for _ in range(60):
+    _cx, _cy, _r = _rng.random(), _rng.random(), _rng.uniform(0.02, 0.08)
+    _height += np.exp(-((_xx - _cx) ** 2 + (_yy - _cy) ** 2) / (2 * _r ** 2)) * _rng.uniform(-1, 1)
+_gy, _gx = np.gradient(_height * 40)
+_gl = np.stack([-_gx, _gy, np.ones_like(_height)], -1)
+_gl /= np.linalg.norm(_gl, axis=-1, keepdims=True)
+_dx = _gl.copy()
+_dx[..., 1] *= -1
+
+
+def _save_normals(vectors, name):
+    _PImg.fromarray(np.clip((vectors + 1) / 2 * 255 + 0.5, 0, 255).astype(np.uint8)).save(_px_dir / name)
+    return _px_dir / name
+
+
+def _says(path, rules=""):
+    budget = agk.Budget.from_mapping(agk.parse_rules_text(rules)) if rules else agk.Budget()
+    # Names here are chosen for what they test, not for a naming convention.
+    budget = __import__("dataclasses").replace(budget, enforce_texture_naming=False,
+                                               require_power_of_two=False)
+    verdict = agk.Gatekeeper(budget).check(path)
+    return list(verdict.problems), list(verdict.warnings)
+
+
+_unreal = '[naming]\npreset = ["unreal"]\n'
+_unity = '[naming]\npreset = ["unity"]\n'
+_gl_path = _save_normals(_gl, "T_Rock_N.png")
+_dx_path = _save_normals(_dx, "T_Brick_N.png")
+expect("green read from the pixels: a slope field with green up is OpenGL, flipped is DirectX",
+       _tc.green_convention(_gl)[0] == "opengl" and _tc.green_convention(_dx)[0] == "directx")
+_flat = np.zeros((256, 256, 3))
+_flat[..., 2] = 1
+_noise = _rng.normal(0, 0.3, (512, 512, 3))
+_noise[..., 2] = 1
+_noise /= np.linalg.norm(_noise, axis=-1, keepdims=True)
+expect("... a flat map and a noise map give no verdict rather than a guess",
+       _tc.green_convention(_flat)[0] == "" and _tc.green_convention(_noise)[0] == "")
+_half = _gl.copy()
+_half[:, 256:, 1] *= -1
+expect("... a map whose halves disagree is 'mixed'", _tc.green_convention(_half)[0] == "mixed")
+_said = _says(_gl_path, _unreal)
+expect("an OpenGL map in an Unreal project: a warning that lighting will look inverted",
+       _said[0] == [] and any("engine reads DirectX" in line for line in _said[1]), _said)
+expect("... the same map in a Unity project: nothing to say", _says(_gl_path, _unity) == ([], []))
+expect("... a DirectX map in a Unity project: the warning the other way",
+       any("engine reads OpenGL" in line for line in _says(_dx_path, _unity)[1]))
+expect("... normal_check = \"fail\" makes it a failure; \"off\" says nothing",
+       any("engine reads DirectX" in line
+           for line in _says(_gl_path, _unreal + '[texture]\nnormal_check = "fail"\n')[0])
+       and _says(_gl_path, _unreal + '[texture]\nnormal_check = "off"\n') == ([], []))
+expect("... normal_convention overrides the naming preset",
+       _says(_gl_path, _unreal + '[texture]\nnormal_convention = "opengl"\n') == ([], []))
+expect("... with no engine known, nothing is assumed", _says(_gl_path) == ([], []))
+_claim = _save_normals(_dx, "T_Wall_nor_gl.png")
+expect("a name that claims OpenGL (_nor_gl) over DirectX pixels is caught, engine or not",
+       any("named OpenGL (green up) but the pixels read as DirectX" in line
+           for line in _says(_claim)[1]) and agk.is_normal_name(_claim), _says(_claim))
+_mixed = _save_normals(_half, "T_Mirror_Normal.png")
+expect("a mixed map says which parts to rebake", any("both ways" in line for line in _says(_mixed)[1]))
+_gamma = _px_dir / "T_Gamma_Normal.png"
+_PImg.fromarray((np.clip(((_gl + 1) / 2) ** (1 / 2.2), 0, 1) * 255).astype(np.uint8)).save(_gamma)
+expect("a normal map saved through a gamma conversion: vectors not unit length",
+       any("not unit length" in line for line in _says(_gamma)[1]), _says(_gamma))
+_inward = _gl.copy()
+_inward[..., 2] *= -1
+expect("a map whose vectors point into the surface (blue below 128) is named for it",
+       any("point into the surface" in line for line in _says(_save_normals(_inward, "T_In_N.png"))[1]))
+_bc5 = ((_gl + 1) / 2 * 255).astype(np.uint8)
+_bc5[..., 2] = 0
+_PImg.fromarray(_bc5).save(_px_dir / "T_Two_N.png")
+expect("a two-channel map (blue empty, rebuilt by the shader) is judged on red and green only",
+       not any("unit length" in line or "into the surface" in line
+               for line in _says(_px_dir / "T_Two_N.png")[1])
+       and _tc.normal_findings(_px_dir / "T_Two_N.png", "directx"), _says(_px_dir / "T_Two_N.png"))
+# Packed masks
+_ao = (200 + _rng.random((256, 256)) * 55).astype(np.uint8)
+_rough = np.full((256, 256), 140, np.uint8)
+_metal = np.zeros((256, 256), np.uint8)
+_metal[:100] = 255
+_grey = (_rng.random((256, 256)) * 255).astype(np.uint8)
+for _name, _channels in (("T_Good_ORM.png", (_ao, _rough, _metal)),
+                         ("T_Grey_ORM.png", (_grey, _grey, _grey)),
+                         ("T_Swap_ORM.png", (_metal, _rough, _ao)),
+                         ("T_Dark_ORM.png", (np.full((256, 256), 10, np.uint8), _rough, _metal)),
+                         ("T_Mirror_ORM.png", (_ao, np.zeros((256, 256), np.uint8), _metal)),
+                         ("T_Lit_MaskMap.png", (_metal, _ao, _rough))):
+    _PImg.fromarray(np.stack(_channels, -1)).save(_px_dir / _name)
+expect("a well-packed ORM passes with nothing to say", _says(_px_dir / "T_Good_ORM.png") == ([], []))
+expect("an ORM whose channels were never packed (R = G = B)",
+       any("same image" in line for line in _says(_px_dir / "T_Grey_ORM.png")[1]))
+expect("an ORM with occlusion in the metallic slot",
+       any("blue (metallic)" in line and "in-between" in line
+           for line in _says(_px_dir / "T_Swap_ORM.png")[1]), _says(_px_dir / "T_Swap_ORM.png"))
+expect("an ORM whose occlusion is nearly black",
+       any("red (occlusion) is almost black" in line for line in _says(_px_dir / "T_Dark_ORM.png")[1]))
+expect("an ORM whose roughness is 0 everywhere (smoothness saved as roughness)",
+       any("perfect mirror" in line for line in _says(_px_dir / "T_Mirror_ORM.png")[1]))
+expect("a Unity MaskMap is read in its own order (R metallic, G occlusion)",
+       _says(_px_dir / "T_Lit_MaskMap.png") == ([], []), _says(_px_dir / "T_Lit_MaskMap.png"))
+expect("mask_check = \"fail\" fails it; \"off\" says nothing",
+       _says(_px_dir / "T_Grey_ORM.png", '[texture]\nmask_check = "fail"\n')[0]
+       and _says(_px_dir / "T_Grey_ORM.png", '[texture]\nmask_check = false\n') == ([], []))
+for _bad in ('normal_check = "maybe"', 'normal_convention = "vulkan"', "mask_check = 3"):
+    try:
+        agk.Budget.from_mapping(agk.parse_rules_text(f"[texture]\n{_bad}\n"))
+        _refused = False
+    except agk.ConfigError:
+        _refused = True
+    expect(f"[texture] {_bad} is refused with a reason", _refused)
+# Animation
+_frames = [_PImg.new("RGB", (64, 64), (index * 40, 90, 90)) for index in range(4)]
+_frames[0].save(_px_dir / "T_Fire_BaseColor.gif", save_all=True, append_images=_frames[1:])
+_frames[0].save(_px_dir / "T_Still_BaseColor.gif")
+expect("an animated GIF passes with a note: engines import the first frame only",
+       any("animated (4 frames)" in line for line in _says(_px_dir / "T_Fire_BaseColor.gif")[1])
+       and _says(_px_dir / "T_Fire_BaseColor.gif")[0] == [])
+expect("... a single-frame GIF gets no note", _says(_px_dir / "T_Still_BaseColor.gif") == ([], []))
+# Duplicates in --audit
+_dup = Path(tempfile.mkdtemp(prefix="agk_dup_"))
+(_dup / "A").mkdir()
+(_dup / "B").mkdir()
+_img = (_rng.random((64, 64, 3)) * 255).astype(np.uint8)
+_PImg.fromarray(_img).save(_dup / "A" / "T_Rock_BaseColor.png")
+shutil.copy(_dup / "A" / "T_Rock_BaseColor.png", _dup / "B" / "T_Rock2_BaseColor.png")
+_PImg.fromarray(_img).save(_dup / "B" / "T_Rock3_BaseColor.bmp")
+_PImg.fromarray(255 - _img).save(_dup / "B" / "T_Other_BaseColor.png")
+_groups = agk.duplicate_textures(_dup) if hasattr(agk, "duplicate_textures") else \
+    __import__("agk_gate.audit", fromlist=["x"]).duplicate_textures(_dup)
+expect("--audit finds one image stored three times: the same bytes, and the same pixels as a BMP",
+       len(_groups) == 1 and _groups[0][0] == ["same file", "same pixels"]
+       and [p.name for p in _groups[0][1]] == ["T_Rock_BaseColor.png", "T_Rock2_BaseColor.png",
+                                              "T_Rock3_BaseColor.bmp"], _groups)
+_audit = subprocess.run([sys.executable, str(ROOT / "asset_gatekeeper.py"), str(_dup), "--audit"],
+                        capture_output=True, text=True)
+expect("... prints it with what it costs, and duplicates alone do not fail the audit's exit code",
+       "DUPLICATE  A/T_Rock_BaseColor.png" in _audit.stdout and "(same pixels)" in _audit.stdout
+       and "2 duplicate texture(s)" in _audit.stdout, _audit.stdout[-500:])
+shutil.rmtree(_dup, ignore_errors=True)
+shutil.rmtree(_px_dir, ignore_errors=True)
+
 print("10. Hooks and tools know the new formats")
 sys.path.insert(0, str(ROOT / "vcs_hooks"))
 import git_pre_commit  # noqa: E402

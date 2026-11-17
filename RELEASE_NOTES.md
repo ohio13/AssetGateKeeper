@@ -1,5 +1,41 @@
 # Unreleased (on `main`)
 
+* **Subfolders are checked by default (17 Nov).** Point the gate at the
+  folder you want checked; it checks everything below it. Leave parts out with
+  `.agkignore` or `[filters] include`, or check only the folder's own files
+  with `--no-recursive`. `--recursive` is still accepted. A run with
+  `--no-recursive` says how many files in subfolders it did not check.
+
+* **What a texture's pixels say (17 Nov).** Normal maps: green direction is
+  read from the pixels (OpenGL or DirectX, or "mixed" when a mirrored half was
+  baked the other way) and compared with your engine (`[texture]
+  normal_convention`, or from `[naming] preset`: Unreal reads DirectX; Unity,
+  Godot and glTF read OpenGL) and with a name that claims one (`_nor_gl`);
+  vectors that are not unit length (saved through a gamma conversion) and
+  pixels pointing into the surface are named. Packed masks (`_ORM`, `_ARM`,
+  `_RMA`, `_MRA`, `_MaskMap`): channels never packed, occlusion nearly black,
+  another map in the metallic slot, roughness 0 everywhere. Warnings by
+  default; `normal_check` / `mask_check` = `"fail"` or `"off"`. Animated GIFs
+  get a note: engines import the first frame only.
+
+* **Choose which folders are checked; Browse… (16 Nov).** `[filters] include`
+  and `.agkignore` files (written like `.gitignore`) decide what a scan, watch,
+  hook or DCC button checks; a left-out folder is never read. The Rules page has
+  **Browse…** (your computer's own folder window adds a folder, no restart) and
+  a **Folders** panel showing what is checked, with **Check only** and
+  **Budget** per folder. Open formats: PLY, STL, OFF, 3MF, Collada, OpenUSD,
+  BMP, GIF, PSD, KTX, HDR. The git hook checks a commit in one run. The bake
+  says before every bake that the result is a starting point for an artist.
+
+* **Duplicate textures in `--audit` (17 Nov).** The same image stored more
+  than once (same bytes, or different files with the same pixels), with what
+  the copies cost. Reported, not failed.
+
+* **Perforce trigger: one gate run per rules file (17 Nov).** As the git hook
+  (16 Nov), so a big changelist takes seconds. It reads the depot's
+  `.agkignore` files, and refuses the submit when the gate stops without a
+  verdict.
+
 * **Workstation panels resize; full detail both ways; a cleaner face (14 Nov).**
   The Art Workstation's library, side panel and review notes are resized by
   dragging their edges (double-click to reset; kept in the browser), and
