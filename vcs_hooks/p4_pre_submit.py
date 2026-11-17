@@ -312,7 +312,11 @@ def depot_rules_for(depot_path: str, destination_root: Path,
             found = cache[folder]
             break
         walked.append(folder)
-        target = destination_root / "_rules" / f"{len(cache) + len(walked)}" / RULES_FILENAME
+        # Fetched to its own place in the temp tree (//depot/art/rules.toml ->
+        # <temp>/depot/art/rules.toml), so every asset sits below its rules
+        # file as it does in the depot: [tags.*] and [[exceptions]] paths are
+        # relative to that folder, and several assets share one gate run.
+        target = destination_root / folder.lstrip("/") / RULES_FILENAME
         target.parent.mkdir(parents=True, exist_ok=True)
         try:
             p4("p4", "print", "-q", "-o", str(target), f"{folder}/{RULES_FILENAME}#head")
@@ -328,6 +332,86 @@ def depot_rules_for(depot_path: str, destination_root: Path,
     for item in walked:
         cache[item] = found
     return found
+
+
+IGNORE_FILENAME = ".agkignore"
+
+
+def fetch_ignores(depot_path: str, top: str, destination_root: Path, done: set) -> None:
+    """Every .agkignore from ``top`` (the rules file's folder, or the depot) down
+    to the asset's folder, at #head, to its place in the temp tree: the project
+    leaves the same files out at submit as a scan of the workspace does."""
+    folder = depot_path.rsplit("/", 1)[0]
+    chain = []
+    while folder.startswith(top) and folder.count("/") >= 2:
+        chain.append(folder)
+        if folder == top:
+            break
+        folder = folder.rsplit("/", 1)[0]
+    for folder in chain:
+        if folder in done:
+            continue
+        done.add(folder)
+        target = destination_root / folder.lstrip("/") / IGNORE_FILENAME
+        target.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            p4("p4", "print", "-q", "-o", str(target), f"{folder}/{IGNORE_FILENAME}#head")
+        except (RuntimeError, OSError):
+            continue                     # none at this level
+
+
+def gate_files(paths: list[Path], extra: list[str]) -> dict:
+    """Gate several files in ONE gate run (one Python start, ~0.6 s, instead of
+    one per file). Returns {path: (word, detail)}: word is PASSED, FAILED,
+    ERROR, SKIPPED (the project's .agkignore or [filters] include leaves it out)
+    or SETUP (the gate could not run - every file of the run gets it, and the
+    submit is refused: a gate that stops is not a pass)."""
+    command = [*gatekeeper_command(), *map(str, paths), "--once", "--json", *extra]
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True,
+                                   encoding="utf-8", errors="replace", timeout=600.0)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {path: ("SETUP", f"the gate did not run: {exc}") for path in paths}
+    found: dict = {}
+    for line in completed.stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("file"):
+            found[os.path.normcase(str(Path(row["file"]).resolve()))] = row
+    results: dict = {}
+    last = (completed.stderr.strip().splitlines() or ["no output"])[-1][:400]
+    for path in paths:
+        row = found.get(os.path.normcase(str(Path(path).resolve())))
+        if row is None:
+            if f"{Path(path).name} not checked:" in completed.stderr:
+                results[path] = ("SKIPPED", "left out by the project's .agkignore or include")
+            else:
+                results[path] = ("SETUP", f"no verdict (gate exit {completed.returncode}): {last}")
+            continue
+        problems = "; ".join(row.get("problems") or [])
+        word = str(row.get("status") or ("PASSED" if row.get("passed") else "FAILED"))
+        results[path] = (word, f"{word}: {problems}" if problems else word)
+    return results
+
+
+def _batches(paths: list, max_files: int = 150, max_chars: int = 20000):
+    """Groups small enough for one command line (Windows allows 32,767 characters)."""
+    batch: list = []
+    length = 0
+    for path in paths:
+        size = len(str(path)) + 3
+        if batch and (len(batch) >= max_files or length + size > max_chars):
+            yield batch
+            batch, length = [], 0
+        batch.append(path)
+        length += size
+    if batch:
+        yield batch
 
 
 def gatekeeper_command() -> list[str]:
@@ -520,6 +604,11 @@ def main(argv: list[str] | None = None) -> int:
             local_of[depot_path] = destination
         fetch_references(list(local_of.values()), temp_root, options.verbose)
 
+        # Group the assets by the rules file they answer to, then gate each group
+        # in one run (17 Nov 2026: one Python start per file made a 200-texture
+        # changelist take minutes). Each file is still judged as on its own.
+        groups: dict = {}
+        ignores_done: set = set()
         for depot_path, action in candidates:
             destination = local_of.get(depot_path)
             if destination is None:
@@ -531,38 +620,41 @@ def main(argv: list[str] | None = None) -> int:
                 if problem:
                     failures.append(f"{depot_path} ({action})\n    {problem}")
                 continue
-            per_file = list(extra)
+            rules_key: tuple = ()
+            top = "//" + depot_path.lstrip("/").split("/", 1)[0]
             if not options.rules:
                 rules_file, rules_folder = depot_rules_for(depot_path, temp_root, rules_cache)
                 if rules_file is not None:
-                    per_file += ["--rules", str(rules_file)]
-                    # [[exceptions]] name paths below the rules file's folder; the
-                    # temp copy is laid out differently, so say where it really is.
-                    per_file += ["--exception-path", depot_path[len(rules_folder):].lstrip("/")]
+                    rules_key = ("--rules", str(rules_file))
+                    top = rules_folder
                 elif options.verbose:
                     log(f"AssetGatekeeper: no rules.toml above {depot_path}; shipped defaults")
-            completed = gate(destination, per_file)
-            if completed.returncode == 0:
-                if options.require_approval:
-                    problem = approval_problem(options.workstation, options.workstation_token,
-                                               destination)
-                    if problem:
-                        failures.append(f"{depot_path} ({action})\n    {problem}")
+            fetch_ignores(depot_path, top, temp_root, ignores_done)
+            groups.setdefault(rules_key, []).append((depot_path, action, destination))
+        for rules_key, members in groups.items():
+            for batch in _batches(members):
+                results = gate_files([item[2] for item in batch], [*extra, *rules_key])
+                for depot_path, action, destination in batch:
+                    word, detail = results.get(destination, ("SETUP", "no verdict"))
+                    if word == "SKIPPED":
+                        if options.verbose:
+                            log(f"AssetGatekeeper: not checked (left out by the project) {depot_path}")
                         continue
-                if options.verbose:
-                    log(f"AssetGatekeeper: PASSED {depot_path}")
-                passed.append((destination, depot_path))
-                continue
-            if completed.returncode == 2:
-                failures.append(f"{depot_path}: gate setup error\n{completed.stderr.strip()[:400]}")
-                continue
-            # Exit code 1: a real budget failure. Surface the tool's own verdict line.
-            verdict = ""
-            for line in (completed.stdout + completed.stderr).splitlines():
-                if "FAILED" in line or "PASSED" in line:
-                    verdict = line.strip()
-            detail = verdict or (completed.stdout + completed.stderr).strip()[:400]
-            failures.append(f"{depot_path} ({action})\n    {detail}")
+                    if word in ("PASSED", "HEALED"):
+                        if options.require_approval:
+                            problem = approval_problem(options.workstation,
+                                                       options.workstation_token, destination)
+                            if problem:
+                                failures.append(f"{depot_path} ({action})\n    {problem}")
+                                continue
+                        if options.verbose:
+                            log(f"AssetGatekeeper: PASSED {depot_path}")
+                        passed.append((destination, depot_path))
+                        continue
+                    if word == "SETUP":
+                        failures.append(f"{depot_path}: gate setup error\n    {detail}")
+                        continue
+                    failures.append(f"{depot_path} ({action})\n    {detail}")
         # Only a submit that will go through is queued for review. Meshes first,
         # carrying the files they reference; a texture that went in with its
         # mesh is not sent again as an asset of its own.

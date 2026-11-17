@@ -147,7 +147,7 @@ Drop a file in, get a verdict. That's it. Colour-coded on a real terminal, plain
 `--once` sweeps a folder, prints one line per asset, prints a summary, and **exits non-zero if anything failed**. That single design decision is what makes it usable in automation.
 
 ```bash
-python asset_gatekeeper.py Assets/Exports --once --recursive
+python asset_gatekeeper.py Assets/Exports --once
 ```
 
 ```
@@ -163,7 +163,7 @@ $ echo $?
 
 ```sh
 #!/bin/sh
-python tools/asset_gatekeeper.py Assets/Exports --once --recursive
+python tools/asset_gatekeeper.py Assets/Exports --once
 status=$?
 if [ $status -ne 0 ]; then
     echo ""
@@ -179,7 +179,7 @@ exit $status
 - name: Asset budget gate
   run: |
     python -m pip install watchdog trimesh pillow charset-normalizer DracoPy
-    python tools/asset_gatekeeper.py Assets/Exports --once --recursive
+    python tools/asset_gatekeeper.py Assets/Exports --once
 ```
 
 ### Exit codes
@@ -272,8 +272,17 @@ python asset_gatekeeper.py D:\Exports --audit
 # BROKEN  props/table.gltf
 #           -> wood_Albedo.png   (expected D:\Exports\props\wood_Albedo.png)
 # ORPHAN  props/old_wood_Albedo.png
-# 41 mesh file(s), 96 reference(s), 1 broken, 1 orphaned texture(s)     # exit 1
+# DUPLICATE  props/T_Crate_BaseColor.png
+#         =  old/T_Crate2_BaseColor.png   (same file)
+#         =  old/T_Crate_BaseColor.bmp    (same pixels)
+#            2 extra copies, 1.4 MB on disk; keep one and point the others at it
+# 41 mesh file(s), 96 reference(s), 1 broken, 1 orphaned texture(s), 2 duplicate texture(s)   # exit 1
 ```
+
+Duplicates are textures stored more than once: the same bytes, or different files
+(another format, other metadata) that decode to the same pixels. Images that only
+look alike are not reported. Duplicates are waste, not damage, so they do not
+change the exit code. `.agkignore` and `--include` apply to the whole audit.
 
 `--no-reference-check` turns the per-asset failure off; `--audit` is unaffected.
 
@@ -880,7 +889,7 @@ python asset_gatekeeper.py [folder] [options]
 | `folder` | Folder to watch (default: current directory) |
 | `--once` | Inspect everything present, print a summary, exit `0`/`1` |
 | `--allow-empty` | With `--once`: exit `0` when the folder holds no tracked assets (without it an empty folder fails: a wrong path is the usual reason) |
-| `--recursive` | Include subfolders |
+| `--no-recursive` | Check only the folder's own files, not its subfolders. Subfolders are checked by default; leave parts out with `.agkignore` or `[filters] include`. (`--recursive` is still accepted and does nothing new.) |
 | `--follow-symlinks` | Descend into symlinked/junctioned folders, with a loop guard (off by default: a link re-counts a tree) |
 | `--rules PATH` | Use a specific rules file instead of `<folder>/rules.toml` |
 | `--preset NAME` | Apply a shipped platform preset (`--list-presets`); beats `rules.toml`, loses to an explicit numeric flag |
@@ -896,7 +905,7 @@ python asset_gatekeeper.py [folder] [options]
 | `--tag-mode MODE` | How a near-miss asset tag is handled: `auto`, `suggest` (default), `strict` |
 | `--exclude GLOB` | Ignore files matching this glob (repeatable; same as `[filters] exclude`) |
 | `--include GLOB` | Check only files under paths matching this glob, relative to the folder (repeatable; same as `[filters] include`). `.agkignore` files are always read |
-| `--audit` | Report broken references and orphaned textures for the whole folder, then exit |
+| `--audit` | Report broken references, orphaned textures and duplicate textures for the whole folder, then exit |
 | `--no-reference-check` | Do not fail assets whose texture/buffer links are missing |
 | `--no-pbr-check` | Do not clamp albedo luminance |
 | `--audit-transforms` | Flag unbaked node transforms and uncentred pivots |
@@ -911,7 +920,7 @@ python asset_gatekeeper.py [folder] [options]
 | `--cache FILE` | With `--once`: where the verdict cache lives - outside the folder being checked (a cache inside it is refused). Default: one file per folder in the user's cache directory (`%LOCALAPPDATA%\AssetGatekeeper\cache`, `~/.cache/asset-gatekeeper`, or `$AGK_CACHE_DIR`). An unchanged file - and unchanged files it references - reuses its last verdict; a rule, gate or version change re-checks everything |
 | `--no-cache` | With `--once`: check every file and leave the cache alone |
 | `--jobs N` | With `--once`: check N files at a time in separate processes (`0` = one per CPU). Verdicts and their order are the same as one at a time; healing always runs one at a time |
-| `--exception-path PATH` | With one file: the path `[[exceptions]]` match it as, relative to the rules file's folder. The Perforce trigger passes the depot path, since its temp copy is laid out differently |
+| `--exception-path PATH` | With one file: the path `[[exceptions]]` match it as, relative to the rules file's folder. For a copy of a file kept somewhere else (the Perforce trigger used it before 17 Nov 2026; its temp copy is now laid out as in the depot) |
 | `--notify` / `--no-notify` | Native desktop toasts on failure/heal (on while watching, off in `--once`) |
 | `--notify-max N` | Maximum toasts per minute (default 6) |
 | `--allow-degenerate` | Permit zero-area triangles |

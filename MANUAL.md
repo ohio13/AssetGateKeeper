@@ -236,7 +236,7 @@ Run `asset-gatekeeper --help` for this list on your build.
 | Flag | Effect |
 |---|---|
 | `--once` | scan what's there and exit (default is watch) |
-| `--recursive` | include subfolders |
+| `--no-recursive` | only the folder's own files (subfolders are checked by default) |
 | `--json` | one JSON object per asset on stdout (for DCC plugins and your own scripts) |
 | `--exclude GLOB` | ignore matching files (repeatable; same as `[filters] exclude`) |
 | `--include GLOB` | check only files in matching folders (repeatable; same as `[filters] include`) |
@@ -298,7 +298,7 @@ When the dashboard sends a `.gltf`, the sibling files that make it loadable
 | `--doctor` | machine check, then exit |
 | `--init` `--yes` `--force` | write a starter `rules.toml` |
 | `--wizard` · `--wizard-answers FILE` | write a `rules.toml` from seven questions about the project (several engines, tools and platforms at once) |
-| `--audit` | whole-folder report: broken references + orphaned textures |
+| `--audit` | whole-folder report: broken references, orphaned and duplicate textures |
 | `--version` | print the version |
 | `--list-presets` | print the ten hardware targets and their budgets, then exit |
 
@@ -496,7 +496,7 @@ close a name has to be.
 Opt-in, verified, and deliberately narrow.
 
 ```bat
-asset-gatekeeper "…\Assets" --recursive --auto-heal
+asset-gatekeeper "…\Assets" --auto-heal
 ```
 
 or `[healer] enabled = true`. Hooks and CI always pass `--no-auto-heal`.
@@ -529,13 +529,14 @@ file. Those keep failing, which is the safe answer.
 ## 8. Audit mode
 
 ```bat
-asset-gatekeeper "…\Assets" --recursive --audit
+asset-gatekeeper "…\Assets" --audit
 ```
 
 A **report**, not a gate: no budget needed, no assets touched.
 
 Finds broken references (a `.gltf` pointing at a texture nobody shipped) and
-**orphaned textures** (files nothing references). Use it when taking over a
+**orphaned textures** (files nothing references) and **duplicate textures** (the
+same image stored more than once). Use it when taking over a
 project, before a milestone, or when disk usage smells wrong.
 
 ---
@@ -547,7 +548,7 @@ Both are **off unless configured**, both are non-blocking.
 ### Push verdicts to AssetHealth
 
 ```bat
-asset-gatekeeper "…\Assets" --recursive --once ^
+asset-gatekeeper "…\Assets" --once ^
   --telemetry-url http://127.0.0.1:8080/api/telemetry
 ```
 
@@ -839,7 +840,7 @@ the paperwork.
 ```bat
 cd D:\Project\Assets
 asset-gatekeeper . --once                    :: did I break anything?
-asset-gatekeeper . --recursive --notify      :: while I work: watch + toasts
+asset-gatekeeper . --notify      :: while I work: watch + toasts
 ```
 
 - Everything lives in one `rules.toml`, next to the assets.
@@ -940,8 +941,8 @@ a server.
 
 ```bat
 asset-gatekeeper --doctor
-asset-gatekeeper "…\Assets" --recursive --audit          :: what is broken already
-asset-gatekeeper "…\Assets" --recursive --once -v        :: what would fail today
+asset-gatekeeper "…\Assets" --audit          :: what is broken already
+asset-gatekeeper "…\Assets" --once -v        :: what would fail today
 ```
 
 Then write the budget (`--init`), agree it with whoever owns the platform, commit it.
@@ -954,8 +955,8 @@ work outside a host, `asset-gatekeeper . --once`.
 **Before a milestone**
 
 ```bat
-asset-gatekeeper "…\Assets" --recursive --once --json > verdicts.json
-asset-gatekeeper "…\Assets" --recursive --audit
+asset-gatekeeper "…\Assets" --once --json > verdicts.json
+asset-gatekeeper "…\Assets" --audit
 ```
 
 **Changing the budget (whoever owns it)**

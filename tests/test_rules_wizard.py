@@ -352,7 +352,7 @@ expect("--wizard-answers creates the folder and the file", done.returncode == 0
 _doc, cli_budget = load(cli / "rules.toml")
 expect("... with the tightest of pc, mobile and switch", cli_budget.max_triangles == 15_000
        and cli_budget.max_material_slots == 2 and cli_budget.require_power_of_two)
-expect("... and it tells the user what to run next", "--once --recursive" in done.stdout
+expect("... and it tells the user what to run next", "\" --once" in done.stdout and "--recursive" not in done.stdout
        and "--platform" in done.stdout)
 original = (cli / "rules.toml").read_text(encoding="utf-8")
 again = run(cli, "--wizard-answers", answers_file("pc", {"platforms": "pc"}))

@@ -70,6 +70,21 @@ one asset and gets one budget. If you need per-object budgets, export per object
 | `pbr_ceiling` | float | 0.94 | above this is "white" |
 | `pbr_suffixes` | list | `["_Albedo","_Diffuse","_BaseColor"]` | which suffixes are tested for PBR sanity |
 | `n64_tmem` | bool | false | each texture must fit the Nintendo 64's 4 KB texture memory in the format its colours allow: 16 colours or fewer load as CI4 (4,096 texels: 64x64, 128x32), 256 or fewer as CI8 (2,048: 64x32), more as RGBA16 (2,048). Textures packed in a `.glb` are held to 4,096 texels. On in the `n64` and `n64-pak` presets. The Expansion Pak adds RAM, not texture memory, so the limit is the same with it. `--preset n64-pak` is the budget for one character shown with little else on screen (a cutscene): 3,000 triangles, 4 materials (body, head, face, eyes), a 128 px edge so a 128x32 strip is allowed, the TMEM rule on |
+| `normal_check` | `"warn"`/`"fail"`/`"off"` | `"warn"` | what a normal map's pixels say (files named `_Normal`, `_N`, `_nrm`, `_nor_gl`, `_Normal_DX`...): vectors that are not unit length (saved through an sRGB/gamma conversion), pixels that point into the surface, and which way green points (below) |
+| `normal_convention` | `"opengl"`/`"directx"` | from `[naming] preset` | the green your engine reads. Unreal reads DirectX (green down); Unity, Godot, Blender and glTF read OpenGL (green up). Left out, it follows `[naming] preset` when that names one family of engines, and is otherwise unknown (then only a map whose name claims one, like `_nor_gl`, is compared) |
+| `mask_check` | `"warn"`/`"fail"`/`"off"` | `"warn"` | what a packed mask's pixels say (`_ORM`, `_ARM`, `_RMA`, `_MRA`, `_MaskMap`): R, G and B the same image (never packed), occlusion nearly black, metallic full of in-between values (another map in its slot), roughness 0 everywhere (smoothness saved as roughness) |
+
+**What the pixels say (17 Nov 2026).** Green direction is read from the pixels
+alone: a tangent-space normal map is the slope of a surface, and slopes have no
+curl, so the curl measured with green read up and read down tells OpenGL from
+DirectX. It is judged in 32-pixel tiles and only tiles with real detail vote: a
+flat or noisy map gives no verdict rather than a wrong one, and a map whose parts
+disagree (a mirrored half baked the other way) is reported as mixed. Tried on
+nine of Khronos' glTF sample normal maps (OpenGL by the glTF spec): six read as
+OpenGL and, flipped, as DirectX; two too smooth to judge gave no verdict; one
+(DamagedHelmet) reads as DirectX in most of its detailed areas, so check that
+kind of result by eye before flipping a map. An animated GIF (or APNG, or animated WebP) gets a note
+whatever the settings: engines import its first frame only.
 
 The suffix list is a studio convention, not a universal truth. Change the list
 rather than switching `naming` off: a list documents the convention, a boolean
@@ -333,7 +348,8 @@ format = "astc8x8"
   counting as 0 MB.
 * **At submit time** the Perforce trigger matches `[[exceptions]]` paths against
   the depot path below the folder of the `rules.toml` it used, as a local run
-  does (`--exception-path`).
+  does: the rules file and the assets are laid out in its temp folder as in the
+  depot.
 * These are **estimates** in the engine's terms; check a few against the
   engine's own numbers (Unreal: Size Map, `memreport`) before tightening a
   budget on them. `max_texture_mb` and `max_mesh_mb` can be relaxed per asset

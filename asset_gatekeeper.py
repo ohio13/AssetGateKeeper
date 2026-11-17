@@ -22,7 +22,7 @@ Usage
     python asset_gatekeeper.py "D:\\Exports\\Incoming"
 
     # one-shot sweep (handy in CI or on a pre-existing drop folder)
-    python asset_gatekeeper.py "D:\\Exports\\Incoming" --once --recursive
+    python asset_gatekeeper.py "D:\\Exports\\Incoming" --once
 
     # override the shipped budgets for a different project
     python asset_gatekeeper.py . --triangles 30000 --max-texture 1024 --max-materials 2

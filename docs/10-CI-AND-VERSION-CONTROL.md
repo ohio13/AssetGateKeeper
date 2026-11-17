@@ -60,7 +60,7 @@ dashboard; it usually means a bad merged `rules.toml`, not a bad asset.
 ### Reports your CI server shows per asset
 
 ```
-asset-gatekeeper Assets --once --recursive --report junit:gate.xml --report sarif:gate.sarif
+asset-gatekeeper Assets --once --report junit:gate.xml --report sarif:gate.sarif
 ```
 
 * **JUnit** (`junit:<file>`): one test case per asset, named by its path, with
@@ -90,7 +90,7 @@ checks only what changed since last night. `--jobs N` checks the rest in
 parallel.
 
 ```
-asset-gatekeeper Assets --once --recursive --jobs 0 --cache "$RUNNER_TEMP/agk-cache/verdicts.json"
+asset-gatekeeper Assets --once --jobs 0 --cache "$RUNNER_TEMP/agk-cache/verdicts.json"
 ```
 
 On GitHub Actions, keep it with `actions/cache/restore` and `actions/cache/save`
@@ -151,6 +151,12 @@ exactly the window a gate needs. It:
   above each file in the depot, at its submitted `#head` (so a `rules.toml`
   edited in the same changelist does not loosen its own gate), or the file
   given with `--rules` on the trigger line;
+* leaves out what the project's `.agkignore` files leave out (fetched at `#head`
+  from the rules file's folder down to each asset), as a scan of the workspace does;
+* gates all the assets under one `rules.toml` in **one** gate run (one Python
+  start instead of one per file, so a 200-texture changelist takes seconds),
+  each still judged on its own; a gate that stops without a verdict refuses the
+  submit;
 * exits non-zero to refuse the submit, or prints warnings for advisory mode.
 
 Every file of the changelist is fetched **before** any is gated, laid out as in

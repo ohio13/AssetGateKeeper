@@ -142,7 +142,7 @@ Reported as: `tag 'charcter' is not a known tag; closest match is 'character'`.
 | `--json` | machine-readable verdicts on stdout |
 | `--report junit:FILE` / `sarif:FILE` / `github:FILE` | with `--once` or one file, also write a JUnit, SARIF or GitHub-annotation report for CI (repeatable; see [10](10-CI-AND-VERSION-CONTROL.md#reports-your-ci-server-shows-per-asset)) |
 | `--cache FILE` · `--no-cache` | with `--once`: where the verdict cache lives (outside the folder; default in the user's cache directory), or no cache at all |
-| `--exception-path PATH` | with one file: the path `[[exceptions]]` match it as, relative to the rules file's folder (used by the Perforce trigger) |
+| `--exception-path PATH` | with one file: the path `[[exceptions]]` match it as, relative to the rules file's folder (for a copy kept somewhere else) |
 | `--jobs N` | with `--once`: check N files at a time in separate processes (`0` = one per CPU; healing always runs one at a time) |
 | `--no-color` | plain text (CI logs, redirected output) |
 | `-v` | verbose |
@@ -204,7 +204,7 @@ the texture, or the new name is taken.
 |---|---|
 | `--once` | gate everything, print, exit (no watcher) |
 | `--allow-empty` | with `--once`: exit 0 when the folder holds no tracked assets. Without it an empty folder fails the run, because a wrong path is the usual reason a scan finds nothing |
-| `--recursive` | include subfolders (the default for a folder target) |
+| `--no-recursive` | check only the folder's own files (subfolders are checked by default; `--recursive` is still accepted) |
 | `--exclude GLOB` | skip matching paths; repeatable |
 | `--follow-symlinks` | walk through symlinked folders (off by default) |
 | `--notify` / `--no-notify` | desktop toasts for new failures |

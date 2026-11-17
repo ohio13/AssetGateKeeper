@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Optional, Sequence
 from urllib.parse import unquote
 
+from agk_gate import texture_checks
 from agk_gate.common import (
     engine_module, GLTF_SUFFIXES, HEADER_ONLY_TEXTURES, Image, LOG, MESH_SUFFIXES,
     TEXTURE_SUFFIXES, walk_files,
@@ -44,7 +45,11 @@ from agk_gate.usd import USD_SUFFIXES
 
 # What counts as a texture on disk when hunting orphans. Wider than the gated
 # suffixes on purpose: an orphaned .tga is still an orphan.
-TEXTURE_DISK_SUFFIXES = (".png", ".jpg", ".jpeg", ".tga", ".tif", ".tiff", ".exr", ".webp")
+# Images a mesh points at. Not .psd (the source a PNG is exported from, rarely
+# referenced), nor compiled .dds/.ktx/.ktx2, nor .hdr skies: none of those is an
+# orphan for having no mesh pointing at it.
+TEXTURE_DISK_SUFFIXES = (".png", ".jpg", ".jpeg", ".jfif", ".jpe", ".tga", ".tif", ".tiff",
+                         ".exr", ".webp", ".bmp", ".gif")
 
 # Material lines in an .mtl that point at a file (map_Kd foo.png, bump foo.png ...)
 _MTL_MAP_KEYS = ("map_kd", "map_ka", "map_ks", "map_bump", "bump", "map_ns", "map_d",
@@ -1317,9 +1322,30 @@ class Gatekeeper:
             if violation:
                 problems.append(violation)
 
+        warnings: list[str] = []
+        if path.suffix.lower() not in HEADER_ONLY_TEXTURES:
+            moving = texture_checks.animation_warning(path)
+            if moving:
+                warnings.append(moving)
+            # What the pixels say (17 Nov 2026): normal maps and packed masks.
+            for severity, findings in self._pixel_findings(path):
+                (problems if severity == "fail" else warnings).extend(findings)
+
         return Verdict(path, tuple(problems),
                        f"{width}x{height}{memory_metric}" + (f" {n64_format}" if n64_format else ""),
-                       (("width", width), ("height", height), ("memory_kb", memory // 1024)))
+                       (("width", width), ("height", height), ("memory_kb", memory // 1024)),
+                       warnings=tuple(warnings))
+
+    def _pixel_findings(self, path: Path) -> list:
+        found = []
+        is_normal, _ = texture_checks.normal_name_convention(path)
+        if is_normal and self.budget.normal_check != "off":
+            found.append((self.budget.normal_check, texture_checks.normal_findings(
+                path, texture_checks.expected_convention(self.budget))))
+        layout = texture_checks.packed_layout(path)
+        if layout and self.budget.mask_check != "off":
+            found.append((self.budget.mask_check, texture_checks.mask_findings(path, layout)))
+        return found
 
     def _is_pbr(self, path: Path) -> bool:
         if path.suffix.lower() in HEADER_ONLY_TEXTURES:

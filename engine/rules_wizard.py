@@ -516,7 +516,7 @@ def build_rules(answers: dict, folder: str = "<folder>", today: Optional[str] = 
                          "platform's own budget instead, add --platform with its name "
                          "(the [platforms.*] blocks further down), for example:"))
         example = next(k for k in reversed(platforms) if k != owner["triangles"])
-        add(f'#   asset-gatekeeper "{folder}" --once --recursive --platform {example}')
+        add(f'#   asset-gatekeeper "{folder}" --once --platform {example}')
     else:
         out.extend(_wrap(f"The numbers of your platform, {plabel[platforms[0]]}: "
                          f"{PLATFORM_BY_KEY[platforms[0]].why}."))
@@ -958,8 +958,8 @@ def run_wizard(target: Optional[Path], *, answers_file: Optional[Path] = None,
         say(f"  --platform {' | '.join(p['platforms'])}  for one platform's own budget")
     say("")
     say("Next:")
-    say(f'  asset-gatekeeper "{target}" --once --recursive     # check everything once')
-    say(f'  asset-gatekeeper "{target}" --recursive            # keep watching')
+    say(f'  asset-gatekeeper "{target}" --once                # check everything once')
+    say(f'  asset-gatekeeper "{target}"                        # keep watching')
     return 0
 
 

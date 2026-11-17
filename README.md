@@ -33,8 +33,8 @@ pip install "asset-gatekeeper[full]"                  # from PyPI
 
 asset-gatekeeper path/to/Exports --init                # write a rules.toml with your budget
 asset-gatekeeper path/to/Exports --wizard              # ...or answer seven questions about your project
-asset-gatekeeper path/to/Exports --once --recursive    # check everything once
-asset-gatekeeper path/to/Exports --recursive           # keep watching; a pop-up on each failure
+asset-gatekeeper path/to/Exports --once    # check everything once
+asset-gatekeeper path/to/Exports           # keep watching; a pop-up on each failure
 ```
 
 `--once` exits with `1` when anything failed, so the same line works in a build script. `asset-gatekeeper --doctor` checks the machine if something doesn't start.
