@@ -144,6 +144,12 @@ left out by an `.agkignore`, outside **Check only** (`[filters] include`), or
 partly. **Check only** and **Budget** on a row add that folder to `[filters]
 include` or as a category; nothing is written until **Save**.
 
+The **Texture checks** panel sets `[texture] normal_check` and `mask_check`
+(Warn, Fail or Off) and `normal_convention` (the green your engine reads, or
+"From the naming preset", which it explains for the project). Warn and "From the
+naming preset" are the defaults, and Save leaves those keys out of the file so an
+older gate can still read it.
+
 **Send to Workstation** asks the review screen for its upload limit first (512 MB
 by default). A file over it is not sent; the row says how big it is and how to
 raise the limit, instead of a connection error.

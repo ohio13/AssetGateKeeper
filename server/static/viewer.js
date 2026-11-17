@@ -2378,20 +2378,24 @@ function showVerdict(assetOrId) {
     body.innerHTML = '<div class="empty">No asset selected.</div>';
     return;
   }
-  if (!verdictOf(asset)) {
-    body.innerHTML = '<div class="empty">No gate verdict on this asset. '
-      + 'Ones sent from the AssetHealth dashboard carry one.</div>';
-    return;
+  // The verdict it arrived with (AssetHealth, a hook, the uploader), if any...
+  let sent = "";
+  if (verdictOf(asset)) {
+    const problems = String(asset.verdict_problems || "").split("\n").filter(Boolean);
+    sent =
+      `<div class="verdict-sent"><div class="verdict-label">Sent with it</div>`
+      + `<div class="verdict-line ${escapeHtml(verdictOf(asset))}">`
+      + `${escapeHtml(verdictOf(asset).toUpperCase())}</div>`
+      + (problems.length
+        ? `<ul class="verdict-problems">${problems.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`
+        : '<div class="sub">No rule was broken.</div>')
+      + (asset.verdict_tags ? `<div class="verdict-tags">Category: ${escapeHtml(asset.verdict_tags)}</div>` : "")
+      + (asset.source ? `<div class="verdict-source">sent from ${escapeHtml(asset.source)}</div>` : "")
+      + "</div>";
   }
-  const problems = String(asset.verdict_problems || "").split("\n").filter(Boolean);
-  body.innerHTML =
-    `<div class="verdict--line ${escapeHtml(verdictOf(asset))}">`
-    + `${escapeHtml(verdictOf(asset).toUpperCase())}</div>`
-    + (problems.length
-      ? `<ul class="verdict-problems">${problems.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>`
-      : '<div class="sub">No rule was broken.</div>')
-    + (asset.verdict_tags ? `<div class="verdict-tags">Category: ${escapeHtml(asset.verdict_tags)}</div>` : "")
-    + (asset.source ? `<div class="verdict-source">sent from ${escapeHtml(asset.source)}</div>` : "")
+  body.innerHTML = sent
+    + '<div id="verdict-check" class="verdict-check"><div class="sub">Checking it against the '
+    + "project's rules…</div></div>"
     + (asset.healed_from
       ? `<div class="verdict-healed">Fixed copy of <a href="?asset=${encodeURIComponent(asset.healed_from)}" `
         + `data-asset="${escapeHtml(asset.healed_from)}">#${escapeHtml(asset.healed_from)}</a>, `
@@ -2399,6 +2403,60 @@ function showVerdict(assetOrId) {
     + (asset.provenance_auth === "open"
       ? '<div class="verdict-trust">Not authenticated: this workstation was open to the network '
         + "with no token when it arrived, so anyone could have sent it.</div>" : "");
+  loadCheck(asset);
+}
+
+// ...and the gate run here, with the project's rules: the only place the notes
+// (warnings) show - a normal map whose green points the wrong way, a packed
+// mask never packed, an animated GIF - since a verdict is sent with its
+// failures only. Each texture that came with a mesh is checked too.
+let checkTicket = 0;
+
+function noteList(lines, cls) {
+  return lines.length
+    ? `<ul class="${cls}">${lines.map((line) => `<li>${escapeHtml(line)}</li>`).join("")}</ul>` : "";
+}
+
+async function loadCheck(asset) {
+  const ticket = ++checkTicket;
+  let result;
+  try {
+    result = await json(`/api/assets/${asset.id}/check`);
+  } catch (error) {
+    if (ticket !== checkTicket) return;
+    const box = $("verdict-check");
+    if (box) box.innerHTML = `<div class="sub">Not checked here: ${escapeHtml(error.message)}</div>`;
+    return;
+  }
+  const box = $("verdict-check");
+  if (ticket !== checkTicket || !box) return;     // another asset was picked meanwhile
+  if (!result.checked) {
+    box.innerHTML = `<div class="verdict-label">Checked here</div>`
+      + `<div class="sub">Not checked: ${escapeHtml(result.reason || "unknown")}</div>`;
+    return;
+  }
+  const status = String(result.status || "").toLowerCase();
+  const files = result.files || [];
+  const said = files.filter((file) => (file.problems || []).length || (file.warnings || []).length);
+  const quiet = files.length - said.length;
+  box.innerHTML =
+    `<div class="verdict-label" title="${escapeHtml(result.budget)}">Checked here against `
+    + `${escapeHtml(String(result.budget || "").split(" (")[0])}</div>`
+    + `<div class="verdict-line ${escapeHtml(status)}">${escapeHtml(String(result.status || ""))}`
+    + `${result.metric ? ` <span class="sub">${escapeHtml(result.metric)}</span>` : ""}</div>`
+    + noteList(result.problems || [], "verdict-problems")
+    + ((result.warnings || []).length
+      ? '<div class="verdict-notes-title">Notes</div>' + noteList(result.warnings, "verdict-notes") : "")
+    + (!(result.problems || []).length && !(result.warnings || []).length
+      ? '<div class="sub">Nothing to say about the file itself.</div>' : "")
+    + said.map((file) =>
+      `<div class="verdict-file"><div class="verdict-file-name">${escapeHtml(file.name)} `
+      + `<span class="verdict-line ${escapeHtml(String(file.status).toLowerCase())}">`
+      + `${escapeHtml(file.status)}</span></div>`
+      + noteList(file.problems || [], "verdict-problems")
+      + noteList(file.warnings || [], "verdict-notes") + "</div>").join("")
+    + (quiet ? `<div class="sub">${quiet} other texture${quiet === 1 ? "" : "s"} with it: `
+      + "nothing to say.</div>" : "");
 }
 
 

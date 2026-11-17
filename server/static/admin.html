@@ -177,6 +177,46 @@
     </div>
   </section>
 
+  <section class="panel" id="texture-checks">
+    <h2>Texture checks <span class="help">(what a texture's pixels say)</span></h2>
+    <div class="grid">
+      <label>Normal maps
+        <select id="normal-check">
+          <option value="warn">Warn (recommended)</option>
+          <option value="fail">Fail</option>
+          <option value="off">Off</option>
+        </select>
+      </label>
+      <label>Your engine reads green
+        <select id="normal-convention">
+          <option value="">From the naming preset</option>
+          <option value="directx">Down: DirectX (Unreal)</option>
+          <option value="opengl">Up: OpenGL (Unity, Godot, Blender, glTF)</option>
+        </select>
+      </label>
+      <label>Packed masks (ORM, MaskMap)
+        <select id="mask-check">
+          <option value="warn">Warn (recommended)</option>
+          <option value="fail">Fail</option>
+          <option value="off">Off</option>
+        </select>
+      </label>
+    </div>
+    <p class="help" id="normal-convention-note"></p>
+    <p class="help">
+      <strong>Normal maps</strong> (named <code>_Normal</code>, <code>_N</code>,
+      <code>_nrm</code>, <code>_nor_gl</code>…): green pointing the other way from your
+      engine (lighting looks inverted), a map saved as colour instead of linear data,
+      and pixels pointing into the surface. <strong>Packed masks</strong>
+      (<code>_ORM</code>, <code>_ARM</code>, <code>_RMA</code>, <code>_MRA</code>,
+      <code>_MaskMap</code>): channels never packed, a black occlusion channel, the wrong
+      map in the metallic slot, smoothness saved as roughness. Warn shows a note and
+      lets the file through; Fail stops it. Warn is recommended: the green check reads
+      most maps correctly but not every one, so look at a flagged map before flipping
+      it.
+    </p>
+  </section>
+
   <section class="panel">
     <h2 id="categories">Categories <span class="help">([tags.*] — a folder or filename prefix)</span></h2>
     <p class="help">A budget for part of the project: an asset in a folder with this
