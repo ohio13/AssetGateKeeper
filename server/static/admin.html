@@ -41,9 +41,11 @@
           <label>Allowed folder
             <select id="wiz-allowed"><option value="">— choose —</option></select>
           </label>
+          <button type="button" id="wiz-browse" class="ghost browse-button" hidden>Browse…</button>
         </div>
-        <p class="help">Only folders on the allow-list can be opened. To add one,
-        double-click <code>Allow_Folder.bat</code>.</p>
+        <p class="help">Only folders on the allow-list can be opened. To add one, press
+        <strong>Browse…</strong> and choose it in your computer's folder window (or
+        double-click <code>Allow_Folder.bat</code>).</p>
       </li>
       <li>
         <strong>Your engine</strong>
@@ -77,10 +79,11 @@
     <h2>Project</h2>
     <p class="help">
       Point the tool at a game project folder. This page can only open folders on
-      its allow-list, and the browser cannot widen it. To add a folder, double-click
-      <code>Allow_Folder.bat</code> in the AssetGatekeeper folder and choose it; the
-      page restarts by itself. (Studios: <code>--allow-root</code> or
-      <code>AGK_PROJECT_ROOTS</code>.)
+      its allow-list. To add one, press <strong>Browse…</strong>: your computer's own
+      folder window opens, and the folder you choose there is added (a web page
+      cannot add one by itself). Browse works in a browser on the computer that runs
+      the tool; elsewhere, double-click <code>Allow_Folder.bat</code> on that computer.
+      (Studios: <code>--allow-root</code> or <code>AGK_PROJECT_ROOTS</code>.)
     </p>
     <div class="row">
       <label style="flex:1 1 320px">Project folder
@@ -90,12 +93,41 @@
         <select id="allowed-roots"><option value="">— choose —</option></select>
       </label>
       <button type="button" id="project-use" class="primary">Use this folder</button>
+      <button type="button" id="project-browse" class="ghost browse-button" hidden>Browse…</button>
     </div>
     <div class="row" id="recent-row">
       <span class="help">Recent:</span>
       <span id="recent" class="chips"></span>
     </div>
     <p class="help" id="project-status">Loading…</p>
+  </section>
+
+  <section class="panel" id="folders-panel">
+    <h2>Folders <span class="help">(what a scan checks)</span></h2>
+    <p class="help">
+      Every folder inside the project is checked unless you narrow it. Two ways,
+      both kept with the project: <strong>Check only</strong> below
+      (<code>[filters] include</code> in rules.toml), and <code>.agkignore</code>
+      files, written like <code>.gitignore</code>, in any folder. A folder an
+      <code>.agkignore</code> leaves out is never read. To give one folder its own
+      polygon budget, press <strong>Budget</strong> on its row: it becomes a
+      category below.
+    </p>
+    <div class="row crumbs" id="folder-crumbs"></div>
+    <table class="folders">
+      <thead>
+        <tr><th>Folder</th><th class="num">Assets here</th><th>Scan</th><th></th></tr>
+      </thead>
+      <tbody id="folder-rows"><tr><td colspan="4" class="sub">Loading…</td></tr></tbody>
+    </table>
+    <label class="wide">Check only (one pattern per line, relative to the project;
+      empty = everything)
+      <textarea id="scope-include" rows="3" spellcheck="false"
+        placeholder="MM_Assets/**&#10;Characters/MM_*/**"></textarea>
+    </label>
+    <p class="help">A pattern with no <code>/</code> matches a folder of that name at
+    any depth (<code>MM_*</code>); <code>**</code> means any folders. Saved with
+    <strong>Save</strong> like the numbers.</p>
   </section>
 
   <section class="panel">
@@ -146,7 +178,10 @@
   </section>
 
   <section class="panel">
-    <h2>Categories <span class="help">([tags.*] — a folder or filename prefix)</span></h2>
+    <h2 id="categories">Categories <span class="help">([tags.*] — a folder or filename prefix)</span></h2>
+    <p class="help">A budget for part of the project: an asset in a folder with this
+    name (at any depth), or whose name starts with it, gets these numbers instead of
+    the defaults above. Boss, enemy and player folders are the usual three.</p>
     <table class="tags">
       <thead>
         <tr><th>Tag</th><th class="num">Max polygons</th><th></th></tr>
@@ -186,12 +221,14 @@
   <section class="panel">
     <h2>Audit trail</h2>
     <p class="help">Every applied change, oldest last. Also in git — this table is the short version.</p>
+    <div class="audit-scroll">
     <table class="audit">
       <thead>
         <tr><th>When</th><th>Who</th><th>Where</th><th>Old</th><th>New</th></tr>
       </thead>
       <tbody id="audit"></tbody>
     </table>
+    </div>
   </section>
 
 </main>

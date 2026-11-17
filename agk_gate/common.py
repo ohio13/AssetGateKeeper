@@ -215,7 +215,8 @@ def is_candidate(path: Path, exclude: Sequence[str] = ()) -> bool:
 
 
 def walk_files(root: Path, recursive: bool = True, follow_symlinks: bool = False,
-               on_skip: Optional[Callable[[str], None]] = None) -> list[Path]:
+               on_skip: Optional[Callable[[str], None]] = None,
+               enter: Optional[Callable[[Path], bool]] = None) -> list[Path]:
     """Every readable file under ``root``, surviving entries the OS refuses.
 
     ``Path.rglob`` raises on the first entry it cannot traverse - a dangling
@@ -227,6 +228,9 @@ def walk_files(root: Path, recursive: bool = True, follow_symlinks: bool = False
     Symlinked folders are **not** followed by default: they re-introduce the same
     tree twice (double-counted verdicts) and a self-referential link is an
     infinite walk. ``--follow-symlinks`` opts in.
+
+    ``enter(folder)`` returning False leaves a folder unwalked (an .agkignore
+    that ignores it, agk_gate/scope.py).
     """
     top = Path(root)
     found: list[Path] = []
@@ -260,6 +264,9 @@ def walk_files(root: Path, recursive: bool = True, follow_symlinks: bool = False
             # project: backups would read as orphaned textures in an audit.
             dirnames[:] = [name for name in dirnames
                            if not name.startswith(IGNORED_DIR_PREFIXES)]
+            if enter is not None:
+                dirnames[:] = [name for name in dirnames
+                               if enter(Path(directory) / name)]
             if follow_symlinks:
                 keep = []
                 for name in dirnames:

@@ -104,3 +104,50 @@ label.keep[hidden] { display: none; }
   box-shadow: 0 6px 24px rgba(0,0,0,.45); opacity: 0; transform: translateY(8px);
   transition: opacity .2s, transform .2s; pointer-events: none; }
 .toast.show { opacity: 1; transform: none; }
+
+/* Folders panel (16 Nov 2026) */
+textarea { background: var(--panel-2); border: 1px solid var(--line); color: var(--text);
+  border-radius: 7px; padding: 8px 10px; font: 12.5px/1.5 ui-monospace, Consolas, monospace;
+  resize: vertical; width: 100%; }
+textarea:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+label.wide { margin-top: 12px; }
+.crumbs { gap: 4px; align-items: center; margin-bottom: 8px; font-size: 12.5px; }
+.crumbs button { padding: 3px 8px; font-size: 12px; }
+.crumbs .sep { color: var(--muted); }
+.folders td .open { background: none; border: none; color: var(--accent); padding: 0;
+  font-size: 13px; text-align: left; }
+.folders td .open:hover { text-decoration: underline; }
+.folders td.acts { text-align: right; white-space: nowrap; }
+.folders td.acts button { margin-left: 4px; }
+.state { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: 11px;
+  border: 1px solid var(--line); }
+.state.checked { color: var(--good); border-color: #1d4034; }
+.state.ignored, .state.outside { color: var(--muted); }
+.state.some { color: var(--warn); border-color: #3d3423; }
+@media (max-width: 640px) {
+  /* One card per folder: name and state, then its buttons. */
+  .folders thead { display: none; }
+  .folders tr { display: block; padding: 8px 0; border-bottom: 1px solid #1e2530; }
+  .folders td { display: inline-block; border: none; padding: 2px 6px 2px 0; }
+  .folders td.num { display: none; }
+  .folders td.acts { display: flex; flex-wrap: wrap; gap: 6px; text-align: left;
+    white-space: normal; padding-top: 6px; }
+  .folders td.acts button { margin: 0; }
+}
+/* Phone width: the page scrolled sideways (a long folder in a <select>, the
+   320 px folder field, the top bar). One column instead. */
+@media (max-width: 640px) {
+  .topbar { flex-wrap: wrap; }
+  .actions { flex-wrap: wrap; }
+  .row > label, .row > input, .row > select { flex: 1 1 100% !important; min-width: 0; }
+  input, select, textarea { min-width: 0; max-width: 100%; width: 100%; }
+  .steps { padding-left: 18px; }
+  .wrap { padding: 16px 12px 48px; }
+  .checks input, .choices input { width: 15px; }
+}
+.notice, .help, #where, #project-status { overflow-wrap: anywhere; }
+.crumbs button { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+@media (max-width: 640px) { .brand { min-width: 0; flex-wrap: wrap; } }
+/* The audit table keeps its columns and scrolls inside its own panel. */
+.audit-scroll { overflow-x: auto; }
+.audit td { overflow-wrap: anywhere; }

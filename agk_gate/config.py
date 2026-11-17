@@ -67,6 +67,9 @@ class Budget:
     # Globs that look like assets but are not: review renders, 4x paint sources,
     # hashed build caches. From [filters] exclude. Empty by default.
     exclude: tuple[str, ...] = ()
+    # Folders to check, as globs relative to the scanned folder (MM_*, Art/**).
+    # From [filters] include. Empty = everything (see agk_gate/scope.py).
+    include: tuple[str, ...] = ()
 
     # - reference & hierarchy auditing - #
     # On by default: a .gltf pointing at a texture nobody shipped is broken in
@@ -271,8 +274,9 @@ class Budget:
         filters = document.get("filters") or {}
         if not isinstance(filters, dict):
             raise ConfigError("[filters] must be a table")
-        _reject_unknown(filters, ("exclude",), "[filters]")
-        exclude = _read_strings(filters, "exclude", "[filters]") if filters else None
+        _reject_unknown(filters, ("exclude", "include"), "[filters]")
+        exclude = _read_strings(filters, "exclude", "[filters]") if "exclude" in filters else None
+        include = _read_strings(filters, "include", "[filters]") if "include" in filters else None
 
         mesh = document.get("mesh", {})
         texture = document.get("texture", {})
@@ -366,6 +370,7 @@ class Budget:
                 else allow_outside_references
             ),
             exclude=defaults.exclude if exclude is None else exclude,
+            include=defaults.include if include is None else include,
             pbr_check=defaults.pbr_check if pbr_check is None else pbr_check,
             n64_tmem=defaults.n64_tmem if n64_tmem is None else n64_tmem,
             pbr_floor=defaults.pbr_floor if pbr_floor is None else pbr_floor,
@@ -1482,6 +1487,8 @@ def resolve_budget(root: Path, args: argparse.Namespace,
             overrides[field] = value
     if getattr(args, "exclude", None):
         overrides["exclude"] = tuple(args.exclude)
+    if getattr(args, "include", None):
+        overrides["include"] = tuple(args.include)
     if getattr(args, "require_indexed", None):
         # Asking for an index audit without the transform audit would silently
         # skip the pivot checks that make the audit useful.

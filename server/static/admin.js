@@ -18,6 +18,8 @@ const state = {
   original: "",        // serialised snapshot, for the dirty flag
   scan: null,
   stream: null,
+  project: "",         // the folder the page is pointed at
+  folderPath: "",      // the folder the Folders panel shows ("" = the allowed list)
 };
 
 /* - project */
@@ -69,6 +71,8 @@ async function useProject() {
       ? "Numbers loaded from the project's rules.toml."
       : "No rules.toml here yet - pick a preset or type the numbers, then Save.";
     $("scan-root").textContent = info.project;
+    state.project = info.project;
+    loadFolders(info.project);
     notice(info.rules_exists
       ? `Project set: ${info.project} - existing rules.toml loaded.`
       : `Project set: ${info.project} - no rules.toml yet; Save will create one.`,
@@ -77,6 +81,163 @@ async function useProject() {
     notice(`That folder cannot be used: ${error.message}`, "err");
   } finally {
     $("project-use").disabled = false;
+  }
+}
+
+/* - Browse... and the Folders panel (16 Nov 2026) */
+// Allow_Folder.bat was the only way to widen the allow-list, and it meant leaving
+// the page and restarting the dashboard. Browse asks the server to open the
+// computer's own folder window; the folder a person picks there is allowed at
+// once. The page can ask for the window but can never name a folder itself.
+
+function addAllowedOption(select, root) {
+  if ([...select.options].some((option) => option.value.toLowerCase() === root.toLowerCase())) return;
+  const option = document.createElement("option");
+  option.value = root;
+  option.textContent = root;
+  select.appendChild(option);
+}
+
+async function browseFolder(inputId, buttonId, thenUse) {
+  const button = $(buttonId);
+  button.disabled = true;
+  notice("A folder window is open on this computer. Choose the folder there "
+    + "(it may be behind this browser).", "warn");
+  try {
+    const result = await api("/admin/api/browse", { method: "POST", json: {} });
+    if (!result.ok) { notice("No folder chosen; nothing changed.", "warn"); return; }
+    for (const root of result.allowed_roots || []) {
+      addAllowedOption($("allowed-roots"), root);
+      addAllowedOption($("wiz-allowed"), root);
+    }
+    $(inputId).value = result.path;
+    if (thenUse) await useProject();
+    else notice(`Allowed: ${result.path}${result.saved ? "" : " (until the dashboard restarts)"}`, "ok");
+  } catch (error) {
+    notice(`Browse did not work: ${error.message}`, "err");
+  } finally {
+    button.disabled = false;
+  }
+}
+
+const FOLDER_STATE = {
+  checked: ["checked", "checked"],
+  ignored: ["ignored", "not checked: an .agkignore leaves it out"],
+  outside: ["outside", "not checked: outside Check only"],
+  some: ["some", "partly: Check only names folders inside"],
+};
+
+function relativeTo(base, path) {
+  const norm = (text) => String(text || "").replace(/\\/g, "/").replace(/\/+$/, "");
+  const from = norm(base);
+  const to = norm(path);
+  if (!from || to.toLowerCase() === from.toLowerCase()) return "";
+  if (to.toLowerCase().startsWith(from.toLowerCase() + "/")) return to.slice(from.length + 1);
+  return null;
+}
+
+function renderCrumbs(data) {
+  const host = $("folder-crumbs");
+  host.innerHTML = "";
+  const add = (label, path) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "small ghost";
+    button.textContent = label;
+    button.title = path || "the folders this page may open";
+    button.addEventListener("click", () => loadFolders(path));
+    host.appendChild(button);
+  };
+  add("Allowed folders", "");
+  if (!data.path) return;
+  const root = (data.roots || []).find((item) => relativeTo(item, data.path) !== null);
+  if (!root) return;
+  const sep = root.includes("\\") ? "\\" : "/";
+  let current = root;
+  const span = document.createElement("span");
+  span.className = "sep";
+  span.textContent = "›";
+  host.appendChild(span.cloneNode(true));
+  add(root, root);
+  for (const part of (relativeTo(root, data.path) || "").split("/").filter(Boolean)) {
+    current = current.replace(/[\\/]+$/, "") + sep + part;
+    host.appendChild(span.cloneNode(true));
+    add(part, current);
+  }
+}
+
+let folderRequest = 0;
+
+async function loadFolders(path) {
+  state.folderPath = path || "";
+  const body = $("folder-rows");
+  // Two quick loads (page start, then a project switch) can answer out of
+  // order; only the last one asked for may draw.
+  const ticket = ++folderRequest;
+  let data;
+  try {
+    data = await api(`/admin/api/folders?path=${encodeURIComponent(state.folderPath)}`);
+  } catch (error) {
+    if (ticket !== folderRequest) return;
+    body.innerHTML = `<tr><td colspan="4" class="sub">${escapeHtml(error.message)}</td></tr>`;
+    return;
+  }
+  if (ticket !== folderRequest) return;
+  renderCrumbs(data);
+  body.innerHTML = "";
+  const rows = data.folders || [];
+  if (!rows.length) {
+    body.innerHTML = `<tr><td colspan="4" class="sub">No folders inside`
+      + `${data.assets ? ` - ${data.assets} asset file(s) here` : ""}.</td></tr>`;
+  }
+  const project = state.project || data.project || "";
+  for (const row of rows) {
+    const tr = document.createElement("tr");
+    const [cls, label] = FOLDER_STATE[row.status] || ["", ""];
+    const relative = relativeTo(project, row.path);
+    tr.innerHTML = `
+      <td><button type="button" class="open">${escapeHtml(row.name)}${row.has_folders ? " ›" : ""}</button></td>
+      <td class="num">${row.assets === null || row.assets === undefined ? "" : row.assets}</td>
+      <td>${label ? `<span class="state ${cls}">${escapeHtml(label)}</span>` : ""}</td>
+      <td class="acts"></td>`;
+    tr.querySelector(".open").addEventListener("click", () => loadFolders(row.path));
+    const acts = tr.querySelector(".acts");
+    const action = (text, title, handler) => {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "small ghost";
+      button.textContent = text;
+      button.title = title;
+      button.addEventListener("click", handler);
+      acts.appendChild(button);
+    };
+    if (relative) {
+      action("Check only", `add ${relative}/** to Check only`, () => {
+        const lines = scopePatterns();
+        const pattern = `${relative}/**`;
+        if (!lines.some((line) => line.toLowerCase() === pattern.toLowerCase())) lines.push(pattern);
+        $("scope-include").value = lines.join("\n");
+        markDirty();
+        notice(`Added ${pattern} to Check only. Save to keep it.`, "ok");
+      });
+      action("Budget", `a polygon budget for every folder named ${row.name}`, () => {
+        const tags = collectTags();
+        if (!tags[row.name]) tags[row.name] = { max_triangles: Number($("prop-tris").value || 1) };
+        renderTags(tags);
+        markDirty();
+        $("categories").scrollIntoView({ behavior: "smooth", block: "start" });
+        notice(`Category "${row.name}" added with the prop budget; change its number, then Save.`, "ok");
+      });
+    }
+    action("Use as project", `point the tool at ${row.path}`, () => {
+      $("project-path").value = row.path;
+      useProject();
+    });
+    body.appendChild(tr);
+  }
+  if (data.truncated) {
+    body.insertAdjacentHTML("beforeend",
+      `<tr><td colspan="4" class="sub">Only the first 500 folders are shown.</td></tr>`);
   }
 }
 
@@ -133,6 +294,8 @@ function setupWizard(data) {
   target.value = state.presets.some((row) => row.name === "pc") ? "pc" : (state.presets[0] || {}).name;
   document.querySelectorAll('input[name="wiz-engine"]').forEach((input) =>
     input.addEventListener("change", () => { $("wiz-engine-help").innerHTML = ENGINE_HELP[wizardEngine()]; }));
+  $("wiz-browse").hidden = !data.can_browse;
+  $("wiz-browse").addEventListener("click", () => browseFolder("wiz-path", "wiz-browse", false));
   $("wiz-go").addEventListener("click", runWizard);
   $("wiz-skip").addEventListener("click", () => { $("wizard").hidden = true; });
 }
@@ -151,6 +314,7 @@ async function runWizard() {
       return;
     }
     $("project-path").value = info.project;
+    state.project = info.project;
     $("where").textContent = info.rules_path;
     setProjectStatus(info);
     renderRecent(info.recent);
@@ -246,7 +410,14 @@ function budgetDocument() {
     },
     tagging: { mode: $("tag-mode").value },
     tags: collectTags(),
+    // Only include: [filters] exclude and anything else there is kept as it is.
+    filters: { include: scopePatterns() },
   };
+}
+
+function scopePatterns() {
+  return $("scope-include").value.split(/\r?\n/)
+    .map((line) => line.trim()).filter((line) => line && !line.startsWith("#"));
 }
 
 function collectTags() {
@@ -306,6 +477,7 @@ function fillForm(document) {
   $("naming").checked = texture.naming !== false;
   $("refs").checked = mesh.check_references !== false;
   $("degenerate").checked = !!mesh.allow_degenerate;
+  $("scope-include").value = ((document.filters || {}).include || []).join("\n");
 
   // The two headline numbers are the character/prop categories; the base budget
   // is the character figure, so the form cannot disagree with itself.
@@ -476,6 +648,7 @@ async function loadState(firstTime = true) {
   $("where").textContent = data.rules_path;
   $("scan-root").textContent = data.scan_root || "your project folder (pick it above)";
   $("project-path").value = data.project || data.scan_root || "";
+  state.project = data.project || "";
   setProjectStatus({ rules_path: data.rules_path, rules_exists: data.rules_exists,
                      rules_error: data.rules_error });
   renderRecent(data.recent_projects);
@@ -490,6 +663,9 @@ async function loadState(firstTime = true) {
     }
     setupWizard(data);
     $("project-use").addEventListener("click", useProject);
+    $("project-browse").hidden = !data.can_browse;
+    $("project-browse").addEventListener("click",
+      () => browseFolder("project-path", "project-browse", true));
     $("project-path").addEventListener("keydown", (event) => {
       if (event.key === "Enter") { event.preventDefault(); useProject(); }
     });
@@ -536,6 +712,7 @@ async function loadState(firstTime = true) {
   }
 
   fillForm(state.document);
+  loadFolders(state.folderPath || state.project);
   renderAudit(data.audit || []);
   if (data.scan) {
     state.scan = data.scan;

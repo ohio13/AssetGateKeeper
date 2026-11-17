@@ -127,11 +127,22 @@ godot or none), hardware budget; then it saves and runs the first scan. Then:
   dropdown, tags as a tree;
 * **audit trail** - who changed which rule, when, and what the diff was.
 
-The project picker is allow-listed at launch: the install folder, folders added
-with `Allow_Folder.bat` (kept in `.agk/allowed_folders.txt`; it restarts the
-dashboard for you), `--allow-root` and `$AGK_PROJECT_ROOTS` (`;`-separated). Paths
-are resolved before comparison, so `..` and symlinks cannot escape the list, and a
-browser cannot widen it.
+The project picker is allow-listed: the install folder, folders added with
+**Browse…** or `Allow_Folder.bat` (both kept in `.agk/allowed_folders.txt`),
+`--allow-root` and `$AGK_PROJECT_ROOTS` (`;`-separated). Paths are resolved before
+comparison, so `..` and symlinks cannot escape the list. A page cannot name a
+folder to add: **Browse…** (`POST /admin/api/browse`) only asks the computer to
+open its own folder window, and only a person choosing a folder there adds one. It
+answers only a browser on the same computer, a director or producer, with the CSRF
+token, one window at a time; `--no-browse` turns it off. Set `AGK_FOLDER_PICKER` to
+a `.py` file or command to use another picker (it is given the starting folder and
+prints one folder, or nothing for Cancel).
+
+The **Folders** panel (`GET /admin/api/folders?path=`) lists the folders inside an
+allowed one, names only, at most 500, with what a scan does with each: checked,
+left out by an `.agkignore`, outside **Check only** (`[filters] include`), or
+partly. **Check only** and **Budget** on a row add that folder to `[filters]
+include` or as a category; nothing is written until **Save**.
 
 **Send to Workstation** asks the review screen for its upload limit first (512 MB
 by default). A file over it is not sent; the row says how big it is and how to

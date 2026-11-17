@@ -165,25 +165,48 @@ def main(argv: list[str] | None = None) -> int:
                             "hold a version this hook cannot check: `git add` it to commit what is on "
                             "disk, or `git stash --keep-index` to check the staged version")
             paths.remove(path)
+    # One gate run per rules file, not one per asset: each run is a Python start
+    # (about 0.6 s), so a 200-texture commit took two minutes; batched it takes
+    # seconds. Each file is still checked exactly as it would be on its own.
+    groups: dict[tuple[str, ...], list[Path]] = {}
     for path in paths:
-        lfs = " [LFS]" if is_lfs_tracked(path) else ""
-        rules = [] if options.rules else nearest_rules(path)
-        completed = subprocess.run([*gatekeeper_command(), str(path), *extra, *rules],
-                                   capture_output=True, text=True,
-                                   encoding="utf-8", errors="replace")
-        if completed.returncode == 0:
-            if options.verbose:
-                print(f"AssetGatekeeper: PASSED {path}{lfs}")
-            continue
-        if completed.returncode == 2:
-            print(f"AssetGatekeeper: setup error for {path}:\n{completed.stderr.strip()}",
-                  file=sys.stderr)
-            return 2
-        verdict = ""
-        for line in (completed.stdout + completed.stderr).splitlines():
-            if "FAILED" in line:
-                verdict = line.strip()
-        failures.append(f"{path}{lfs}\n    {verdict or completed.stdout.strip()[:300]}")
+        rules = () if options.rules else tuple(nearest_rules(path))
+        groups.setdefault(rules, []).append(path)
+    for rules, members in groups.items():
+        for batch in _batches(members):
+            completed = subprocess.run([*gatekeeper_command(), *map(str, batch), "--once",
+                                        "--json", *extra, *rules],
+                                       capture_output=True, text=True,
+                                       encoding="utf-8", errors="replace")
+            if completed.returncode == 2:
+                print(f"AssetGatekeeper: setup error for {batch[0]}"
+                      f"{f' and {len(batch) - 1} more' if len(batch) > 1 else ''}:\n"
+                      f"{completed.stderr.strip()[-1500:]}", file=sys.stderr)
+                return 2
+            verdicts = _verdicts(completed.stdout)
+            for path in batch:
+                lfs = " [LFS]" if is_lfs_tracked(path) else ""
+                verdict = verdicts.get(_key(path))
+                if verdict is None:
+                    # No verdict is fine only when the gate said why: the project's
+                    # .agkignore or [filters] include leaves the file out, as a scan
+                    # of the folder would. Anything else (a crash) blocks: a hook
+                    # that waves files through when the gate stops is not a gate.
+                    if f"{path.name} not checked:" in completed.stderr:
+                        if options.verbose:
+                            print(f"AssetGatekeeper: not checked (left out by the project) "
+                                  f"{path}{lfs}")
+                        continue
+                    last = (completed.stderr.strip().splitlines() or ["no output"])[-1]
+                    failures.append(f"{path}{lfs}\n    not checked: the gate stopped "
+                                    f"(exit {completed.returncode}): {last[:300]}")
+                    continue
+                if verdict.get("passed"):
+                    if options.verbose:
+                        print(f"AssetGatekeeper: PASSED {path}{lfs}")
+                    continue
+                reasons = "; ".join(verdict.get("problems") or []) or str(verdict.get("status"))
+                failures.append(f"{path}{lfs}\n    {verdict.get('status', 'FAILED')}: {reasons}")
 
     if not failures:
         return 0
@@ -194,6 +217,43 @@ def main(argv: list[str] | None = None) -> int:
     print("\nNothing was healed or modified. Commit the fix, or `git commit --no-verify` "
           "if a technical lead agrees.", file=sys.stderr)
     return 1
+
+
+def _key(path: Path) -> str:
+    import os
+    return os.path.normcase(str(Path(path).resolve()))
+
+
+def _batches(paths: list[Path], max_files: int = 150, max_chars: int = 20000):
+    """Groups small enough for one command line (Windows allows 32,767 characters)."""
+    batch: list[Path] = []
+    length = 0
+    for path in paths:
+        size = len(str(path)) + 3
+        if batch and (len(batch) >= max_files or length + size > max_chars):
+            yield batch
+            batch, length = [], 0
+        batch.append(path)
+        length += size
+    if batch:
+        yield batch
+
+
+def _verdicts(stdout: str) -> dict:
+    """The gate's --json verdict lines, by file."""
+    import json
+    found = {}
+    for line in stdout.splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(row, dict) and row.get("file"):
+            found[_key(Path(row["file"]))] = row
+    return found
 
 
 def install() -> int:

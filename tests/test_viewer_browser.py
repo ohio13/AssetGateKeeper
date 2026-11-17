@@ -861,6 +861,9 @@ with sync_playwright() as playwright:
             paint: document.getElementById("bake-paint").checked,
             pakTris: Array.from(document.querySelectorAll("#bake-triangles .pak-only"))
                           .filter((o) => !o.hidden && !o.disabled).length })""")
+    caution = page.evaluate("document.getElementById('bake-caution').textContent")
+    expect("the bake panel says plainly that a bake is a starting point for an artist to repair",
+           "starting point, not a finished asset" in caution and "repair" in caution, caution)
     bake_set("#bake-preset", "")
     expect("no Expansion Pak box for a modern game asset, and its eyes stay geometry",
            not bake_state()["pak"] and not bake_state()["row"] and not bake_state()["paint"],

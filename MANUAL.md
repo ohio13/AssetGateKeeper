@@ -142,8 +142,8 @@ Start AssetGatekeeper.bat
 It finds Python, starts the admin page **and** the 3D review screen as detached
 background services (auto port fallback, logs in `.agk\logs`), and opens your
 browser on the admin dashboard. Running it again while they are up just re-opens
-the page. `Stop.bat` (double-click) stops them; `Allow_Folder.bat` lets the
-page open another folder.
+the page. `Stop.bat` (double-click) stops them; **Browse…** on the Rules page (or
+`Allow_Folder.bat`) lets the page open another folder.
 
 To let the project picker reach folders outside this repo, set once:
 
@@ -239,6 +239,7 @@ Run `asset-gatekeeper --help` for this list on your build.
 | `--recursive` | include subfolders |
 | `--json` | one JSON object per asset on stdout (for DCC plugins and your own scripts) |
 | `--exclude GLOB` | ignore matching files (repeatable; same as `[filters] exclude`) |
+| `--include GLOB` | check only files in matching folders (repeatable; same as `[filters] include`) |
 | `-v` / `--verbose` | debug logging |
 | `--no-color` | plain output for logs |
 
@@ -353,6 +354,7 @@ pbr_suffixes = ["_Albedo", "_Diffuse"]
 # -------------------------------------------------------------- filters
 [filters]
 exclude = ["preview_*", "*_src4x.png", "*_c.png"]   # not shipped assets
+include = ["MM_*"]            # only these folders (default: all); plus any .agkignore files
 
 # -------------------------------------------------------------- tagging
 [tagging]

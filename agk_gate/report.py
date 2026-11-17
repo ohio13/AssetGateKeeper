@@ -345,6 +345,10 @@ class Reporter:
         LOG.info("%d asset(s): %d passed, %d failed", total, self.passed, self.failed)
         if skipped and skipped.get("total"):
             LOG.info("%s", describe_skipped(skipped))
+        below = (skipped or {}).get("not_recursive", 0)
+        if below:
+            LOG.warning("%s more asset file(s) in subfolders were not checked: add --recursive "
+                        "to check them", f"{below:,}+" if below >= 1000 else f"{below:,}")
 
     def close(self, timeout: Optional[float] = None) -> None:
         """Flush pending telemetry and toasts. Bounded, and a no-op when off."""
@@ -354,20 +358,27 @@ class Reporter:
             self.notifier.close(timeout)
 
 
-def skipped_files(files: Iterable[Path], exclude: Sequence[str] = ()) -> dict:
+def skipped_files(files: Iterable[Path], exclude: Sequence[str] = (), scope=None) -> dict:
     """What a run walked past and why: {"total", "unsupported": {".jfif": 6},
     "excluded": n}. Scratch files, hidden files and the tool's own (rules.toml,
     .agk folders) are not counted - only what a person put there and might
     expect to be checked. Reference images saved as .jfif used to be ignored
     without a word, so a folder looked checked when half of it was not."""
     unsupported: dict[str, int] = {}
-    excluded = 0
+    excluded = ignored = outside = 0
     for path in files:
         name = path.name
         if (name.startswith(IGNORED_PREFIXES) or name.startswith(".")
                 or name.lower() in QUIET_NAMES or name.lower().endswith(IGNORED_SUFFIXES)
                 or any(part.startswith(IGNORED_DIR_PREFIXES) or part == ".agk"
                        for part in path.parts[:-1])):
+            continue
+        why = scope.reason(path) if scope is not None else ""
+        if why == "ignored":
+            ignored += 1            # an .agkignore says so: never "unsupported"
+            continue
+        if why == "outside":
+            outside += 1
             continue
         suffix = path.suffix.lower()
         if suffix not in TRACKED_SUFFIXES:
@@ -376,8 +387,10 @@ def skipped_files(files: Iterable[Path], exclude: Sequence[str] = ()) -> dict:
         elif not is_candidate(path, exclude):
             excluded += 1
     ordered = dict(sorted(unsupported.items(), key=lambda item: (-item[1], item[0])))
-    return {"total": sum(ordered.values()) + excluded, "unsupported": ordered,
-            "excluded": excluded}
+    folders = len(getattr(scope, "pruned_folders", ()) or ())
+    return {"total": sum(ordered.values()) + excluded + ignored + outside, "unsupported": ordered,
+            "excluded": excluded, "ignored": ignored, "outside": outside,
+            "ignored_folders": folders}
 
 
 def describe_skipped(skipped: dict, limit: int = 5) -> str:
@@ -394,7 +407,15 @@ def describe_skipped(skipped: dict, limit: int = 5) -> str:
         pieces.append("unsupported type " + ", ".join(parts))
     if skipped.get("excluded"):
         pieces.append(f"{skipped['excluded']} by [filters] exclude / --exclude")
-    return f"{skipped.get('total', 0)} file(s) skipped: " + "; ".join(pieces)
+    if skipped.get("outside"):
+        pieces.append(f"{skipped['outside']} outside [filters] include")
+    if skipped.get("ignored"):
+        pieces.append(f"{skipped['ignored']} by .agkignore")
+    line = f"{skipped.get('total', 0)} file(s) skipped: " + "; ".join(pieces)
+    if skipped.get("ignored_folders"):
+        count = skipped["ignored_folders"]
+        line += f" ({count} folder{'s' if count != 1 else ''} ignored by .agkignore, not read)"
+    return line
 
 
 #: A word of advice for the unsupported types people most often drop in.
