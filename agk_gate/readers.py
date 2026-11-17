@@ -45,6 +45,11 @@ def _describe_unexpected(exc: BaseException) -> str:
 
 def _mesh_read_error(exc: BaseException) -> str:
     """The FAILED reason for a mesh trimesh could not load, with the fix if there is one."""
+    if isinstance(exc, ModuleNotFoundError) and getattr(exc, "name", "") in ("networkx", "lxml"):
+        # trimesh reads 3MF with these two (both BSD); without them it raises
+        # this at the first .3mf.
+        return ("could not read mesh: reading 3MF needs the free networkx and lxml "
+                "readers: run Install_Extras.bat, or python -m pip install networkx lxml")
     if isinstance(exc, ModuleNotFoundError) and getattr(exc, "name", "") == "collada":
         return ("could not read mesh: reading Collada (.dae) needs the free pycollada "
                 "reader: run Install_Extras.bat, or python -m pip install pycollada")

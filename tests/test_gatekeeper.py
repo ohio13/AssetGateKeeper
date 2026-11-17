@@ -3795,6 +3795,38 @@ with _ctx.redirect_stdout(_out):
 expect("--check with a needed package missing exits 1 and prints the command",
        _code == 1 and "pip install" in _out.getvalue() and "MISSING" in _out.getvalue(),
        _out.getvalue()[-300:])
+# 17 Nov 2026: one extra with no package for this Python (usd-core on a brand-new
+# Python) made the single pip call fail and left Windows with nothing installed.
+_calls = []
+_real_call = extras.subprocess.call
+extras.loads = lambda module, python=None: (module not in ("trimesh", "pxr.Usd"), "no module")
+
+
+def _fake_call(command):
+    _calls.append(command[4:])
+    return 1 if any(part.startswith("usd-core") for part in command[4:]) else 0
+
+
+extras.subprocess.call = _fake_call
+_real_pip_available = extras.pip_available
+extras.pip_available = lambda python=None: True
+_out = _io.StringIO()
+with _ctx.redirect_stdout(_out):
+    _code = extras.main([])
+expect("the installer puts what the gate needs in one pip call and each extra in its own",
+       _calls[0] == ["trimesh>=4.0,<6"] and ["usd-core>=24.0"] in _calls, _calls)
+extras.loads = lambda module, python=None: (module != "pxr.Usd", "No module named 'pxr'")
+_calls.clear()
+_out = _io.StringIO()
+with _ctx.redirect_stdout(_out):
+    _code = extras.main([])
+expect("... an extra that cannot be installed is named and does not fail the install",
+       _code == 0 and "could not be installed on this Python" in _out.getvalue()
+       and "usd-core - reads USD" in _out.getvalue()
+       and "everything AssetGatekeeper needs is installed and loads" in _out.getvalue(),
+       _out.getvalue()[-500:])
+extras.subprocess.call = _real_call
+extras.pip_available = _real_pip_available
 extras.loads = lambda module, python=None: (module != "watchdog.observers", "")
 _out = _io.StringIO()
 with _ctx.redirect_stdout(_out):
@@ -3826,8 +3858,15 @@ extras.subprocess.call = lambda command: _calls.append(command) or 1
 _out = _io.StringIO()
 with _ctx.redirect_stdout(_out):
     _code = extras.main([])
-expect("a failed install exits 1 and says what still does not load",
-       _code == 1 and "still do not load" in _out.getvalue() and "watchdog" in _out.getvalue())
+expect("a failed optional extra is named, and the install still succeeds (17 Nov 2026)",
+       _code == 0 and "could not be installed on this Python" in _out.getvalue()
+       and "watchdog - faster folder watching" in _out.getvalue(), _out.getvalue()[-300:])
+extras.loads = lambda module, python=None: (module != "trimesh", "No module named 'trimesh'")
+_out = _io.StringIO()
+with _ctx.redirect_stdout(_out):
+    _code = extras.main([])
+expect("a failed install of what the gate needs exits 1 and says what still does not load",
+       _code == 1 and "still do not load" in _out.getvalue() and "trimesh" in _out.getvalue())
 extras.subprocess.call = _real_call
 extras.loads = _real_loads
 _bat = (ROOT_MODULE_DIR / "Install_Extras.bat").read_bytes()
@@ -3887,7 +3926,9 @@ from agk_gate import scope as _scope  # noqa: E402
 _sc_dir = Path(__import__("tempfile").mkdtemp(prefix="agk-scope-"))
 for _rel in ("MM_Assets/MM_Enemies/T_Bug_BaseColor.png", "MM_Assets/Enemies/T_Old_BaseColor.png",
              "MM_Assets/MM_Boss/T_Boss_BaseColor.png", "MM_Assets/MM_Enemies/WIP/T_Wip_BaseColor.png",
-             "MM_Assets/MM_Enemies/wip/T_Wip2_BaseColor.png", "Reference/T_Ref_BaseColor.png",
+             # a lower-case wip elsewhere: two folders differing only in case are
+             # one folder on Windows and macOS
+             "MM_Assets/MM_Boss/wip/T_Wip2_BaseColor.png", "Reference/T_Ref_BaseColor.png",
              "T_Root_BaseColor.png", "MM_Assets/mm_props/T_Prop_BaseColor.png"):
     (_sc_dir / _rel).parent.mkdir(parents=True, exist_ok=True)
     make_png(_sc_dir / _rel, (64, 64))
@@ -3902,7 +3943,7 @@ expect(".agkignore: '/*/' then '!/MM_*/' keeps only the MM_ folders (any case), 
                  "MM_Assets/mm_props/T_Prop_BaseColor.png"], _kept)
 expect("... ignored folders are not read at all",
        sorted(p.relative_to(_sc_dir).as_posix() for p in _sc.pruned_folders)
-       == ["MM_Assets/Enemies", "MM_Assets/MM_Enemies/WIP", "MM_Assets/MM_Enemies/wip"],
+       == ["MM_Assets/Enemies", "MM_Assets/MM_Boss/wip", "MM_Assets/MM_Enemies/WIP"],
        _sc.pruned_folders)
 expect("include: a file outside the patterns is 'outside', one under them is checked",
        _sc.reason(_sc_dir / "Reference" / "T_Ref_BaseColor.png") == "outside"

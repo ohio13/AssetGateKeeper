@@ -40,6 +40,9 @@ SUITES = (
     ("test_admin", "tests/test_admin.py", (), "gate"),
     ("test_enterprise", "tests/test_enterprise.py", (), "gate"),
     ("test_analytics", "tests/test_analytics.py", (), "gate"),
+    # The engine plug-ins' contract with the gate (formats, arguments): CI runs
+    # it, so certify does too (17 Nov 2026: a new format reached CI first).
+    ("test_engine_plugins", "tests/test_engine_plugins.py", ("--only", "contract"), "gate"),
     ("headless_integration", "tests/run_headless_integration.py", ("--synthetic",), "gate"),
     ("test_workstation", "tests/test_workstation.py", (), "workstation"),
     ("test_viewer_browser", "tests/test_viewer_browser.py", (), "workstation"),

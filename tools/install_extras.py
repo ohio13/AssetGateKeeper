@@ -79,6 +79,8 @@ PACKAGES: tuple = (
             False, min_python=BAKE_MIN_PYTHON),
     Package("usd-core>=24.0", "pxr.Usd", "reads USD (.usd, .usda, .usdc, .usdz)", False),
     Package("pycollada>=0.8", "collada", "reads Collada (.dae)", False),
+    Package("networkx>=2.6", "networkx", "reads 3MF (.3mf), with lxml", False),
+    Package("lxml>=4.9", "lxml.etree", "reads 3MF (.3mf), with networkx", False),
 )
 
 
@@ -192,9 +194,18 @@ def main(argv: Optional[list] = None) -> int:
         say("then run this again.")
         return 1
 
+    needed = [p for p in missing if p.needed]
+    optional = [p for p in missing if not p.needed]
     say(f"Installing {', '.join(p.name for p in missing)} (this can take a few minutes)...")
     say()
-    code = subprocess.call(command)
+    # What the gate needs goes in one pip call; each optional extra in its own,
+    # so one that has no package for this Python or computer (usd-core on a
+    # brand-new Python, say) cannot stop everything else being installed
+    # (17 Nov 2026: one failed extra left a Windows install with nothing).
+    code = subprocess.call(pip_command(needed)) if needed else 0
+    for package in optional:
+        if subprocess.call(pip_command([package])) != 0:
+            say(f"  ({package.name} could not be installed here; see the lines above)")
     say()
     if code != 0:
         say(f"pip stopped with exit {code}; the lines above say why. Common causes:")
@@ -206,15 +217,25 @@ def main(argv: Optional[list] = None) -> int:
         say("    .venv/bin/python (the .bat files use .venv by themselves)")
 
     still = []
+    extras_missing = []
     for package in missing:
         ok, why = loads(package.module)
         if not ok:
-            still.append((package, why))
+            (still if package.needed else extras_missing).append((package, why))
     if still:
         say("These still do not load:")
         for package, why in still:
             say(f"  {package.name}: {why}")
         return 1
+    if extras_missing:
+        # The gate works without these; say plainly what is missing and why.
+        say("Done: everything AssetGatekeeper needs is installed and loads.")
+        say("Optional extras that could not be installed on this Python "
+            f"{version[0]}.{version[1]}:")
+        for package, why in extras_missing:
+            say(f"  {package.name} - {package.purpose} ({why})")
+        say("Everything else works. A newer release of an extra, or Python 3.12, usually fixes it.")
+        return 0
     say("Done: everything is installed and loads.")
     if skipped:
         say("(The Polypaint bake needs Python 3.10 or newer; this Python is older.)")

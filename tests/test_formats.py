@@ -1918,7 +1918,16 @@ _open_budget = agk.Budget()
 import trimesh as _tm  # noqa: E402
 _open_dir = Path(tempfile.mkdtemp(prefix="agk_open_"))
 _ball = _tm.creation.icosphere(subdivisions=2)
-for _ext in ("ply", "stl", "off", "3mf"):
+try:
+    import lxml.etree  # noqa: F401
+    import networkx  # noqa: F401
+    _three_mf = ("3mf",)
+except ImportError:                       # trimesh reads and writes 3MF with these two
+    _three_mf = ()
+    print("  skip  .3mf: networkx and lxml not installed")
+expect("a .3mf with no reader says how to get one",
+       "networkx and lxml" in agk_readers._mesh_read_error(ModuleNotFoundError("x", name="networkx")))
+for _ext in ("ply", "stl", "off", *_three_mf):
     _ball.export(_open_dir / f"SM_Ball.{_ext}")
     _said = gate_says(_open_dir / f"SM_Ball.{_ext}", _open_budget)
     expect(f".{_ext} is read: triangles counted, passes a plain budget",
@@ -2191,7 +2200,7 @@ expect("--audit finds one image stored three times: the same bytes, and the same
 _audit = subprocess.run([sys.executable, str(ROOT / "asset_gatekeeper.py"), str(_dup), "--audit"],
                         capture_output=True, text=True)
 expect("... prints it with what it costs, and duplicates alone do not fail the audit's exit code",
-       "DUPLICATE  A/T_Rock_BaseColor.png" in _audit.stdout and "(same pixels)" in _audit.stdout
+       f"DUPLICATE  {Path('A') / 'T_Rock_BaseColor.png'}" in _audit.stdout and "(same pixels)" in _audit.stdout
        and "2 duplicate texture(s)" in _audit.stdout, _audit.stdout[-500:])
 shutil.rmtree(_dup, ignore_errors=True)
 shutil.rmtree(_px_dir, ignore_errors=True)

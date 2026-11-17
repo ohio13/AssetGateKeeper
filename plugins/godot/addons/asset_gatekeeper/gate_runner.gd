@@ -29,8 +29,10 @@ const MAX_BATCH_FILES := 50
 const MAX_COMMAND_CHARS := 8000
 
 ## Source formats the gate measures (its TRACKED_SUFFIXES). Anything else is left alone.
-const GATED_EXTENSIONS := ["fbx", "obj", "gltf", "glb",
-		"png", "tga", "jpg", "jpeg", "tif", "tiff", "webp", "dds", "exr", "ktx2"]
+const GATED_EXTENSIONS := ["fbx", "obj", "gltf", "glb", "ply", "stl", "off", "3mf", "dae",
+		"usd", "usda", "usdc", "usdz",
+		"png", "tga", "jpg", "jpeg", "jfif", "jpe", "tif", "tiff", "webp", "bmp", "gif", "psd",
+		"dds", "exr", "hdr", "ktx", "ktx2"]
 
 ## Variables that point a child Python at some other install. Inherited by the
 ## gate's interpreter, they make it load the wrong standard library and die
