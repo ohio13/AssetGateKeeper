@@ -21,8 +21,10 @@ from pathlib import Path
 
 # Every format the gate checks (asset_gatekeeper.TRACKED_SUFFIXES): a hook that
 # skipped .dds or .tif let an 8K texture through that CI then failed.
-ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg",
-                  ".tif", ".tiff", ".webp", ".dds", ".exr", ".ktx2"}
+ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".ply", ".stl", ".off", ".3mf", ".dae",
+                  ".usd", ".usda", ".usdc", ".usdz",
+                  ".png", ".tga", ".jpg", ".jpeg", ".jfif", ".jpe", ".tif", ".tiff", ".webp",
+                  ".dds", ".bmp", ".gif", ".psd", ".exr", ".ktx2", ".ktx", ".hdr"}
 HOOK_NAME = "pre-commit"
 
 

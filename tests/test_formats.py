@@ -38,6 +38,9 @@ for extra in (str(ROOT), str(ROOT / "server")):
         sys.path.insert(0, extra)
 
 import asset_gatekeeper as agk  # noqa: E402
+import agk_gate.readers as agk_readers  # noqa: E402
+import agk_gate.report as agk_report  # noqa: E402
+import agk_gate.usd as agk_usd  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "fbx"
 WORK = ROOT / "scratch" / "format_tests"
@@ -1909,6 +1912,129 @@ lightmap_only = structure_budget(lightmap={"require": True})
 no_uv2 = sop.analyse(_HouGeometry(houdini_crate, uv_names=("uv",)), lightmap_only, node_name="crate")
 expect("Houdini SOP: no uv2 attribute -> every static piece lacks the lightmap set, as the gate says",
        sorted(no_uv2) == gate_says(one_uv_fbx, lightmap_only)[0] and no_uv2, no_uv2)
+
+print("9b. Open formats added 16 Nov 2026")
+_open_budget = agk.Budget()
+import trimesh as _tm  # noqa: E402
+_open_dir = Path(tempfile.mkdtemp(prefix="agk_open_"))
+_ball = _tm.creation.icosphere(subdivisions=2)
+for _ext in ("ply", "stl", "off", "3mf"):
+    _ball.export(_open_dir / f"SM_Ball.{_ext}")
+    _said = gate_says(_open_dir / f"SM_Ball.{_ext}", _open_budget)
+    expect(f".{_ext} is read: triangles counted, passes a plain budget",
+           agk.count_triangles(_open_dir / f"SM_Ball.{_ext}") == 320 and _said[0] == [], _said)
+try:
+    import collada  # noqa: F401
+    _ball.export(_open_dir / "SM_Ball.dae")
+    expect(".dae (Collada) is read when pycollada is installed",
+           agk.count_triangles(_open_dir / "SM_Ball.dae") == 320)
+except ImportError:
+    print("  skip  .dae: pycollada not installed")
+expect("a Collada file with no reader says how to get one",
+       "pycollada" in agk_readers._mesh_read_error(ModuleNotFoundError("x", name="collada")))
+# Textures: BMP and GIF through Pillow, PSD as Unreal imports it (the flattened image).
+from PIL import Image as _Img  # noqa: E402
+_Img.new("RGB", (300, 256), (200, 40, 40)).save(_open_dir / "T_Red_BaseColor.bmp")
+_Img.new("RGB", (256, 256), (200, 40, 40)).save(_open_dir / "T_Red_BaseColor.gif")
+_w, _h = 128, 64
+_psd = (b"8BPS" + struct.pack(">H", 1) + bytes(6) + struct.pack(">HIIHH", 3, _h, _w, 8, 3)
+        + struct.pack(">I", 0) * 3 + struct.pack(">H", 0) + bytes(3 * _w * _h))
+(_open_dir / "T_Paint_BaseColor.psd").write_bytes(_psd)
+open(_open_dir / "T_Sky_Emissive.hdr", "wb").write(
+    b"#?RADIANCE\nFORMAT=32-bit_rle_rgbe\n\n-Y 512 +X 1024\n" + bytes(64))
+(_open_dir / "T_Rock_BaseColor.ktx").write_bytes(
+    b"\xabKTX 11\xbb\r\n\x1a\n" + struct.pack("<13I", 0x04030201, 0x1401, 1, 0x1908, 0x8058, 0x1908,
+                                            256, 128, 0, 0, 1, 1, 0) + bytes(64))
+for _name, _size in (("T_Red_BaseColor.bmp", (300, 256)), ("T_Red_BaseColor.gif", (256, 256)),
+                     ("T_Paint_BaseColor.psd", (128, 64)), ("T_Sky_Emissive.hdr", (1024, 512)),
+                     ("T_Rock_BaseColor.ktx", (256, 128))):
+    expect(f"{Path(_name).suffix} texture is measured ({_size[0]}x{_size[1]})",
+           agk_readers.measure_texture(_open_dir / _name) == _size,
+           agk_readers.measure_texture(_open_dir / _name) if (_open_dir / _name).exists() else "")
+expect("... and a bad size still fails it (a 300 px BMP is not a power of two)",
+       any("power of two" in problem for problem in gate_says(_open_dir / "T_Red_BaseColor.bmp", _open_budget)[0]))
+expect("a renamed file is still caught (a PNG saved as .bmp)",
+       _Img.new("RGB", (4, 4)).save(_open_dir / "T_Fake_BaseColor.bmp", "PNG") is None
+       and any("actually PNG" in problem for problem in gate_says(_open_dir / "T_Fake_BaseColor.bmp", _open_budget)[0]))
+expect("closed formats stay out, with a hint (Maya .mb, 3ds Max .max, ZBrush .ztl)",
+       not {".mb", ".max", ".ztl", ".spp"} & set(agk.TRACKED_SUFFIXES)
+       and all(agk_report.SKIPPED_HINTS.get(suffix) for suffix in (".mb", ".max", ".ztl", ".spp")))
+try:
+    from pxr import Sdf, Usd, UsdGeom, UsdShade, UsdSkel
+except ImportError:
+    print("  skip  USD: usd-core not installed")
+    with patch.dict(sys.modules, {"pxr": None}):
+        agk_usd._read_cached.cache_clear()
+        _usd_path = _open_dir / "SM_None.usda"
+        _usd_path.write_text("#usda 1.0\n", encoding="utf-8")
+        expect("USD with no reader fails with the install hint",
+               any("usd-core" in problem for problem in gate_says(_usd_path, _open_budget)[0]))
+else:
+    _stage = Usd.Stage.CreateNew(str(_open_dir / "SM_Crate.usda"))
+    UsdGeom.Xform.Define(_stage, "/Crate").AddScaleOp().Set((0.5, 0.5, 0.5))
+    _box = _tm.creation.box()
+    _mesh = UsdGeom.Mesh.Define(_stage, "/Crate/Box")
+    _mesh.CreatePointsAttr([tuple(v) for v in _box.vertices])
+    _quads = [[0, 1, 3, 2]]          # one quad added: 12 + 2 triangles
+    _mesh.CreateFaceVertexCountsAttr([3] * len(_box.faces) + [4])
+    _mesh.CreateFaceVertexIndicesAttr([int(i) for i in _box.faces.ravel()] + _quads[0])
+    UsdGeom.PrimvarsAPI(_mesh).CreatePrimvar("st", Sdf.ValueTypeNames.TexCoord2fArray,
+                                             UsdGeom.Tokens.faceVarying).Set([(0, 0)] * 40)
+    UsdGeom.PrimvarsAPI(_mesh).CreatePrimvar("st1", Sdf.ValueTypeNames.TexCoord2fArray,
+                                             UsdGeom.Tokens.faceVarying).Set([(0, 0)] * 40)
+    _guide = UsdGeom.Mesh.Define(_stage, "/Crate/Guide")
+    _guide.CreatePurposeAttr(UsdGeom.Tokens.guide)
+    _guide.CreatePointsAttr([(0, 0, 0), (1, 0, 0), (0, 1, 0)])
+    _guide.CreateFaceVertexCountsAttr([3]); _guide.CreateFaceVertexIndicesAttr([0, 1, 2])
+    for _number, _name in enumerate(("Wood", "Metal")):
+        _mat = UsdShade.Material.Define(_stage, f"/Crate/{_name}")
+        _shader = UsdShade.Shader.Define(_stage, f"/Crate/{_name}/Tex")
+        _shader.CreateIdAttr("UsdUVTexture")
+        _shader.CreateInput("file", Sdf.ValueTypeNames.Asset).Set(f"textures/T_{_name}_BaseColor.png")
+        _subset = UsdShade.MaterialBindingAPI.Apply(_mesh.GetPrim()).CreateMaterialBindSubset(
+            _name, list(range(_number * 6, _number * 6 + 6)))
+        UsdShade.MaterialBindingAPI.Apply(_subset.GetPrim()).Bind(_mat)
+    _skin = UsdSkel.BindingAPI.Apply(_mesh.GetPrim())
+    _weights = [0.0] * (len(_box.vertices) * 6)
+    _weights[:6] = [0.4, 0.2, 0.1, 0.1, 0.1, 0.1]                     # one point on six joints
+    _skin.CreateJointWeightsPrimvar(False, 6).Set(_weights)
+    _skin.CreateJointIndicesPrimvar(False, 6).Set([0] * len(_weights))
+    _stage.GetRootLayer().Save()
+    (_open_dir / "textures").mkdir()
+    _Img.new("RGB", (64, 64)).save(_open_dir / "textures" / "T_Wood_BaseColor.png")
+    _crate = _open_dir / "SM_Crate.usda"
+    _said = gate_says(_crate, _open_budget)
+    expect("USD: triangles (a quad is two), guide meshes left out",
+           agk.count_triangles(_crate) == 14, agk.count_triangles(_crate))
+    expect("USD: material slots from per-face bindings, UV sets, skin influences",
+           agk.count_material_slots(_crate) == 2 and agk.count_uv_channels(_crate) == 2
+           and agk.max_bone_influences(_crate) == 6,
+           (agk.count_material_slots(_crate), agk.count_uv_channels(_crate), agk.max_bone_influences(_crate)))
+    expect("USD: a texture it names that is not there is a broken reference; one that is, is not",
+           any("T_Metal_BaseColor.png" in problem for problem in _said[0])
+           and not any("T_Wood_BaseColor.png" in problem for problem in _said[0])
+           and any("influence limit" in problem for problem in _said[0]), _said)
+    _ok = _open_dir / "usdz_src"
+    _ok.mkdir()
+    _plain = Usd.Stage.CreateNew(str(_ok / "SM_Lamp.usdc"))
+    _lamp = UsdGeom.Mesh.Define(_plain, "/Lamp")
+    _lamp.CreatePointsAttr([tuple(v) for v in _box.vertices])
+    _lamp.CreateFaceVertexCountsAttr([3] * 12); _lamp.CreateFaceVertexIndicesAttr([int(i) for i in _box.faces.ravel()])
+    _plain.GetRootLayer().Save()
+    import zipfile as _zip  # noqa: E402
+    _big = io.BytesIO(); _Img.new("RGB", (4096, 4096)).save(_big, "PNG")
+    with _zip.ZipFile(_open_dir / "SM_Lamp.usdz", "w", _zip.ZIP_STORED) as _pack:
+        _pack.write(_ok / "SM_Lamp.usdc", "SM_Lamp.usdc")
+        _pack.writestr("textures/T_Lamp_BaseColor.png", _big.getvalue())
+    _lamp_said = gate_says(_open_dir / "SM_Lamp.usdz", _open_budget)
+    expect("USDZ: read from the package, and a 4096 image packed in it is over a 2048 budget",
+           agk.count_triangles(_open_dir / "SM_Lamp.usdz") == 12
+           and any("embedded texture" in problem and "4096x4096" in problem for problem in _lamp_said[0]),
+           _lamp_said)
+    _quiet = subprocess.run([sys.executable, str(ROOT / "asset_gatekeeper.py"), str(_crate), "--no-color"],
+                            capture_output=True, text=True, encoding="utf-8", errors="replace")
+    expect("USD's own warnings stay off the console (the gate says it once, readably)",
+           "_EnqueueDependency" not in _quiet.stderr + _quiet.stdout, _quiet.stderr[-300:])
 
 print("10. Hooks and tools know the new formats")
 sys.path.insert(0, str(ROOT / "vcs_hooks"))

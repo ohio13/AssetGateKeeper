@@ -43,7 +43,7 @@ asset-gatekeeper path/to/Exports --recursive           # keep watching; a pop-up
 
 | Files | Rule | Default |
 | :--- | :--- | :--- |
-| `.fbx` `.obj` `.gltf` `.glb` | triangles (every placed copy, as Unreal imports them) | 50,000 |
+| `.fbx` `.obj` `.gltf` `.glb` `.usd` `.usdz` `.dae` `.ply` `.stl` `.off` `.3mf` | triangles (every placed copy, as Unreal imports them) | 50,000 |
 | | material slots (draw calls) | 3 |
 | | bone weights per vertex | 4 |
 | | UV sets | 4 |
@@ -53,9 +53,11 @@ asset-gatekeeper path/to/Exports --recursive           # keep watching; a pop-up
 | | mesh name prefix such as `SM_` | off |
 | | LOD levels, and how much each one saves | off |
 | | Unreal collision (`UCX_` hulls): present, named after the mesh, convex, how many | off |
-| `.png` `.tga` `.jpg` `.tif` `.webp` `.dds` `.exr` `.ktx2` | longest edge | 2,048 px |
+| `.png` `.tga` `.jpg` `.tif` `.webp` `.dds` `.bmp` `.gif` `.psd` `.exr` `.hdr` `.ktx` `.ktx2` | longest edge | 2,048 px |
 | | power of two | on |
 | | name ends in a map name (`_BaseColor`, `_Normal`, `_ORM`, …) | on, 28 names |
+
+USD (`.usd` `.usda` `.usdc` `.usdz`) and Collada (`.dae`) need the free open-source readers that `Install_Extras.bat` adds. Closed formats that need the vendor's software (Maya `.mb`, 3ds Max `.max`, ZBrush `.ztl`, Substance `.spp`) are not read; the scan names them and says what to export.
 
 Every rule lives in a `rules.toml` next to the assets and can be changed per folder, per platform or per asset type. See the [rules reference](https://github.com/ohio13/AssetGateKeeper/blob/main/docs/05-RULES-REFERENCE.md).
 

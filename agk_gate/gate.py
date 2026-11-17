@@ -29,8 +29,9 @@ from agk_gate.readers import (
     is_power_of_two, lightmap_facts, lod_chains_by_name, max_bone_influences, measure_texture,
     mesh_facts, mesh_name_problem, _name_list, obj_colour_source, _ordinal, _percent,
     _primitive_triangles, read_accessor, read_fbx, read_gltf_document, skeleton_facts,
-    texture_name_problem,
+    texture_name_problem, usd_summary,
 )
+from agk_gate.usd import USD_SUFFIXES
 
 
 # --- #
@@ -128,6 +129,13 @@ def collect_references(path: Path) -> list[str]:
 def resolve_references(path: Path) -> list[tuple[str, Path]]:
     """[(as written, resolved absolute path)] for every external reference."""
     base = path.parent
+    if path.suffix.lower() in USD_SUFFIXES:
+        try:
+            summary = usd_summary(path)
+        except AssetError:
+            return []
+        return ([(written, Path(target)) for written, target in summary.resolved]
+                + [(written, base / written.replace("\\", "/")) for written in summary.unresolved])
     if path.suffix.lower() in FBX_SUFFIXES:
         try:
             summary = read_fbx(path)

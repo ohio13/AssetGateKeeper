@@ -52,8 +52,10 @@ from pathlib import Path
 from typing import Optional
 
 # Every format the gate checks (asset_gatekeeper.TRACKED_SUFFIXES).
-ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".png", ".tga", ".jpg", ".jpeg",
-                  ".tif", ".tiff", ".webp", ".dds", ".exr", ".ktx2"}
+ASSET_SUFFIXES = {".obj", ".gltf", ".glb", ".fbx", ".ply", ".stl", ".off", ".3mf", ".dae",
+                  ".usd", ".usda", ".usdc", ".usdz",
+                  ".png", ".tga", ".jpg", ".jpeg", ".jfif", ".jpe", ".tif", ".tiff", ".webp",
+                  ".dds", ".bmp", ".gif", ".psd", ".exr", ".ktx2", ".ktx", ".hdr"}
 #: Files an asset carries that the gate does not measure on their own. With
 #: --require-approval they still need an approved version holding these exact
 #: bytes: a changelist that only edits rock.bin changes an approved rock.gltf.

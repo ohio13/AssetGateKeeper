@@ -344,7 +344,7 @@ mixed = Path(tempfile.mkdtemp(prefix="agk-mixed-"))
 from PIL import Image as _Image
 _Image.new("RGB", (64, 64), (90, 90, 90)).save(mixed / "T_Good_BaseColor.png")
 _Image.new("RGB", (1000, 1000), (90, 90, 90)).save(mixed / "T_Bad_BaseColor.png")
-_Image.new("RGB", (64, 64), (90, 90, 90)).save(mixed / "reference.jfif", "JPEG")
+(mixed / "reference.heic").write_bytes(b"\x00\x00\x00\x18ftypheic")
 server.scan_root = str(mixed)
 status, body = anon.post("/admin/api/scan", csrf=csrf)
 expect("a scan of a folder with a failing asset starts", status == 200, body[:200])
@@ -358,9 +358,9 @@ expect("... and finishes as done, not 'scan failed'", snapshot["status"] == "don
        and not snapshot["error"], json.dumps(snapshot)[:300])
 expect("... counting exactly the two assets (the summary line is not an asset)",
        snapshot["totals"] == {"total": 2, "passed": 1, "failed": 1}, json.dumps(snapshot["totals"]))
-expect("... and saying the .jfif was skipped, with what to do",
-       snapshot["skipped"].get("unsupported") == {".jfif": 1}
-       and any(e.get("type") == "skipped" and "rename it to .jpg" in e.get("text", "")
+expect("... and saying the .heic was skipped, with what to do",
+       snapshot["skipped"].get("unsupported") == {".heic": 1}
+       and any(e.get("type") == "skipped" and "save it as PNG or JPEG" in e.get("text", "")
                for e in server.scanner.recent()), json.dumps(snapshot.get("skipped")))
 # 12 Nov 2026: each Save & Run Audit added every unchanged file to the
 # dashboard again. The same folder twice: the second scan stores nothing new

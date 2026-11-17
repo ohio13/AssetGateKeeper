@@ -24,6 +24,7 @@ from agk_gate.common import (
     GLB_JSON_CHUNK, GLB_MAGIC, GLTF_SUFFIXES, HEADER_ONLY_TEXTURES, Image, LOG, np,
     TEXTURE_FORMATS, trimesh,
 )
+from agk_gate.usd import USD_SUFFIXES, UsdUnavailable, read_usd
 from agk_gate.config import (
     AssetError, LIGHTMAP_UV_TOLERANCE,
 )
@@ -44,6 +45,9 @@ def _describe_unexpected(exc: BaseException) -> str:
 
 def _mesh_read_error(exc: BaseException) -> str:
     """The FAILED reason for a mesh trimesh could not load, with the fix if there is one."""
+    if isinstance(exc, ModuleNotFoundError) and getattr(exc, "name", "") == "collada":
+        return ("could not read mesh: reading Collada (.dae) needs the free pycollada "
+                "reader: run Install_Extras.bat, or python -m pip install pycollada")
     if isinstance(exc, ModuleNotFoundError) and getattr(exc, "name", "") == "charset_normalizer":
         return ("could not read mesh: it is not UTF-8 text, and reading it needs "
                 "charset-normalizer (python -m pip install charset-normalizer)")
@@ -51,6 +55,18 @@ def _mesh_read_error(exc: BaseException) -> str:
         return ("could not read mesh: it is damaged (an index points past the end of its "
                 f"data - {_describe_unexpected(exc)}); re-export it")
     return f"could not read mesh ({_describe_unexpected(exc)})"
+
+
+def usd_summary(path: Path, epsilon: float = 0.0, ratio: float = 1e-6):
+    """read_usd(), with its failures as the gate's AssetError."""
+    try:
+        return read_usd(path, epsilon, ratio)
+    except UsdUnavailable as exc:
+        raise AssetError(f"could not read USD: {exc}") from exc
+    except OSError as exc:
+        raise AssetError(f"could not read USD ({exc})") from exc
+    except Exception as exc:              # pxr raises its own error types
+        raise AssetError(f"could not read USD ({_describe_unexpected(exc)}); re-export it") from exc
 
 
 def obj_colour_source(path: Path) -> str:
@@ -111,6 +127,12 @@ def load_trimesh_scene(source, **kwargs) -> object:
 @lru_cache(maxsize=8)
 def _load_scene_cached(path_string: str, modified_ns: int) -> object:
     """One load per (path, mtime). The mtime keeps the cache honest on re-export."""
+    if Path(path_string).suffix.lower() in USD_SUFFIXES:
+        scene = trimesh.Scene()
+        for number, (points, faces) in enumerate(usd_summary(Path(path_string)).meshes):
+            scene.add_geometry(trimesh.Trimesh(points, faces, process=False),
+                               geom_name=f"mesh{number}")
+        return scene
     return load_trimesh_scene(path_string, process=False)
 
 
@@ -991,6 +1013,8 @@ def count_triangles(path: Path) -> int:
     suffix = path.suffix.lower()
     if suffix in FBX_SUFFIXES:
         return read_fbx(path).triangles
+    if suffix in USD_SUFFIXES:
+        return usd_summary(path).triangles
     if suffix in GLTF_SUFFIXES:
         document = read_gltf_document(path)
         try:
@@ -1033,6 +1057,8 @@ def count_material_slots(path: Path) -> int:
     primitives that point at the same glTF material index count as one slot.
     """
     suffix = path.suffix.lower()
+    if suffix in USD_SUFFIXES:
+        return usd_summary(path).material_slots
     if suffix in FBX_SUFFIXES:
         return read_fbx(path).material_slots
 
@@ -1225,6 +1251,8 @@ def mesh_facts(path: Path, assumed_texture: int = 1024) -> dict:
 def count_uv_channels(path: Path) -> int:
     """Number of distinct texture-coordinate sets (TEXCOORD_n / OBJ vt / FBX UV layers)."""
     suffix = path.suffix.lower()
+    if suffix in USD_SUFFIXES:
+        return usd_summary(path).uv_channels
     if suffix in FBX_SUFFIXES:
         return read_fbx(path).uv_channels
 
@@ -1267,6 +1295,8 @@ def max_bone_influences(path: Path, epsilon: float = 1e-4) -> int:
     """
     if path.suffix.lower() in FBX_SUFFIXES:
         return read_fbx(path).max_influences
+    if path.suffix.lower() in USD_SUFFIXES:
+        return usd_summary(path).max_influences
     if path.suffix.lower() not in GLTF_SUFFIXES:
         return 0  # .obj has no skin data
 
@@ -2122,6 +2152,8 @@ def count_degenerate_triangles(path: Path, epsilon: float = 0.0, ratio: float = 
     """Triangles that are flat or collapsed (see degenerate_mask)."""
     if path.suffix.lower() in FBX_SUFFIXES:
         return read_fbx(path, epsilon, ratio).degenerate
+    if path.suffix.lower() in USD_SUFFIXES:
+        return usd_summary(path, epsilon, ratio).degenerate
     if np is None:  # pragma: no cover - numpy ships with trimesh
         LOG.debug("numpy is unavailable; skipping degenerate geometry check")
         return 0
@@ -2143,6 +2175,19 @@ def count_degenerate_triangles(path: Path, epsilon: float = 0.0, ratio: float = 
     return total
 
 
+def _radiance_size(data: bytes) -> Optional[tuple[int, int]]:
+    """(width, height) of a Radiance .hdr: text lines, a blank one, then a line
+    such as ``-Y 512 +X 1024`` (height first in the usual orientation)."""
+    head, blank, rest = data.partition(b"\n\n")
+    if not blank:
+        return None
+    match = re.match(rb"\s*([-+])([XY]) (\d+) ([-+])([XY]) (\d+)", rest)
+    if not match or match.group(2) == match.group(5):
+        return None
+    first, second = int(match.group(3)), int(match.group(6))
+    return (second, first) if match.group(2) == b"Y" else (first, second)
+
+
 def image_size_from_bytes(data: bytes) -> Optional[tuple[int, int]]:
     """(width, height) of an image held in memory, or None if unrecognised.
 
@@ -2151,6 +2196,13 @@ def image_size_from_bytes(data: bytes) -> Optional[tuple[int, int]]:
     if data[:12] == b"\xabKTX 20\xbb\r\n\x1a\n" and len(data) >= 28:
         width, height = struct.unpack_from("<II", data, 20)
         return int(width), int(max(height, 1))
+    if data[:12] == b"\xabKTX 11\xbb\r\n\x1a\n" and len(data) >= 44:
+        # KTX 1: an endianness word, six GL enums, then width and height.
+        order = "<" if struct.unpack_from("<I", data, 12)[0] == 0x04030201 else ">"
+        width, height = struct.unpack_from(order + "II", data, 36)
+        return int(width), int(max(height, 1))
+    if data[:2] == b"#?":
+        return _radiance_size(data)
     if Image is None:
         return None
     try:
@@ -2171,6 +2223,8 @@ def embedded_texture_sizes(path: Path) -> list[tuple[str, int, int]]:
     suffix = path.suffix.lower()
     if suffix in FBX_SUFFIXES:
         return [tuple(item) for item in read_fbx(path).embedded_textures]
+    if suffix in USD_SUFFIXES:
+        return [tuple(item) for item in usd_summary(path).packed]
     if suffix not in GLTF_SUFFIXES:
         return []
     document = read_gltf_document(path)
@@ -2241,7 +2295,7 @@ def measure_texture(path: Path) -> tuple[int, int]:
                 head = handle.read(1 << 16)
         except OSError as exc:
             raise AssetError(f"could not read image ({exc})") from exc
-        size = _exr_size(head) if suffix == ".exr" else image_size_from_bytes(head[:64])
+        size = _exr_size(head) if suffix == ".exr" else image_size_from_bytes(head[:4096])
         if size is None or min(size) <= 0:
             raise AssetError(f"could not read the {suffix} header (damaged or not really {suffix})")
         return size

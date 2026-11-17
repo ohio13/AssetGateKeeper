@@ -1051,7 +1051,7 @@ with sync_playwright() as playwright:
     (game / "Textures").mkdir(parents=True)
     _Image.new("RGB", (64, 64), (90, 90, 90)).save(game / "Textures" / "T_Crate_Albedo.png")
     _Image.new("RGB", (1000, 1000), (90, 90, 90)).save(game / "Textures" / "T_Bad_Albedo.png")
-    _Image.new("RGB", (64, 64), (90, 90, 90)).save(game / "Textures" / "reference.jfif", "JPEG")
+    (game / "Textures" / "reference.heic").write_bytes(b"\x00\x00\x00\x18ftypheic")
     install_rules = WORK / "install_rules.toml"
     install_rules.write_text("", encoding="utf-8")
     first = ahs.build_server("127.0.0.1", 0, first_db, quiet=True, rules_path=str(install_rules),
@@ -1081,7 +1081,7 @@ with sync_playwright() as playwright:
            'preset = ["unity"]' in written and "max_edge = 64" in written, written[:400])
     log = admin.locator("#scan-log").inner_text()
     expect("... then checks the project itself, saying what was skipped",
-           "T_Bad_Albedo.png" in log and "rename it to .jpg" in log
+           "T_Bad_Albedo.png" in log and "save it as PNG or JPEG" in log
            and "1 passed, 1 failed, 1 skipped" in log, log[-400:])
     expect("... and the wizard is gone", admin.locator("#wizard").is_hidden())
     admin.reload()
