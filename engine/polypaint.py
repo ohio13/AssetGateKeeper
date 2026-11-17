@@ -130,6 +130,9 @@ DETAIL_SPREAD = 0.2
 DETAIL_BOOST = 2.0
 DETAIL_SHARE = 0.4
 DETAIL_MIN_TEXTURE = 512
+#: The largest texture the N64 presets bake from: 64x32 in 256 colours and
+#: 64x64 or 128x32 in 16 are what its texture memory holds.
+N64_TEXTURE = 64
 #: At this size and below the texture is packed by the texel (_pack_texels) and
 #: the .glb asks for no mip levels: islands are a texel or two wide and a
 #: smaller copy would blend in the next island.
@@ -4141,6 +4144,17 @@ def _bake_one(source: Path, out_dir: Optional[Path] = None, triangles: int = DEF
         raise PolypaintError(f"unknown face layout '{face_layout}' (choose: {', '.join(FACE_LAYOUTS)})")
     if body_textures not in (1, 2):
         raise PolypaintError(f"the body can have 1 or 2 textures (got {body_textures})")
+    tmem_note = ""
+    if str(preset).startswith("n64") and texture > N64_TEXTURE:
+        # 15 Nov 2026: fast64 refused a 128 px bake ("Texture is too large: 1024 /
+        # 256"). A palette texture has half of the N64's 4 KB texture memory -
+        # the palette is loaded in the other half - so 64x32 in 256 colours, or
+        # 64x64 / 128x32 in 16, is all one texture can be. The Expansion Pak
+        # adds RAM, not texture memory.
+        tmem_note = (f"textures made from {N64_TEXTURE} px, not the {texture} px asked for: "
+                     "an N64 cannot load a larger palette texture (4 KB of texture memory, "
+                     "half of it the palette's)")
+        texture = N64_TEXTURE
     simplify, xatlas, spatial = _require_bake_libraries()
     steps = 4
 
@@ -4799,6 +4813,8 @@ def _bake_one(source: Path, out_dir: Optional[Path] = None, triangles: int = DEF
         note += f"; textures of their own: {', '.join(described)}"
     if strand_note:
         note += f"; {strand_note}"
+    if tmem_note:
+        note += f"; {tmem_note}"
     if painted_note:
         note += f"; {painted_note}"
     if hidden_dropped:
